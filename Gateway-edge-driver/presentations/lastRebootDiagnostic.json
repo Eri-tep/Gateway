@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{rebootDiagnostic.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "최근 재부팅 사유",
+      "displayType": "state",
+      "state": {
+        "label": "{{rebootDiagnostic.value}}"
+      }
+    }
+  ]
+}

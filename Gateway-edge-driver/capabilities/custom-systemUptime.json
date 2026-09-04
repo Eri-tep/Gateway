@@ -1,0 +1,16 @@
+{
+  "name": "Uptime",
+  "attributes": {
+    "uptime": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {}
+}

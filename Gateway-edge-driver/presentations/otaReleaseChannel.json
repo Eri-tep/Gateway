@@ -1,0 +1,50 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{channel.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "\u200b",
+      "displayType": "list",
+      "list": {
+        "command": {
+          "name": "setChannel",
+          "alternatives": [
+            {
+              "key": "stable",
+              "value": "Stable",
+              "type": "active"
+            },
+            {
+              "key": "beta",
+              "value": "Beta",
+              "type": "active"
+            }
+          ],
+          "argumentType": "string"
+        },
+        "state": {
+          "value": "channel.value",
+          "valueType": "string",
+          "alternatives": [
+            {
+              "key": "stable",
+              "value": "Stable",
+              "type": "active"
+            },
+            {
+              "key": "beta",
+              "value": "Beta",
+              "type": "active"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

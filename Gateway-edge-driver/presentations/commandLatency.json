@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{latency.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "\u200b",
+      "displayType": "state",
+      "state": {
+        "label": "{{latency.value}}"
+      }
+    }
+  ]
+}

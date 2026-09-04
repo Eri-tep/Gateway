@@ -1,0 +1,3 @@
+lan:
+  - id: "ESP32_WALLPAD_GATEWAY"
+    deviceProfileName: "gateway-ultra"

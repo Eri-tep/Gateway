@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{crcErrorRate.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "\u200b",
+      "displayType": "state",
+      "state": {
+        "label": "{{crcErrorRate.value}}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "Firmware OTA Status",
+  "attributes": {
+    "otaStatus": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {
+    "startOta": {
+      "arguments": []
+    }
+  }
+}

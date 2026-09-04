@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{otaStatus.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "\u200b",
+      "displayType": "state",
+      "state": {
+        "label": "{{otaStatus.value}}"
+      }
+    }
+  ]
+}

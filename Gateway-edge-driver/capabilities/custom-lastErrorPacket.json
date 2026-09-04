@@ -1,0 +1,18 @@
+{
+  "name": "Last Error Packet",
+  "attributes": {
+    "lastError": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {}
+}

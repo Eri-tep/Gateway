@@ -1,0 +1,70 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{profile.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "\u200b",
+      "displayType": "list",
+      "list": {
+        "command": {
+          "name": "setProfile",
+          "alternatives": [
+            {
+              "key": "auto",
+              "value": "Auto Detect",
+              "type": "active"
+            },
+            {
+              "key": "custom1",
+              "value": "The_Astin",
+              "type": "active"
+            },
+            {
+              "key": "custom2",
+              "value": "Custom 2",
+              "type": "active"
+            },
+            {
+              "key": "custom3",
+              "value": "Custom 3",
+              "type": "active"
+            }
+          ],
+          "argumentType": "string"
+        },
+        "state": {
+          "value": "profile.value",
+          "valueType": "string",
+          "alternatives": [
+            {
+              "key": "auto",
+              "value": "Auto Detect",
+              "type": "active"
+            },
+            {
+              "key": "custom1",
+              "value": "The_Astin",
+              "type": "active"
+            },
+            {
+              "key": "custom2",
+              "value": "Custom 2",
+              "type": "active"
+            },
+            {
+              "key": "custom3",
+              "value": "Custom 3",
+              "type": "active"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

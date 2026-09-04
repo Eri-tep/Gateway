@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{lastError.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "최근 에러 패킷",
+      "displayType": "state",
+      "state": {
+        "label": "{{lastError.value}}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{deviceId.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "Device ID",
+      "displayType": "state",
+      "state": {
+        "label": "{{deviceId.value}}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+name: Build & Publish Cloud OTA Firmware
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - beta
+      - Beta
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+
+      - name: Compile ESP32 Firmware
+        run: |
+          pio pkg install -e m5stack-atoms3-usb
+          pio run -e m5stack-atoms3-usb
+
+      - name: Determine Release Tag & Channel
+        id: vars
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            echo "tag=latest" >> $GITHUB_OUTPUT
+            echo "name=Latest Stable Release" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/beta" ] || [ "${{ github.ref }}" = "refs/heads/Beta" ]; then
+            echo "tag=beta-latest" >> $GITHUB_OUTPUT
+            echo "name=Latest Beta Test Release" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
+            echo "name=Release ${TAG_NAME}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish GitHub Release & Firmware Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.name }}
+          prerelease: ${{ steps.vars.outputs.prerelease == 'true' }}
+          files: |
+            .pio/build/m5stack-atoms3-usb/firmware.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

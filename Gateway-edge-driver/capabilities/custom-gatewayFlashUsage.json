@@ -1,0 +1,20 @@
+{
+  "name": "Gateway FLASH Usage",
+  "attributes": {
+    "flashUsage": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "value"
+        ]
+      }
+    }
+  },
+  "commands": {}
+}

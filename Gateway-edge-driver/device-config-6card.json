@@ -1,0 +1,126 @@
+{
+  "mnmn": "SmartThingsCommunity",
+  "type": "profile",
+  "dashboard": {
+    "states": [
+      {
+        "component": "main",
+        "capability": "digituniverse06711.activeDevice",
+        "version": 1
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "component": "main",
+      "capability": "digituniverse06711.activeDevice",
+      "version": 1
+    },
+    {
+      "component": "wallpad",
+      "capability": "switch",
+      "version": 1
+    },
+    {
+      "component": "wallpad",
+      "capability": "digituniverse06711.profile",
+      "version": 1
+    },
+    {
+      "component": "wallpad",
+      "capability": "digituniverse06711.frame",
+      "version": 1
+    },
+    {
+      "component": "wallpad",
+      "capability": "digituniverse06711.checksum",
+      "version": 1
+    },
+    {
+      "component": "wallpad",
+      "capability": "digituniverse06711.opcodes",
+      "version": 1
+    },
+    {
+      "component": "diagnostics",
+      "capability": "switch",
+      "version": 1
+    },
+    {
+      "component": "diagnostics",
+      "capability": "digituniverse06711.uptime",
+      "version": 1
+    },
+    {
+      "component": "diagnostics",
+      "capability": "digituniverse06711.cpu",
+      "version": 1
+    },
+    {
+      "component": "diagnostics",
+      "capability": "digituniverse06711.ram",
+      "version": 1
+    },
+    {
+      "component": "diagnostics",
+      "capability": "digituniverse06711.flash",
+      "version": 1
+    },
+    {
+      "component": "logs",
+      "capability": "switch",
+      "version": 1
+    },
+    {
+      "component": "logs",
+      "capability": "digituniverse06711.logHistory",
+      "version": 1
+    },
+    {
+      "component": "logs",
+      "capability": "digituniverse06711.crashDump",
+      "version": 1
+    },
+    {
+      "component": "network",
+      "capability": "switch",
+      "version": 1
+    },
+    {
+      "component": "network",
+      "capability": "digituniverse06711.scan",
+      "version": 1
+    },
+    {
+      "component": "network",
+      "capability": "digituniverse06711.wifi",
+      "version": 1
+    },
+    {
+      "component": "network",
+      "capability": "digituniverse06711.mode",
+      "version": 1
+    },
+    {
+      "component": "ota",
+      "capability": "switch",
+      "version": 1
+    },
+    {
+      "component": "ota",
+      "capability": "digituniverse06711.version",
+      "version": 1
+    },
+    {
+      "component": "ota",
+      "capability": "digituniverse06711.build",
+      "version": 1
+    },
+    {
+      "component": "ota",
+      "capability": "digituniverse06711.updated",
+      "version": 1
+    }
+  ]
+}

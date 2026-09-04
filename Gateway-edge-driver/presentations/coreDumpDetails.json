@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{coredumpDetails.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "\u200b",
+      "displayType": "state",
+      "state": {
+        "label": "{{coredumpDetails.value}}"
+      }
+    }
+  ]
+}

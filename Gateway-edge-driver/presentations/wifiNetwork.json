@@ -1,0 +1,57 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{wifiInfo.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "\u200b",
+      "displayType": "state",
+      "state": {
+        "label": "{{wifiInfo.value}}"
+      }
+    },
+    {
+      "label": "\u200b",
+      "displayType": "list",
+      "list": {
+        "command": {
+          "name": "setMode",
+          "alternatives": [
+            {
+              "key": "STA",
+              "value": "Sta",
+              "type": "active"
+            },
+            {
+              "key": "AP_STA",
+              "value": "Ap+Sta",
+              "type": "active"
+            }
+          ],
+          "argumentType": "string"
+        },
+        "state": {
+          "value": "mode.value",
+          "valueType": "string",
+          "alternatives": [
+            {
+              "key": "STA",
+              "value": "Sta",
+              "type": "active"
+            },
+            {
+              "key": "AP_STA",
+              "value": "Ap+Sta",
+              "type": "active"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

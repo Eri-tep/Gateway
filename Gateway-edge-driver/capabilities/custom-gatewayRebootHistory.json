@@ -1,0 +1,25 @@
+{
+  "name": "Gateway Reboot History",
+  "attributes": {
+    "history": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "value"
+        ]
+      }
+    }
+  },
+  "commands": {
+    "clear": {
+      "name": "clear",
+      "arguments": []
+    }
+  }
+}

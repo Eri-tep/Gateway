@@ -1,0 +1,43 @@
+{
+  "name": "WiFi Network",
+  "attributes": {
+    "mode": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "enum": ["STA", "AP_STA"]
+          }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    },
+    "wifiInfo": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {
+    "setMode": {
+      "arguments": [
+        {
+          "name": "mode",
+          "schema": {
+            "type": "string",
+            "enum": ["STA", "AP_STA"]
+          }
+        }
+      ]
+    }
+  }
+}

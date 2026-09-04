@@ -1,0 +1,313 @@
+name: gateway-ultra
+components:
+  - id: main
+    label: "Devices"
+    capabilities:
+      - id: digituniverse06711.activeDevice
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Hub
+
+  - id: wallpad
+    label: "Wallpad"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: digituniverse06711.profile
+        version: 1
+      - id: digituniverse06711.frame
+        version: 1
+      - id: digituniverse06711.checksum
+        version: 1
+      - id: digituniverse06711.opcodes
+        version: 1
+    categories:
+      - name: Hub
+
+  - id: diagnostics
+    label: "Gateway"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: digituniverse06711.uptime
+        version: 1
+      - id: digituniverse06711.cpu
+        version: 1
+      - id: digituniverse06711.ram
+        version: 1
+      - id: digituniverse06711.flash
+        version: 1
+    categories:
+      - name: Hub
+
+  - id: logs
+    label: "Logs"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: digituniverse06711.logHistory
+        version: 1
+      - id: digituniverse06711.crashDump
+        version: 1
+    categories:
+      - name: Hub
+
+  - id: network
+    label: "Network"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: digituniverse06711.scan
+        version: 1
+      - id: digituniverse06711.wifi
+        version: 1
+      - id: digituniverse06711.mode
+        version: 1
+    categories:
+      - name: Hub
+
+  - id: ota
+    label: "Firmware"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: digituniverse06711.version
+        version: 1
+      - id: digituniverse06711.build
+        version: 1
+      - id: digituniverse06711.updated
+        version: 1
+    categories:
+      - name: Hub
+
+preferences:
+  - preferenceId: gatewayIp
+    name: gatewayIp
+    title: "Gateway IP Address"
+    description: "ESP32 Gateway IPv4 Address"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 7
+      maxLength: 15
+      default: "172.30.1.3"
+
+  - preferenceId: gatewayPort
+    name: gatewayPort
+    title: "Gateway Port"
+    description: "JSON-RPC Management Port (Default: 8900)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1024
+      maximum: 65535
+      default: 8900
+
+  - preferenceId: wallpadProfileSlot
+    name: wallpadProfileSlot
+    title: "Wallpad Profile"
+    description: "Select RS-485 Wallpad Protocol Profile"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        0: "Auto Detect"
+        1: "The_Astin (Slot 1)"
+        2: "Custom 2 (Slot 2)"
+        3: "Custom 3 (Slot 3)"
+      default: 1
+
+  - preferenceId: wifiOperationMode
+    name: wifiOperationMode
+    title: "Wi-Fi Mode"
+    description: "Gateway Wi-Fi Operating Mode"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        "STA": "STA (Station Mode)"
+        "AP_STA": "AP_STA (Concurrent Mode)"
+      default: "STA"
+
+  - preferenceId: otaChannel
+    name: otaChannel
+    title: "OTA Release Channel"
+    description: "Select Firmware OTA Update Channel"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        "main": "Main"
+        "beta": "Beta"
+      default: "main"
+
+  - preferenceId: ch1PollInterval
+    name: ch1PollInterval
+    title: "CH1 Master Polling Interval (ms)"
+    description: "Device status polling interval (Default: 1000ms)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 50
+      maximum: 5000
+      default: 1000
+
+  - preferenceId: ch2AckDelay
+    name: ch2AckDelay
+    title: "CH2 Main Wallpad ACK Delay (ms)"
+    description: "Virtual ACK delay for main wallpad (Default: 30ms)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 500
+      default: 30
+
+  - preferenceId: ch3AckDelay
+    name: ch3AckDelay
+    title: "CH3 Sub Wallpad ACK Delay (ms)"
+    description: "Virtual ACK delay for sub wallpad (Default: 240ms)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 500
+      default: 240
+
+  - preferenceId: pollingInterval
+    name: pollingInterval
+    title: "Telemetry Polling Interval (sec)"
+    description: "System health and status refresh interval in seconds"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 5
+      maximum: 300
+      default: 30
+
+  - preferenceId: githubRepo
+    name: githubRepo
+    title: "GitHub Repository (Owner/Repo)"
+    description: "GitHub Release Repository (Default: Eri-tep/Gateway)"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 3
+      maxLength: 64
+      default: "Eri-tep/Gateway"
+
+
+
+
+
+
+
+  # RS-485 Serial UART Settings
+  - preferenceId: ch1Baudrate
+    name: ch1Baudrate
+    title: "CH1 RS-485 Baudrate (Wallpad)"
+    description: "CH1 baudrate (Range: 1200 ~ 115200, Default: 9600)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1200
+      maximum: 115200
+      default: 9600
+
+  - preferenceId: ch1Framing
+    name: ch1Framing
+    title: "CH1 RS-485 Framing"
+    description: "Data bits, Parity, Stop bits"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
+        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
+        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
+        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
+      default: "8N1"
+
+  - preferenceId: ch2Baudrate
+    name: ch2Baudrate
+    title: "CH2 RS-485 Baudrate (Sub 1)"
+    description: "CH2 baudrate (Range: 1200 ~ 115200, Default: 9600)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1200
+      maximum: 115200
+      default: 9600
+
+  - preferenceId: ch2Framing
+    name: ch2Framing
+    title: "CH2 RS-485 Framing"
+    description: "Data bits, Parity, Stop bits"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
+        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
+        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
+        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
+      default: "8N1"
+
+  - preferenceId: ch3Baudrate
+    name: ch3Baudrate
+    title: "CH3 RS-485 Baudrate (Sub 2)"
+    description: "CH3 baudrate (Range: 1200 ~ 115200, Default: 9600)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1200
+      maximum: 115200
+      default: 9600
+
+  - preferenceId: ch3Framing
+    name: ch3Framing
+    title: "CH3 RS-485 Framing"
+    description: "Data bits, Parity, Stop bits"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
+        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
+        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
+        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
+      default: "8N1"
+
+  - preferenceId: ch4Baudrate
+    name: ch4Baudrate
+    title: "CH4 RS-485 Baudrate (Doorphone)"
+    description: "CH4 baudrate (Range: 1200 ~ 115200, Default: 3860)"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1200
+      maximum: 115200
+      default: 3860
+
+  - preferenceId: ch4Framing
+    name: ch4Framing
+    title: "CH4 RS-485 Framing"
+    description: "Data bits, Parity, Stop bits"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
+        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
+        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
+        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
+      default: "8E1"
+
+metadata:
+  vid: "169734da-9b17-3614-b296-c3b4974a21b4"
+  mnmn: "SmartThingsCommunity"
+

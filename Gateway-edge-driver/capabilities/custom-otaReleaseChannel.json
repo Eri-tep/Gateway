@@ -1,0 +1,31 @@
+{
+  "name": "OTA Release Channel",
+  "attributes": {
+    "channel": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "enum": ["stable", "beta"]
+          }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {
+    "setChannel": {
+      "arguments": [
+        {
+          "name": "channel",
+          "schema": {
+            "type": "string",
+            "enum": ["stable", "beta"]
+          }
+        }
+      ]
+    }
+  }
+}

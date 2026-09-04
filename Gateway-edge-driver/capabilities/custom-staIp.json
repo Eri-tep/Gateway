@@ -1,0 +1,16 @@
+{
+  "name": "STA IP",
+  "attributes": {
+    "ipAddress": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {}
+}

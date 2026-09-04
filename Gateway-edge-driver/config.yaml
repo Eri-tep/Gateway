@@ -1,0 +1,6 @@
+name: "ESP32 Wallpad Gateway Controller"
+packageKey: "com.gateway.smartthings.controller"
+description: "ESP32 Wallpad Gateway Ultra Controller"
+permissions:
+  lan: {}
+  discovery: {}

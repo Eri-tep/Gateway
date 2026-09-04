@@ -1,0 +1,22 @@
+{
+  "name": "Core Dump Details",
+  "attributes": {
+    "coredumpDetails": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {
+    "clearCoreDump": {
+      "arguments": []
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{discovered.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "Discovered",
+      "displayType": "state",
+      "state": {
+        "label": "{{discovered.value}}"
+      }
+    }
+  ]
+}
