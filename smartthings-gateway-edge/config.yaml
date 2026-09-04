@@ -1,0 +1,6 @@
+name: "Wallpad Gateway"
+packageKey: "wallpad_gateway"
+description: "Universal Wallpad Gateway"
+permissions:
+  lan: {}
+  discovery: {}

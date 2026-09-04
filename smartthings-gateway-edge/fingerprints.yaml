@@ -1,0 +1,6 @@
+lan:
+  - id: universal-gateway-bridge
+    deviceLabel: 월패드 게이트웨이
+    profileName: gateway-bridge
+    manufacturer: Universal
+    model: WallpadGateway

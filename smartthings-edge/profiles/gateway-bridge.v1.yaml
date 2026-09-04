@@ -1,0 +1,66 @@
+name: gateway-bridge.v1
+components:
+  - id: main
+    label: "게이트웨이"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Hub
+preferences:
+  - title: "월패드 게이트웨이 IP"
+    name: wallpadIp
+    description: "ESP32 RS-485 게이트웨이 IP 주소"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 7
+      maxLength: 15
+      default: "172.30.1.3"
+  - title: "월패드 게이트웨이 포트"
+    name: wallpadPort
+    description: "ESP32 TCP 서버 포트"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+  - title: "송신 딜레이 (ms)"
+    name: txDelay
+    description: "연속 패킷 송신 간격"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 500
+      default: 50
+  - title: "엘리베이터 EW11 IP"
+    name: elevatorIp
+    description: "엘리베이터 전용 EW11 IP 주소 (미입력 시 비활성)"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+  - title: "엘리베이터 EW11 포트"
+    name: elevatorPort
+    description: "엘리베이터 TCP 포트"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+  - title: "우리집 층수"
+    name: myFloor
+    description: "엘리베이터 도착 알림 층수"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 99
+      default: 15

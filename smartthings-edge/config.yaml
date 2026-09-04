@@ -1,0 +1,7 @@
+name: "Wallpad Gateway"
+packageKey: "com.home.rs485-gateway"
+description: "ESP32 RS-485 Wallpad Gateway Edge Driver"
+vendorSupportInformation: "https://github.com/owner/gateway"
+permissions:
+  lan: {}
+  discovery: {}

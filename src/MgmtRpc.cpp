@@ -572,9 +572,22 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 
   // 6. cache_purge_rescan
   if (strcasecmp(cmd, "cache_purge_rescan") == 0) {
+    g_auto_probing_engine.reset();
+    g_doorphone_tracker.clearNvs();
     g_polling_targets.clear();
     g_device_repo.clear();
-    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Cache purged, bus rescan triggered\"}\n";
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Auto-probing reset and cache purged, bus rescan triggered\"}\n";
+    send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+    return;
+  }
+
+  // 6.1. wallpad_reset (Explicit Wallpad Auto-probing Reset)
+  if (strcasecmp(cmd, "wallpad_reset") == 0) {
+    g_auto_probing_engine.reset();
+    g_doorphone_tracker.clearNvs();
+    g_polling_targets.clear();
+    g_device_repo.clear();
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Wallpad auto-probing and framing reset completed\"}\n";
     send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
     return;
   }
