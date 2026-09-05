@@ -1,0 +1,22 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{resource.value}}"
+      }
+    ],
+    "actions": [],
+    "panelItems": []
+  },
+  "detailView": [
+    {
+      "label": "Resource",
+      "displayType": "state",
+      "state": {
+        "label": "{{resource.value}}"
+      }
+    }
+  ],
+  "id": "digituniverse06711.resource",
+  "version": 1
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Resource",
+  "attributes": {
+    "resource": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string" }
+        },
+        "additionalProperties": false,
+        "required": ["value"]
+      }
+    }
+  },
+  "commands": {}
+}

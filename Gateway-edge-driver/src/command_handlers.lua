@@ -94,7 +94,7 @@ function CommandHandlers.handle_switch_on(driver, device, command)
       local total = #valid_aps
       local function show_ap_at(idx)
         local ap = valid_aps[idx]
-        local text = string.format("[%d/%d] %s (%d%%)", idx, total, ap.ssid, ap.pct)
+        local text = string.format("%s (%d%%)", ap.ssid, ap.pct)
         log.info(string.format("📶 [SCAN ROLL] %s", text))
         if cap_scan then
           device:emit_component_event(comp, cap_scan.scanResult({ value = text }))

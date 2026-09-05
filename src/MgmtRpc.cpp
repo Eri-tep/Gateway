@@ -280,9 +280,11 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
 
   uint32_t ch3_rx = g_pkt_stats.ch3.rx_pkts.load(std::memory_order_relaxed);
   uint32_t ch3_tx = g_pkt_stats.ch3.tx_pkts.load(std::memory_order_relaxed);
+  uint32_t ch3_uncached = g_pkt_stats.ch3.uncached_pkts.load(std::memory_order_relaxed);
 
   uint32_t ch4_rx = g_pkt_stats.ch4.rx_pkts.load(std::memory_order_relaxed);
   uint32_t ch4_tx = g_pkt_stats.ch4.tx_pkts.load(std::memory_order_relaxed);
+  uint32_t ch4_inv = g_pkt_stats.ch4.invalid_frames.load(std::memory_order_relaxed);
 
   uint32_t ch5_rx = g_pkt_stats.ch5.rx_pkts.load(std::memory_order_relaxed);
   uint32_t ch5_tx = g_pkt_stats.ch5.tx_pkts.load(std::memory_order_relaxed);
@@ -391,15 +393,15 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
   // Channels
   out.appendFormat("\"channels\":{\"ch1\":{\"rx\":%u,\"tx\":%u,\"crc_err\":%u,\"timeout\":%u,\"crc_rate\":%.2f},"
                    "\"ch2\":{\"rx\":%u,\"tx\":%u,\"uncached\":%u},"
-                   "\"ch3\":{\"rx\":%u,\"tx\":%u},"
-                   "\"ch4\":{\"rx\":%u,\"tx\":%u},"
+                   "\"ch3\":{\"rx\":%u,\"tx\":%u,\"uncached\":%u},"
+                   "\"ch4\":{\"rx\":%u,\"tx\":%u,\"inv\":%u},"
                    "\"ch5\":{\"rx\":%u,\"tx\":%u,\"dropped\":%u},"
                    "\"ch6\":{\"rx\":%u,\"tx\":%u,\"dropped\":%u},"
                    "\"ch7\":{\"rx\":%u,\"tx\":%u}},",
                    ch1_rx, ch1_tx, ch1_crc, ch1_tout, crc_rate,
                    ch2_rx, ch2_tx, ch2_uncached,
-                   ch3_rx, ch3_tx,
-                   ch4_rx, ch4_tx,
+                   ch3_rx, ch3_tx, ch3_uncached,
+                   ch4_rx, ch4_tx, ch4_inv,
                    ch5_rx, ch5_tx, ch5_drp,
                    ch6_rx, ch6_tx, ch6_drp,
                    ch7_rx, ch7_tx);

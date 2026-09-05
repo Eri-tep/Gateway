@@ -124,6 +124,30 @@ local function device_removed(driver, device)
     device.thread:cancel_timer(device:get_field("poll_timer"))
     device:set_field("poll_timer", nil)
   end
+  if device:get_field("scan_roll_timer") then
+    device.thread:cancel_timer(device:get_field("scan_roll_timer"))
+    device:set_field("scan_roll_timer", nil)
+  end
+  if device:get_field("resource_roll_timer") then
+    device.thread:cancel_timer(device:get_field("resource_roll_timer"))
+    device:set_field("resource_roll_timer", nil)
+  end
+  if device:get_field("log_roll_timer") then
+    device.thread:cancel_timer(device:get_field("log_roll_timer"))
+    device:set_field("log_roll_timer", nil)
+  end
+  if device:get_field("wifi_roll_timer") then
+    device.thread:cancel_timer(device:get_field("wifi_roll_timer"))
+    device:set_field("wifi_roll_timer", nil)
+  end
+  if device:get_field("ota_roll_timer") then
+    device.thread:cancel_timer(device:get_field("ota_roll_timer"))
+    device:set_field("ota_roll_timer", nil)
+  end
+  if device:get_field("traffic_roll_timer") then
+    device.thread:cancel_timer(device:get_field("traffic_roll_timer"))
+    device:set_field("traffic_roll_timer", nil)
+  end
 end
 
 local is_device_created = false

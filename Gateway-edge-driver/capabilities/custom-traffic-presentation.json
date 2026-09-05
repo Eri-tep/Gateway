@@ -1,0 +1,20 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{traffic.value}}"
+      }
+    ],
+    "actions": [],
+    "panelItems": []
+  },
+  "detailView": [
+    {
+      "label": "Traffic",
+      "displayType": "state",
+      "state": {
+        "label": "{{traffic.value}}"
+      }
+    }
+  ]
+}

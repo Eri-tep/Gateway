@@ -33,11 +33,9 @@ components:
         version: 1
       - id: digituniverse06711.uptime
         version: 1
-      - id: digituniverse06711.cpu
+      - id: digituniverse06711.resource
         version: 1
-      - id: digituniverse06711.ram
-        version: 1
-      - id: digituniverse06711.flash
+      - id: digituniverse06711.traffic
         version: 1
     categories:
       - name: Hub
@@ -48,8 +46,6 @@ components:
       - id: switch
         version: 1
       - id: digituniverse06711.logHistory
-        version: 1
-      - id: digituniverse06711.crashDump
         version: 1
     categories:
       - name: Hub
@@ -63,8 +59,6 @@ components:
         version: 1
       - id: digituniverse06711.wifi
         version: 1
-      - id: digituniverse06711.mode
-        version: 1
     categories:
       - name: Hub
 
@@ -76,8 +70,6 @@ components:
       - id: digituniverse06711.version
         version: 1
       - id: digituniverse06711.build
-        version: 1
-      - id: digituniverse06711.updated
         version: 1
     categories:
       - name: Hub
@@ -336,6 +328,6 @@ preferences:
       default: "8E1"
 
 metadata:
-  vid: "169734da-9b17-3614-b296-c3b4974a21b4"
+  vid: "efc54370-4451-3d58-9360-b418a8251bc7"
   mnmn: "SmartThingsCommunity"
 
