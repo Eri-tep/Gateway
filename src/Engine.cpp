@@ -485,8 +485,16 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
   if (UNLIKELY(ack.length < 5))
     return;
   auto *parser = WallpadParserFactory::getActiveParser();
+  if (!parser)
+    return;
+
+  // ★ ACK 패킷만 DevRepo에 등록 - 쿼리(0x01)/제어(0x02)가 섞여서
+  // 오프셋 LEARNING 중에 23개 장치가 46개로 2배 등록되는 버그 수정
+  if (!parser->isAckPacket(span<const uint8_t>(ack.data.data(), ack.length)))
+    return;
+
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  if (!parser || !parser->extractDeviceKey(span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1, sub2)) {
+  if (!parser->extractDeviceKey(span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1, sub2)) {
     return;
   }
 

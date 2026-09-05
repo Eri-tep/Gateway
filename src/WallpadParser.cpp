@@ -678,34 +678,24 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   }
 
   // [Step 3: Device Type & Sub ID Determination]
+  // candidate_cols: 쿼리 패킷에서 값이 2개 이상 다양한 컬럼 (q/r 동일 조건 제거 - DevType은 q≠r 가능)
   std::vector<size_t> candidate_cols;
   for (size_t k = 1; k < min_common_len - 1; ++k) {
     if (static_cast<int>(k) == opcode_idx)
       continue;
-    if (swap_i >= 0 && (static_cast<int>(k) == swap_i || static_cast<int>(k) == swap_j)) {
-      std::set<uint8_t> vals;
-      for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
-      if (vals.size() >= 2) candidate_cols.push_back(k);
-    } else {
-      bool eq = true;
-      for (size_t m = 0; m < N; ++m) {
-        if (pairs[m].q.data[k] != pairs[m].r.data[k]) {
-          eq = false;
-          break;
-        }
-      }
-      if (eq) {
-        std::set<uint8_t> vals;
-        for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
-        if (vals.size() >= 2) candidate_cols.push_back(k);
-      }
-    }
+    std::set<uint8_t> vals;
+    for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
+    if (vals.size() >= 2) candidate_cols.push_back(k);
   }
 
   int dev_type_idx = -1;
   int sub_id_idx = -1;
 
-  // Filter 1: Length = f(Candidate)
+  // ★ 충분한 유일성 기준: N의 75% 이상 (최소 2)
+  // combo_keys.size() == N(100%)은 너무 엄격 - Sub-ID가 DevType별로 겹칠 수 있음
+  size_t min_unique = std::max<size_t>(2, N * 3 / 4);
+
+  // Filter 1: Length = f(Candidate) → DevType 오프셋 후보 선택
   for (size_t cand : candidate_cols) {
     std::map<uint8_t, size_t> len_map;
     bool consistent = true;
@@ -728,7 +718,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     }
   }
 
-  // Filter 2: Instance enumeration under dev_type_idx
+  // Filter 2: Instance enumeration - DevType+SubID 조합이 min_unique 이상이면 락
   if (dev_type_idx >= 0) {
     for (size_t cand : candidate_cols) {
       if (static_cast<int>(cand) == dev_type_idx)
@@ -738,13 +728,14 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
         uint16_t k = (static_cast<uint16_t>(pairs[m].q.data[dev_type_idx]) << 8) | pairs[m].q.data[cand];
         combo_keys.insert(k);
       }
-      if (combo_keys.size() == N) {
+      // ★ 완화: 100% unique 대신 75% 이상이면 Sub-ID 오프셋으로 확정
+      if (combo_keys.size() >= min_unique) {
         sub_id_idx = static_cast<int>(cand);
         break;
       }
     }
   } else {
-    // Fixed length protocols
+    // Fixed length protocols: 두 컬럼 조합이 min_unique 이상 유니크하면 확정
     for (size_t cand1 : candidate_cols) {
       for (size_t cand2 : candidate_cols) {
         if (cand1 == cand2) continue;
@@ -753,7 +744,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
           uint16_t k = (static_cast<uint16_t>(pairs[m].q.data[cand1]) << 8) | pairs[m].q.data[cand2];
           combo_keys.insert(k);
         }
-        if (combo_keys.size() == N) {
+        if (combo_keys.size() >= min_unique) {
           dev_type_idx = static_cast<int>(cand1);
           sub_id_idx = static_cast<int>(cand2);
           break;
