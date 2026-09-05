@@ -704,9 +704,10 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   int dev_type_idx = -1;
   int sub_id_idx = -1;
 
-  // ★ 충분한 유일성 기준: N의 75% 이상 (최소 2)
-  // combo_keys.size() == N(100%)은 너무 엄격 - Sub-ID가 DevType별로 겹칠 수 있음
-  size_t min_unique = std::max<size_t>(2, N * 3 / 4);
+  // ★ 엄격한 유일성 기준: N의 90% 이상 (최소 2)
+  // - 100%는 복수 상태조회 패킷(단일 기기 2형태 쿼리) 존재 시 락 불가 버그 유발
+  // - 90%는 가짜 상태 바이트를 완벽히 배제하면서도 실제 기기군을 확실하게 검증
+  size_t min_unique = std::max<size_t>(2, N * 9 / 10);
 
   // Filter 1: Length = f(Candidate) → DevType 오프셋 후보 선택
   for (size_t cand : candidate_cols) {
