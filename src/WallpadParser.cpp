@@ -1,7 +1,11 @@
 #include "WallpadParser.h"
 #include "Common.h"
+#include "TelnetCli.h"
 #include <Preferences.h>
 #include <algorithm>
+#include <vector>
+#include <set>
+#include <map>
 
 // ============================================================================
 // 1ST TIER CACHE: POLLING TARGET REGISTRY
@@ -19,8 +23,15 @@ void PollingTargetRegistry::registerOrTouch(uint8_t ch, uint8_t dev_id,
     CriticalSectionLocker lock(&_mux);
 
     for (size_t i = 0; i < _count; ++i) {
-      if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
-          _entries[i].sub2 == sub2) {
+      bool match = false;
+      if (dev_id != 0 || sub1 != 0 || sub2 != 0) {
+        match = (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
+                 _entries[i].sub2 == sub2);
+      }
+      if (!match && raw_pkt && raw_len > 0 && _entries[i].raw_query_len == raw_len) {
+        match = (memcmp(_entries[i].raw_query_data.data(), raw_pkt, raw_len) == 0);
+      }
+      if (match) {
         if (_entries[i].last_requested_ms > 0 && now > _entries[i].last_requested_ms) {
           uint32_t delta = now - _entries[i].last_requested_ms;
           if (delta >= 100 && delta <= 10000) {
@@ -71,6 +82,42 @@ void PollingTargetRegistry::registerOrTouch(uint8_t ch, uint8_t dev_id,
   if (is_new_entry) {
     g_warm_cache_dirty.store(true, std::memory_order_release);
     g_warm_cache_dirty_ms.store(now, std::memory_order_release);
+  }
+}
+
+void PollingTargetRegistry::updateResponse(const uint8_t *query_pkt, size_t query_len,
+                                           const uint8_t *ack_pkt, size_t ack_len) {
+  if (!query_pkt || query_len == 0 || !ack_pkt || ack_len == 0)
+    return;
+  CriticalSectionLocker lock(&_mux);
+  for (size_t i = 0; i < _count; ++i) {
+    if (_entries[i].is_active && _entries[i].raw_query_len == query_len &&
+        memcmp(_entries[i].raw_query_data.data(), query_pkt, query_len) == 0) {
+      _entries[i].raw_ack_len = static_cast<uint8_t>(std::min<size_t>(ack_len, 64));
+      memcpy(_entries[i].raw_ack_data.data(), ack_pkt, _entries[i].raw_ack_len);
+      _entries[i].is_verified = true;
+      return;
+    }
+  }
+}
+
+void PollingTargetRegistry::reindexWithOffsets(uint8_t dev_id_offset, uint8_t sub1_offset,
+                                               uint8_t sub2_offset) {
+  CriticalSectionLocker lock(&_mux);
+  for (size_t i = 0; i < _count; ++i) {
+    if (_entries[i].raw_query_len > dev_id_offset) {
+      _entries[i].dev_id = _entries[i].raw_query_data[dev_id_offset];
+    }
+    if (sub1_offset > 0 && _entries[i].raw_query_len > sub1_offset) {
+      _entries[i].sub1 = _entries[i].raw_query_data[sub1_offset];
+    } else {
+      _entries[i].sub1 = 0;
+    }
+    if (sub2_offset > 0 && _entries[i].raw_query_len > sub2_offset) {
+      _entries[i].sub2 = _entries[i].raw_query_data[sub2_offset];
+    } else {
+      _entries[i].sub2 = 0;
+    }
   }
 }
 
@@ -449,30 +496,23 @@ void AutoProbingEngine::feedOpcodePair(span<const uint8_t> req, span<const uint8
 
   {
     CriticalSectionLocker lock(&_mux);
-    size_t limit = std::min(static_cast<size_t>(7), std::min(req.size(), ack.size()) - 2);
-    size_t diff_cnt = 0;
-    size_t diff_idx = 0;
+    if (_desc.opcodes_locked)
+      return;
 
-    for (size_t i = 1; i < limit; ++i) {
-      if (i == 1 && (req[1] == req.size() || ack[1] == ack.size())) {
-        continue; // 패킷 길이가 서로 다를 때 1번 바이트(길이 필드) 차이는 스킵
-      }
+    size_t min_len = std::min(req.size(), ack.size());
+    for (size_t i = 1; i < min_len - 1; ++i) {
       if (req[i] != ack[i]) {
-        diff_cnt++;
-        diff_idx = i;
-      }
-    }
-
-    if (diff_cnt == 1 && diff_idx < 16) {
-      _diff_idx_counts[diff_idx]++;
-      if (_diff_idx_counts[diff_idx] >= 5) {
-        _desc.opcode_offset = static_cast<uint8_t>(diff_idx);
-        _desc.query_opcode = req[diff_idx];
-        _desc.ack_opcode = ack[diff_idx];
-        _desc.opcodes_locked = true;
-        if (_desc.is_locked) {
-          should_sync = true;
-          desc_to_sync = _desc;
+        _diff_idx_counts[i < 16 ? i : 15]++;
+        if (_diff_idx_counts[i < 16 ? i : 15] >= 10) {
+          _desc.opcode_offset = static_cast<uint8_t>(i);
+          _desc.query_opcode = req[i];
+          _desc.ack_opcode = ack[i];
+          _desc.opcodes_locked = true;
+          if (_desc.is_locked) {
+            should_sync = true;
+            desc_to_sync = _desc;
+          }
+          break;
         }
       }
     }
@@ -506,13 +546,13 @@ void AutoProbingEngine::feedControlPair(span<const uint8_t> ctrl_req, span<const
     if (_desc.ack_opcode != 0 && ack_op != _desc.ack_opcode)
       return;
 
-    // 3) 송신 제어 패킷과 수신 응답 패킷의 장치 ID(Offset 3) 매칭 검증
-    if (ctrl_req.size() >= 4 && ack_res.size() >= 4) {
-      if (ctrl_req[3] != ack_res[3])
+    // 3) 송신 제어 패킷과 수신 응답 패킷의 장치 ID 매칭 검증
+    if (_desc.dev_id_offset < ctrl_req.size() && _desc.dev_id_offset < ack_res.size()) {
+      if (ctrl_req[_desc.dev_id_offset] != ack_res[_desc.dev_id_offset])
         return; // 타깃 장치 ID 불일치 시 확정 보류
     }
 
-    // 4) ★ 3회 연속 폐루프 실물 응답 검증 시 최종 [LOCKED] 확정!
+    // 4) ★ 3회 연속 폐루프 실물 응답 검증 시 제어 코드 확정!
     if (_candidate_ctrl_op == ctrl_op) {
       _control_matches++;
       if (_control_matches >= 3) {
@@ -537,6 +577,286 @@ void AutoProbingEngine::feedControlPair(span<const uint8_t> ctrl_req, span<const
 bool AutoProbingEngine::isLocked() const {
   CriticalSectionLocker lock(&_mux);
   return _desc.is_locked;
+}
+
+bool AutoProbingEngine::isOffsetsLocked() const {
+  CriticalSectionLocker lock(&_mux);
+  return _desc.offsets_locked;
+}
+
+bool AutoProbingEngine::analyzeCacheMatrix() {
+  struct PktPair {
+    StaticPacket q;
+    StaticPacket r;
+  };
+  std::vector<PktPair> pairs;
+  pairs.reserve(64);
+
+  size_t target_count = g_polling_targets.totalCount();
+  for (size_t i = 0; i < target_count; ++i) {
+    PollingTargetEntry target;
+    if (!g_polling_targets.getEntry(i, target))
+      continue;
+    if (!target.is_active || target.raw_query_len < 4)
+      continue;
+
+    if (target.raw_ack_len >= 4) {
+      PktPair pair;
+      pair.q.length = target.raw_query_len;
+      memcpy(pair.q.data.data(), target.raw_query_data.data(), target.raw_query_len);
+      pair.r.length = target.raw_ack_len;
+      memcpy(pair.r.data.data(), target.raw_ack_data.data(), target.raw_ack_len);
+      pairs.push_back(pair);
+    } else {
+      const DeviceStateEntry *dev = g_device_repo.find(target.dev_id, target.sub1, target.sub2);
+      if (dev && dev->is_online && dev->last_ack_len >= 4) {
+        PktPair pair;
+        pair.q.length = target.raw_query_len;
+        memcpy(pair.q.data.data(), target.raw_query_data.data(), target.raw_query_len);
+        pair.r.length = dev->last_ack_len;
+        memcpy(pair.r.data.data(), dev->last_ack_data.data(), dev->last_ack_len);
+        pairs.push_back(pair);
+      }
+    }
+  }
+
+  if (pairs.size() < 2)
+    return false;
+
+  size_t N = pairs.size();
+  size_t min_common_len = 256;
+  for (const auto &p : pairs) {
+    if (p.q.length < min_common_len) min_common_len = p.q.length;
+    if (p.r.length < min_common_len) min_common_len = p.r.length;
+  }
+  if (min_common_len < 4)
+    return false;
+
+  // [Step 1: Opcode Determination]
+  int opcode_idx = -1;
+  uint8_t learned_q_op = 0, learned_ack_op = 0;
+  for (size_t k = 1; k < min_common_len - 1; ++k) {
+    uint8_t cq = pairs[0].q.data[k];
+    uint8_t cr = pairs[0].r.data[k];
+    if (cq == cr)
+      continue;
+    bool all_match = true;
+    for (size_t m = 1; m < N; ++m) {
+      if (pairs[m].q.data[k] != cq || pairs[m].r.data[k] != cr) {
+        all_match = false;
+        break;
+      }
+    }
+    if (all_match) {
+      opcode_idx = static_cast<int>(k);
+      learned_q_op = cq;
+      learned_ack_op = cr;
+      break;
+    }
+  }
+
+  // [Step 2: Address & Symmetry Test (Swapped DA/SA detection)]
+  int swap_i = -1, swap_j = -1;
+  for (size_t i = 1; i < min_common_len - 1; ++i) {
+    for (size_t j = i + 1; j < min_common_len - 1; ++j) {
+      bool is_cross = true;
+      for (size_t m = 0; m < N; ++m) {
+        if (pairs[m].q.data[i] != pairs[m].r.data[j] ||
+            pairs[m].q.data[j] != pairs[m].r.data[i] ||
+            pairs[m].q.data[i] == pairs[m].q.data[j]) {
+          is_cross = false;
+          break;
+        }
+      }
+      if (is_cross) {
+        swap_i = static_cast<int>(i);
+        swap_j = static_cast<int>(j);
+        break;
+      }
+    }
+    if (swap_i >= 0) break;
+  }
+
+  // [Step 3: Device Type & Sub ID Determination]
+  std::vector<size_t> candidate_cols;
+  for (size_t k = 1; k < min_common_len - 1; ++k) {
+    if (static_cast<int>(k) == opcode_idx)
+      continue;
+    if (swap_i >= 0 && (static_cast<int>(k) == swap_i || static_cast<int>(k) == swap_j)) {
+      std::set<uint8_t> vals;
+      for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
+      if (vals.size() >= 2) candidate_cols.push_back(k);
+    } else {
+      bool eq = true;
+      for (size_t m = 0; m < N; ++m) {
+        if (pairs[m].q.data[k] != pairs[m].r.data[k]) {
+          eq = false;
+          break;
+        }
+      }
+      if (eq) {
+        std::set<uint8_t> vals;
+        for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
+        if (vals.size() >= 2) candidate_cols.push_back(k);
+      }
+    }
+  }
+
+  int dev_type_idx = -1;
+  int sub_id_idx = -1;
+
+  // Filter 1: Length = f(Candidate)
+  for (size_t cand : candidate_cols) {
+    std::map<uint8_t, size_t> len_map;
+    bool consistent = true;
+    for (size_t m = 0; m < N; ++m) {
+      uint8_t val = pairs[m].q.data[cand];
+      size_t r_len = pairs[m].r.length;
+      if (len_map.count(val) && len_map[val] != r_len) {
+        consistent = false;
+        break;
+      }
+      len_map[val] = r_len;
+    }
+    if (consistent && len_map.size() > 1) {
+      std::set<size_t> distinct_lens;
+      for (auto &kv : len_map) distinct_lens.insert(kv.second);
+      if (distinct_lens.size() > 1) {
+        dev_type_idx = static_cast<int>(cand);
+        break;
+      }
+    }
+  }
+
+  // Filter 2: Instance enumeration under dev_type_idx
+  if (dev_type_idx >= 0) {
+    for (size_t cand : candidate_cols) {
+      if (static_cast<int>(cand) == dev_type_idx)
+        continue;
+      std::set<uint16_t> combo_keys;
+      for (size_t m = 0; m < N; ++m) {
+        uint16_t k = (static_cast<uint16_t>(pairs[m].q.data[dev_type_idx]) << 8) | pairs[m].q.data[cand];
+        combo_keys.insert(k);
+      }
+      if (combo_keys.size() == N) {
+        sub_id_idx = static_cast<int>(cand);
+        break;
+      }
+    }
+  } else {
+    // Fixed length protocols
+    for (size_t cand1 : candidate_cols) {
+      for (size_t cand2 : candidate_cols) {
+        if (cand1 == cand2) continue;
+        std::set<uint16_t> combo_keys;
+        for (size_t m = 0; m < N; ++m) {
+          uint16_t k = (static_cast<uint16_t>(pairs[m].q.data[cand1]) << 8) | pairs[m].q.data[cand2];
+          combo_keys.insert(k);
+        }
+        if (combo_keys.size() == N) {
+          dev_type_idx = static_cast<int>(cand1);
+          sub_id_idx = static_cast<int>(cand2);
+          break;
+        }
+      }
+      if (dev_type_idx >= 0) break;
+    }
+  }
+
+  // [Step 4: Sub-Command / Invariant Parameter]
+  int sub_cmd_idx = -1;
+  if (dev_type_idx >= 0) {
+    for (size_t k = 1; k < min_common_len - 1; ++k) {
+      if (static_cast<int>(k) == opcode_idx || static_cast<int>(k) == dev_type_idx ||
+          static_cast<int>(k) == sub_id_idx || static_cast<int>(k) == swap_i ||
+          static_cast<int>(k) == swap_j) {
+        continue;
+      }
+      bool eq = true;
+      for (size_t m = 0; m < N; ++m) {
+        if (pairs[m].q.data[k] != pairs[m].r.data[k]) {
+          eq = false;
+          break;
+        }
+      }
+      if (eq) {
+        std::map<uint8_t, uint8_t> dep_map;
+        bool pure_func = true;
+        for (size_t m = 0; m < N; ++m) {
+          uint8_t dt = pairs[m].q.data[dev_type_idx];
+          uint8_t sc = pairs[m].q.data[k];
+          if (dep_map.count(dt) && dep_map[dt] != sc) {
+            pure_func = false;
+            break;
+          }
+          dep_map[dt] = sc;
+        }
+        if (pure_func && dep_map.size() > 1) {
+          sub_cmd_idx = static_cast<int>(k);
+          break;
+        }
+      }
+    }
+  }
+
+  // [Step 5: Finalize Profile & Update State]
+  AutoProbeDescriptor desc_to_sync;
+  {
+    CriticalSectionLocker lock(&_mux);
+    if (opcode_idx >= 0) {
+      _desc.opcode_offset = static_cast<uint8_t>(opcode_idx);
+      _desc.query_opcode = learned_q_op;
+      _desc.ack_opcode = learned_ack_op;
+      _desc.opcodes_locked = true;
+    }
+    if (dev_type_idx >= 0) {
+      _desc.dev_id_offset = static_cast<uint8_t>(dev_type_idx);
+    }
+    if (sub_cmd_idx >= 0) {
+      _desc.sub1_offset = static_cast<uint8_t>(sub_cmd_idx);
+    }
+    if (sub_id_idx >= 0) {
+      _desc.sub2_offset = static_cast<uint8_t>(sub_id_idx);
+    }
+    _desc.is_swapped_addr = (swap_i >= 0);
+    _desc.offsets_locked = (dev_type_idx >= 0 && sub_id_idx >= 0);
+
+    int max_hdr = 0;
+    if (opcode_idx > max_hdr) max_hdr = opcode_idx;
+    if (dev_type_idx > max_hdr) max_hdr = dev_type_idx;
+    if (sub_cmd_idx > max_hdr) max_hdr = sub_cmd_idx;
+    if (sub_id_idx > max_hdr) max_hdr = sub_id_idx;
+    if (swap_i > max_hdr) max_hdr = swap_i;
+    if (swap_j > max_hdr) max_hdr = swap_j;
+    _desc.payload_offset = static_cast<uint8_t>(max_hdr + 1);
+
+    snprintf(_desc.description, sizeof(_desc.description),
+             "Auto: OP@%u(0x%02X/0x%02X) DEV@%u SUB1@%u SUB2@%u",
+             _desc.opcode_offset, _desc.query_opcode, _desc.ack_opcode,
+             _desc.dev_id_offset, _desc.sub1_offset, _desc.sub2_offset);
+    desc_to_sync = _desc;
+  }
+
+  ProfileRepository::syncAutoProfileToNvs(desc_to_sync);
+
+  if (desc_to_sync.offsets_locked) {
+    g_polling_targets.reindexWithOffsets(desc_to_sync.dev_id_offset,
+                                         desc_to_sync.sub1_offset,
+                                         desc_to_sync.sub2_offset);
+    for (size_t i = 0; i < target_count; ++i) {
+      PollingTargetEntry target;
+      if (g_polling_targets.getEntry(i, target) && target.is_active && target.raw_ack_len >= 4) {
+        StaticPacket ack_pkt;
+        ack_pkt.channel_id = 1;
+        ack_pkt.length = target.raw_ack_len;
+        memcpy(ack_pkt.data.data(), target.raw_ack_data.data(), target.raw_ack_len);
+        g_device_repo.updateFromBus(ack_pkt);
+      }
+    }
+  }
+
+  g_telnet_tracer.trace("[AUTO PROBE] ★ Full-Matrix Cache Analysis Complete! Offsets locked & saved to NVS.\r\n");
+  return true;
 }
 
 AutoProbeDescriptor AutoProbingEngine::getDescriptor() const {
@@ -802,9 +1122,9 @@ bool ProfileRepository::saveCurrentAutoAs(const char *name, size_t &saved_idx) {
   new_prof.query_op = (ad.query_opcode > 0) ? ad.query_opcode : 0x01;
   new_prof.ctrl_op = ad.control_seen ? ad.control_opcode : 0x02;
   new_prof.ack_op = (ad.ack_opcode > 0) ? ad.ack_opcode : 0x04;
-  new_prof.dev_id_offset = 3;
-  new_prof.sub1_offset = 5;
-  new_prof.sub2_offset = 6;
+  new_prof.dev_id_offset = ad.offsets_locked ? ad.dev_id_offset : 3;
+  new_prof.sub1_offset = ad.offsets_locked ? ad.sub1_offset : 5;
+  new_prof.sub2_offset = ad.offsets_locked ? ad.sub2_offset : 6;
 
   // 도어폰의 현재 학습된 프레이밍도 함께 프로파일에 저장
   uint8_t dp_s = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
@@ -868,6 +1188,11 @@ void ProfileRepository::syncAutoProfileToNvs(const AutoProbeDescriptor &auto_des
       desc.ctrl_op = auto_desc.control_opcode;
     }
     desc.ack_op = auto_desc.ack_opcode;
+    if (auto_desc.offsets_locked) {
+      desc.dev_id_offset = auto_desc.dev_id_offset;
+      desc.sub1_offset = auto_desc.sub1_offset;
+      desc.sub2_offset = auto_desc.sub2_offset;
+    }
     s_active_profiles[0] = desc;
   }
   Preferences prefs;
@@ -1006,12 +1331,25 @@ bool UniversalProtocolEngine::extractDeviceKey(span<const uint8_t> frame,
                                                uint8_t &dev_id, uint8_t &sub1,
                                                uint8_t &sub2) const {
   VendorProfileDescriptor desc = activeProfile();
-  if (frame.size() <= desc.dev_id_offset)
+  uint8_t d_off = desc.dev_id_offset;
+  uint8_t s1_off = desc.sub1_offset;
+  uint8_t s2_off = desc.sub2_offset;
+
+  if (isAutoProfile(desc)) {
+    auto ad = g_auto_probing_engine.getDescriptor();
+    if (ad.offsets_locked) {
+      d_off = ad.dev_id_offset;
+      s1_off = ad.sub1_offset;
+      s2_off = ad.sub2_offset;
+    }
+  }
+
+  if (frame.size() <= d_off)
     return false;
 
-  dev_id = frame[desc.dev_id_offset];
-  sub1 = (desc.sub1_offset < frame.size()) ? frame[desc.sub1_offset] : 0;
-  sub2 = (desc.sub2_offset < frame.size()) ? frame[desc.sub2_offset] : 0;
+  dev_id = frame[d_off];
+  sub1 = (s1_off < frame.size()) ? frame[s1_off] : 0;
+  sub2 = (s2_off < frame.size()) ? frame[s2_off] : 0;
   return true;
 }
 
@@ -1036,6 +1374,11 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
     algo = ad.checksum_algo;
     op_off = ad.opcode_offset;
     q_op = ad.query_opcode;
+    if (ad.offsets_locked) {
+      d_off = ad.dev_id_offset;
+      s1_off = ad.sub1_offset;
+      s2_off = ad.sub2_offset;
+    }
   }
 
   out.channel_id = 1;

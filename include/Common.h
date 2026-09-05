@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.9";
+constexpr const char *FIRMWARE_VERSION = "v1.1.2";
 } // namespace Config
 
 namespace Config::Task {
@@ -214,6 +214,9 @@ constexpr uint32_t INITIAL_CACHING_GRACE_PERIOD_MS = 5000;
 constexpr uint32_t SYSTEM_MONITOR_INTERVAL_MS = 15000;
 // [CH4 도어폰] 버튼 신호 디바운스 대기 (기본: 500ms)
 constexpr uint32_t DOORPHONE_DEBOUNCE_MS = 500;
+// [월패드 Auto 학습] 범용 인터패킷 갭 감지 타이머 (기본: 20ms 침묵 = 1프레임
+// 캡처, 9600bps 기준 패킷 분할 방지)
+constexpr uint32_t WALLPAD_AUTO_IPG_MS = 20;
 // [CH4 도어폰] 범용 인터패킷 갭 감지 타이머 (기본: 25ms 침묵 = 1프레임 종료
 // 판정)
 constexpr uint32_t DOORPHONE_IPG_MS = 25;
@@ -1362,7 +1365,6 @@ extern SemaphoreHandle_t g_ch5_mutex;
 extern SemaphoreHandle_t g_mgmt_mutex;
 extern RuntimeConfig g_config;
 extern portMUX_TYPE g_config_mux;
-extern TelnetTracer g_telnet_tracer;
 extern std::atomic<uint32_t> g_ch1_bus_ms;
 extern std::atomic<bool> g_config_dirty;
 extern std::atomic<bool> g_ota_in_progress;

@@ -72,6 +72,8 @@ struct PollingTargetEntry {
   uint32_t restored_ms{0};
   uint8_t raw_query_len{0};
   std::array<uint8_t, 64> raw_query_data{};
+  uint8_t raw_ack_len{0};
+  std::array<uint8_t, 64> raw_ack_data{};
 };
 
 class PollingTargetRegistry {
@@ -86,6 +88,10 @@ private:
 public:
   void registerOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                        const uint8_t *raw_pkt = nullptr, size_t raw_len = 0);
+  void updateResponse(const uint8_t *query_pkt, size_t query_len,
+                      const uint8_t *ack_pkt, size_t ack_len);
+  void reindexWithOffsets(uint8_t dev_id_offset, uint8_t sub1_offset,
+                          uint8_t sub2_offset);
   void sweepExpired(uint32_t ttl_ms = 30000);
   size_t getActiveTargets(PollingTargetEntry *out_buf, size_t max_count);
   size_t activeCount() const;
@@ -121,6 +127,12 @@ struct AutoProbeDescriptor {
   uint8_t ack_opcode{0x04};
   bool opcodes_locked{false};
   bool control_seen{false};
+  uint8_t dev_id_offset{3};
+  uint8_t sub1_offset{5};
+  uint8_t sub2_offset{6};
+  uint8_t payload_offset{7};
+  bool is_swapped_addr{false};
+  bool offsets_locked{false};
   uint32_t matched_packets{0};
   uint32_t tested_packets{0};
   bool is_locked{false};
@@ -149,6 +161,8 @@ public:
   void feedControlPair(span<const uint8_t> ctrl_req,
                        span<const uint8_t> ack_res);
   bool isLocked() const;
+  bool isOffsetsLocked() const;
+  bool analyzeCacheMatrix();
   AutoProbeDescriptor getDescriptor() const;
   void reset();
   uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
@@ -219,6 +233,8 @@ public:
   virtual uint8_t getEtx() const = 0;
   virtual uint8_t getMinPacketLen() const = 0;
   virtual uint8_t getMaxPacketLen() const = 0;
+  virtual bool isLocked() const = 0;
+  virtual bool isAutoMode() const = 0;
 
   // Stream packet length extraction:
   // > 0 : Full packet length extracted
@@ -243,6 +259,18 @@ public:
   const char *getVendorName() const override;
   const char *getProfileKey() const override;
   uint8_t getVendorId() const override;
+
+  bool isLocked() const override {
+    VendorProfileDescriptor d = activeProfile();
+    if (isAutoProfile(d)) {
+      return g_auto_probing_engine.isLocked();
+    }
+    return true;
+  }
+  bool isAutoMode() const override {
+    VendorProfileDescriptor d = activeProfile();
+    return isAutoProfile(d);
+  }
 
   bool validatePacket(span<const uint8_t> frame) const override;
   bool isQueryPacket(span<const uint8_t> frame) const override;

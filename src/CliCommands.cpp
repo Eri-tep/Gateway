@@ -959,7 +959,15 @@ void wallpadPrintStatus(AppendBuf &out) {
   auto *active = WallpadParserFactory::getActiveParser();
   auto desc = g_auto_probing_engine.getDescriptor();
   size_t active_targets = g_polling_targets.activeCount();
+  size_t verified_targets = g_polling_targets.verifiedCount();
   size_t online_devs = g_device_repo.getOnlineCount();
+
+  const char *phase_str = "Phase 1/3 (Framing Probing)";
+  if (desc.offsets_locked) {
+    phase_str = "Phase 3/3: Fully Locked";
+  } else if (desc.is_locked) {
+    phase_str = "Phase 2/3: Cache Syncing";
+  }
 
   out.append("\r\n");
   out.append(Fmt::DIV80EQ);
@@ -968,19 +976,20 @@ void wallpadPrintStatus(AppendBuf &out) {
   out.appendFormat("Active Profile  : %s (ID: %u)\r\n",
                    active ? active->getProfileKey() : "Standard",
                    static_cast<unsigned>(g_config.wallpad_profile));
-  out.appendFormat("Profile Mode    : %s\r\n",
-                   (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE))
-                       ? (desc.is_locked ? "Auto Adaptive [LOCKED]" : "Auto Adaptive [LEARNING]")
-                       : "Manual Fixed");
+  if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
+    out.appendFormat("Profile Mode    : Auto Adaptive [%s]\r\n", phase_str);
+  } else {
+    out.appendFormat("Profile Mode    : Manual Fixed\r\n");
+  }
   out.appendFormat("Devices Tracked : %u Active / %u Online (%u Offline) [%s]\r\n",
                    static_cast<unsigned>(active_targets), static_cast<unsigned>(online_devs),
                    static_cast<unsigned>(g_device_repo.count() >= online_devs ? (g_device_repo.count() - online_devs) : 0),
                    (online_devs >= active_targets && active_targets > 0) ? "100% Synced" : "Syncing");
   out.append(Fmt::DIV80);
-  out.append("Category       Parameter       Value / Rule                               Status\r\n");
+  out.append("Packet Field    Parameter       Value / Layout Rule                       Status\r\n");
   out.append(Fmt::DIV80);
 
-  // 1. Framing
+  // 1. Header (STX, LEN)
   char stx_buf[16], etx_buf[16], len_buf[32], pkt_len_buf[32];
   snprintf(stx_buf, sizeof(stx_buf), "%02X", active ? active->getStx() : 0xF7);
   snprintf(etx_buf, sizeof(etx_buf), "%02X", active ? active->getEtx() : 0xEE);
@@ -988,7 +997,6 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   size_t total_tgts = g_polling_targets.totalCount();
 
-  // Collect observed raw packet lengths from active polling targets
   uint8_t q_lens[8];
   size_t q_len_cnt = 0;
   for (size_t i = 0; i < total_tgts && q_len_cnt < 8; ++i) {
@@ -1010,15 +1018,16 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(pkt_len_buf, sizeof(pkt_len_buf), "11 Bytes");
   }
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Framing", "STX", stx_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "ETX", etx_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Length", pkt_len_buf, "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Length Field", len_buf, "[LOCKED]");
+  char len_rule_buf[48];
+  snprintf(len_rule_buf, sizeof(len_rule_buf), "Byte #1 (%s)", pkt_len_buf);
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "STX", stx_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Length (LEN)", len_rule_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
   out.append(Fmt::DIV80);
 
-  // 2. Addressing & Data (Observed Byte Values)
-  uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16], data0_ids[16];
-  size_t dev_id_cnt = 0, sub1_cnt = 0, sub2_cnt = 0, data0_cnt = 0;
+  // 2. Addressing (Address Mode, Device Type, Sub-ID)
+  uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16];
+  size_t dev_id_cnt = 0, sub1_cnt = 0, sub2_cnt = 0;
 
   for (size_t i = 0; i < total_tgts; ++i) {
     PollingTargetEntry entry;
@@ -1032,19 +1041,12 @@ void wallpadPrintStatus(AppendBuf &out) {
       if (sub2_cnt < 16 && std::find(sub2_ids, sub2_ids + sub2_cnt, entry.sub2) == sub2_ids + sub2_cnt) {
         sub2_ids[sub2_cnt++] = entry.sub2;
       }
-      if (entry.raw_query_len >= 8 && data0_cnt < 16) {
-        uint8_t d0 = entry.raw_query_data[7];
-        if (std::find(data0_ids, data0_ids + data0_cnt, d0) == data0_ids + data0_cnt) {
-          data0_ids[data0_cnt++] = d0;
-        }
-      }
     }
   }
 
   std::sort(dev_ids, dev_ids + dev_id_cnt);
   std::sort(sub1_ids, sub1_ids + sub1_cnt);
   std::sort(sub2_ids, sub2_ids + sub2_cnt);
-  std::sort(data0_ids, data0_ids + data0_cnt);
 
   auto format_hex_list = [](const uint8_t *arr, size_t cnt, const char *prefix, char *out, size_t out_sz) {
     if (cnt == 0) {
@@ -1054,7 +1056,7 @@ void wallpadPrintStatus(AppendBuf &out) {
     char hex_str[64] = {0};
     size_t off = 0;
     for (size_t d = 0; d < cnt; ++d) {
-      if (off + 5 >= 25) { // 25자 초과 시 뒷부분 줄임표 처리하여 39자 폭 절대 준수
+      if (off + 5 >= 24) {
         off += snprintf(hex_str + off, sizeof(hex_str) - off, ", ..");
         break;
       }
@@ -1064,105 +1066,123 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(out, out_sz, "%s (%s)", prefix, hex_str);
   };
 
-  char dev_list_buf[64], sub1_list_buf[64], sub2_list_buf[64], data_list_buf[64];
-  format_hex_list(dev_ids, dev_id_cnt, "Byte #3", dev_list_buf, sizeof(dev_list_buf));
-  format_hex_list(sub1_ids, sub1_cnt, "Byte #5", sub1_list_buf, sizeof(sub1_list_buf));
-  format_hex_list(sub2_ids, sub2_cnt, "Byte #6", sub2_list_buf, sizeof(sub2_list_buf));
-  format_hex_list(data0_ids, data0_cnt, "Byte #7 ~ #(N-3)", data_list_buf, sizeof(data_list_buf));
+  const char *addr_mode = desc.offsets_locked
+                              ? (desc.is_swapped_addr ? "Swapped (DA/SA Swap)" : "Direct (1:1 Direct)")
+                              : (desc.is_locked ? "Probing..." : "Waiting");
+  const char *addr_status = desc.offsets_locked ? "[LOCKED]" : (desc.is_locked ? "[LEARNING]" : "[WAITING]");
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Addressing", "Device ID", dev_list_buf, "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Sub-ID #1", sub1_list_buf, "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Sub-ID #2", sub2_list_buf, "[LOCKED]");
-  out.append(Fmt::DIV80);
-
-  // 3. Opcodes
-  char off_buf[32], q_buf[16], c_buf[16], a_buf[16];
-  const char *c_status = "[WAITING]";
-  if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
-    snprintf(off_buf, sizeof(off_buf), "Byte #%u", desc.opcode_offset);
-    snprintf(q_buf, sizeof(q_buf), "%02X", desc.query_opcode);
-    if (desc.control_seen) {
-      snprintf(c_buf, sizeof(c_buf), "%02X", desc.control_opcode);
-      c_status = "[LOCKED]";
-    } else {
-      snprintf(c_buf, sizeof(c_buf), "--");
-      c_status = "[WAITING]";
-    }
-    snprintf(a_buf, sizeof(a_buf), "%02X", desc.ack_opcode);
+  char dev_off_label[32], sub1_off_label[32], sub2_off_label[32];
+  if (desc.offsets_locked) {
+    snprintf(dev_off_label, sizeof(dev_off_label), "Byte #%u", desc.dev_id_offset);
+    snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #%u", desc.sub1_offset);
+    snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #%u", desc.sub2_offset);
   } else {
-    snprintf(off_buf, sizeof(off_buf), "Byte #4");
-    snprintf(q_buf, sizeof(q_buf), "01");
-    snprintf(c_buf, sizeof(c_buf), "02");
-    c_status = "[LOCKED]";
-    snprintf(a_buf, sizeof(a_buf), "04");
+    snprintf(dev_off_label, sizeof(dev_off_label), "Byte #3 (Init)");
+    snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #5 (Init)");
+    snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #6 (Init)");
   }
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Opcodes", "Position", off_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Query", q_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Control", c_buf, c_status);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "ACK", a_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
+  char dev_list_buf[64], sub1_list_buf[64], sub2_list_buf[64];
+  format_hex_list(dev_ids, dev_id_cnt, dev_off_label, dev_list_buf, sizeof(dev_list_buf));
+  format_hex_list(sub1_ids, sub1_cnt, sub1_off_label, sub1_list_buf, sizeof(sub1_list_buf));
+  format_hex_list(sub2_ids, sub2_cnt, sub2_off_label, sub2_list_buf, sizeof(sub2_list_buf));
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Addressing", "Address Mode", addr_mode, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Device Type", dev_list_buf, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sub-ID", sub2_list_buf, addr_status);
   out.append(Fmt::DIV80);
 
-  // 4. Payload
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Payload", "Range", data_list_buf, "[STABLE]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Length", "0 ~ 11 Bytes", "[STABLE]");
-  out.append(Fmt::DIV80);
-
-  // 5. Checksum
-  char cs_buf[36], match_buf[36];
-  const char *match_status = "[STABLE]";
-  if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
-    snprintf(cs_buf, sizeof(cs_buf), "%s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
-    uint32_t pct = desc.tested_packets ? (desc.matched_packets * 100 / desc.tested_packets) : 100;
-    snprintf(match_buf, sizeof(match_buf), "%u%% (%u / %u)", static_cast<unsigned>(pct), static_cast<unsigned>(desc.matched_packets), static_cast<unsigned>(desc.tested_packets));
-    if (pct >= 95) {
-      match_status = "[STABLE]";
-    } else if (pct >= 80) {
-      match_status = "[NOISY]";
-    } else {
-      match_status = "[ERROR]";
-    }
+  // 3. Command (Opcode, Sub-Command)
+  char op_line_buf[48];
+  char ctl_hex[8];
+  if (desc.control_seen && desc.control_opcode != 0) {
+    snprintf(ctl_hex, sizeof(ctl_hex), "%02X", desc.control_opcode);
   } else {
-    snprintf(cs_buf, sizeof(cs_buf), "XOR [0 .. N-3]");
-    snprintf(match_buf, sizeof(match_buf), "N/A");
-    match_status = "[STABLE]";
+    snprintf(ctl_hex, sizeof(ctl_hex), "02");
   }
+  snprintf(op_line_buf, sizeof(op_line_buf), "Byte #%u (QRY:%02X, CTL:%s, ACK:%02X)",
+           desc.opcode_offset, desc.query_opcode, ctl_hex, desc.ack_opcode);
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Checksum", "Formula", cs_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Match Rate", match_buf, match_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "Opcode Offset", op_line_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sub-Command", sub1_list_buf, addr_status);
   out.append(Fmt::DIV80);
 
-  // 6. Door Framing (Universal IPG Engine)
+  // 4. Payload (Data Range, Length Rule)
+  char payload_range_buf[48];
+  char payload_len_buf[32];
+  if (desc.offsets_locked) {
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #%u ~ #(N-3)", desc.payload_offset);
+    snprintf(payload_len_buf, sizeof(payload_len_buf), "LEN - %u Bytes", desc.payload_offset + 2);
+  } else {
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #7 ~ #(N-3) (Est)");
+    snprintf(payload_len_buf, sizeof(payload_len_buf), "LEN - 9 Bytes (Est)");
+  }
+  const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Payload", "Data Range", payload_range_buf, payload_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Data Length", payload_len_buf, payload_status);
+  out.append(Fmt::DIV80);
+
+  // 5. Tail (Checksum, ETX)
+  char cs_algo_buf[48];
+  snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #(N-2) (%s)", AutoProbingEngine::getAlgoName(desc.checksum_algo));
+  char etx_line_buf[32];
+  snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #(N-1) (%s)", etx_buf);
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "Checksum (CS)", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.append(Fmt::DIV80);
+
+  // 6. Bus Physical (CH1/CH2/CH3 RS-485 Config)
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", "9600 bps (CH1/CH2/CH3)", "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", "20 ms (CH1/CH2/CH3)", "[CONFIG]");
+  out.append(Fmt::DIV80);
+
+  // 7. Doorphone (CH4 Universal IPG Engine)
   Config::Doorphone::FramingStatus dp_status = g_doorphone_tracker.status.load(std::memory_order_relaxed);
   const char *dp_status_str = (dp_status == Config::Doorphone::FramingStatus::LOCKED)   ? "[LOCKED]"
                             : (dp_status == Config::Doorphone::FramingStatus::LEARNING) ? "[LEARNING]"
                             : (dp_status == Config::Doorphone::FramingStatus::NOISY)    ? "[NOISY]"
                                                                                         : "[WAITING]";
 
-  char dp_stx_buf[16], dp_etx_buf[16];
+  char dp_frame_buf[48];
   if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
-    snprintf(dp_stx_buf, sizeof(dp_stx_buf), "--");
-    snprintf(dp_etx_buf, sizeof(dp_etx_buf), "--");
+    snprintf(dp_frame_buf, sizeof(dp_frame_buf), "-- .. --");
   } else {
-    uint8_t stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-    uint8_t etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-    snprintf(dp_stx_buf, sizeof(dp_stx_buf), "%02X", stx);
-    snprintf(dp_etx_buf, sizeof(dp_etx_buf), "%02X", etx);
+    uint8_t dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
+    uint8_t dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
+    uint8_t dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+    if (dp_len > 0) {
+      snprintf(dp_frame_buf, sizeof(dp_frame_buf), "%02X .. %02X (%u Bytes)", dp_stx, dp_etx, dp_len);
+    } else {
+      snprintf(dp_frame_buf, sizeof(dp_frame_buf), "%02X .. %02X", dp_stx, dp_etx);
+    }
   }
 
-  char dp_len_buf[32];
-  uint8_t learned_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-  if (learned_len > 0) {
-    snprintf(dp_len_buf, sizeof(dp_len_buf), "%u Bytes", learned_len);
-  } else {
-    snprintf(dp_len_buf, sizeof(dp_len_buf), "--");
-  }
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Doorphone (CH4)", "Framing", dp_frame_buf, dp_status_str);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Baudrate", "3840 bps", "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Time-gap", "25 ms", "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Debounce", "500 ms", "[CONFIG]");
+  out.append(Fmt::DIV80);
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Door Framing", "STX",         dp_stx_buf,                         dp_status_str);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "ETX",         dp_etx_buf,                         dp_status_str);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "Length",      dp_len_buf,                         dp_status_str);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "Time-gap",    "25 ms",                            "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "Debounce",    "500 ms",                           "[LOCKED]");
+  // 8. Runtime Sync & Telemetry
+  char conv_buf[48];
+  uint32_t conv_pct = active_targets ? (verified_targets * 100 / active_targets) : 0;
+  snprintf(conv_buf, sizeof(conv_buf), "%u / %u Targets (%u%%)",
+           static_cast<unsigned>(verified_targets), static_cast<unsigned>(active_targets),
+           static_cast<unsigned>(conv_pct));
+  const char *conv_status = (verified_targets >= active_targets && active_targets > 0)
+                                ? "[SYNCED]"
+                                : (desc.is_locked ? "[SYNCING]" : "[WAITING]");
+
+  char cs_rate_buf[48];
+  uint32_t cs_pct = desc.tested_packets ? (desc.matched_packets * 100 / desc.tested_packets) : 100;
+  snprintf(cs_rate_buf, sizeof(cs_rate_buf), "%u / %u Packets (%u%%)",
+           static_cast<unsigned>(desc.matched_packets), static_cast<unsigned>(desc.tested_packets),
+           static_cast<unsigned>(cs_pct));
+  const char *cs_status = (cs_pct >= 95) ? "[STABLE]" : (cs_pct >= 80 ? "[NOISY]" : "[ERROR]");
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Runtime Sync", "Cache Sync", conv_buf, conv_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "CS Validation", cs_rate_buf, cs_status);
   out.append(Fmt::DIV80EQ);
   out.append("\r\n");
 }

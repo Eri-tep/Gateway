@@ -487,11 +487,7 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
   auto *parser = WallpadParserFactory::getActiveParser();
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
   if (!parser || !parser->extractDeviceKey(span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1, sub2)) {
-    if (ack.length >= 7) {
-      dev_id = ack.data[3];
-      sub1 = ack.data[5];
-      sub2 = ack.data[6];
-    }
+    return;
   }
 
   MutexLocker lock(_cache_mutex);
@@ -567,13 +563,7 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
     virtual_ack_out.channel_id = req.channel_id;
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
     if (!parser->extractDeviceKey(frame, dev_id, sub1, sub2)) {
-      if (req.length >= 7) {
-        dev_id = req.data[3];
-        sub1 = req.data[5];
-        sub2 = req.data[6];
-      } else {
-        return false;
-      }
+      return false;
     }
     return g_device_repo.copyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
   }
@@ -625,6 +615,7 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
   uint8_t temp[64], stream[128];
   size_t stream_len = 0;
   uint32_t start_ms = millis();
+  uint32_t last_rx_ms = 0;
   auto *parser = WallpadParserFactory::getActiveParser();
   QueueHandle_t evt_q = Uart_GetEventQueue(u_num);
 
@@ -635,57 +626,77 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
     // 1. 남아있는 스트림 버퍼에서 즉시 유효 패킷 파싱 시도
     if (stream_len >= 3) {
-      uint8_t stx = parser ? parser->getStx() : PKT_STX;
-      size_t idx = 0;
-      while (idx < stream_len) {
-        if (stream[idx] != stx) {
-          idx++;
-          continue;
+      if (parser && parser->isAutoMode() && !parser->isLocked()) {
+        // [Auto Mode Initial Learning: Silence (IPG) Framing]
+        if (last_rx_ms > 0 && TimeUtils::isElapsed(last_rx_ms, Config::Timing::WALLPAD_AUTO_IPG_MS)) {
+          g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
+
+          if (echo_match && echo_match->length == stream_len &&
+              memcmp(echo_match->data.data(), stream, stream_len) == 0) {
+            stream_len = 0;
+            last_rx_ms = 0;
+            continue;
+          }
+
+          out.length = static_cast<uint8_t>(stream_len);
+          memcpy(out.data.data(), stream, stream_len);
+          stream_len = 0;
+          last_rx_ms = 0;
+          return UartRxStatus::SUCCESS;
+        }
+      } else {
+        uint8_t stx = parser ? parser->getStx() : PKT_STX;
+        size_t idx = 0;
+        while (idx < stream_len) {
+          if (stream[idx] != stx) {
+            idx++;
+            continue;
+          }
+
+          int len_res = parser ? parser->extractPacketLength(stream, stream_len, idx) : -1;
+          if (len_res == 0) {
+            // 불완전 패킷 (추가 바이트 대기 필요)
+            break;
+          }
+          if (len_res < 0) {
+            // 프레이밍 불일치/헤더 오류 → 다음 바이트로 이동
+            idx++;
+            continue;
+          }
+
+          uint8_t pkt_len = static_cast<uint8_t>(len_res);
+          uint8_t *pkt = &stream[idx];
+          span<const uint8_t> pkt_span(pkt, pkt_len);
+          if (!parser->validatePacket(pkt_span)) {
+            uint8_t ch = (u_num == UART_NUM_0) ? 1 : (u_num == UART_NUM_1) ? 2 : 3;
+            StaticPacket drp_pkt{ch, pkt_len};
+            memcpy(drp_pkt.data.data(), pkt, pkt_len);
+            g_telnet_tracer.trace(ch, false, TraceType::DRP, drp_pkt);
+            idx++;
+            continue;
+          }
+
+          // [순수 범용 에코 필터링] 송신 패킷과 100% 동일한 바이트인 경우 스킵
+          if (echo_match && echo_match->length == pkt_len &&
+              memcmp(echo_match->data.data(), pkt, pkt_len) == 0) {
+            idx += pkt_len;
+            continue;
+          }
+
+          out.length = pkt_len;
+          memcpy(out.data.data(), pkt, pkt_len);
+          size_t consumed = idx + pkt_len;
+          if (consumed < stream_len)
+            memmove(stream, stream + consumed, stream_len - consumed);
+          stream_len = (consumed < stream_len) ? (stream_len - consumed) : 0;
+          return UartRxStatus::SUCCESS;
         }
 
-        int len_res = parser ? parser->extractPacketLength(stream, stream_len, idx) : -1;
-        if (len_res == 0) {
-          // 불완전 패킷 (추가 바이트 대기 필요)
-          break;
+        if (idx > 0) {
+          if (idx < stream_len)
+            memmove(stream, stream + idx, stream_len - idx);
+          stream_len = (idx < stream_len) ? (stream_len - idx) : 0;
         }
-        if (len_res < 0) {
-          // 프레이밍 불일치/헤더 오류 → 다음 바이트로 이동
-          idx++;
-          continue;
-        }
-
-        uint8_t pkt_len = static_cast<uint8_t>(len_res);
-        uint8_t *pkt = &stream[idx];
-        span<const uint8_t> pkt_span(pkt, pkt_len);
-        if (!parser->validatePacket(pkt_span)) {
-          uint8_t ch = (u_num == UART_NUM_0) ? 1 : (u_num == UART_NUM_1) ? 2 : 3;
-          StaticPacket drp_pkt{ch, pkt_len};
-          memcpy(drp_pkt.data.data(), pkt, pkt_len);
-          g_telnet_tracer.trace(ch, false, TraceType::DRP, drp_pkt);
-          idx++;
-          continue;
-        }
-
-        // [순수 범용 에코 필터링] 송신 패킷과 100% 동일한 바이트인 경우 스킵
-        if (echo_match && echo_match->length == pkt_len &&
-            memcmp(echo_match->data.data(), pkt, pkt_len) == 0) {
-          idx += pkt_len;
-          continue;
-        }
-
-        out.length = pkt_len;
-        memcpy(out.data.data(), pkt, pkt_len);
-        size_t consumed = idx + pkt_len;
-        if (consumed < stream_len)
-          memmove(stream, stream + consumed, stream_len - consumed);
-        stream_len = (consumed < stream_len) ? (stream_len - consumed) : 0;
-        return UartRxStatus::SUCCESS;
-      }
-
-      if (idx > 0) {
-        if (idx < stream_len)
-          memmove(stream, stream + idx, stream_len - idx);
-        stream_len = (idx < stream_len) ? (stream_len - idx) : 0;
       }
     }
 
@@ -720,6 +731,7 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
               memcpy(stream + stream_len, temp, copy_len);
               stream_len += copy_len;
               received_new_bytes = true;
+              last_rx_ms = millis();
             }
           }
         } else if (evt.type == UART_FIFO_OVF || evt.type == UART_BUFFER_FULL) {
@@ -752,10 +764,23 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
           size_t copy_len = std::min(static_cast<size_t>(rx), sizeof(stream) - stream_len);
           memcpy(stream + stream_len, temp, copy_len);
           stream_len += copy_len;
+          last_rx_ms = millis();
         }
       }
     }
   }
+
+  // 타임아웃 발생 시에도 Auto 모드 미잠금 상태에서 유효 바이트가 있으면 프레임 처리
+  if (stream_len >= 3 && parser && parser->isAutoMode() && !parser->isLocked()) {
+    g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
+    if (!(echo_match && echo_match->length == stream_len &&
+          memcmp(echo_match->data.data(), stream, stream_len) == 0)) {
+      out.length = static_cast<uint8_t>(stream_len);
+      memcpy(out.data.data(), stream, stream_len);
+      return UartRxStatus::SUCCESS;
+    }
+  }
+
   return UartRxStatus::TIMEOUT;
 }
 
@@ -862,7 +887,7 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
       const auto &tgt = s_active_targets[idx];
       const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
 
-      if (!cached_dev || cached_dev->last_updated_ms == 0) {
+      if (tgt.raw_ack_len == 0 || !cached_dev || cached_dev->last_updated_ms == 0) {
         poll_dev_id = tgt.dev_id;
         poll_sub1 = tgt.sub1;
         poll_sub2 = tgt.sub2;
@@ -970,6 +995,8 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
         g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
         g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
         ack.channel_id = 1;
+        g_polling_targets.updateResponse(q_pkt.data.data(), q_pkt.length,
+                                         ack.data.data(), ack.length);
         g_device_repo.updateFromBus(ack);
         g_polling_targets.markVerified(poll_dev_id, poll_sub1, poll_sub2);
         g_auto_probing_engine.feedOpcodePair(
@@ -1056,7 +1083,13 @@ void Task_Ch1(void *pvParameters) {
         s_stable_start_ms = millis();
       }
 
-      if (active_tgts > 0 && online_devs >= active_tgts) {
+      bool is_all_online = (online_devs >= active_tgts);
+      auto *parser = WallpadParserFactory::getActiveParser();
+      if (parser && parser->isAutoMode() && !g_auto_probing_engine.isOffsetsLocked()) {
+        is_all_online = (g_polling_targets.verifiedCount() >= active_tgts);
+      }
+
+      if (active_tgts > 0 && is_all_online) {
         if (s_stable_start_ms == 0) {
           s_stable_start_ms = millis();
         } else if (TimeUtils::isElapsed(s_stable_start_ms, Config::Timing::CACHE_CONVERGENCE_STABLE_MS)) { // 1.5초간 신규 기기 증가 멈춤 & 전원 온라인 확인 시 최종 수렴!
@@ -1064,6 +1097,11 @@ void Task_Ch1(void *pvParameters) {
           g_initial_caching_complete.store(true, std::memory_order_release);
           if (g_system_event_group) {
             xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
+          }
+          if (parser && parser->isAutoMode() && !g_auto_probing_engine.isOffsetsLocked()) {
+            MutexLocker u0_lock(g_uart0_mutex, pdMS_TO_TICKS(100));
+            Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
+            g_auto_probing_engine.analyzeCacheMatrix();
           }
           // ★ 2차 캐싱 100% 수렴 완료! 초기 웜업 노이즈(Uncache, 웜업 제어/폴링 수) 일괄 리셋
           g_pkt_stats.resetAll();
@@ -1225,10 +1263,9 @@ void Task_Ch2Ch3(void *pvParameters) {
 
       if (is_query) {
         uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-        if (parser->extractDeviceKey(frame, dev_id, sub1, sub2)) {
-          g_polling_targets.registerOrTouch(cfg->channel_id, dev_id, sub1, sub2,
-                                            req.data.data(), req.length);
-        }
+        parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+        g_polling_targets.registerOrTouch(cfg->channel_id, dev_id, sub1, sub2,
+                                          req.data.data(), req.length);
         StaticPacket virtual_ack;
         if (g_control_dispatcher.dispatch(req, virtual_ack)) {
           uint32_t delay_ms = (cfg->channel_id == 2)
