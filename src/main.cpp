@@ -1960,6 +1960,9 @@ void setup() {
 
   Serial.println(F("[BOOT] All FreeRTOS tasks started successfully."));
   esp_task_wdt_delete(nullptr);
+  if (g_system_event_group) {
+    xEventGroupSetBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING);
+  }
   vTaskDelete(nullptr);
 }
 

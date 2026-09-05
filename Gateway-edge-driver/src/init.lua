@@ -148,6 +148,10 @@ local function device_removed(driver, device)
     device.thread:cancel_timer(device:get_field("traffic_roll_timer"))
     device:set_field("traffic_roll_timer", nil)
   end
+  if device:get_field("channel_roll_timer") then
+    device.thread:cancel_timer(device:get_field("channel_roll_timer"))
+    device:set_field("channel_roll_timer", nil)
+  end
 end
 
 local is_device_created = false

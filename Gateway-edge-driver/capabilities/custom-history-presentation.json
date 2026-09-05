@@ -1,0 +1,20 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{history.value}}"
+      }
+    ],
+    "actions": [],
+    "panelItems": []
+  },
+  "detailView": [
+    {
+      "label": "History",
+      "displayType": "state",
+      "state": {
+        "label": "{{history.value}}"
+      }
+    }
+  ]
+}

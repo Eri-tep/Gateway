@@ -254,8 +254,8 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     ch4_str = string.format("%s (InV %d)", ch4_str, ch4_inv)
   end
 
-  setup_rolling_ticker(device, comp_diag, capabilities["digituniverse06711.traffic"], "traffic",
-                       "traffic_roll_timer", "traffic_items", "traffic_idx",
+  setup_rolling_ticker(device, comp_diag, capabilities["digituniverse06711.channel"], "channel",
+                       "channel_roll_timer", "channel_items", "channel_idx",
                        { ch1_str, ch2_str, ch3_str, ch4_str })
 
   -- ═══════════════════════════════════════════════════════════════════════════
@@ -265,12 +265,10 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   -- 4-0. Switch (진단 로그 초기화 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_logs, capabilities.switch.switch.off())
 
-  -- 4-1. Log History & Crash Dump 4초 주기 롤링 순회 (Empty일 때만 접두사 표시)
-  local log_display = "Log: Empty"
+  -- 4-1. History (Log & Crash Dump 4초 주기 롤링 순회 - 시간 부분 제외, Empty일 때 Empty Log / Empty Crash)
+  local log_display = "Empty Log"
   if data.diagnostics and data.diagnostics.reboot_logs and #data.diagnostics.reboot_logs > 0 then
     local top = data.diagnostics.reboot_logs[1]
-    local t = top.time or ""
-    local time_hm = t:match("%s(%d%d:%d%d)") or t:match("(%d%d:%d%d)") or t
     local reason_short = top.reason or "Unknown"
     if reason_short:match("Low Heap") then
       reason_short = "Low Heap"
@@ -280,21 +278,19 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
       reason_short = "Remote Reboot"
     elseif reason_short:match("Power") then
       reason_short = "Power On"
+    elseif reason_short:match("CPU Panic") then
+      reason_short = "CPU Panic"
     end
-    if time_hm ~= "" then
-      log_display = string.format("%s, %s", time_hm, reason_short)
-    else
-      log_display = reason_short
-    end
+    log_display = reason_short
   end
 
-  local crash_display = "Crash: Empty"
+  local crash_display = "Empty Crash"
   if data.diagnostics and data.diagnostics.coredump and data.diagnostics.coredump.valid then
     local cd = data.diagnostics.coredump
     crash_display = string.format("Panic Task %s", cd.task or "main")
   end
 
-  setup_rolling_ticker(device, comp_logs, capabilities["digituniverse06711.logHistory"], "history",
+  setup_rolling_ticker(device, comp_logs, capabilities["digituniverse06711.history"], "history",
                        "log_roll_timer", "log_items", "log_idx",
                        { log_display, crash_display })
 

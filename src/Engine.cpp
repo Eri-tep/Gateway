@@ -1009,7 +1009,9 @@ static void Ch1_SetState(Ch1State &cur_state, Ch1State new_state) {
 
 void Task_Ch1(void *pvParameters) {
   esp_task_wdt_add(nullptr);
-  vTaskDelay(pdMS_TO_TICKS(50));
+  if (g_system_event_group) {
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);
+  }
   StaticPacket ctrlPacket;
   size_t current_dev_idx = 0;
   Ch1State current_state = Ch1State::IDLE;
@@ -1144,6 +1146,10 @@ void Task_Ch2Ch3(void *pvParameters) {
   uart_flush_input(cfg->uart_num);
   TimestampedPacketQueue<8> ack_queue;
 
+  if (g_system_event_group) {
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);
+  }
+
   for (;;) {
     g_wdt_monitor.feed(task_idx);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
@@ -1258,6 +1264,10 @@ void Task_Ch4(void *pvParameters) {
   static uint32_t last_tx_ms = 0;
   static StaticPacket last_pkt{};
   static uint32_t last_pkt_ms = 0;
+
+  if (g_system_event_group) {
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);
+  }
 
   if (!g_initial_caching_complete.load(std::memory_order_acquire)) {
     if (g_system_event_group) {

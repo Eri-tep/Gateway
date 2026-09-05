@@ -35,7 +35,7 @@ components:
         version: 1
       - id: digituniverse06711.resource
         version: 1
-      - id: digituniverse06711.traffic
+      - id: digituniverse06711.channel
         version: 1
     categories:
       - name: Hub
@@ -45,7 +45,7 @@ components:
     capabilities:
       - id: switch
         version: 1
-      - id: digituniverse06711.logHistory
+      - id: digituniverse06711.history
         version: 1
     categories:
       - name: Hub
@@ -328,6 +328,6 @@ preferences:
       default: "8E1"
 
 metadata:
-  vid: "efc54370-4451-3d58-9360-b418a8251bc7"
+  vid: "f5c3e339-bdd1-380a-8793-08f219776202"
   mnmn: "SmartThingsCommunity"
 
