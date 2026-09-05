@@ -33,11 +33,16 @@ bool TelnetTracer::passesFilter(uint8_t channel, TraceType type,
     return (channel == target);
 
   if (mode == TraceType::DEVID) {
-    uint8_t pkt_dev_id = 0;
-    if (pkt.length >= 4 && pkt.data[0] == PKT_STX)
-      pkt_dev_id = pkt.data[3];
-    else if (pkt.length == 5 && pkt.data[0] == 0x7F)
-      pkt_dev_id = pkt.data[1];
+    uint8_t pkt_dev_id = 0, dummy_s1 = 0, dummy_s2 = 0;
+    if (pkt.length >= 5 && pkt.data[0] == PKT_STX) {
+      auto *parser = WallpadParserFactory::getActiveParser();
+      if (parser) {
+        span<const uint8_t> frame(pkt.data.data(), pkt.length);
+        parser->extractDeviceKey(frame, pkt_dev_id, dummy_s1, dummy_s2);
+      }
+    } else if (pkt.length == 5 && pkt.data[0] == 0x7F) {
+      pkt_dev_id = pkt.data[1];  // 도어폰 패킷 (별도 프로토콜)
+    }
     return (pkt_dev_id == target);
   }
 
@@ -159,12 +164,15 @@ void TelnetTracer::flushToClient() {
 
   for (size_t i = 0; i < batch_count; ++i) {
     TracePacketEntry &entry = local_batch[i];
-    uint8_t dev_id =
-        (entry.len >= 4 && entry.data[0] == PKT_STX) ? entry.data[3] : 0;
-    uint8_t sub1 =
-        (entry.len >= 6 && entry.data[0] == PKT_STX) ? entry.data[5] : 0;
-    uint8_t sub2 =
-        (entry.len >= 7 && entry.data[0] == PKT_STX) ? entry.data[6] : 0;
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    // ★ 고정 오프셋(data[3]/data[5]/data[6]) 대신 parser 동적 추출 사용
+    if (entry.len >= 5 && entry.data[0] == PKT_STX) {
+      auto *parser = WallpadParserFactory::getActiveParser();
+      if (parser) {
+        span<const uint8_t> frame(entry.data.data(), entry.len);
+        parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+      }
+    }
 
     long delay_ms = -1;
     bool is_new_req = false;

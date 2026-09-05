@@ -1332,6 +1332,10 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
   } else if (strcasecmp(sub, "reset") == 0) {
     g_auto_probing_engine.reset();
     g_doorphone_tracker.clearNvs();
+    // ★ Task_Ch1의 수렴 상태(s_convergence_done)를 리셋하여 재수렴·재락 허용
+    // g_auto_probing_engine.reset()만으로는 Task 내부 static s_convergence_done이
+    // true로 유지되어 analyzeCacheMatrix()가 재호출되지 않는 문제를 수정
+    g_probe_convergence_reset.store(true, std::memory_order_release);
     sendTelnetMsg(sock, "[OK] Auto-probing engine & Doorphone framing reset. Re-analyzing RS-485 bus traffic...\r\n");
   } else {
     sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset]\r\n");

@@ -341,8 +341,15 @@ static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1, uint8_t sub2) no
 }
 
 static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
+  // [의도적 설계] 온도조절기 0x18/sub1=0x45: 전원-ON 직후 버스에서 0x45가 관측되나
+  // 실제 상태 조회 sub1=0x46과 동일 장치이므로 0x46으로 정규화 (DevRepo 중복 방지)
   if (dev_id == Config::Devices::DEV_THERMOSTAT && sub1 == 0x45)
     return 0x46;
+  // [의도적 설계] 전열교환기 0x2B: 제어 응답(sub1=0x42)과 상태 조회(sub1=0x40)가
+  // 같은 물리 장치를 가리키므로 DevRepo에서 동일 키로 관리.
+  // CH6 ACK 변환(0x42→0x40)과 짝을 이루며, 스마트싱스가 단일 장치로 인식하도록 설계.
+  // ※ 이 함수는 extractDeviceKey()가 이미 오프셋을 해석한 후 dev_id/sub1을 받으므로
+  //    하드코딩된 오프셋과 무관하게 올바르게 동작함.
   if (dev_id == Config::Devices::DEV_HEAT_EXCHANGER &&
       sub1 == Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK) {
     return Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
@@ -827,17 +834,20 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
         span<const uint8_t>(ack.data.data(), ack.length));
     ack.channel_id = ctrlPacket.channel_id;
 
-    // ★ [추가] 스마트싱스/앱(CH6) 전송용 주소 변환 (0x42 -> 0x40 및 Checksum
-    // 재계산)
+    // ★ [추가] 스마트싱스/앱(CH6) 전송용 주소 변환 (0x42 -> 0x40 및 Checksum 재계산)
+    // 오프셋 학습 완료 시 동적 오프셋 사용, 미완료 시 기본값(3,5) fallback
     StaticPacket ch6_ack = ack;
     if (ch6_ack.length >= 7 && ch6_ack.data[0] == 0xF7) {
-      if (ch6_ack.data[3] == Config::Devices::DEV_HEAT_EXCHANGER &&
-          ch6_ack.data[5] ==
-              Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK) { // 전열교환기 제어
-                                                              // 응답 패킷
-        ch6_ack.data[5] =
-            Config::Devices::SUB_HEAT_EXCHANGER_QUERY; // 스마트싱스가 인지하는
-                                                       // 대표 주소(0x40)로 변경
+      auto ad = g_auto_probing_engine.getDescriptor();
+      // ACK DevType 위치: swap 구조일 때 gw_addr_offset, 아닐 때 dev_id_offset
+      uint8_t ack_dev_off  = (ad.offsets_locked && ad.is_swapped_addr)
+                                 ? ad.gw_addr_offset : (ad.offsets_locked ? ad.dev_id_offset : 3);
+      uint8_t ack_sub1_off = ad.offsets_locked ? ad.sub1_offset : 5;
+
+      if (ack_dev_off < ch6_ack.length && ack_sub1_off < ch6_ack.length &&
+          ch6_ack.data[ack_dev_off] == Config::Devices::DEV_HEAT_EXCHANGER &&
+          ch6_ack.data[ack_sub1_off] == Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK) {
+        ch6_ack.data[ack_sub1_off] = Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
 
         ch6_ack.data[ch6_ack.length - 2] =
             PacketCodec::calculateChecksum(ch6_ack.data.data(), ch6_ack.length);
@@ -1078,6 +1088,19 @@ void Task_Ch1(void *pvParameters) {
                  u_evt.type == UART_FRAME_ERR) {
         g_pkt_stats.ch1.crc_errors.fetch_add(1, std::memory_order_relaxed);
       }
+    }
+
+    // ★ wallpad reset 신호 처리: s_convergence_done을 리셋하여 재수렴·재락 허용
+    if (g_probe_convergence_reset.load(std::memory_order_acquire)) {
+      g_probe_convergence_reset.store(false, std::memory_order_release);
+      s_convergence_done = false;
+      s_stable_start_ms = 0;
+      s_last_active_tgts = 0;
+      g_initial_caching_complete.store(false, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
+      }
+      g_telnet_tracer.trace("[AUTO PROBE] Convergence state reset. Re-learning bus offsets...\r\n");
     }
 
     // 2차 캐싱 100% 수렴 완료 판정

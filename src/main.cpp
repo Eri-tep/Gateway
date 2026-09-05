@@ -552,7 +552,7 @@ SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
 Ch1StateMetrics g_ch1_state_metrics;
 portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> g_config_dirty{false}, g_ota_in_progress{false},
-    g_initial_caching_complete{false};
+    g_initial_caching_complete{false}, g_probe_convergence_reset{false};
 WifiFallbackGuard g_wifi_guard;
 
 static void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {

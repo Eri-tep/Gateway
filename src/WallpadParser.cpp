@@ -810,6 +810,24 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
       _desc.sub2_offset = static_cast<uint8_t>(sub_id_idx);
     }
     _desc.is_swapped_addr = (swap_i >= 0);
+
+    // ★ swap 구조 보완: gw_addr_offset = swap_j (ACK에서 DevType 위치),
+    // gw_addr = 쿼리의 swap_j 위치에 있는 상수값 (GW 자신의 RS-485 주소)
+    if (swap_i >= 0 && swap_j >= 0 && static_cast<size_t>(swap_j) < min_common_len) {
+      // swap_j = GW 주소가 있는 QUERY 오프셋 = ACK에서 DevType 위치
+      _desc.gw_addr_offset = static_cast<uint8_t>(swap_j);
+      // GW 주소값: 모든 쿼리의 swap_j 위치가 동일한 상수값 (버스에서 관측)
+      _desc.gw_addr = pairs[0].q.data[swap_j];
+    } else if (!_desc.is_swapped_addr && dev_type_idx >= 0) {
+      // swap 없는 경우: ACK DevType 위치 = QUERY DevType 위치 = dev_id_offset
+      _desc.gw_addr_offset = _desc.dev_id_offset;
+    }
+
+    // ★ 버스 관측 기반 쿼리 패킷 길이 학습 (min_common_len = 실제 쿼리 공통 길이)
+    if (min_common_len >= 5 && min_common_len <= 64) {
+      _desc.learned_query_len = static_cast<uint8_t>(min_common_len);
+    }
+
     _desc.offsets_locked = (dev_type_idx >= 0 && sub_id_idx >= 0);
 
     int max_hdr = 0;
@@ -1326,19 +1344,34 @@ bool UniversalProtocolEngine::extractDeviceKey(span<const uint8_t> frame,
   uint8_t s1_off = desc.sub1_offset;
   uint8_t s2_off = desc.sub2_offset;
 
+  bool is_swapped = false;
+  uint8_t gw_addr_off = d_off; // 기본: swap 없으면 동일
+
   if (isAutoProfile(desc)) {
     auto ad = g_auto_probing_engine.getDescriptor();
     if (ad.offsets_locked) {
       d_off = ad.dev_id_offset;
       s1_off = ad.sub1_offset;
       s2_off = ad.sub2_offset;
+      is_swapped = ad.is_swapped_addr;
+      gw_addr_off = ad.gw_addr_offset;
     }
   }
 
   if (frame.size() <= d_off)
     return false;
 
-  dev_id = frame[d_off];
+  // ★ swap 구조 보완: ACK 패킷에서 DevType은 gw_addr_offset 위치에 있음
+  // (QUERY: dev_id_offset=swap_i=DevType, gw_addr_offset=swap_j=GW주소)
+  // (ACK:   dev_id_offset=swap_i=GW주소, gw_addr_offset=swap_j=DevType) ← 교차!
+  if (is_swapped && isAckPacket(frame)) {
+    if (frame.size() <= gw_addr_off)
+      return false;
+    dev_id = frame[gw_addr_off];  // ACK에서 DevType = gw_addr_offset 위치
+  } else {
+    dev_id = frame[d_off];        // QUERY 또는 swap 없는 ACK: dev_id_offset 위치
+  }
+
   sub1 = (s1_off < frame.size()) ? frame[s1_off] : 0;
   sub2 = (s2_off < frame.size()) ? frame[s2_off] : 0;
   return true;
@@ -1370,14 +1403,42 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
       s1_off = ad.sub1_offset;
       s2_off = ad.sub2_offset;
     }
+
+    // ★ 버스 관측 기반 동적 패킷 길이 (기본: learned_query_len, 최소 11)
+    uint8_t pkt_len = (ad.offsets_locked && ad.learned_query_len >= 5)
+                          ? ad.learned_query_len : 11;
+    out.channel_id = 1;
+    out.length = pkt_len;
+    out.data.fill(0);
+    out.data[0] = stx;
+    out.data[1] = pkt_len;  // LEN 필드
+
+    // ★ GW 주소: 버스에서 관측된 ad.gw_addr를 ad.gw_addr_offset 위치에 기입
+    // (기존: data[2] = 0x01 하드코딩 → 현재: 관측값 사용)
+    if (ad.gw_addr_offset < pkt_len) {
+      out.data[ad.gw_addr_offset] = ad.gw_addr;
+    }
+
+    if (d_off < pkt_len) out.data[d_off] = dev_id;
+    if (op_off < pkt_len) out.data[op_off] = q_op;
+    if (s1_off > 0 && s1_off < pkt_len) out.data[s1_off] = sub1;
+    if (s2_off > 0 && s2_off < pkt_len) out.data[s2_off] = sub2;
+
+    // CS = Byte #(N-2), ETX = Byte #(N-1)
+    if (pkt_len >= 3) {
+      out.data[pkt_len - 2] = g_auto_probing_engine.calculateChecksum(algo, out.data.data(), pkt_len);
+      out.data[pkt_len - 1] = etx;
+    }
+    return true;
   }
 
+  // ── Non-Auto 프로파일: 기존 고정 11바이트 로직 유지 ──
   out.channel_id = 1;
   out.length = 11;
   out.data.fill(0);
   out.data[0] = stx;
   out.data[1] = 11;
-  out.data[2] = 0x01;
+  out.data[2] = 0x01;  // 비-Auto 프로파일: GW 주소 기존 고정값 유지
   if (d_off < 11) out.data[d_off] = dev_id;
   if (op_off < 11) out.data[op_off] = q_op;
   if (s1_off > 0 && s1_off < 11) out.data[s1_off] = sub1;

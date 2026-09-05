@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.4";
+constexpr const char *FIRMWARE_VERSION = "v1.1.5";
 } // namespace Config
 
 namespace Config::Task {
@@ -1369,6 +1369,9 @@ extern std::atomic<uint32_t> g_ch1_bus_ms;
 extern std::atomic<bool> g_config_dirty;
 extern std::atomic<bool> g_ota_in_progress;
 extern std::atomic<bool> g_initial_caching_complete;
+// ★ wallpad reset 시 수렴 상태를 재초기화하여 재학습·재락을 허용하는 신호
+// 플래그
+extern std::atomic<bool> g_probe_convergence_reset;
 extern EventGroupHandle_t g_system_event_group;
 constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
 constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);

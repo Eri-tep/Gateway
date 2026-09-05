@@ -127,12 +127,17 @@ struct AutoProbeDescriptor {
   uint8_t ack_opcode{0x04};
   bool opcodes_locked{false};
   bool control_seen{false};
-  uint8_t dev_id_offset{3};
+  uint8_t dev_id_offset{3};   // DevType 위치 (QUERY 기준 / swap 없으면 ACK도 동일)
   uint8_t sub1_offset{5};
   uint8_t sub2_offset{6};
   uint8_t payload_offset{7};
   bool is_swapped_addr{false};
   bool offsets_locked{false};
+  // ★ swap 구조 보완 필드 (DA/SA 교차 프로토콜 지원)
+  uint8_t gw_addr_offset{2};  // GW 주소 위치 (QUERY 기준) = ACK 기준 DevType 위치
+  uint8_t gw_addr{0x01};      // 버스에서 관측된 GW 자신의 RS-485 주소값 (기본: 0x01)
+  // ★ 학습된 쿼리 패킷 길이 (버스 관측 기반, buildQueryPacket 동적 길이 사용)
+  uint8_t learned_query_len{11};  // 관측된 쿼리 패킷 최빈 길이 (기본: 11)
   uint32_t matched_packets{0};
   uint32_t tested_packets{0};
   bool is_locked{false};
