@@ -104,7 +104,7 @@ end
 function GatewayClient.wifi_scan(ip, port)
   return GatewayClient.send_rpc(ip, port, {
     cmd = "wifi_scan"
-  })
+  }, 10)
 end
 
 function GatewayClient.system_reboot(ip, port, reason)

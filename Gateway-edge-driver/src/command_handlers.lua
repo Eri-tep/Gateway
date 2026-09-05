@@ -68,17 +68,27 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     if cap_scan then
       device:emit_component_event(comp, cap_scan.scanResult({ value = "Scanning..." }))
     end
-    local res = gateway_client.wifi_scan(ip, port)
-    local result_text = "Scan Ready"
-    if res and res.count then
-      result_text = string.format("%d APs Found", res.count)
-    elseif res and res.msg then
-      if res.msg:match("Unknown") then
-        result_text = "Need v2.6.6"
-      else
+    local res, err = gateway_client.wifi_scan(ip, port)
+    local result_text = "Scan Failed"
+    if res then
+      local s1 = res.top1 and res.top1:match("^%s*(.-)%s*$") or ""
+      local s2 = res.top2 and res.top2:match("^%s*(.-)%s*$") or ""
+      if s1 ~= "" and s2 ~= "" then
+        result_text = string.format("%s\n%s", s1, s2)
+      elseif s1 ~= "" then
+        result_text = s1
+      elseif res.count and res.count > 0 then
+        result_text = string.format("%d APs Found", res.count)
+      elseif res.msg then
         result_text = res.msg
+      else
+        result_text = "No Networks"
       end
+    elseif err then
+      log.error("❌ [CMD] Wi-Fi Scan RPC error: " .. tostring(err))
+      result_text = "Scan Timeout"
     end
+    log.info("📶 [CMD] Wi-Fi Scan Result: \n" .. tostring(result_text))
     if cap_scan then
       device:emit_component_event(comp, cap_scan.scanResult({ value = result_text }))
       device:set_field("last_scan_result", result_text)

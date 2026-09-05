@@ -610,16 +610,52 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
-  // 9. wifi_scan
+  // 9. wifi_scan (Top 2 Strongest SSIDs, skipping empty/hidden)
   if (strcasecmp(cmd, "wifi_scan") == 0) {
     int n = WiFi.scanNetworks(false, true);
-    char resp[128];
-    if (n < 0) {
-      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":0,\"msg\":\"0 APs Found\"}\n");
-    } else {
-      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"msg\":\"%d APs Found\"}\n", n, n);
+    if (n <= 0) {
+      WiFi.scanDelete();
+      const char *no_ap_msg = "{\"res\":\"ok\",\"count\":0,\"top_ssids\":[],\"msg\":\"No Networks Found\"}\n";
+      send(sock, no_ap_msg, strlen(no_ap_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    // 인덱스 배열 정렬 (RSSI 내림차순)
+    std::vector<int> indices(n);
+    for (int i = 0; i < n; ++i) indices[i] = i;
+    std::sort(indices.begin(), indices.end(), [](int a, int b) {
+      return WiFi.RSSI(a) > WiFi.RSSI(b);
+    });
+
+    String top1 = "";
+    String top2 = "";
+    for (int idx : indices) {
+      String s = WiFi.SSID(idx);
+      s.trim();
+      if (s.length() == 0) continue;
+      if (top1.length() == 0) {
+        top1 = s;
+      } else if (top2.length() == 0 && s != top1) {
+        top2 = s;
+        break;
+      }
     }
     WiFi.scanDelete();
+
+    // JSON escape 처리 (필요시 따옴표 제거)
+    top1.replace("\"", "\\\"");
+    top2.replace("\"", "\\\"");
+
+    char resp[384];
+    if (top1.length() > 0 && top2.length() > 0) {
+      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"top1\":\"%s\",\"top2\":\"%s\"}\n",
+               n, top1.c_str(), top2.c_str());
+    } else if (top1.length() > 0) {
+      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"top1\":\"%s\",\"top2\":\"\"}\n",
+               n, top1.c_str());
+    } else {
+      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"top1\":\"\",\"top2\":\"\"}\n", n);
+    }
     send(sock, resp, strlen(resp), MSG_DONTWAIT);
     return;
   }
