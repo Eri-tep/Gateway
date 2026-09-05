@@ -1021,32 +1021,59 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   size_t total_tgts = g_polling_targets.totalCount();
 
-  uint8_t q_lens[8];
-  size_t q_len_cnt = 0;
-  for (size_t i = 0; i < total_tgts && q_len_cnt < 8; ++i) {
-    PollingTargetEntry entry;
-    if (g_polling_targets.getEntry(i, entry) && entry.raw_query_len > 0) {
-      if (std::find(q_lens, q_lens + q_len_cnt, entry.raw_query_len) == q_lens + q_len_cnt) {
-        q_lens[q_len_cnt++] = entry.raw_query_len;
+  uint8_t q_lens[8], ack_lens[8];
+  size_t q_len_cnt = 0, ack_len_cnt = 0;
+
+  auto add_unique_len = [](uint8_t *arr, size_t &cnt, uint8_t len) {
+    if (len >= 3 && len <= 64 && cnt < 8) {
+      if (std::find(arr, arr + cnt, len) == arr + cnt) {
+        arr[cnt++] = len;
       }
+    }
+  };
+
+  for (size_t i = 0; i < total_tgts; ++i) {
+    PollingTargetEntry entry;
+    if (g_polling_targets.getEntry(i, entry)) {
+      if (entry.raw_query_len > 0) add_unique_len(q_lens, q_len_cnt, entry.raw_query_len);
+      if (entry.raw_ack_len > 0) add_unique_len(ack_lens, ack_len_cnt, entry.raw_ack_len);
     }
   }
   std::sort(q_lens, q_lens + q_len_cnt);
-  if (q_len_cnt > 0) {
-    size_t off = 0;
-    for (size_t i = 0; i < q_len_cnt; ++i) {
-      off += snprintf(pkt_len_buf + off, sizeof(pkt_len_buf) - off, "%s%u", (i == 0 ? "" : ", "), q_lens[i]);
+  std::sort(ack_lens, ack_lens + ack_len_cnt);
+
+  auto format_lens = [](const uint8_t *arr, size_t cnt, char *out, size_t out_sz, const char *fallback) {
+    if (cnt == 0) {
+      snprintf(out, out_sz, "%s", fallback);
+      return;
     }
-    snprintf(pkt_len_buf + off, sizeof(pkt_len_buf) - off, " Bytes");
+    size_t off = 0;
+    for (size_t i = 0; i < cnt; ++i) {
+      off += snprintf(out + off, out_sz - off, "%s%u", (i == 0 ? "" : ","), arr[i]);
+    }
+    snprintf(out + off, out_sz - off, "B");
+  };
+
+  char q_str[24], ack_str[24];
+  format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), "11B");
+  format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), "11B");
+
+  char q_val[32], cmd_val[32], ack_val[32];
+  snprintf(q_val, sizeof(q_val), "Byte #1 (%s)", q_str);
+  if (desc.control_seen && desc.learned_ctrl_len > 0) {
+    snprintf(cmd_val, sizeof(cmd_val), "Byte #1 (%uB)", desc.learned_ctrl_len);
   } else {
-    snprintf(pkt_len_buf, sizeof(pkt_len_buf), "11 Bytes");
+    snprintf(cmd_val, sizeof(cmd_val), "Byte #1 (Waiting)");
   }
+  snprintf(ack_val, sizeof(ack_val), "Byte #1 (%s)", ack_str);
 
-  char len_rule_buf[48];
-  snprintf(len_rule_buf, sizeof(len_rule_buf), "Byte #1 (%s)", pkt_len_buf);
+  const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
+  const char *cmd_status = (desc.control_seen && desc.learned_ctrl_len > 0) ? "[LOCKED]" : "[WAITING]";
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "STX", stx_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Length (LEN)", len_rule_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "STX", stx_buf, len_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "LEN (Query)", q_val, len_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "LEN (Command)", cmd_val, cmd_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "LEN (Response)", ack_val, len_status);
   out.append(Fmt::DIV80);
 
   // 2. Addressing (Address Mode, Device Type, Sub-ID)
@@ -1168,7 +1195,19 @@ void wallpadPrintStatus(AppendBuf &out) {
   out.append(Fmt::DIV80);
 
   // 6. Bus Physical (CH1/CH2/CH3 RS-485 Config)
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", "9600 bps (CH1/CH2/CH3)", "[CONFIG]");
+  uint32_t b1 = g_config.uart_baud_rate;
+  uint32_t b2 = g_config.ch2_baud_rate;
+  uint32_t b3 = g_config.ch3_baud_rate;
+
+  char baud_buf[48];
+  if (b1 == b2 && b2 == b3) {
+    snprintf(baud_buf, sizeof(baud_buf), "%u bps (CH1~3)", static_cast<unsigned>(b1));
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+  } else {
+    snprintf(baud_buf, sizeof(baud_buf), "CH1:%u, CH2:%u, CH3:%u",
+             static_cast<unsigned>(b1), static_cast<unsigned>(b2), static_cast<unsigned>(b3));
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+  }
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", "20 ms (CH1/CH2/CH3)", "[CONFIG]");
   out.append(Fmt::DIV80);
 

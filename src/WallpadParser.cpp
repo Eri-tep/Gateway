@@ -571,6 +571,7 @@ void AutoProbingEngine::feedControlPair(span<const uint8_t> ctrl_req, span<const
       if (_control_matches >= 3) {
         _desc.control_opcode = ctrl_op;
         _desc.control_seen = true;
+        _desc.learned_ctrl_len = static_cast<uint8_t>(ctrl_req.size());
         if (_desc.is_locked) {
           should_sync = true;
           desc_to_sync = _desc;
