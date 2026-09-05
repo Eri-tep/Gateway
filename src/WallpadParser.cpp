@@ -565,13 +565,27 @@ void AutoProbingEngine::feedControlPair(span<const uint8_t> ctrl_req, span<const
         return; // 타깃 장치 ID 불일치 시 확정 보류
     }
 
-    // 4) ★ 3회 연속 폐루프 실물 응답 검증 시 제어 코드 확정!
+    auto add_ctrl_len = [&](uint8_t len) {
+      if (len >= 3 && len <= 64) {
+        for (uint8_t i = 0; i < _desc.ctrl_len_cnt; ++i) {
+          if (_desc.learned_ctrl_lens[i] == len) return;
+        }
+        if (_desc.ctrl_len_cnt < 4) {
+          _desc.learned_ctrl_lens[_desc.ctrl_len_cnt++] = len;
+          std::sort(_desc.learned_ctrl_lens, _desc.learned_ctrl_lens + _desc.ctrl_len_cnt);
+        }
+      }
+    };
+
+    // 4) 제어 패킷 길이 상시 수집
+    add_ctrl_len(static_cast<uint8_t>(ctrl_req.size()));
+
+    // 5) ★ 3회 연속 폐루프 실물 응답 검증 시 제어 코드 확정!
     if (_candidate_ctrl_op == ctrl_op) {
       _control_matches++;
       if (_control_matches >= 3) {
         _desc.control_opcode = ctrl_op;
         _desc.control_seen = true;
-        _desc.learned_ctrl_len = static_cast<uint8_t>(ctrl_req.size());
         if (_desc.is_locked) {
           should_sync = true;
           desc_to_sync = _desc;

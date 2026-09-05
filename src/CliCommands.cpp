@@ -1060,15 +1060,17 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   char q_val[32], cmd_val[32], ack_val[32];
   snprintf(q_val, sizeof(q_val), "Byte #1 (%s)", q_str);
-  if (desc.control_seen && desc.learned_ctrl_len > 0) {
-    snprintf(cmd_val, sizeof(cmd_val), "Byte #1 (%uB)", desc.learned_ctrl_len);
+  if (desc.ctrl_len_cnt > 0) {
+    char cmd_lens_str[24];
+    format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), "11B");
+    snprintf(cmd_val, sizeof(cmd_val), "Byte #1 (%s)", cmd_lens_str);
   } else {
     snprintf(cmd_val, sizeof(cmd_val), "Byte #1 (Waiting)");
   }
   snprintf(ack_val, sizeof(ack_val), "Byte #1 (%s)", ack_str);
 
   const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
-  const char *cmd_status = (desc.control_seen && desc.learned_ctrl_len > 0) ? "[LOCKED]" : "[WAITING]";
+  const char *cmd_status = (desc.control_seen && desc.ctrl_len_cnt > 0) ? "[LOCKED]" : "[WAITING]";
 
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "STX", stx_buf, len_status);
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "LEN (Query)", q_val, len_status);

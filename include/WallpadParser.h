@@ -142,7 +142,8 @@ struct AutoProbeDescriptor {
   uint8_t gw_addr{0x01};      // 버스에서 관측된 GW 자신의 RS-485 주소값 (기본: 0x01)
   // ★ 학습된 쿼리 패킷 길이 (버스 관측 기반, buildQueryPacket 동적 길이 사용)
   uint8_t learned_query_len{11};  // 관측된 쿼리 패킷 최빈 길이 (기본: 11)
-  uint8_t learned_ctrl_len{0};    // 관측된 제어(CMD/CTL) 패킷 길이 (0이면 미관측)
+  uint8_t learned_ctrl_lens[4]{0}; // 관측된 제어(CMD/CTL) 패킷 가변 길이 목록
+  uint8_t ctrl_len_cnt{0};        // 관측된 제어 패킷 길이 가짓수
   uint32_t matched_packets{0};
   uint32_t tested_packets{0};
   bool is_locked{false};
