@@ -102,18 +102,23 @@ static void Task_HttpOta(void *pvParameters) {
     return;
   }
 
+  g_ota_in_progress.store(true, std::memory_order_release);
+  if (g_system_event_group) {
+    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+
   WiFiClient *stream = http.getStreamPtr();
-  uint8_t buff[1024];
+  static uint8_t s_ota_buff[4096]; // Flash 4KB Sector 일치 정적 버퍼 (Zero Heap / Zero Stack)
   size_t written = 0;
   uint32_t last_progress_ms = 0;
 
   while (http.connected() && (written < static_cast<size_t>(contentLength))) {
     size_t sizeAvailable = stream->available();
     if (sizeAvailable > 0) {
-      size_t to_read = std::min(sizeAvailable, sizeof(buff));
-      int c = stream->readBytes(buff, to_read);
+      size_t to_read = std::min(sizeAvailable, sizeof(s_ota_buff));
+      int c = stream->readBytes(s_ota_buff, to_read);
       if (c > 0) {
-        size_t w = Update.write(buff, c);
+        size_t w = Update.write(s_ota_buff, c);
         if (w != static_cast<size_t>(c)) {
           snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
           snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Flash write error at %u", (unsigned)written);
@@ -130,7 +135,7 @@ static void Task_HttpOta(void *pvParameters) {
         }
       }
     } else {
-      vTaskDelay(pdMS_TO_TICKS(5));
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
 
@@ -152,6 +157,10 @@ static void Task_HttpOta(void *pvParameters) {
 
   http.end();
   g_http_ota_state.in_progress = false;
+  g_ota_in_progress.store(false, std::memory_order_release);
+  if (g_system_event_group) {
+    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
   free(url);
   vTaskDelete(nullptr);
 }
@@ -174,7 +183,8 @@ void Mgmt_StartHttpOta(const char *url) {
     return;
   }
 
-  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 8192, url_copy, 5, nullptr, 0);
+  // Priority 12 (Network 태스크와 동급 상향 조정으로 CPU 기아 방지)
+  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 8192, url_copy, 12, nullptr, 0);
 }
 
 // ============================================================================

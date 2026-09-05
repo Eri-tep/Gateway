@@ -1023,7 +1023,11 @@ void Task_Ch1(void *pvParameters) {
     g_wdt_monitor.feed(0);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       Ch1_SetState(current_state, Ch1State::IDLE);
-      vTaskDelay(pdMS_TO_TICKS(100));
+      if (g_system_event_group) {
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
       next_poll_due_ms = millis();
       continue;
     }
@@ -1056,6 +1060,9 @@ void Task_Ch1(void *pvParameters) {
         } else if (TimeUtils::isElapsed(s_stable_start_ms, Config::Timing::CACHE_CONVERGENCE_STABLE_MS)) { // 1.5초간 신규 기기 증가 멈춤 & 전원 온라인 확인 시 최종 수렴!
           s_convergence_done = true;
           g_initial_caching_complete.store(true, std::memory_order_release);
+          if (g_system_event_group) {
+            xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
+          }
           // ★ 2차 캐싱 100% 수렴 완료! 초기 웜업 노이즈(Uncache, 웜업 제어/폴링 수) 일괄 리셋
           g_pkt_stats.resetAll();
           g_polling_targets.resetHits();
@@ -1140,7 +1147,11 @@ void Task_Ch2Ch3(void *pvParameters) {
   for (;;) {
     g_wdt_monitor.feed(task_idx);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
-      vTaskDelay(pdMS_TO_TICKS(100));
+      if (g_system_event_group) {
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
       continue;
     }
 
@@ -1248,18 +1259,24 @@ void Task_Ch4(void *pvParameters) {
   static StaticPacket last_pkt{};
   static uint32_t last_pkt_ms = 0;
 
-  uint32_t wait_start_ms = millis();
-  while (!g_initial_caching_complete.load(std::memory_order_acquire) &&
-         !TimeUtils::isElapsed(wait_start_ms,
-                               Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS)) {
+  if (!g_initial_caching_complete.load(std::memory_order_acquire)) {
+    if (g_system_event_group) {
+      xEventGroupWaitBits(g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
+                          pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
+    }
     g_wdt_monitor.feed(3);
-    vTaskDelay(pdMS_TO_TICKS(100));
   }
 
   for (;;) {
     g_wdt_monitor.feed(3);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
-      vTaskDelay(pdMS_TO_TICKS(100));
+      if (g_system_event_group) {
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
       continue;
     }
 

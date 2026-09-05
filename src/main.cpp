@@ -223,15 +223,33 @@ void System_EnterRescueMode(const char *reason) {
   esp_wifi_set_config(WIFI_IF_STA, &w_conf);
   esp_wifi_connect();
 
+  if (!g_system_event_group) {
+    g_system_event_group = xEventGroupCreate();
+    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+
   ArduinoOTA.setHostname("gateway-rescue");
   ArduinoOTA.setPassword(OTA_PASSWORD);
-  ArduinoOTA.onStart([]() { g_ota_in_progress.store(true); });
+  ArduinoOTA.onStart([]() {
+    g_ota_in_progress.store(true, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+  });
   ArduinoOTA.onEnd([]() {
-    g_ota_in_progress.store(false);
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
   });
-  ArduinoOTA.onError([](ota_error_t error) { g_ota_in_progress.store(false); });
+  ArduinoOTA.onError([](ota_error_t error) {
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+  });
   ArduinoOTA.begin();
 }
 
@@ -366,6 +384,7 @@ QueueHandle_t g_ch4_passthrough_queue = nullptr, g_ch4_to_tcp_queue = nullptr,
               g_ch6_to_tcp_queue = nullptr;
 
 EventGroupHandle_t g_wifi_event_group = nullptr;
+EventGroupHandle_t g_system_event_group = nullptr;
 static constexpr EventBits_t WIFI_BIT_CONNECTED    = BIT0;
 static constexpr EventBits_t WIFI_BIT_DISCONNECTED = BIT1;
 static constexpr EventBits_t WIFI_BIT_GOT_IP       = BIT2;
@@ -891,7 +910,10 @@ void Task_Network(void *pvParameters) {
     g_wdt_monitor.feed(4);
     ArduinoOTA.handle();
     if (g_ota_in_progress.load(std::memory_order_relaxed)) {
-      vTaskDelay(pdMS_TO_TICKS(20));
+      for (int i = 0; i < 4; i++) {
+        ArduinoOTA.handle();
+      }
+      vTaskDelay(1);
       continue;
     }
 
@@ -1661,6 +1683,10 @@ static void Boot_InitSyncPrimitives() {
 
   if (!g_wifi_event_group)
     g_wifi_event_group = xEventGroupCreate();
+  if (!g_system_event_group) {
+    g_system_event_group = xEventGroupCreate();
+    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
   WiFi.onEvent(onWifiEvent);
 }
 
@@ -1834,13 +1860,26 @@ static void Boot_InitWifiAndOta() {
 
     ArduinoOTA.setHostname("gateway-bridge");
     ArduinoOTA.setPassword(OTA_PASSWORD);
-    ArduinoOTA.onStart([]() { g_ota_in_progress.store(true); });
+    ArduinoOTA.onStart([]() {
+      g_ota_in_progress.store(true, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+      }
+    });
     ArduinoOTA.onEnd([]() {
-      g_ota_in_progress.store(false);
+      g_ota_in_progress.store(false, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+      }
       vTaskDelay(pdMS_TO_TICKS(200));
       esp_restart();
     });
-    ArduinoOTA.onError([](ota_error_t error) { g_ota_in_progress.store(false); });
+    ArduinoOTA.onError([](ota_error_t error) {
+      g_ota_in_progress.store(false, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+      }
+    });
     ArduinoOTA.begin();
   }
 }

@@ -12,6 +12,8 @@
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "mbedtls/sha256.h"
 #include <Arduino.h>
 #include <ArduinoOTA.h>
@@ -168,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.4";
+constexpr const char *FIRMWARE_VERSION = "v1.1.5";
 } // namespace Config
 
 namespace Config::Task {
@@ -1365,6 +1367,9 @@ extern std::atomic<uint32_t> g_ch1_bus_ms;
 extern std::atomic<bool> g_config_dirty;
 extern std::atomic<bool> g_ota_in_progress;
 extern std::atomic<bool> g_initial_caching_complete;
+extern EventGroupHandle_t g_system_event_group;
+constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
+constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
 extern PacketStatistics g_pkt_stats;
 extern uint32_t g_boot_start_ms;
 extern SystemMetricsTracker g_metrics;
