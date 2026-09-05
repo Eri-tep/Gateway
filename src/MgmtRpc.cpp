@@ -320,8 +320,8 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
   else if (cur_wmode == WIFI_MODE_APSTA) mode_str = "AP_STA";
 
   out.appendFormat("\"wifi\":{\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"mode\":\"%s\"},",
-                   WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : (g_config.wifi_ssid[0] ? g_config.wifi_ssid : "Disconnected"),
-                   static_cast<int>(WiFi.RSSI()),
+                   WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected",
+                   WiFi.status() == WL_CONNECTED ? static_cast<int>(WiFi.RSSI()) : -100,
                    WiFi.localIP().toString().c_str(),
                    mode_str);
 
@@ -610,12 +610,12 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
-  // 9. wifi_scan (Top 2 Strongest SSIDs, skipping empty/hidden)
+  // 9. wifi_scan (Top 4 Strongest SSIDs with signal percentage, skipping empty/hidden)
   if (strcasecmp(cmd, "wifi_scan") == 0) {
     int n = WiFi.scanNetworks(false, true);
     if (n <= 0) {
       WiFi.scanDelete();
-      const char *no_ap_msg = "{\"res\":\"ok\",\"count\":0,\"top_ssids\":[],\"msg\":\"No Networks Found\"}\n";
+      const char *no_ap_msg = "{\"res\":\"ok\",\"count\":0,\"ap_count\":0,\"aps\":[],\"msg\":\"No Networks Found\"}\n";
       send(sock, no_ap_msg, strlen(no_ap_msg), MSG_DONTWAIT);
       return;
     }
@@ -627,35 +627,48 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       return WiFi.RSSI(a) > WiFi.RSSI(b);
     });
 
-    String top1 = "";
-    String top2 = "";
+    struct ApInfo {
+      String ssid;
+      int pct;
+    };
+    std::vector<ApInfo> top_aps;
+    top_aps.reserve(4);
+
     for (int idx : indices) {
       String s = WiFi.SSID(idx);
       s.trim();
       if (s.length() == 0) continue;
-      if (top1.length() == 0) {
-        top1 = s;
-      } else if (top2.length() == 0 && s != top1) {
-        top2 = s;
-        break;
+
+      // 중복 SSID 방지
+      bool duplicate = false;
+      for (const auto &item : top_aps) {
+        if (item.ssid == s) {
+          duplicate = true;
+          break;
+        }
       }
+      if (duplicate) continue;
+
+      int rssi = WiFi.RSSI(idx);
+      int pct = std::min(100, std::max(0, 2 * (rssi + 100)));
+      s.replace("\"", "\\\""); // JSON escape
+      top_aps.push_back({s, pct});
+      if (top_aps.size() >= 4) break;
     }
     WiFi.scanDelete();
 
-    // JSON escape 처리 (필요시 따옴표 제거)
-    top1.replace("\"", "\\\"");
-    top2.replace("\"", "\\\"");
-
-    char resp[384];
-    if (top1.length() > 0 && top2.length() > 0) {
-      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"top1\":\"%s\",\"top2\":\"%s\"}\n",
-               n, top1.c_str(), top2.c_str());
-    } else if (top1.length() > 0) {
-      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"top1\":\"%s\",\"top2\":\"\"}\n",
-               n, top1.c_str());
-    } else {
-      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"top1\":\"\",\"top2\":\"\"}\n", n);
+    char resp[512];
+    int offset = snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"ap_count\":%u,\"aps\":[",
+                          n, static_cast<unsigned>(top_aps.size()));
+    for (size_t i = 0; i < top_aps.size(); ++i) {
+      offset += snprintf(resp + offset, sizeof(resp) - offset,
+                         "%s{\"ssid\":\"%s\",\"pct\":%d}",
+                         (i > 0 ? "," : ""),
+                         top_aps[i].ssid.c_str(),
+                         top_aps[i].pct);
+      if (offset >= (int)sizeof(resp) - 8) break;
     }
+    snprintf(resp + offset, sizeof(resp) - offset, "]}\n");
     send(sock, resp, strlen(resp), MSG_DONTWAIT);
     return;
   }

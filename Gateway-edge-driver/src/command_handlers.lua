@@ -68,30 +68,68 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     if cap_scan then
       device:emit_component_event(comp, cap_scan.scanResult({ value = "Scanning..." }))
     end
-    local res, err = gateway_client.wifi_scan(ip, port)
-    local result_text = "Scan Failed"
-    if res then
-      local s1 = res.top1 and res.top1:match("^%s*(.-)%s*$") or ""
-      local s2 = res.top2 and res.top2:match("^%s*(.-)%s*$") or ""
-      if s1 ~= "" and s2 ~= "" then
-        result_text = string.format("%s\n%s", s1, s2)
-      elseif s1 ~= "" then
-        result_text = s1
-      elseif res.count and res.count > 0 then
-        result_text = string.format("%d APs Found", res.count)
-      elseif res.msg then
-        result_text = res.msg
-      else
-        result_text = "No Networks"
-      end
-    elseif err then
-      log.error("❌ [CMD] Wi-Fi Scan RPC error: " .. tostring(err))
-      result_text = "Scan Timeout"
+
+    -- 기존에 실행 중이던 롤링 타이머가 있다면 취소
+    local prev_timer = device:get_field("scan_roll_timer")
+    if prev_timer then
+      device.thread:cancel_timer(prev_timer)
+      device:set_field("scan_roll_timer", nil)
     end
-    log.info("📶 [CMD] Wi-Fi Scan Result: \n" .. tostring(result_text))
-    if cap_scan then
-      device:emit_component_event(comp, cap_scan.scanResult({ value = result_text }))
-      device:set_field("last_scan_result", result_text)
+
+    local res, err = gateway_client.wifi_scan(ip, port)
+    local valid_aps = {}
+
+    if res and res.aps and #res.aps > 0 then
+      for _, item in ipairs(res.aps) do
+        local raw_s = item.ssid or ""
+        local s = raw_s:match("^%s*(.-)%s*$")
+        if s and s ~= "" then
+          local pct = tonumber(item.pct) or 70
+          table.insert(valid_aps, { ssid = s, pct = pct })
+        end
+      end
+    end
+
+    if #valid_aps > 0 then
+      local total = #valid_aps
+      local function show_ap_at(idx)
+        local ap = valid_aps[idx]
+        local text = string.format("[%d/%d] %s (%d%%)", idx, total, ap.ssid, ap.pct)
+        log.info(string.format("📶 [SCAN ROLL] %s", text))
+        if cap_scan then
+          device:emit_component_event(comp, cap_scan.scanResult({ value = text }))
+          device:set_field("last_scan_result", text)
+        end
+      end
+
+      -- 1번째 AP 즉시 표시
+      show_ap_at(1)
+
+      -- 유효 AP가 2개 이상이면 4초 주기로 순회 롤링 타이머 등록
+      if total > 1 then
+        local current_idx = 1
+        local function schedule_next()
+          local timer = device.thread:call_with_delay(4, function()
+            current_idx = (current_idx % total) + 1
+            show_ap_at(current_idx)
+            schedule_next()
+          end)
+          device:set_field("scan_roll_timer", timer)
+        end
+        schedule_next()
+      end
+    else
+      local fail_text = "No Networks"
+      if err then
+        log.error("❌ [CMD] Wi-Fi Scan RPC error: " .. tostring(err))
+        fail_text = "Scan Timeout"
+      elseif res and res.msg then
+        fail_text = res.msg
+      end
+      if cap_scan then
+        device:emit_component_event(comp, cap_scan.scanResult({ value = fail_text }))
+        device:set_field("last_scan_result", fail_text)
+      end
     end
     CommandHandlers.refresh_telemetry(driver, device)
   elseif comp_id == "ota" then

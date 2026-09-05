@@ -254,10 +254,12 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
 
   -- 4-2. WiFi (<SSID> (<Quality>%))
   local wifi_data = data.wifi or {}
-  local ssid = (wifi_data.ssid and wifi_data.ssid ~= "") and wifi_data.ssid or "Connected"
+  local ssid = (wifi_data.ssid and wifi_data.ssid ~= "") and wifi_data.ssid or "Disconnected"
   local rssi = wifi_data.rssi or (sys and sys.wifi_rssi)
-  local wifi_display = ssid
-  if rssi then
+  local wifi_display = "Disconnected (0%)"
+  if ssid == "Disconnected" then
+    wifi_display = "Disconnected (0%)"
+  elseif rssi then
     local lqi = math.floor(math.min(100, math.max(0, 2 * (rssi + 100))))
     wifi_display = string.format("%s (%d%%)", ssid, lqi)
   else

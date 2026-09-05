@@ -200,11 +200,30 @@ preferences:
       maxLength: 64
       default: "Eri-tep/Gateway"
 
+  # Wi-Fi Network Credentials
+  - preferenceId: newWifiSsid
+    name: newWifiSsid
+    title: "Target Wi-Fi SSID"
+    description: "Enter Wi-Fi network name (SSID) to connect"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 0
+      maxLength: 32
+      default: ""
 
-
-
-
-
+  - preferenceId: newWifiPassword
+    name: newWifiPassword
+    title: "Target Wi-Fi Password"
+    description: "Enter Wi-Fi password (leave blank for open network)"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: password
+      minLength: 0
+      maxLength: 64
+      default: ""
 
   # RS-485 Serial UART Settings
   - preferenceId: ch1Baudrate
