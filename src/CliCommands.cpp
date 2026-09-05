@@ -958,12 +958,36 @@ void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
 void wallpadPrintStatus(AppendBuf &out) {
   auto *active = WallpadParserFactory::getActiveParser();
   auto desc = g_auto_probing_engine.getDescriptor();
+  VendorProfileDescriptor active_prof;
+  bool is_manual_prof = false;
+  if (ProfileRepository::getActiveProfile(active_prof) && strcasecmp(active_prof.key, "auto") != 0) {
+    is_manual_prof = true;
+    // 수동 프로파일 정보로 desc 오버라이드 (이미 확정 저장된 프로파일)
+    desc.stx = active_prof.stx;
+    desc.etx = active_prof.etx;
+    desc.checksum_algo = active_prof.cs_algo;
+    desc.opcode_offset = active_prof.opcode_offset;
+    desc.query_opcode = active_prof.query_op;
+    desc.control_opcode = active_prof.ctrl_op;
+    desc.ack_opcode = active_prof.ack_op;
+    desc.control_seen = (active_prof.ctrl_op != 0);
+    desc.dev_id_offset = active_prof.dev_id_offset;
+    desc.sub1_offset = active_prof.sub1_offset;
+    desc.sub2_offset = active_prof.sub2_offset;
+    desc.is_swapped_addr = (active_prof.is_swapped_addr != 0);
+    desc.is_locked = true;
+    desc.opcodes_locked = true;
+    desc.offsets_locked = true;
+    desc.payload_offset = std::max({active_prof.opcode_offset, active_prof.dev_id_offset,
+                                    active_prof.sub1_offset, active_prof.sub2_offset}) + 1;
+  }
+
   size_t active_targets = g_polling_targets.activeCount();
   size_t verified_targets = g_polling_targets.verifiedCount();
   size_t online_devs = g_device_repo.getOnlineCount();
 
   const char *phase_str = "Phase 1/3 (Framing Probing)";
-  if (desc.offsets_locked) {
+  if (is_manual_prof || desc.offsets_locked) {
     phase_str = "Phase 3/3: Fully Locked";
   } else if (desc.is_locked) {
     phase_str = "Phase 2/3: Cache Syncing";
@@ -1109,7 +1133,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   if (!desc.opcodes_locked) {
     opcode_status = "[LEARNING]";
   } else if (!desc.control_seen || desc.control_opcode == 0) {
-    opcode_status = "[LOCKED/CTL:??]";  // QRY+ACK 확정, CTL은 아직 미관측
+    opcode_status = "[WAITING]";        // QRY+ACK 확정, CTL은 아직 미관측(대기)
   } else {
     opcode_status = "[LOCKED]";         // QRY+CTL+ACK 모두 확정
   }

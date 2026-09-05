@@ -40,6 +40,10 @@ struct VendorProfileDescriptor {
   uint8_t door_stx;      // 도어폰 STX (예: 0x7F, 0x02 등, 0이면 비활성)
   uint8_t door_etx;      // 도어폰 ETX (예: 0xEE, 0x03 등)
   uint8_t door_len;      // 도어폰 패킷 길이 (예: 9)
+  uint8_t is_swapped_addr{0};     // 1: DA/SA 교차 주소 모드, 0: 1:1 직접
+  uint8_t gw_addr_offset{2};      // GW 주소 위치 (QUERY 기준) = ACK 기준 DevType 위치
+  uint8_t gw_addr{0x01};          // GW 주소값
+  uint8_t learned_query_len{11};  // 학습된 쿼리 길이
 };
 
 // ============================================================================

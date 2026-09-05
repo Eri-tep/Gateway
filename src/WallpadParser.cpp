@@ -360,25 +360,38 @@ uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo, const uint8_t *d
 }
 
 void AutoProbingEngine::initFromNvs() {
-  VendorProfileDescriptor auto_prof;
-  if (ProfileRepository::getProfile(0, auto_prof)) {
+  VendorProfileDescriptor prof;
+  if (ProfileRepository::getActiveProfile(prof)) {
     CriticalSectionLocker lock(&_mux);
-    _desc.stx = auto_prof.stx;
-    _desc.etx = auto_prof.etx;
-    _desc.min_len = auto_prof.min_len;
-    _desc.max_len = auto_prof.max_len;
-    _desc.checksum_algo = auto_prof.cs_algo;
-    _desc.opcode_offset = auto_prof.opcode_offset;
-    _desc.query_opcode = auto_prof.query_op;
-    _desc.control_opcode = auto_prof.ctrl_op;
-    _desc.ack_opcode = auto_prof.ack_op;
-    _desc.control_seen = (auto_prof.ctrl_op != 0);
-    _desc.opcodes_locked = false;
+    _desc.stx = prof.stx;
+    _desc.etx = prof.etx;
+    _desc.min_len = prof.min_len;
+    _desc.max_len = prof.max_len;
+    _desc.checksum_algo = prof.cs_algo;
+    _desc.opcode_offset = prof.opcode_offset;
+    _desc.query_opcode = prof.query_op;
+    _desc.control_opcode = prof.ctrl_op;
+    _desc.ack_opcode = prof.ack_op;
+    _desc.control_seen = (prof.ctrl_op != 0);
+
+    // ★ 오프셋 및 주소 모드 복원
+    if (prof.dev_id_offset > 0 || prof.sub1_offset > 0 || prof.sub2_offset > 0) {
+      _desc.dev_id_offset = prof.dev_id_offset;
+      _desc.sub1_offset = prof.sub1_offset;
+      _desc.sub2_offset = prof.sub2_offset;
+      _desc.is_swapped_addr = (prof.is_swapped_addr != 0);
+      _desc.gw_addr_offset = (prof.gw_addr_offset > 0) ? prof.gw_addr_offset : 2;
+      _desc.gw_addr = (prof.gw_addr != 0) ? prof.gw_addr : 0x01;
+      _desc.learned_query_len = (prof.learned_query_len >= 3) ? prof.learned_query_len : 11;
+      _desc.offsets_locked = true;
+      _desc.opcodes_locked = true;
+    }
+
     _desc.is_locked = true;
     _consecutive_mismatches = 0;
     snprintf(_desc.description, sizeof(_desc.description),
-             "Restored: STX 0x%02X ETX 0x%02X (%s)",
-             auto_prof.stx, auto_prof.etx, getAlgoName(auto_prof.cs_algo));
+             "Restored: %s (STX 0x%02X ETX 0x%02X / %s)",
+             prof.name, prof.stx, prof.etx, getAlgoName(prof.cs_algo));
   }
 }
 
@@ -906,13 +919,13 @@ void AutoProbingEngine::reset() {
 
 static const VendorProfileDescriptor s_default_profiles[ProfileRepository::MAX_PROFILES] = {
     // 0: Universal Auto-Probing
-    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0},
+    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11},
     // 1: User Slot 1
-    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0},
+    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11},
     // 2: User Slot 2
-    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0},
+    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11},
     // 3: User Slot 3
-    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0}
+    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11}
 };
 
 static VendorProfileDescriptor s_active_profiles[ProfileRepository::MAX_PROFILES];
@@ -1134,6 +1147,10 @@ bool ProfileRepository::saveCurrentAutoAs(const char *name, size_t &saved_idx) {
   new_prof.dev_id_offset = ad.offsets_locked ? ad.dev_id_offset : 3;
   new_prof.sub1_offset = ad.offsets_locked ? ad.sub1_offset : 5;
   new_prof.sub2_offset = ad.offsets_locked ? ad.sub2_offset : 6;
+  new_prof.is_swapped_addr = ad.offsets_locked ? (ad.is_swapped_addr ? 1 : 0) : 0;
+  new_prof.gw_addr_offset = ad.offsets_locked ? ad.gw_addr_offset : 2;
+  new_prof.gw_addr = ad.offsets_locked ? ad.gw_addr : 0x01;
+  new_prof.learned_query_len = (ad.offsets_locked && ad.learned_query_len >= 3) ? ad.learned_query_len : 11;
 
   // 도어폰의 현재 학습된 프레이밍도 함께 프로파일에 저장
   uint8_t dp_s = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
@@ -1201,6 +1218,10 @@ void ProfileRepository::syncAutoProfileToNvs(const AutoProbeDescriptor &auto_des
       desc.dev_id_offset = auto_desc.dev_id_offset;
       desc.sub1_offset = auto_desc.sub1_offset;
       desc.sub2_offset = auto_desc.sub2_offset;
+      desc.is_swapped_addr = auto_desc.is_swapped_addr ? 1 : 0;
+      desc.gw_addr_offset = auto_desc.gw_addr_offset;
+      desc.gw_addr = auto_desc.gw_addr;
+      desc.learned_query_len = auto_desc.learned_query_len;
     }
     s_active_profiles[0] = desc;
   }
@@ -1344,8 +1365,8 @@ bool UniversalProtocolEngine::extractDeviceKey(span<const uint8_t> frame,
   uint8_t s1_off = desc.sub1_offset;
   uint8_t s2_off = desc.sub2_offset;
 
-  bool is_swapped = false;
-  uint8_t gw_addr_off = d_off; // 기본: swap 없으면 동일
+  bool is_swapped = (desc.is_swapped_addr != 0);
+  uint8_t gw_addr_off = is_swapped ? desc.gw_addr_offset : d_off;
 
   if (isAutoProfile(desc)) {
     auto ad = g_auto_probing_engine.getDescriptor();
@@ -1432,19 +1453,28 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
     return true;
   }
 
-  // ── Non-Auto 프로파일: 기존 고정 11바이트 로직 유지 ──
+  // ── Non-Auto 프로파일: 저장된 프로파일의 길이와 GW 주소 규칙 사용 ──
+  uint8_t pkt_len = (desc.learned_query_len >= 3 && desc.learned_query_len <= 64)
+                        ? desc.learned_query_len : 11;
   out.channel_id = 1;
-  out.length = 11;
+  out.length = pkt_len;
   out.data.fill(0);
   out.data[0] = stx;
-  out.data[1] = 11;
-  out.data[2] = 0x01;  // 비-Auto 프로파일: GW 주소 기존 고정값 유지
-  if (d_off < 11) out.data[d_off] = dev_id;
-  if (op_off < 11) out.data[op_off] = q_op;
-  if (s1_off > 0 && s1_off < 11) out.data[s1_off] = sub1;
-  if (s2_off > 0 && s2_off < 11) out.data[s2_off] = sub2;
-  out.data[9] = g_auto_probing_engine.calculateChecksum(algo, out.data.data(), 11);
-  out.data[10] = etx;
+  out.data[1] = pkt_len;
+
+  if (desc.gw_addr_offset < pkt_len) {
+    out.data[desc.gw_addr_offset] = (desc.gw_addr != 0) ? desc.gw_addr : 0x01;
+  }
+
+  if (d_off < pkt_len) out.data[d_off] = dev_id;
+  if (op_off < pkt_len) out.data[op_off] = q_op;
+  if (s1_off > 0 && s1_off < pkt_len) out.data[s1_off] = sub1;
+  if (s2_off > 0 && s2_off < pkt_len) out.data[s2_off] = sub2;
+
+  if (pkt_len >= 3) {
+    out.data[pkt_len - 2] = g_auto_probing_engine.calculateChecksum(algo, out.data.data(), pkt_len);
+    out.data[pkt_len - 1] = etx;
+  }
   return true;
 }
 
