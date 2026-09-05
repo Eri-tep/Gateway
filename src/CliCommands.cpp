@@ -1098,12 +1098,23 @@ void wallpadPrintStatus(AppendBuf &out) {
   if (desc.control_seen && desc.control_opcode != 0) {
     snprintf(ctl_hex, sizeof(ctl_hex), "%02X", desc.control_opcode);
   } else {
-    snprintf(ctl_hex, sizeof(ctl_hex), "02");
+    // ★ 제어 패킷 미관측 - 가정값("02") 대신 명시적으로 미확인 표시
+    snprintf(ctl_hex, sizeof(ctl_hex), "??");
   }
   snprintf(op_line_buf, sizeof(op_line_buf), "Byte #%u (QRY:%02X, CTL:%s, ACK:%02X)",
            desc.opcode_offset, desc.query_opcode, ctl_hex, desc.ack_opcode);
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "Opcode Offset", op_line_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
+  // ★ [LOCKED] 상태: QRY/ACK 락 여부 + CTL 관측 여부를 구분하여 표시
+  const char *opcode_status;
+  if (!desc.opcodes_locked) {
+    opcode_status = "[LEARNING]";
+  } else if (!desc.control_seen || desc.control_opcode == 0) {
+    opcode_status = "[LOCKED/CTL:??]";  // QRY+ACK 확정, CTL은 아직 미관측
+  } else {
+    opcode_status = "[LOCKED]";         // QRY+CTL+ACK 모두 확정
+  }
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "Opcode Offset", op_line_buf, opcode_status);
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sub-Command", sub1_list_buf, addr_status);
   out.append(Fmt::DIV80);
 
