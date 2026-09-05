@@ -729,20 +729,36 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     char new_ssid[64] = {0};
     char new_pass[64] = {0};
     bool has_ssid = findJsonStringValue(json_str, "ssid", new_ssid, sizeof(new_ssid));
-    findJsonStringValue(json_str, "password", new_pass, sizeof(new_pass));
+    bool has_pass = findJsonStringValue(json_str, "password", new_pass, sizeof(new_pass));
 
-    if (has_ssid && strlen(new_ssid) > 0) {
-      strncpy(g_config.wifi_ssid, new_ssid, sizeof(g_config.wifi_ssid) - 1);
-      strncpy(g_config.wifi_password, new_pass, sizeof(g_config.wifi_password) - 1);
-      Config_Save();
-      const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Wi-Fi credentials saved. Reconnecting...\"}\n";
-      send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
-      WiFi.disconnect();
-      WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
-    } else {
-      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid SSID\"}\n";
+    if (!has_ssid || strlen(new_ssid) == 0) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Missing or empty SSID\"}\n";
       send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
     }
+
+    if (has_pass && strlen(new_pass) > 0 && strlen(new_pass) < 8) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Wi-Fi password must be at least 8 characters (or empty for open network)\"}\n";
+      send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    // 현재 정상 동작 중인 Wi-Fi 정보를 백업하여 15초 내 접속 실패 시 자동 롤백 준비
+    strncpy(g_wifi_guard.prev_ssid, g_config.wifi_ssid, sizeof(g_wifi_guard.prev_ssid) - 1);
+    strncpy(g_wifi_guard.prev_pass, g_config.wifi_password, sizeof(g_wifi_guard.prev_pass) - 1);
+    g_wifi_guard.start_ms = millis();
+    g_wifi_guard.testing.store(true, std::memory_order_release);
+
+    strncpy(g_config.wifi_ssid, new_ssid, sizeof(g_config.wifi_ssid) - 1);
+    strncpy(g_config.wifi_password, new_pass, sizeof(g_config.wifi_password) - 1);
+
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Testing new Wi-Fi credentials (15s automatic fallback guard active)...\"}\n";
+    send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    WiFi.disconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
     return;
   }
 

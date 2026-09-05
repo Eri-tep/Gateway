@@ -225,6 +225,15 @@ preferences:
       maxLength: 64
       default: ""
 
+  - preferenceId: applyWifiConfig
+    name: applyWifiConfig
+    title: "Apply Wi-Fi (ON to Commit)"
+    description: "Enter Target SSID & Password above, then turn ON to apply and reconnect"
+    required: false
+    preferenceType: boolean
+    definition:
+      default: false
+
   # RS-485 Serial UART Settings
   - preferenceId: ch1Baudrate
     name: ch1Baudrate

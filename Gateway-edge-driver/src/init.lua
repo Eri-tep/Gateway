@@ -82,11 +82,17 @@ local function device_info_changed(driver, device, event, args)
     gateway_client.set_timing(ip, port, ch1, ch2, ch3)
   end
 
-  -- 4. Wi-Fi Credentials
-  if new_prefs.newWifiSsid and new_prefs.newWifiSsid ~= "" and
-     (old_prefs.newWifiSsid ~= new_prefs.newWifiSsid or old_prefs.newWifiPassword ~= new_prefs.newWifiPassword) then
-    log.info(string.format("📶 [WIFI] Changing Wi-Fi credentials to SSID: %s", new_prefs.newWifiSsid))
-    gateway_client.set_wifi(ip, port, new_prefs.newWifiSsid, new_prefs.newWifiPassword or "")
+  -- 4. Wi-Fi Credentials (2-Step Safe Commit: Requires explicit apply toggle)
+  if new_prefs.applyWifiConfig and not old_prefs.applyWifiConfig then
+    local target_ssid = new_prefs.newWifiSsid
+    local target_pass = new_prefs.newWifiPassword or ""
+
+    if target_ssid and target_ssid ~= "" then
+      log.info(string.format("📶 [WIFI] Explicit Apply Triggered! Setting Wi-Fi -> SSID: '%s'", target_ssid))
+      gateway_client.set_wifi(ip, port, target_ssid, target_pass)
+    else
+      log.warn("⚠️ [WIFI] Apply toggle turned ON, but Target SSID is empty! Aborting.")
+    end
   end
 
   -- 5. RS-485 Serial UART Settings (CH1 ~ CH4)

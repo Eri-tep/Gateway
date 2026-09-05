@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.5";
+constexpr const char *FIRMWARE_VERSION = "v1.1.6";
 } // namespace Config
 
 namespace Config::Task {
@@ -1372,6 +1372,13 @@ constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
 constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
 extern PacketStatistics g_pkt_stats;
 extern uint32_t g_boot_start_ms;
+struct WifiFallbackGuard {
+  std::atomic<bool> testing{false};
+  uint32_t start_ms{0};
+  char prev_ssid[64]{0};
+  char prev_pass[64]{0};
+};
+extern WifiFallbackGuard g_wifi_guard;
 extern SystemMetricsTracker g_metrics;
 
 extern SoftwareSerial g_doorphone_serial;

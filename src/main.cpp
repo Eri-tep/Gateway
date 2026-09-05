@@ -553,6 +553,7 @@ Ch1StateMetrics g_ch1_state_metrics;
 portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> g_config_dirty{false}, g_ota_in_progress{false},
     g_initial_caching_complete{false};
+WifiFallbackGuard g_wifi_guard;
 
 static void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
   if (sock < 0)
@@ -925,6 +926,11 @@ void Task_Network(void *pvParameters) {
 
       if (bits & WIFI_BIT_GOT_IP) {
         xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
+        if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
+          g_wifi_guard.testing.store(false, std::memory_order_release);
+          Config_Save();
+          Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved to NVS.\r\n", g_config.wifi_ssid);
+        }
         if (WiFi.getMode() == WIFI_MODE_APSTA || WiFi.getMode() == WIFI_MODE_AP) {
           WiFi.softAPdisconnect(true);
           WiFi.mode(WIFI_STA);
@@ -934,6 +940,19 @@ void Task_Network(void *pvParameters) {
         configTime(0, 0, "pool.ntp.org", "asia.pool.ntp.org");
         setenv("TZ", "KST-9", 1);
         tzset();
+      }
+
+      if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
+        if (TimeUtils::isElapsed(g_wifi_guard.start_ms, 15000)) {
+          g_wifi_guard.testing.store(false, std::memory_order_release);
+          Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed to connect within 15s! Reverting to '%s'...\r\n",
+                        g_config.wifi_ssid, g_wifi_guard.prev_ssid);
+          strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid, sizeof(g_config.wifi_ssid) - 1);
+          strncpy(g_config.wifi_password, g_wifi_guard.prev_pass, sizeof(g_config.wifi_password) - 1);
+          WiFi.disconnect(false);
+          vTaskDelay(pdMS_TO_TICKS(100));
+          WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
+        }
       }
 
       if (bits & WIFI_BIT_DISCONNECTED) {
