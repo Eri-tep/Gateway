@@ -54,17 +54,12 @@
     },
     {
       "component": "diagnostics",
-      "capability": "digituniverse06711.cpu",
+      "capability": "digituniverse06711.resource",
       "version": 1
     },
     {
       "component": "diagnostics",
-      "capability": "digituniverse06711.ram",
-      "version": 1
-    },
-    {
-      "component": "diagnostics",
-      "capability": "digituniverse06711.flash",
+      "capability": "digituniverse06711.channel",
       "version": 1
     },
     {
@@ -74,12 +69,7 @@
     },
     {
       "component": "logs",
-      "capability": "digituniverse06711.logHistory",
-      "version": 1
-    },
-    {
-      "component": "logs",
-      "capability": "digituniverse06711.crashDump",
+      "capability": "digituniverse06711.history",
       "version": 1
     },
     {
@@ -98,11 +88,6 @@
       "version": 1
     },
     {
-      "component": "network",
-      "capability": "digituniverse06711.mode",
-      "version": 1
-    },
-    {
       "component": "ota",
       "capability": "switch",
       "version": 1
@@ -115,11 +100,6 @@
     {
       "component": "ota",
       "capability": "digituniverse06711.build",
-      "version": 1
-    },
-    {
-      "component": "ota",
-      "capability": "digituniverse06711.updated",
       "version": 1
     }
   ]

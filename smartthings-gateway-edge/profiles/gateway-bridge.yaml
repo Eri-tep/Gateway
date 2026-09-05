@@ -1,0 +1,52 @@
+name: gateway-bridge
+ocfDeviceType: oic.d.networkhub
+components:
+  - id: main
+    capabilities:
+      - id: refresh
+        version: 1
+      - id: healthCheck
+        version: 1
+    categories:
+      - name: Hub
+  - id: addDevices
+    label: "Devices Create"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: circlecircle06391.info
+        version: 1
+  - id: deleteDevices
+    label: "Devices Delete"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: circlecircle06391.info
+        version: 1
+  - id: systemManage
+    label: "System Reboot"
+    capabilities:
+      - id: switch
+        version: 1
+preferences:
+  - preferenceId: serverIp
+    name: serverIp
+    title: "Gateway IP"
+    description: "ESP32 게이트웨이 IP 주소"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 7
+      maxLength: 15
+      default: "0.0.0.0"
+  - preferenceId: serverPort
+    name: serverPort
+    title: "Gateway Port"
+    description: "게이트웨이 통신 포트"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 1

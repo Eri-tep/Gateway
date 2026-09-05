@@ -58,6 +58,11 @@ function GatewayClient.get_telemetry(ip, port)
   return GatewayClient.send_rpc(ip, port, { cmd = "get_telemetry" })
 end
 
+function GatewayClient.cache_purge_rescan(ip, port)
+  return GatewayClient.send_rpc(ip, port, { cmd = "cache_purge_rescan" })
+end
+
+
 function GatewayClient.set_profile(ip, port, slot)
   return GatewayClient.send_rpc(ip, port, { cmd = "set_profile", slot = slot })
 end
@@ -96,7 +101,7 @@ end
 function GatewayClient.wifi_scan(ip, port)
   return GatewayClient.send_rpc(ip, port, {
     cmd = "wifi_scan"
-  })
+  }, 10)
 end
 
 function GatewayClient.system_reboot(ip, port, reason)

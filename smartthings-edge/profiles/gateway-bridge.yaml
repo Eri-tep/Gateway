@@ -1,0 +1,92 @@
+name: gateway-bridge
+ocfDeviceType: oic.d.networkhub
+components:
+  - id: main
+    label: "게이트웨이"
+    capabilities:
+      - id: refresh
+        version: 1
+      - id: healthCheck
+        version: 1
+    categories:
+      - name: Hub
+  - id: addDevices
+    label: "기기 추가"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: circlecircle06391.info
+        version: 1
+    categories:
+      - name: Switch
+  - id: deleteDevices
+    label: "기기 삭제"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: circlecircle06391.info
+        version: 1
+    categories:
+      - name: Switch
+  - id: systemManage
+    label: "시스템 관리"
+    capabilities:
+      - id: switch
+        version: 1
+    categories:
+      - name: Switch
+preferences:
+  - name: wallpadIp
+    title: "월패드 게이트웨이 IP"
+    description: "ESP32 RS-485 게이트웨이 IP 주소"
+    required: true
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 7
+      maxLength: 15
+      default: "172.30.1.3"
+  - name: wallpadPort
+    title: "월패드 게이트웨이 포트"
+    description: "ESP32 TCP 서버 포트"
+    required: true
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+  - name: txDelay
+    title: "송신 딜레이 (ms)"
+    description: "연속 패킷 송신 간격"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 500
+      default: 50
+  - name: elevatorIp
+    title: "엘리베이터 EW11 IP"
+    description: "엘리베이터 전용 EW11 IP 주소 (미입력 시 비활성)"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+  - name: elevatorPort
+    title: "엘리베이터 EW11 포트"
+    description: "엘리베이터 TCP 포트"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+  - name: myFloor
+    title: "우리집 층수"
+    description: "엘리베이터 도착 알림 층수"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 99
+      default: 15

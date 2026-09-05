@@ -5,12 +5,6 @@ local log = require "log"
 
 local CommandHandlers = {}
 
-local PROFILE_REVERSE_MAP = {
-  ["auto"] = 0,
-  ["custom1"] = 1,
-  ["custom2"] = 2,
-  ["custom3"] = 3
-}
 
 local function get_connection_info(device)
   local ip = device.preferences.gatewayIp or "172.30.1.3"
@@ -54,13 +48,10 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     log.info("🧹 [CMD] Clear Logs triggered from Logs switch!")
     gateway_client.clear_reboot_logs(ip, port)
     gateway_client.clear_coredump(ip, port)
-    local cap_rlog = capabilities["digituniverse06711.logHistory"]
-    local cap_cd = capabilities["digituniverse06711.crashDump"]
-    if cap_rlog then
-      device:emit_component_event(comp, cap_rlog.history({ value = "Empty" }))
-    end
-    if cap_cd then
-      device:emit_component_event(comp, cap_cd.details({ value = "Empty" }))
+    local cap_hist = capabilities["digituniverse06711.history"]
+    if cap_hist then
+      device:emit_component_event(comp, cap_hist.history({ value = "Empty Log" }))
+      telemetry_handler.register_ticker(device, comp, cap_hist, "history", "history", { "Empty Log", "Empty Crash" }, true)
     end
   elseif comp_id == "network" then
     log.info("📶 [CMD] Wi-Fi Scan triggered from Network switch!")
@@ -68,20 +59,47 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     if cap_scan then
       device:emit_component_event(comp, cap_scan.scanResult({ value = "Scanning..." }))
     end
-    local res = gateway_client.wifi_scan(ip, port)
-    local result_text = "Scan Ready"
-    if res and res.count then
-      result_text = string.format("%d APs Found", res.count)
-    elseif res and res.msg then
-      if res.msg:match("Unknown") then
-        result_text = "Need v2.6.6"
-      else
-        result_text = res.msg
+
+    -- 스캔 중에는 마스터 틱 레지스트리에서 scan 항목 임시 제거
+    local reg = device:get_field("ticker_registry") or {}
+    reg["scan"] = nil
+    device:set_field("ticker_registry", reg)
+
+    local res, err = gateway_client.wifi_scan(ip, port)
+    local valid_aps = {}
+
+    if res and res.aps and #res.aps > 0 then
+      for _, item in ipairs(res.aps) do
+        local raw_s = item.ssid or ""
+        local s = raw_s:match("^%s*(.-)%s*$")
+        if s and s ~= "" then
+          local pct = tonumber(item.pct) or 70
+          table.insert(valid_aps, { ssid = s, pct = pct })
+        end
       end
     end
-    if cap_scan then
-      device:emit_component_event(comp, cap_scan.scanResult({ value = result_text }))
-      device:set_field("last_scan_result", result_text)
+
+    if #valid_aps > 0 then
+      local scan_items = {}
+      for _, ap in ipairs(valid_aps) do
+        table.insert(scan_items, string.format("%s (%d%%)", ap.ssid, ap.pct))
+      end
+      device:set_field("last_scan_result", scan_items[1])
+      device:set_field("scan_items", scan_items)
+      telemetry_handler.register_ticker(device, comp, cap_scan, "scanResult", "scan", scan_items, true)
+    else
+      device:set_field("scan_items", nil)
+      local fail_text = "No Networks"
+      if err then
+        log.error("❌ [CMD] Wi-Fi Scan RPC error: " .. tostring(err))
+        fail_text = "Scan Timeout"
+      elseif res and res.msg then
+        fail_text = res.msg
+      end
+      if cap_scan then
+        device:emit_component_event(comp, cap_scan.scanResult({ value = fail_text }))
+        device:set_field("last_scan_result", fail_text)
+      end
     end
     CommandHandlers.refresh_telemetry(driver, device)
   elseif comp_id == "ota" then
@@ -105,46 +123,9 @@ function CommandHandlers.handle_switch_off(driver, device, command)
   end
 end
 
-function CommandHandlers.handle_set_profile(driver, device, command)
-  local prof_name = command.args.profile
-  local slot = PROFILE_REVERSE_MAP[prof_name] or 0
-  local ip, port = get_connection_info(device)
-  log.info(string.format("🎛️  [CMD] Switching Wallpad Profile -> Slot %d (%s)", slot, prof_name))
-  gateway_client.set_profile(ip, port, slot)
-  refresh_telemetry(driver, device)
-end
-
-function CommandHandlers.handle_set_wifi_mode(driver, device, command)
-  local mode = command.args.mode or "STA"
-  local ip, port = get_connection_info(device)
-  log.info(string.format("📶 [CMD] Switching Wi-Fi Mode -> %s", mode))
-  gateway_client.set_wifi_mode(ip, port, mode)
-  refresh_telemetry(driver, device)
-end
-
-function CommandHandlers.handle_clear_coredump(driver, device, command)
-  local ip, port = get_connection_info(device)
-  log.info("🧹 [CMD] Clearing flash coredump partition on gateway")
-  gateway_client.clear_coredump(ip, port)
-  refresh_telemetry(driver, device)
-end
-
-function CommandHandlers.handle_clear_reboot_logs(driver, device, command)
-  local ip, port = get_connection_info(device)
-  log.info("🧹 [CMD] Clearing NVS reboot log history on gateway")
-  gateway_client.clear_reboot_logs(ip, port)
-  refresh_telemetry(driver, device)
-end
-
 -- ============================================================================
--- Cloud OTA 핸들러 (Method 1: GitHub Releases 자동 다운로드)
+-- Cloud OTA 핸들러 (GitHub Raw 바이너리 다운로드 및 무중단 적용)
 -- ============================================================================
-function CommandHandlers.handle_set_ota_channel(driver, device, command)
-  local channel = command.args.channel or "stable"
-  log.info(string.format("Switching OTA release channel to: %s", channel))
-  device:set_field("ota_channel", channel)
-  refresh_telemetry(driver, device)
-end
 
 function CommandHandlers.handle_start_ota(driver, device, command)
   local ip, port = get_connection_info(device)

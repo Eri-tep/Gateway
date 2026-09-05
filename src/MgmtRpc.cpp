@@ -102,18 +102,23 @@ static void Task_HttpOta(void *pvParameters) {
     return;
   }
 
+  g_ota_in_progress.store(true, std::memory_order_release);
+  if (g_system_event_group) {
+    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+
   WiFiClient *stream = http.getStreamPtr();
-  uint8_t buff[1024];
+  static uint8_t s_ota_buff[4096]; // Flash 4KB Sector 일치 정적 버퍼 (Zero Heap / Zero Stack)
   size_t written = 0;
   uint32_t last_progress_ms = 0;
 
   while (http.connected() && (written < static_cast<size_t>(contentLength))) {
     size_t sizeAvailable = stream->available();
     if (sizeAvailable > 0) {
-      size_t to_read = std::min(sizeAvailable, sizeof(buff));
-      int c = stream->readBytes(buff, to_read);
+      size_t to_read = std::min(sizeAvailable, sizeof(s_ota_buff));
+      int c = stream->readBytes(s_ota_buff, to_read);
       if (c > 0) {
-        size_t w = Update.write(buff, c);
+        size_t w = Update.write(s_ota_buff, c);
         if (w != static_cast<size_t>(c)) {
           snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
           snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Flash write error at %u", (unsigned)written);
@@ -130,7 +135,7 @@ static void Task_HttpOta(void *pvParameters) {
         }
       }
     } else {
-      vTaskDelay(pdMS_TO_TICKS(5));
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
 
@@ -152,6 +157,10 @@ static void Task_HttpOta(void *pvParameters) {
 
   http.end();
   g_http_ota_state.in_progress = false;
+  g_ota_in_progress.store(false, std::memory_order_release);
+  if (g_system_event_group) {
+    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
   free(url);
   vTaskDelete(nullptr);
 }
@@ -174,7 +183,8 @@ void Mgmt_StartHttpOta(const char *url) {
     return;
   }
 
-  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 8192, url_copy, 5, nullptr, 0);
+  // Priority 12 (Network 태스크와 동급 상향 조정으로 CPU 기아 방지)
+  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 8192, url_copy, 12, nullptr, 0);
 }
 
 // ============================================================================
@@ -270,9 +280,11 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
 
   uint32_t ch3_rx = g_pkt_stats.ch3.rx_pkts.load(std::memory_order_relaxed);
   uint32_t ch3_tx = g_pkt_stats.ch3.tx_pkts.load(std::memory_order_relaxed);
+  uint32_t ch3_uncached = g_pkt_stats.ch3.uncached_pkts.load(std::memory_order_relaxed);
 
   uint32_t ch4_rx = g_pkt_stats.ch4.rx_pkts.load(std::memory_order_relaxed);
   uint32_t ch4_tx = g_pkt_stats.ch4.tx_pkts.load(std::memory_order_relaxed);
+  uint32_t ch4_inv = g_pkt_stats.ch4.invalid_frames.load(std::memory_order_relaxed);
 
   uint32_t ch5_rx = g_pkt_stats.ch5.rx_pkts.load(std::memory_order_relaxed);
   uint32_t ch5_tx = g_pkt_stats.ch5.tx_pkts.load(std::memory_order_relaxed);
@@ -320,8 +332,8 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
   else if (cur_wmode == WIFI_MODE_APSTA) mode_str = "AP_STA";
 
   out.appendFormat("\"wifi\":{\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"mode\":\"%s\"},",
-                   WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : (g_config.wifi_ssid[0] ? g_config.wifi_ssid : "Disconnected"),
-                   static_cast<int>(WiFi.RSSI()),
+                   WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected",
+                   WiFi.status() == WL_CONNECTED ? static_cast<int>(WiFi.RSSI()) : -100,
                    WiFi.localIP().toString().c_str(),
                    mode_str);
 
@@ -381,15 +393,15 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
   // Channels
   out.appendFormat("\"channels\":{\"ch1\":{\"rx\":%u,\"tx\":%u,\"crc_err\":%u,\"timeout\":%u,\"crc_rate\":%.2f},"
                    "\"ch2\":{\"rx\":%u,\"tx\":%u,\"uncached\":%u},"
-                   "\"ch3\":{\"rx\":%u,\"tx\":%u},"
-                   "\"ch4\":{\"rx\":%u,\"tx\":%u},"
+                   "\"ch3\":{\"rx\":%u,\"tx\":%u,\"uncached\":%u},"
+                   "\"ch4\":{\"rx\":%u,\"tx\":%u,\"inv\":%u},"
                    "\"ch5\":{\"rx\":%u,\"tx\":%u,\"dropped\":%u},"
                    "\"ch6\":{\"rx\":%u,\"tx\":%u,\"dropped\":%u},"
                    "\"ch7\":{\"rx\":%u,\"tx\":%u}},",
                    ch1_rx, ch1_tx, ch1_crc, ch1_tout, crc_rate,
                    ch2_rx, ch2_tx, ch2_uncached,
-                   ch3_rx, ch3_tx,
-                   ch4_rx, ch4_tx,
+                   ch3_rx, ch3_tx, ch3_uncached,
+                   ch4_rx, ch4_tx, ch4_inv,
                    ch5_rx, ch5_tx, ch5_drp,
                    ch6_rx, ch6_tx, ch6_drp,
                    ch7_rx, ch7_tx);
@@ -572,9 +584,22 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 
   // 6. cache_purge_rescan
   if (strcasecmp(cmd, "cache_purge_rescan") == 0) {
+    g_auto_probing_engine.reset();
+    g_doorphone_tracker.clearNvs();
     g_polling_targets.clear();
     g_device_repo.clear();
-    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Cache purged, bus rescan triggered\"}\n";
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Auto-probing reset and cache purged, bus rescan triggered\"}\n";
+    send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+    return;
+  }
+
+  // 6.1. wallpad_reset (Explicit Wallpad Auto-probing Reset)
+  if (strcasecmp(cmd, "wallpad_reset") == 0) {
+    g_auto_probing_engine.reset();
+    g_doorphone_tracker.clearNvs();
+    g_polling_targets.clear();
+    g_device_repo.clear();
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Wallpad auto-probing and framing reset completed\"}\n";
     send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
     return;
   }
@@ -597,16 +622,65 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
-  // 9. wifi_scan
+  // 9. wifi_scan (Top 4 Strongest SSIDs with signal percentage, skipping empty/hidden)
   if (strcasecmp(cmd, "wifi_scan") == 0) {
     int n = WiFi.scanNetworks(false, true);
-    char resp[128];
-    if (n < 0) {
-      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":0,\"msg\":\"0 APs Found\"}\n");
-    } else {
-      snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"msg\":\"%d APs Found\"}\n", n, n);
+    if (n <= 0) {
+      WiFi.scanDelete();
+      const char *no_ap_msg = "{\"res\":\"ok\",\"count\":0,\"ap_count\":0,\"aps\":[],\"msg\":\"No Networks Found\"}\n";
+      send(sock, no_ap_msg, strlen(no_ap_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    // 인덱스 배열 정렬 (RSSI 내림차순)
+    std::vector<int> indices(n);
+    for (int i = 0; i < n; ++i) indices[i] = i;
+    std::sort(indices.begin(), indices.end(), [](int a, int b) {
+      return WiFi.RSSI(a) > WiFi.RSSI(b);
+    });
+
+    struct ApInfo {
+      String ssid;
+      int pct;
+    };
+    std::vector<ApInfo> top_aps;
+    top_aps.reserve(4);
+
+    for (int idx : indices) {
+      String s = WiFi.SSID(idx);
+      s.trim();
+      if (s.length() == 0) continue;
+
+      // 중복 SSID 방지
+      bool duplicate = false;
+      for (const auto &item : top_aps) {
+        if (item.ssid == s) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) continue;
+
+      int rssi = WiFi.RSSI(idx);
+      int pct = std::min(100, std::max(0, 2 * (rssi + 100)));
+      s.replace("\"", "\\\""); // JSON escape
+      top_aps.push_back({s, pct});
+      if (top_aps.size() >= 4) break;
     }
     WiFi.scanDelete();
+
+    char resp[512];
+    int offset = snprintf(resp, sizeof(resp), "{\"res\":\"ok\",\"count\":%d,\"ap_count\":%u,\"aps\":[",
+                          n, static_cast<unsigned>(top_aps.size()));
+    for (size_t i = 0; i < top_aps.size(); ++i) {
+      offset += snprintf(resp + offset, sizeof(resp) - offset,
+                         "%s{\"ssid\":\"%s\",\"pct\":%d}",
+                         (i > 0 ? "," : ""),
+                         top_aps[i].ssid.c_str(),
+                         top_aps[i].pct);
+      if (offset >= (int)sizeof(resp) - 8) break;
+    }
+    snprintf(resp + offset, sizeof(resp) - offset, "]}\n");
     send(sock, resp, strlen(resp), MSG_DONTWAIT);
     return;
   }
@@ -657,20 +731,36 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     char new_ssid[64] = {0};
     char new_pass[64] = {0};
     bool has_ssid = findJsonStringValue(json_str, "ssid", new_ssid, sizeof(new_ssid));
-    findJsonStringValue(json_str, "password", new_pass, sizeof(new_pass));
+    bool has_pass = findJsonStringValue(json_str, "password", new_pass, sizeof(new_pass));
 
-    if (has_ssid && strlen(new_ssid) > 0) {
-      strncpy(g_config.wifi_ssid, new_ssid, sizeof(g_config.wifi_ssid) - 1);
-      strncpy(g_config.wifi_password, new_pass, sizeof(g_config.wifi_password) - 1);
-      Config_Save();
-      const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Wi-Fi credentials saved. Reconnecting...\"}\n";
-      send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
-      WiFi.disconnect();
-      WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
-    } else {
-      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid SSID\"}\n";
+    if (!has_ssid || strlen(new_ssid) == 0) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Missing or empty SSID\"}\n";
       send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
     }
+
+    if (has_pass && strlen(new_pass) > 0 && strlen(new_pass) < 8) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Wi-Fi password must be at least 8 characters (or empty for open network)\"}\n";
+      send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    // 현재 정상 동작 중인 Wi-Fi 정보를 백업하여 15초 내 접속 실패 시 자동 롤백 준비
+    strncpy(g_wifi_guard.prev_ssid, g_config.wifi_ssid, sizeof(g_wifi_guard.prev_ssid) - 1);
+    strncpy(g_wifi_guard.prev_pass, g_config.wifi_password, sizeof(g_wifi_guard.prev_pass) - 1);
+    g_wifi_guard.start_ms = millis();
+    g_wifi_guard.testing.store(true, std::memory_order_release);
+
+    strncpy(g_config.wifi_ssid, new_ssid, sizeof(g_config.wifi_ssid) - 1);
+    strncpy(g_config.wifi_password, new_pass, sizeof(g_config.wifi_password) - 1);
+
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Testing new Wi-Fi credentials (15s automatic fallback guard active)...\"}\n";
+    send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    WiFi.disconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
     return;
   }
 

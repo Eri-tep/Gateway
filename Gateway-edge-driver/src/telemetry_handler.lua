@@ -30,6 +30,52 @@ local function emit_event(device, comp, cap_event)
   end
 end
 
+-- Unified rolling ticker interval (seconds)
+local TICKER_INTERVAL = 10
+
+-- Ensure the single unified master rolling ticker is running
+function TelemetryHandler.ensure_master_ticker(device)
+  if device:get_field("master_roll_timer") then return end
+
+  local timer = device.thread:call_on_schedule(TICKER_INTERVAL, function()
+    local registry = device:get_field("ticker_registry") or {}
+    for _, entry in pairs(registry) do
+      if entry.items and #entry.items > 1 and entry.cap and entry.comp then
+        entry.idx = (entry.idx % #entry.items) + 1
+        emit_event(device, entry.comp, entry.cap[entry.attr_name]({ value = entry.items[entry.idx] }))
+      end
+    end
+  end, "master_roll_timer")
+  device:set_field("master_roll_timer", timer)
+end
+
+-- Unified ticker registration: registers items to the master tick cycle
+function TelemetryHandler.register_ticker(device, comp, cap, attr_name, ticker_id, items, reset_idx)
+  if not cap or not items or #items == 0 then return end
+
+  local registry = device:get_field("ticker_registry") or {}
+  local current = registry[ticker_id] or { idx = 1 }
+  current.comp = comp
+  current.cap = cap
+  current.attr_name = attr_name
+  current.items = items
+
+  if reset_idx or current.idx > #items then
+    current.idx = 1
+  end
+
+  registry[ticker_id] = current
+  device:set_field("ticker_registry", registry)
+
+  -- Emit initial/current value immediately
+  emit_event(device, comp, cap[attr_name]({ value = items[current.idx] }))
+
+  -- Ensure master ticker is active
+  TelemetryHandler.ensure_master_ticker(device)
+end
+
+local register_ticker = TelemetryHandler.register_ticker
+
 function TelemetryHandler.handle_telemetry(driver, device, data)
   if not data or data.res ~= "ok" then
     log.warn("Invalid telemetry payload received from gateway")
@@ -86,19 +132,14 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_wallpad, cap_pname.profileName({ value = label_key }))
   end
 
-  -- 2-2. Frame: F7...XOR EE (11B)
+  -- 2-2. Frame: F7 [LN] [SA] [DT] [OC] [CD] [ID] [PL] [CS] EE
   local prof = data.profile or {}
   local stx_raw = prof.stx or prof.header or prof.start_byte or prof.stx_hex or (data.packet and data.packet.stx)
   local stx = stx_raw and tostring(stx_raw):gsub("^0x", ""):upper() or "F7"
   local etx_raw = prof.etx or prof.footer or prof.end_byte or prof.etx_hex or (data.packet and data.packet.etx)
   local etx = etx_raw and tostring(etx_raw):gsub("^0x", ""):upper() or "EE"
-  local plen = tonumber(prof.min_len or prof.len or prof.packet_len or (data.packet and data.packet.len)) or 11
 
-  local cs_algo = prof.cs_algo or prof.checksum or prof.checksum_type or prof.crc or (data.packet and data.packet.checksum) or "XOR"
-  local cs_name = tostring(cs_algo):upper():gsub("%s*%(.*%)", ""):gsub("%s*%[.*%]", "")
-  if cs_name == "" or cs_name == "N/A" then cs_name = "XOR" end
-
-  local sig_str = string.format("%s...%s %s (%dB)", stx, cs_name, etx, plen)
+  local sig_str = string.format("%s [LN] [SA] [DT] [OC] [CD] [ID] [PL] [CS] %s", stx, etx)
   local cap_frame = capabilities["digituniverse06711.frame"]
   if cap_frame then
     emit_event(device, comp_wallpad, cap_frame.frame({ value = sig_str }))
@@ -152,26 +193,16 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_diag, cap_uptime.uptime({ value = up_str }))
   end
 
-  -- 2-2. Cpu (Core0, 1 (5%, 4%))
+  -- 3-2. Unified Resource (CPU -> RAM -> Flash 4초 순회)
   local c0 = (data.system and data.system.cpu0_load) or 0
   local c1 = (data.system and data.system.cpu1_load) or 0
-  local cpu_str = string.format("Core0, 1 (%d%%, %d%%)", c0, c1)
-  local cap_cpu = capabilities["digituniverse06711.cpu"]
-  if cap_cpu then
-    emit_event(device, comp_diag, cap_cpu.cpuLoad({ value = cpu_str }))
-  end
+  local cpu_str = string.format("CPU: Core0(%d%%), Core1(%d%%)", c0, c1)
 
-  -- 2-3. Ram (76% (243 / 320 KB))
   local free_heap = (data.system and data.system.free_heap_kb) or 77
   local used_heap = math.max(0, 320 - free_heap)
   local ram_pct = math.floor(math.max(0, math.min(100, used_heap * 100 / 320)))
-  local ram_str = string.format("%d%% (%d / 320 KB)", ram_pct, used_heap)
-  local cap_res = capabilities["digituniverse06711.ram"]
-  if cap_res then
-    emit_event(device, comp_diag, cap_res.ram({ value = ram_str }))
-  end
+  local ram_str = string.format("RAM: %d%% (%d / 320 KB)", ram_pct, used_heap)
 
-  -- 2-4. Flash (<pct>% (<used> / <total> MB))
   local sys = data.system or {}
   local f_total = tonumber(sys.flash_total_mb or sys.flash_size_mb or sys.flash_total or sys.flash_mb)
   local f_used = tonumber(sys.flash_used_mb or sys.flash_used)
@@ -186,26 +217,71 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     f_used = f_used or 3.98
     rom_pct = rom_pct or 49
   end
+  local flash_str = string.format("Flash: %d%% (%.2f / %.2f MB)", rom_pct or 49, f_used or 3.98, f_total or 8.19)
 
-  local flash_str = string.format("%d%% (%.2f / %.2f MB)", rom_pct or 49, f_used or 3.98, f_total or 8.19)
-  local cap_flash = capabilities["digituniverse06711.flash"]
-  if cap_flash then
-    emit_event(device, comp_diag, cap_flash.flash({ value = flash_str }))
+  register_ticker(device, comp_diag, capabilities["digituniverse06711.resource"], "resource", "resource",
+                  { cpu_str, ram_str, flash_str })
+
+  -- 3-3. Traffic Packet Stats (CH1 ~ CH4 10초 순회)
+  local function fmt_num(n)
+    n = tonumber(n) or 0
+    if n >= 1000000 then
+      return string.format("%.1fM", n / 1000000)
+    elseif n >= 1000 then
+      return string.format("%.1fk", n / 1000)
+    else
+      return tostring(n)
+    end
   end
 
+  local channels = data.channels or {}
+  local ch1 = channels.ch1 or {}
+  local ch2 = channels.ch2 or {}
+  local ch3 = channels.ch3 or {}
+  local ch4 = channels.ch4 or {}
+
+  -- CH1: T <tx> / R <rx> (CRC <err>) -> 0 초과 시에만 (CRC N) 표기
+  local ch1_str = string.format("CH1: T %s / R %s", fmt_num(ch1.tx), fmt_num(ch1.rx))
+  local ch1_crc = tonumber(ch1.crc_err or ch1.crc_errors) or 0
+  if ch1_crc > 0 then
+    ch1_str = string.format("%s (CRC %d)", ch1_str, ch1_crc)
+  end
+
+  -- CH2: T <tx> / R <rx> (UnC <uncached>) -> 0 초과 시에만 (UnC N) 표기
+  local ch2_str = string.format("CH2: T %s / R %s", fmt_num(ch2.tx), fmt_num(ch2.rx))
+  local ch2_unc = tonumber(ch2.uncached or ch2.uncached_pkts) or 0
+  if ch2_unc > 0 then
+    ch2_str = string.format("%s (UnC %d)", ch2_str, ch2_unc)
+  end
+
+  -- CH3: T <tx> / R <rx> (UnC <uncached>) -> 0 초과 시에만 (UnC N) 표기
+  local ch3_str = string.format("CH3: T %s / R %s", fmt_num(ch3.tx), fmt_num(ch3.rx))
+  local ch3_unc = tonumber(ch3.uncached or ch3.uncached_pkts) or 0
+  if ch3_unc > 0 then
+    ch3_str = string.format("%s (UnC %d)", ch3_str, ch3_unc)
+  end
+
+  -- CH4: T <tx> / R <rx> (InV <invalid>) -> 0 초과 시에만 (InV N) 표기
+  local ch4_str = string.format("CH4: T %s / R %s", fmt_num(ch4.tx), fmt_num(ch4.rx))
+  local ch4_inv = tonumber(ch4.inv or ch4.invalid or ch4.invalid_frames or ch4.err) or 0
+  if ch4_inv > 0 then
+    ch4_str = string.format("%s (InV %d)", ch4_str, ch4_inv)
+  end
+
+  register_ticker(device, comp_diag, capabilities["digituniverse06711.channel"], "channel", "channel",
+                  { ch1_str, ch2_str, ch3_str, ch4_str })
+
   -- ═══════════════════════════════════════════════════════════════════════════
-  -- CARD 3: Logs (진단 로그 & 코어 덤프 - 네트워크 바로 위)
+  -- CARD 4: Logs (진단 로그 & 코어 덤프 순회)
   -- ═══════════════════════════════════════════════════════════════════════════
 
-  -- 3-0. Switch (진단 로그 초기화 스위치) 🟦 대표 파란 헤더
+  -- 4-0. Switch (진단 로그 초기화 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_logs, capabilities.switch.switch.off())
 
-  -- 3-1. Log History (20:12, Low Heap 또는 Empty)
-  local log_str = "Empty"
+  -- 4-1. History (Log & Crash Dump 10초 주기 롤링 순회 - 시간 부분 제외, Empty일 때 Empty Log / Empty Crash)
+  local log_display = "Empty Log"
   if data.diagnostics and data.diagnostics.reboot_logs and #data.diagnostics.reboot_logs > 0 then
     local top = data.diagnostics.reboot_logs[1]
-    local t = top.time or ""
-    local time_hm = t:match("%s(%d%d:%d%d)") or t:match("(%d%d:%d%d)") or t
     local reason_short = top.reason or "Unknown"
     if reason_short:match("Low Heap") then
       reason_short = "Low Heap"
@@ -215,60 +291,54 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
       reason_short = "Remote Reboot"
     elseif reason_short:match("Power") then
       reason_short = "Power On"
+    elseif reason_short:match("CPU Panic") then
+      reason_short = "CPU Panic"
     end
-    if time_hm ~= "" then
-      log_str = string.format("%s, %s", time_hm, reason_short)
-    else
-      log_str = reason_short
-    end
-  end
-  local cap_rlog = capabilities["digituniverse06711.logHistory"]
-  if cap_rlog then
-    emit_event(device, comp_logs, cap_rlog.history({ value = log_str }))
+    log_display = reason_short
   end
 
-  -- 3-2. Crash Dump (Empty 또는 Panic Task ...)
-  local cd_str = "Empty"
+  local crash_display = "Empty Crash"
   if data.diagnostics and data.diagnostics.coredump and data.diagnostics.coredump.valid then
     local cd = data.diagnostics.coredump
-    cd_str = string.format("Panic Task %s", cd.task or "main")
-  end
-  local cap_cd = capabilities["digituniverse06711.crashDump"]
-  if cap_cd then
-    emit_event(device, comp_logs, cap_cd.details({ value = cd_str }))
+    crash_display = string.format("Panic Task %s", cd.task or "main")
   end
 
+  register_ticker(device, comp_logs, capabilities["digituniverse06711.history"], "history", "history",
+                  { log_display, crash_display })
+
   -- ═══════════════════════════════════════════════════════════════════════════
-  -- CARD 4: Network (네트워크 정보 & WiFi 스캔)
+  -- CARD 5: Network (네트워크 정보 & WiFi 스캔)
   -- ═══════════════════════════════════════════════════════════════════════════
 
-  -- 4-0. Switch (WiFi 스캔 스위치) 🟦 대표 파란 헤더
+  -- 5-0. Switch (WiFi 스캔 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_net, capabilities.switch.switch.off())
 
-  -- 4-1. Scan (Ready / N APs Found)
-  local last_scan = device:get_field("last_scan_result") or "Ready"
+  -- 5-1. Scan (Ready / N APs Found or Active Rolling Scan)
   local cap_scan = capabilities["digituniverse06711.scan"]
-  if cap_scan then
-    emit_event(device, comp_net, cap_scan.scanResult({ value = last_scan }))
+  local scan_items = device:get_field("scan_items")
+  if scan_items and #scan_items > 0 then
+    register_ticker(device, comp_net, cap_scan, "scanResult", "scan", scan_items)
+  else
+    local last_scan = device:get_field("last_scan_result") or "Ready"
+    if cap_scan then
+      emit_event(device, comp_net, cap_scan.scanResult({ value = last_scan }))
+    end
   end
 
-  -- 4-2. WiFi (<SSID> (<Quality>%))
+  -- 5-2. WiFi 정보 & Mode 순회 (Wi-Fi:, Mode: 접두사 없음)
   local wifi_data = data.wifi or {}
-  local ssid = (wifi_data.ssid and wifi_data.ssid ~= "") and wifi_data.ssid or "Connected"
+  local ssid = (wifi_data.ssid and wifi_data.ssid ~= "") and wifi_data.ssid or "Disconnected"
   local rssi = wifi_data.rssi or (sys and sys.wifi_rssi)
-  local wifi_display = ssid
-  if rssi then
+  local wifi_display = "Disconnected (0%)"
+  if ssid == "Disconnected" then
+    wifi_display = "Disconnected (0%)"
+  elseif rssi then
     local lqi = math.floor(math.min(100, math.max(0, 2 * (rssi + 100))))
     wifi_display = string.format("%s (%d%%)", ssid, lqi)
   else
     wifi_display = string.format("%s (70%%)", ssid)
   end
-  local cap_winfo = capabilities["digituniverse06711.wifi"]
-  if cap_winfo then
-    emit_event(device, comp_net, cap_winfo.wifiInfo({ value = wifi_display }))
-  end
 
-  -- 4-3. Mode (STA (172.30.1.3) 또는 STA + AP (172.30.2.1))
   local ip_addr = (data.wifi and data.wifi.ip and data.wifi.ip ~= "") and data.wifi.ip or "172.30.1.3"
   local ap_ip_str = "172.30.2.1"
   local raw_wmode = (data.wifi and data.wifi.mode) or "STA"
@@ -280,19 +350,18 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   else
     mode_str = string.format("STA (%s)", ip_addr)
   end
-  local cap_wmode = capabilities["digituniverse06711.mode"]
-  if cap_wmode then
-    emit_event(device, comp_net, cap_wmode.wifiMode({ value = mode_str }))
-  end
+
+  register_ticker(device, comp_net, capabilities["digituniverse06711.wifi"], "wifiInfo", "wifi",
+                  { wifi_display, mode_str })
 
   -- ═══════════════════════════════════════════════════════════════════════════
-  -- CARD 5: Firmware & OTA (펌웨어 관리 & OTA)
+  -- CARD 6: Firmware & OTA (펌웨어 관리 & OTA)
   -- ═══════════════════════════════════════════════════════════════════════════
 
-  -- 5-0. Switch (OTA 업데이트 시작 스위치) 🟦 대표 파란 헤더
+  -- 6-0. Switch (OTA 업데이트 시작 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_ota, capabilities.switch.switch.off())
 
-  -- 5-1. Version
+  -- 6-1. Version (OTA 진행 시 Updating % 표시)
   local cur_fw = data.system and data.system.firmware
   if cur_fw and cur_fw ~= "" then
     if not cur_fw:match("^v") then cur_fw = "v" .. cur_fw end
@@ -301,11 +370,20 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   end
 
   local latest_fw = (data.system and data.system.latest_firmware) or (data.ota and data.ota.latest_firmware)
-  local fw_display = string.format("%s (Latest)", cur_fw)
+  local fw_display = cur_fw
   if latest_fw and latest_fw ~= "" then
     if not latest_fw:match("^v") then latest_fw = "v" .. latest_fw end
     if is_newer_version(latest_fw, cur_fw) then
-      fw_display = string.format("%s ➔ New %s", cur_fw, latest_fw)
+      fw_display = string.format("%s ➔ %s", cur_fw, latest_fw)
+    end
+  end
+
+  -- OTA 진행 중이거나 에러 발생 시 Version 항목에 상태 출력
+  if data.ota then
+    if data.ota.in_progress then
+      fw_display = string.format("Updating %d%%", data.ota.progress_pct or 0)
+    elseif data.ota.last_error and data.ota.last_error ~= "" then
+      fw_display = string.format("OTA Error: %s", data.ota.last_error)
     end
   end
 
@@ -314,34 +392,18 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_ota, cap_fw.version({ value = fw_display }))
   end
 
-  -- 5-2. Build (Stable (Idle) / Updating 45% 등)
+  -- 6-2. Build (순회 제거, Build: 접두사 제거, 단독 고정 표시)
   local stab_str = "Stable"
   if up_s < 120 then
     stab_str = "Pending"
   elseif data.diagnostics and data.diagnostics.coredump and data.diagnostics.coredump.valid then
     stab_str = "Crash 1"
   end
+  local build_str = string.format("%s (Idle)", stab_str)
 
-  local ota_str = string.format("%s (Idle)", stab_str)
-  if data.ota then
-    if data.ota.in_progress then
-      ota_str = string.format("Updating %d%%", data.ota.progress_pct or 0)
-    elseif data.ota.last_error and data.ota.last_error ~= "" then
-      ota_str = string.format("Failed, %s", data.ota.last_error)
-    end
-  end
   local cap_ostate = capabilities["digituniverse06711.build"]
   if cap_ostate then
-    emit_event(device, comp_ota, cap_ostate.build({ value = ota_str }))
-  end
-
-  -- 6-3. Updated: YYYY-MM-DD HH:MM 형식
-  local cur_time = os.time()
-  local boot_epoch = cur_time - up_s
-  local date_str = os.date("%Y-%m-%d %H:%M", boot_epoch)
-  local cap_udate = capabilities["digituniverse06711.updated"]
-  if cap_udate then
-    emit_event(device, comp_ota, cap_udate.updated({ value = date_str }))
+    emit_event(device, comp_ota, cap_ostate.build({ value = build_str }))
   end
 
   log.info("📊 ═══════════════════════════════════════════════════════════════════════")
