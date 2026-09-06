@@ -1285,9 +1285,21 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   char cs_rate_buf[48];
   uint32_t cs_pct = desc.tested_packets ? (desc.matched_packets * 100 / desc.tested_packets) : 100;
-  snprintf(cs_rate_buf, sizeof(cs_rate_buf), "%u / %u Packets (%u%%)",
-           static_cast<unsigned>(desc.matched_packets), static_cast<unsigned>(desc.tested_packets),
-           static_cast<unsigned>(cs_pct));
+  auto format_compact = [](char *buf, size_t sz, uint32_t count) {
+    if (count >= 1000000) {
+      snprintf(buf, sz, "%.1fM", count / 1000000.0);
+    } else if (count >= 1000) {
+      snprintf(buf, sz, "%.1fk", count / 1000.0);
+    } else {
+      snprintf(buf, sz, "%u", static_cast<unsigned>(count));
+    }
+  };
+  char m_str[16], t_str[16];
+  format_compact(m_str, sizeof(m_str), desc.matched_packets);
+  format_compact(t_str, sizeof(t_str), desc.tested_packets);
+
+  snprintf(cs_rate_buf, sizeof(cs_rate_buf), "%s / %s Packets (%u%%)",
+           m_str, t_str, static_cast<unsigned>(cs_pct));
   const char *cs_status = (cs_pct >= 95) ? "[STABLE]" : (cs_pct >= 80 ? "[NOISY]" : "[ERROR]");
 
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Runtime Sync", "Cache Sync", conv_buf, conv_status);
