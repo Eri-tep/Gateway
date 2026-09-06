@@ -58,13 +58,6 @@ DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad
       }
     }
 
-    // C. 가스 밸브 등 단방향 차단 액추에이터 판별
-    // 선지식(0x43, 0x04/0x01 등)을 전면 배제하고, 이미 관측된 슬롯 특성이 있을 때만 확정
-    const auto *existing_grp = g_control_registry.findGroup(dev_id);
-    if (existing_grp && (existing_grp->close_slot.discovered || existing_grp->coverage.valve_close_seen)) {
-      has_gas_signature = true;
-    }
-
     // D. 콘센트(Outlet) 시그니처 판별
     // 콘센트는 릴레이 상태 외에 전력량(W) 텔레메트리 바이트를 포함하므로
     // 기본 프레임 길이보다 길고(> base_len + 2) 15바이트 이상이며 온도가 아님
@@ -107,9 +100,6 @@ DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad
   }
   if (has_speed_telemetry) {
     return DeviceClass::VENT;
-  }
-  if (has_gas_signature) {
-    return DeviceClass::MOMENTARY;
   }
   if (matched_units > 0) {
     return DeviceClass::SWITCH;
@@ -166,9 +156,6 @@ void ControlTemplateRegistry::clear() {
 }
 
 void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
-  auto ad = g_auto_probing_engine.getDescriptor();
-  group.coverage.dev_class = SlotCoverage::classify(group.dev_id, ad);
-
   // 사용자가 이미 이름을 커스텀 지정한 경우(Unknown/Dev_0x/기본이 아님) 보존
   if (strlen(group.group_name) > 0 &&
       strncmp(group.group_name, "Unknown", 7) != 0 &&
@@ -226,14 +213,6 @@ GroupControlTemplate *ControlTemplateRegistry::findGroup(uint8_t dev_id) {
   taskENTER_CRITICAL(&_mux);
   for (size_t i = 0; i < _group_count; ++i) {
     if (_groups[i].dev_id == dev_id) {
-      if (_groups[i].coverage.dev_class == DeviceClass::UNKNOWN) {
-        auto ad = g_auto_probing_engine.getDescriptor();
-        DeviceClass dc = SlotCoverage::classify(dev_id, ad);
-        if (dc != DeviceClass::UNKNOWN) {
-          _groups[i].coverage.dev_class = dc;
-          autoAssignGroupName(_groups[i]);
-        }
-      }
       taskEXIT_CRITICAL(&_mux);
       return &_groups[i];
     }
@@ -317,15 +296,6 @@ size_t ControlTemplateRegistry::getGroupCount() const {
 bool ControlTemplateRegistry::getGroupByIndex(size_t index, GroupControlTemplate &out) const {
   taskENTER_CRITICAL(&_mux);
   if (index < _group_count) {
-    if (_groups[index].coverage.dev_class == DeviceClass::UNKNOWN) {
-      auto ad = g_auto_probing_engine.getDescriptor();
-      DeviceClass dc = SlotCoverage::classify(_groups[index].dev_id, ad);
-      if (dc != DeviceClass::UNKNOWN) {
-        auto *self = const_cast<ControlTemplateRegistry*>(this);
-        self->_groups[index].coverage.dev_class = dc;
-        self->autoAssignGroupName(self->_groups[index]);
-      }
-    }
     out = _groups[index];
     taskEXIT_CRITICAL(&_mux);
     return true;
@@ -335,13 +305,15 @@ bool ControlTemplateRegistry::getGroupByIndex(size_t index, GroupControlTemplate
 }
 
 bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
-  taskENTER_CRITICAL(&_mux);
   if (dev_id == 0) {
+    taskENTER_CRITICAL(&_mux);
     for (size_t i = 0; i < MAX_GROUPS; ++i) {
       _groups[i] = GroupControlTemplate{};
     }
     _group_count = 0;
+    _session = ActiveLearningSession{};
     taskEXIT_CRITICAL(&_mux);
+
     Preferences prefs;
     if (prefs.begin("ctl_tmpls", false)) {
       prefs.clear();
@@ -350,6 +322,7 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
     return true;
   }
 
+  taskENTER_CRITICAL(&_mux);
   for (size_t i = 0; i < _group_count; ++i) {
     if (_groups[i].dev_id == dev_id) {
       for (size_t j = i; j + 1 < _group_count; ++j) {
@@ -357,6 +330,9 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
       }
       _groups[_group_count - 1] = GroupControlTemplate{};
       _group_count--;
+      if (_session.in_progress && _session.target_dev_id == dev_id) {
+        _session = ActiveLearningSession{};
+      }
       taskEXIT_CRITICAL(&_mux);
       saveToNvs();
       return true;
@@ -393,6 +369,8 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
                    (ad.dev_id_offset < entry.raw_query_len ? entry.raw_query_data[ad.dev_id_offset] : 0);
     if (d_id == 0) continue;
 
+    DeviceClass dc = SlotCoverage::classify(d_id, ad);
+
     GroupControlTemplate *grp = registerOrTouch(d_id);
     if (!grp) continue;
 
@@ -413,8 +391,8 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
         grp->ctl_sub1_override = Config::Devices::SUB_HEAT_EXCHANGER_QUERY; // 0x40
       }
 
+      grp->coverage.dev_class = dc;
       autoAssignGroupName(*grp);
-      grp->coverage.dev_class = SlotCoverage::classify(d_id, ad);
       grp->status = GroupControlTemplate::Status::WAITING;
     }
     taskEXIT_CRITICAL(&_mux);
@@ -716,6 +694,8 @@ bool ControlTemplateRegistry::setupTargetForProbing(uint8_t dev_id) {
     return false;
   }
 
+  GroupControlTemplate *grp = registerOrTouch(dev_id);
+
   taskENTER_CRITICAL(&_mux);
   _session.in_progress = true;
   _session.target_dev_id = dev_id;
@@ -731,7 +711,6 @@ bool ControlTemplateRegistry::setupTargetForProbing(uint8_t dev_id) {
   snprintf(_session.last_log, sizeof(_session.last_log), "Active probing started for 0x%02X (%02X:%02X)",
            dev_id, t_sub1, t_sub2);
 
-  GroupControlTemplate *grp = registerOrTouch(dev_id);
   if (grp) {
     grp->status = GroupControlTemplate::Status::PROBING;
     if (dev_id == Config::Devices::DEV_HEAT_EXCHANGER) {

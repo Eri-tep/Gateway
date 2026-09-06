@@ -922,10 +922,10 @@ void Task_Network(void *pvParameters) {
     g_wdt_monitor.feed(4);
     ArduinoOTA.handle();
     if (g_ota_in_progress.load(std::memory_order_relaxed)) {
-      for (int i = 0; i < 4; i++) {
+      for (int i = 0; i < 8; i++) {
         ArduinoOTA.handle();
       }
-      vTaskDelay(1);
+      taskYIELD();
       continue;
     }
 
@@ -1025,7 +1025,7 @@ void Task_Network(void *pvParameters) {
       }
     }
 
-    struct timeval tv = {0, 15000}; // 15ms 커널 레벨 Event-Driven 블로킹 (vTaskDelay 불필요)
+    struct timeval tv = {0, 10000}; // 10ms 커널 레벨 Event-Driven 블로킹 (소켓 이벤트 발생 시 0ms 즉각 반환, vTaskDelay 불필요)
     int act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
 
     if (act > 0) {
@@ -1838,6 +1838,7 @@ static void Boot_InitWifiAndOta() {
     WiFi.setAutoReconnect(true);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     wifi_config_t w_conf;
     memset(&w_conf, 0, sizeof(w_conf));
