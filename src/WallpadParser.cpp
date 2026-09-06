@@ -778,11 +778,17 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
 
   // [Step 5: Sequence Counter Monotonic Increment Detection & Elimination]
   int seq_idx = -1;
-  if (N >= 3) {
+  if (N >= 4) {
     for (size_t k = 1; k < min_common_len - 1; ++k) {
       int ik = static_cast<int>(k);
       if (ik == len_idx || ik == opcode_idx || ik == swap_i || ik == swap_j || ik == promoted_dev_idx)
         continue;
+      std::set<uint8_t> distinct_vals;
+      for (size_t m = 0; m < N; ++m) distinct_vals.insert(pairs[m].q.data[k]);
+      // Sequence 카운터는 고정값(상수)이거나 가짓수가 적으면 안 됨 (최소 3개 이상의 연속 값 필요)
+      if (distinct_vals.size() < 3)
+        continue;
+
       bool is_inc = true;
       for (size_t m = 0; m < N - 1; ++m) {
         uint8_t diff = static_cast<uint8_t>((pairs[m + 1].q.data[k] - pairs[m].q.data[k]) & 0xFF);
