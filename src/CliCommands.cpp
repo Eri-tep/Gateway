@@ -1191,10 +1191,10 @@ void wallpadPrintStatus(AppendBuf &out) {
   char payload_range_buf[48];
   char payload_len_buf[32];
   if (desc.offsets_locked) {
-    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #%u ~ #N-3", desc.payload_offset);
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #%u ~ #[N-3]", desc.payload_offset);
     snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - %u] Byte", desc.payload_offset + 2);
   } else {
-    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #7 ~ #N-3 : Est");
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #7 ~ #[N-3] : Est");
     snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - 9] Byte : Est");
   }
   const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
@@ -1204,9 +1204,9 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   // 5. Tail (Checksum, ETX)
   char cs_algo_buf[48];
-  snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #N-2 : %s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
+  snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #[N-2] : %s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
   char etx_line_buf[32];
-  snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #N-1 : %s", etx_buf);
+  snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #[N-1] : %s", etx_buf);
 
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "Checksum : CS", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
