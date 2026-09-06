@@ -770,17 +770,27 @@ void ControlTemplateRegistry::processActiveLearning() {
 // NVS
 // ============================================================================
 void ControlTemplateRegistry::saveToNvs() {
+  GroupControlTemplate local_groups[MAX_GROUPS];
+  size_t local_count = 0;
+
+  // 1. Critical section에서는 오직 메모리 복사만 신속히 완료
+  taskENTER_CRITICAL(&_mux);
+  local_count = _group_count;
+  for (size_t i = 0; i < local_count; ++i) {
+    local_groups[i] = _groups[i];
+  }
+  taskEXIT_CRITICAL(&_mux);
+
+  // 2. Flash I/O (NVS)는 락이 완전히 풀린 상태에서 안전하게 수행 (Panic 방지)
   Preferences prefs;
   if (!prefs.begin("ctl_tmpls", false)) return;
 
-  taskENTER_CRITICAL(&_mux);
-  prefs.putUChar("cnt", static_cast<uint8_t>(_group_count));
-  for (size_t i = 0; i < _group_count; ++i) {
+  prefs.putUChar("cnt", static_cast<uint8_t>(local_count));
+  for (size_t i = 0; i < local_count; ++i) {
     char key[16];
     snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
-    prefs.putBytes(key, &_groups[i], sizeof(GroupControlTemplate));
+    prefs.putBytes(key, &local_groups[i], sizeof(GroupControlTemplate));
   }
-  taskEXIT_CRITICAL(&_mux);
   prefs.end();
 }
 
@@ -791,13 +801,18 @@ void ControlTemplateRegistry::loadFromNvs() {
   uint8_t cnt = prefs.getUChar("cnt", 0);
   if (cnt > MAX_GROUPS) cnt = MAX_GROUPS;
 
-  taskENTER_CRITICAL(&_mux);
-  _group_count = cnt;
-  for (size_t i = 0; i < _group_count; ++i) {
+  GroupControlTemplate local_groups[MAX_GROUPS];
+  for (size_t i = 0; i < cnt; ++i) {
     char key[16];
     snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
-    prefs.getBytes(key, &_groups[i], sizeof(GroupControlTemplate));
+    prefs.getBytes(key, &local_groups[i], sizeof(GroupControlTemplate));
+  }
+  prefs.end();
+
+  taskENTER_CRITICAL(&_mux);
+  _group_count = cnt;
+  for (size_t i = 0; i < cnt; ++i) {
+    _groups[i] = local_groups[i];
   }
   taskEXIT_CRITICAL(&_mux);
-  prefs.end();
 }
