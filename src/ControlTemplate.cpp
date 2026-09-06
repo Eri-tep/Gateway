@@ -229,11 +229,15 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
       continue;
     }
 
-    GroupControlTemplate *grp = registerOrTouch(entry.dev_id);
+    // raw_query에서 DevType 추출 (reindex 전이라도 offset 위치에서 직접 읽기)
+    uint8_t d_id = (entry.dev_id != 0) ? entry.dev_id :
+                   (ad.dev_id_offset < entry.raw_query_len ? entry.raw_query_data[ad.dev_id_offset] : 0);
+    if (d_id == 0) continue;
+
+    GroupControlTemplate *grp = registerOrTouch(d_id);
     if (!grp) continue;
 
     taskENTER_CRITICAL(&_mux);
-    // 아직 프레임 골격이 없거나 WAITING 상태이면 1차 캐시(raw_query) 기반 골격 구축
     if (grp->frame_len == 0 || grp->status == GroupControlTemplate::Status::WAITING) {
       grp->frame_len = entry.raw_query_len;
       std::copy(entry.raw_query_data.begin(),
@@ -246,15 +250,12 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
       grp->sub1_offset = sub1_offset;
       grp->sub2_offset = sub2_offset;
 
-      // 전열교환기(ERV) 특수 sub1 고정 오버라이드: 현대통신(0xF7, 0xEE) 규격인 경우에만 0x40 강제
-      if (entry.dev_id == Config::Devices::DEV_HEAT_EXCHANGER && stx == 0xF7 && etx == 0xEE) {
+      if (d_id == Config::Devices::DEV_HEAT_EXCHANGER && stx == 0xF7 && etx == 0xEE) {
         grp->ctl_sub1_override = Config::Devices::SUB_HEAT_EXCHANGER_QUERY; // 0x40
       }
 
       autoAssignGroupName(*grp);
-      if (grp->status == GroupControlTemplate::Status::EMPTY) {
-        grp->status = GroupControlTemplate::Status::WAITING;
-      }
+      grp->status = GroupControlTemplate::Status::WAITING;
     }
     taskEXIT_CRITICAL(&_mux);
   }
