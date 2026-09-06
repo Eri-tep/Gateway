@@ -1208,7 +1208,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   char etx_line_buf[32];
   snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #[N-1] : %s", etx_buf);
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "Checksum : CS", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "Checksum :", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
   out.append(Fmt::DIV80);
 

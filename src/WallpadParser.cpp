@@ -288,12 +288,12 @@ AutoProbingEngine::AutoProbingEngine() {
 
 const char *AutoProbingEngine::getAlgoName(ChecksumAlgo algo) {
   switch (algo) {
-  case ChecksumAlgo::XOR_ALL:        return "XOR [0..[N-3]]";
-  case ChecksumAlgo::XOR_NO_STX:     return "XOR [1..[N-3]]";
-  case ChecksumAlgo::SUM_ALL:        return "SUM [0..[N-3]]";
-  case ChecksumAlgo::SUM_NO_STX:     return "SUM [1..[N-3]]";
-  case ChecksumAlgo::TWOS_COMPLEMENT:return "2's Complement [1..[N-3]]";
-  case ChecksumAlgo::ONES_COMPLEMENT:return "1's Complement [0..[N-3]]";
+  case ChecksumAlgo::XOR_ALL:        return "XOR (0..[N-3])";
+  case ChecksumAlgo::XOR_NO_STX:     return "XOR (1..[N-3])";
+  case ChecksumAlgo::SUM_ALL:        return "SUM (0..[N-3])";
+  case ChecksumAlgo::SUM_NO_STX:     return "SUM (1..[N-3])";
+  case ChecksumAlgo::TWOS_COMPLEMENT:return "2's Complement (1..[N-3])";
+  case ChecksumAlgo::ONES_COMPLEMENT:return "1's Complement (0..[N-3])";
   case ChecksumAlgo::CRC8_MAXIM:     return "CRC-8 (Maxim/0x31)";
   case ChecksumAlgo::NONE:           return "None (Pure Framing)";
   default:                           return "Learning...";
