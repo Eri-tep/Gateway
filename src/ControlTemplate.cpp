@@ -157,6 +157,14 @@ size_t ControlTemplateRegistry::getGroupCount() const {
   taskENTER_CRITICAL(&_mux);
   size_t cnt = _group_count;
   taskEXIT_CRITICAL(&_mux);
+
+  // Phase 3 (offsets_locked) 수렴이 완료되었는데 템플릿이 아직 비어있다면 정밀 합성!
+  if (cnt == 0 && g_auto_probing_engine.isOffsetsLocked() && g_polling_targets.activeCount() > 0) {
+    const_cast<ControlTemplateRegistry*>(this)->synthesizeFromConvergedCache();
+    taskENTER_CRITICAL(&_mux);
+    cnt = _group_count;
+    taskEXIT_CRITICAL(&_mux);
+  }
   return cnt;
 }
 
@@ -203,8 +211,16 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
 // SYNTHESIZE TEMPLATES ON CACHE CONVERGENCE
 // ============================================================================
 void ControlTemplateRegistry::synthesizeFromConvergedCache() {
+  // [엄격한 안전 규칙] 버스 오토프로빙이 Phase 3 (offsets_locked)에 도달하기 전에는 절대 사전 추측/생성 금지!
   auto ad = g_auto_probing_engine.getDescriptor();
   if (!ad.offsets_locked) return;
+
+  uint8_t opcode_offset = ad.opcode_offset;
+  uint8_t ctrl_opcode = (ad.control_opcode != 0) ? ad.control_opcode : 0x02;
+  uint8_t sub1_offset = ad.sub1_offset;
+  uint8_t sub2_offset = ad.sub2_offset;
+  uint8_t stx = ad.stx;
+  uint8_t etx = ad.etx;
 
   size_t total = g_polling_targets.totalCount();
   for (size_t i = 0; i < total; ++i) {
@@ -224,14 +240,14 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
                 entry.raw_query_data.begin() + std::min<size_t>(entry.raw_query_len, 32),
                 grp->raw_template);
 
-      if (ad.opcode_offset < grp->frame_len && ad.control_opcode != 0) {
-        grp->raw_template[ad.opcode_offset] = ad.control_opcode;
+      if (opcode_offset < grp->frame_len && ctrl_opcode != 0) {
+        grp->raw_template[opcode_offset] = ctrl_opcode;
       }
-      grp->sub1_offset = ad.sub1_offset;
-      grp->sub2_offset = ad.sub2_offset;
+      grp->sub1_offset = sub1_offset;
+      grp->sub2_offset = sub2_offset;
 
       // 전열교환기(ERV) 특수 sub1 고정 오버라이드: 현대통신(0xF7, 0xEE) 규격인 경우에만 0x40 강제
-      if (entry.dev_id == Config::Devices::DEV_HEAT_EXCHANGER && ad.stx == 0xF7 && ad.etx == 0xEE) {
+      if (entry.dev_id == Config::Devices::DEV_HEAT_EXCHANGER && stx == 0xF7 && etx == 0xEE) {
         grp->ctl_sub1_override = Config::Devices::SUB_HEAT_EXCHANGER_QUERY; // 0x40
       }
 
