@@ -1412,7 +1412,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.append(Fmt::DIV80EQ);
   out.append("                    DEVICE GROUP CONTROL BLUEPRINT TABLE                     \r\n");
   out.append(Fmt::DIV80EQ);
-  out.append("DevID  Group Name  Type     Coverage  Power Slot      Param Slot     Status\r\n");
+  out.append("DevID  Group Name  Capability  Coverage  Power Slot      Param Slot     Status\r\n");
   out.append(Fmt::DIV80);
 
   size_t count = g_control_registry.getGroupCount();
@@ -1442,7 +1442,10 @@ void wallpadPrintControlTable(AppendBuf &out) {
       }
 
       char param_str[24]{"-"};
-      if (grp.temp_slot.discovered) {
+      if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
+        snprintf(param_str, sizeof(param_str), "T:#%u S:#%u",
+                 grp.temp_slot.action_offset, grp.speed_slot.action_offset);
+      } else if (grp.temp_slot.discovered) {
         snprintf(param_str, sizeof(param_str), "T:#%u (%u~%uC)",
                  grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
       } else if (grp.speed_slot.discovered) {
@@ -1463,22 +1466,63 @@ void wallpadPrintControlTable(AppendBuf &out) {
       case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
       }
 
-      const char *type_str = "Device";
-      if (grp.temp_slot.discovered) type_str = "Thermo";
-      else if (grp.speed_slot.discovered) type_str = "Vent";
-      else if (grp.close_slot.discovered) type_str = "Gas";
-      else if (grp.power_slot.discovered) type_str = "Switch";
+      const char *type_str = "SWITCH";
+      switch (grp.coverage.dev_class) {
+      case DeviceClass::THERMOSTAT: type_str = "THERMO"; break;
+      case DeviceClass::VENT:       type_str = "VENT"; break;
+      case DeviceClass::AIRCON:     type_str = "AIRCON"; break;
+      case DeviceClass::MOMENTARY:  type_str = "MOMENTARY"; break;
+      case DeviceClass::SWITCH:
+      default:
+        type_str = "SWITCH";
+        break;
+      }
 
       char cov_str[16]{"0/2"};
-      int c = (grp.coverage.power_on_seen ? 1 : 0) + (grp.coverage.power_off_seen ? 1 : 0);
+      int c = 0;
       int total_c = 2;
-      if (grp.temp_slot.discovered) {
-        c += (grp.coverage.temp_set_seen ? 1 : 0);
-        total_c = 3;
+      switch (grp.coverage.dev_class) {
+      case DeviceClass::THERMOSTAT:
+        total_c = 6;
+        if (grp.coverage.power_on_seen) c++;
+        if (grp.coverage.power_off_seen) c++;
+        if (grp.coverage.temp_set_seen) c++;
+        if (grp.coverage.away_mode_seen) c++;
+        if (grp.coverage.temp_while_off_seen) c++;
+        if (grp.coverage.temp_while_away_seen) c++;
+        break;
+      case DeviceClass::VENT:
+        total_c = 5;
+        if (grp.coverage.power_on_seen) c++;
+        if (grp.coverage.power_off_seen) c++;
+        if (grp.coverage.speed_l1_seen) c++;
+        if (grp.coverage.speed_l2_seen) c++;
+        if (grp.coverage.speed_l3_seen) c++;
+        break;
+      case DeviceClass::AIRCON:
+        total_c = 7;
+        if (grp.coverage.power_on_seen) c++;
+        if (grp.coverage.power_off_seen) c++;
+        if (grp.coverage.temp_set_seen) c++;
+        if (grp.coverage.speed_l1_seen) c++;
+        if (grp.coverage.speed_l2_seen) c++;
+        if (grp.coverage.speed_l3_seen) c++;
+        if (grp.coverage.temp_while_off_seen) c++;
+        break;
+      case DeviceClass::MOMENTARY:
+        total_c = 1;
+        if (grp.coverage.call_seen) c++;
+        break;
+      case DeviceClass::SWITCH:
+      default:
+        total_c = 2;
+        if (grp.coverage.power_on_seen) c++;
+        if (grp.coverage.power_off_seen) c++;
+        break;
       }
       snprintf(cov_str, sizeof(cov_str), "%d/%d", c, total_c);
 
-      out.appendFormat("0x%02X   %-11s %-8s %-9s %-15s %-14s %s\r\n",
+      out.appendFormat("0x%02X   %-11s %-11s %-9s %-15s %-14s %s\r\n",
                        grp.dev_id, grp.group_name, type_str, cov_str,
                        pwr_str, param_str, stat_str);
     }
@@ -1805,6 +1849,22 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       }
     }
     wallpadControlReset(sock, dev_id);
+  } else if (strcasecmp(sub, "name") == 0 || strcasecmp(sub, "setname") == 0) {
+    if (argc >= 3) {
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+      const char *name = embeddedCliGetToken(args, 3);
+      if (dev_id == 0 || !name || strlen(name) == 0) {
+        sendTelnetMsg(sock, "[ERROR] Usage: ctl name <dev_id> <custom_name> (e.g. ctl name 0x1B Gas)\r\n");
+      } else {
+        if (g_control_registry.setGroupName(dev_id, name)) {
+          sendTelnetMsgf(sock, "[OK] DevID 0x%02X group name set to '%s' and saved to NVS flash.\r\n", dev_id, name);
+        } else {
+          sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry. Learn or capture it first.\r\n", dev_id);
+        }
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl name <dev_id> <custom_name> (e.g. ctl name 0x1B Gas)\r\n");
+    }
   } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
     s_cli_scratch_buf[0] = '\0';
     AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
@@ -1816,6 +1876,7 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
     out.append(Fmt::DIV80);
     out.append("  ctl [table|list]                Display learned control blueprint table\r\n");
     out.append("  ctl view <dev_id>               Inspect detailed packet blueprint & slots\r\n");
+    out.append("  ctl name <dev_id> <name>        Set custom group name (e.g. Gas, Elevator)\r\n");
     out.append("  ctl learn [dev_id|all]          Active probing (learn all groups if omitted)\r\n");
     out.append("  ctl status                      Show active probing real-time progress & logs\r\n");
     out.append("  ctl q                           Abort active probing & restore baseline\r\n");
@@ -1833,7 +1894,7 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       wallpadPrintControlDetail(out, dev_id);
       sendTelnetMsgLen(sock, out.buf, out.offset);
     } else {
-      sendTelnetMsg(sock, "Usage: ctl [view <id> | learn [id] | status | q | reset [id] | help]\r\n");
+      sendTelnetMsg(sock, "Usage: ctl [table | view <id> | name <id> <name> | learn [id] | status | q | reset [id] | help]\r\n");
     }
   }
 }

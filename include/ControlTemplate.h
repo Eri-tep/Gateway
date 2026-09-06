@@ -16,6 +16,7 @@ enum class ControlActionType : uint8_t {
   SET_TEMP,     // 설정 온도 변경 (난방/에어컨)
   FAN_SPEED,    // 풍량 변경 (환기/에어컨)
   VALVE_CLOSE,  // 밸브 닫기 (가스)
+  MOMENTARY_TRIGGER, // 순간 호출 (엘리베이터 등)
   UNKNOWN = 0xFF
 };
 
@@ -32,16 +33,16 @@ struct ActionSlot {
 };
 
 // ============================================================================
-// DEVICE CLASSIFICATION & SLOT COVERAGE
+// DEVICE CAPABILITY CLASSIFICATION & SLOT COVERAGE
 // ============================================================================
 
 enum class DeviceClass : uint8_t {
   UNKNOWN = 0,
-  LIGHT,      // POWER만
-  OUTLET,     // POWER + 텔레메트리 마스킹
-  THERMOSTAT, // POWER + TEMP + AWAY + 복합 상태 2종
-  VENT,       // POWER + SPEED(1,2,3)
-  GAS         // VALVE_CLOSE만
+  SWITCH,     // 지속 릴레이 (ON/OFF) - 조명, 콘센트, 가스밸브, 일괄소등
+  MOMENTARY,  // 단방향 순간 펄스 트리거 (호출) - 엘리베이터 호출, 현관문 열림
+  THERMOSTAT, // 연속 희망온도 파라미터 (14~36℃ 2개 슬롯) - 난방
+  VENT,       // 이산 다단계 풍량 파라미터 (1~3단) - 환기
+  AIRCON      // 온도 + 풍량 복합 파라미터 - 에어컨
 };
 
 struct SlotCoverage {
@@ -53,11 +54,13 @@ struct SlotCoverage {
   // ── 복합 상태 슬롯 (THERMOSTAT 전용, 필수)
   bool temp_while_off_seen{false};   // 꺼진 상태 온도 변경 → 켜기+온도 복합 패턴
   bool temp_while_away_seen{false};  // 외출 모드 온도 변경 → 제조사별 상이한 응답 패턴
-  // ── 환기 풍량
+  // ── 환기 / 에어컨 풍량
   bool speed_l1_seen{false};
   bool speed_l2_seen{false};
   bool speed_l3_seen{false};
-  // ── 가스
+  // ── 순간 펄스 (엘리베이터)
+  bool call_seen{false};
+  // ── 가스 / 차단
   bool valve_close_seen{false};
   // ── 콘센트
   bool telemetry_masked{false};    // 전력량 오프셋 마스킹 완료
@@ -199,6 +202,7 @@ public:
   size_t getGroupCount() const;
   bool getGroupByIndex(size_t index, GroupControlTemplate &out) const;
   bool resetGroup(uint8_t dev_id);
+  bool setGroupName(uint8_t dev_id, const char *name);
 
   // 패시브 삼각 차분 분석 (Triplet Differential Sniffer)
   void onControlTransaction(const StaticPacket &ctl,
