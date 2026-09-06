@@ -1049,14 +1049,14 @@ void wallpadPrintStatus(AppendBuf &out) {
     }
     size_t off = 0;
     for (size_t i = 0; i < cnt; ++i) {
-      off += snprintf(out + off, out_sz - off, "%s%u", (i == 0 ? "" : ","), arr[i]);
+      off += snprintf(out + off, out_sz - off, "%s%u", (i == 0 ? "" : ", "), arr[i]);
     }
-    snprintf(out + off, out_sz - off, "B");
+    snprintf(out + off, out_sz - off, " Byte");
   };
 
-  char q_str[24], ack_str[24];
-  format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), "11B");
-  format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), "11B");
+  char q_str[32], ack_str[32];
+  format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), "11 Byte");
+  format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), "11 Byte");
 
   char len_prefix[16];
   if (desc.has_len_field) {
@@ -1065,16 +1065,16 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(len_prefix, sizeof(len_prefix), desc.is_locked ? "Fixed" : "Byte #1");
   }
 
-  char q_val[32], cmd_val[32], ack_val[32];
-  snprintf(q_val, sizeof(q_val), "%s (%s)", len_prefix, q_str);
+  char q_val[48], cmd_val[48], ack_val[48];
+  snprintf(q_val, sizeof(q_val), "%s : %s", len_prefix, q_str);
   if (desc.ctrl_len_cnt > 0) {
-    char cmd_lens_str[24];
-    format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), "11B");
-    snprintf(cmd_val, sizeof(cmd_val), "%s (%s)", len_prefix, cmd_lens_str);
+    char cmd_lens_str[32];
+    format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), "11 Byte");
+    snprintf(cmd_val, sizeof(cmd_val), "%s : %s", len_prefix, cmd_lens_str);
   } else {
-    snprintf(cmd_val, sizeof(cmd_val), "%s (Waiting)", len_prefix);
+    snprintf(cmd_val, sizeof(cmd_val), "%s : Waiting", len_prefix);
   }
-  snprintf(ack_val, sizeof(ack_val), "%s (%s)", len_prefix, ack_str);
+  snprintf(ack_val, sizeof(ack_val), "%s : %s", len_prefix, ack_str);
 
   const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
   const char *cmd_status = (desc.control_seen && desc.ctrl_len_cnt > 0) ? "[LOCKED]" : "[WAITING]";
@@ -1123,11 +1123,11 @@ void wallpadPrintStatus(AppendBuf &out) {
       off += snprintf(hex_str + off, sizeof(hex_str) - off, "%s%02X",
                       (d == 0 ? "" : ", "), arr[d]);
     }
-    snprintf(out, out_sz, "%s (%s)", prefix, hex_str);
+    snprintf(out, out_sz, "%s : %s", prefix, hex_str);
   };
 
   const char *addr_mode = desc.offsets_locked
-                              ? (desc.is_swapped_addr ? "Swapped (DA/SA Swap)" : "Direct (1:1 Direct)")
+                              ? (desc.is_swapped_addr ? "Swapped : DA/SA" : "Direct")
                               : (desc.is_locked ? "Probing..." : "Waiting");
   const char *addr_status = desc.offsets_locked ? "[LOCKED]" : (desc.is_locked ? "[LEARNING]" : "[WAITING]");
 
@@ -1137,9 +1137,9 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #%u", desc.sub1_offset);
     snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #%u", desc.sub2_offset);
   } else {
-    snprintf(dev_off_label, sizeof(dev_off_label), "Byte #3 (Init)");
-    snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #5 (Init)");
-    snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #6 (Init)");
+    snprintf(dev_off_label, sizeof(dev_off_label), "Byte #3 : Init");
+    snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #5 : Init");
+    snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #6 : Init");
   }
 
   char dev_list_buf[64], sub1_list_buf[64], sub2_list_buf[64];
@@ -1161,7 +1161,7 @@ void wallpadPrintStatus(AppendBuf &out) {
     // ★ 제어 패킷 미관측 - 가정값("02") 대신 명시적으로 미확인 표시
     snprintf(ctl_hex, sizeof(ctl_hex), "??");
   }
-  snprintf(op_line_buf, sizeof(op_line_buf), "Byte #%u (QRY:%02X, CTL:%s, ACK:%02X)",
+  snprintf(op_line_buf, sizeof(op_line_buf), "Byte #%u : QRY:%02X, CTL:%s, ACK:%02X",
            desc.opcode_offset, desc.query_opcode, ctl_hex, desc.ack_opcode);
 
   // ★ [LOCKED] 상태: QRY/ACK 락 여부 + CTL 관측 여부를 구분하여 표시
@@ -1176,11 +1176,11 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   char seq_line_buf[32];
   if (desc.has_seq_counter) {
-    snprintf(seq_line_buf, sizeof(seq_line_buf), "Byte #%u (+1 Counter)", desc.seq_offset);
+    snprintf(seq_line_buf, sizeof(seq_line_buf), "Byte #%u : +1 Counter", desc.seq_offset);
   } else {
-    snprintf(seq_line_buf, sizeof(seq_line_buf), desc.offsets_locked ? "None (No Counter)" : "None");
+    snprintf(seq_line_buf, sizeof(seq_line_buf), desc.offsets_locked ? "-" : "None");
   }
-  const char *seq_status = desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[NONE]") : "[WAITING]";
+  const char *seq_status = desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[UNUSED]") : "[WAITING]";
 
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "Opcode Offset", op_line_buf, opcode_status);
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sequence", seq_line_buf, seq_status);
@@ -1191,11 +1191,11 @@ void wallpadPrintStatus(AppendBuf &out) {
   char payload_range_buf[48];
   char payload_len_buf[32];
   if (desc.offsets_locked) {
-    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #%u ~ #(N-3)", desc.payload_offset);
-    snprintf(payload_len_buf, sizeof(payload_len_buf), "LEN - %u Bytes", desc.payload_offset + 2);
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #%u ~ #N-3", desc.payload_offset);
+    snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - %u] Byte", desc.payload_offset + 2);
   } else {
-    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #7 ~ #(N-3) (Est)");
-    snprintf(payload_len_buf, sizeof(payload_len_buf), "LEN - 9 Bytes (Est)");
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #7 ~ #N-3 : Est");
+    snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - 9] Byte : Est");
   }
   const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Payload", "Data Range", payload_range_buf, payload_status);
@@ -1204,11 +1204,11 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   // 5. Tail (Checksum, ETX)
   char cs_algo_buf[48];
-  snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #(N-2) (%s)", AutoProbingEngine::getAlgoName(desc.checksum_algo));
+  snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #N-2 : %s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
   char etx_line_buf[32];
-  snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #(N-1) (%s)", etx_buf);
+  snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #N-1 : %s", etx_buf);
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "Checksum (CS)", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "Checksum : CS", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
   out.append(Fmt::DIV80);
 
@@ -1219,14 +1219,14 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   char baud_buf[48];
   if (b1 == b2 && b2 == b3) {
-    snprintf(baud_buf, sizeof(baud_buf), "%u bps (CH1~3)", static_cast<unsigned>(b1));
+    snprintf(baud_buf, sizeof(baud_buf), "%u bps : CH1~3", static_cast<unsigned>(b1));
     out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
   } else {
     snprintf(baud_buf, sizeof(baud_buf), "CH1:%u, CH2:%u, CH3:%u",
              static_cast<unsigned>(b1), static_cast<unsigned>(b2), static_cast<unsigned>(b3));
     out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
   }
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", "20 ms (CH1/CH2/CH3)", "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", "20 ms : CH1~3", "[CONFIG]");
   out.append(Fmt::DIV80);
 
   // 7. Doorphone (CH4 Universal IPG Engine)
