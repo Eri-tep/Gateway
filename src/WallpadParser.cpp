@@ -944,11 +944,17 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   }
 
   // [Step 8: ACK / Status Flag Detection & Elimination]
+  // ACK 플래그는 헤더 내부의 상태 플래그만을 의미하며, Sub-ID 뒤의 순수 페이로드(Data) 영역을 침범해선 안 됨
   int ack_flag_idx = -1;
+  int max_known_hdr = std::max({opcode_idx, dev_type_idx, sub_cmd_idx, sub_id_idx, swap_i, swap_j, len_idx, seq_idx});
   for (size_t k = 1; k < min_common_len - 1; ++k) {
     int ik = static_cast<int>(k);
     if (ik == len_idx || ik == opcode_idx || ik == swap_i || ik == swap_j ||
         ik == seq_idx || ik == sub_cmd_idx || ik == dev_type_idx || ik == sub_id_idx) {
+      continue;
+    }
+    // 식별된 헤더 오프셋보다 뒤쪽의 바이트는 순수 페이로드이므로 ACK 플래그로 삼지 않음
+    if (ik > max_known_hdr) {
       continue;
     }
     std::set<uint8_t> r_vals;
