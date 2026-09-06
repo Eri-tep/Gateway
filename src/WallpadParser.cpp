@@ -394,6 +394,14 @@ void AutoProbingEngine::initFromNvs() {
         _desc.learned_ctrl_lens[0] = _desc.learned_query_len;
         _desc.ctrl_len_cnt = 1;
       }
+      // ★ 페이로드 시작점(payload_offset) 명시적 복원: 헤더 필드 중 최대 오프셋 + 1
+      int max_hdr = std::max({_desc.opcode_offset, _desc.dev_id_offset, _desc.sub1_offset, _desc.sub2_offset});
+      if (_desc.gw_addr_offset > max_hdr) max_hdr = _desc.gw_addr_offset;
+      if (_desc.len_offset != 0xFF && _desc.len_offset > max_hdr) max_hdr = _desc.len_offset;
+      if (_desc.seq_offset != 0xFF && _desc.seq_offset > max_hdr) max_hdr = _desc.seq_offset;
+      if (_desc.ack_flag_offset != 0xFF && _desc.ack_flag_offset > max_hdr) max_hdr = _desc.ack_flag_offset;
+      _desc.payload_offset = static_cast<uint8_t>(max_hdr + 1);
+
       _desc.offsets_locked = true;
       _desc.opcodes_locked = true;
     }
@@ -1070,6 +1078,7 @@ void AutoProbingEngine::reset() {
   _desc.seq_offset = 0xFF;
   _desc.has_seq_counter = false;
   _desc.ack_flag_offset = 0xFF;
+  _desc.payload_offset = 7;
   _desc.is_locked = false;
   _consecutive_mismatches = 0;
   strncpy(_desc.description, "Probing bus traffic...", sizeof(_desc.description) - 1);
