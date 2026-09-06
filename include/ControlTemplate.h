@@ -158,6 +158,8 @@ enum class ActiveProbingStep : uint8_t {
 
 struct ActiveLearningSession {
   bool in_progress{false};
+  bool learn_all{false};
+  size_t current_all_idx{0};
   uint8_t target_dev_id{0};
   uint8_t target_sub1{0};
   uint8_t target_sub2{0};
@@ -225,6 +227,7 @@ private:
   mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 
   void autoAssignGroupName(GroupControlTemplate &group);
+  bool setupTargetForProbing(uint8_t dev_id);
 };
 
 extern ControlTemplateRegistry g_control_registry;

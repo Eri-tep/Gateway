@@ -680,12 +680,14 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
   out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
   out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
-  out.append("  wallpad ctl                     Display learned control blueprint table\r\n");
-  out.append("  wallpad ctl-view <id>           Dump detailed packet template & action slots\r\n");
-  out.append("  wallpad ctl-learn <id>          Start active probing session to learn commands\r\n");
-  out.append("  wallpad ctl-learn-status        Show active probing real-time progress\r\n");
-  out.append("  wallpad ctl-abort               Abort active probing & restore baseline\r\n");
-  out.append("  wallpad ctl-reset [id]          Reset learned control template(s)\r\n");
+  out.append(Fmt::DIV80);
+  out.append(" [ CONTROL BLUEPRINT & LEARNING ]\r\n");
+  out.append("  ctl [table|list]                Display learned control blueprint table\r\n");
+  out.append("  ctl view <id>                   Dump detailed packet blueprint & action slots\r\n");
+  out.append("  ctl learn [id|all]              Active probing session (all groups if omitted)\r\n");
+  out.append("  ctl status                      Show active probing real-time progress\r\n");
+  out.append("  ctl q                           Abort active probing & restore baseline\r\n");
+  out.append("  ctl reset [id|all]              Reset blueprint(s) and wipe from NVS flash\r\n");
   out.append("  trace [on|off|ctl|ack|pol|...]  Live packet stream monitoring with filters\r\n");
   out.append("  q                               Shortcut to stop live tracing immediately\r\n");
   out.append(Fmt::DIV80);
@@ -1495,7 +1497,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
     }
   }
   out.append(Fmt::DIV80);
-  out.append("Commands: wallpad ctl-view <id> | wallpad ctl-learn <id> | wallpad ctl-reset\r\n");
+  out.append("Commands: ctl view <id> | ctl learn [id|all] | ctl status | ctl q | ctl reset [id|all]\r\n");
   out.append(Fmt::DIV80EQ);
   out.append("\r\n");
 }
@@ -1594,16 +1596,21 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
 
 void wallpadControlLearn(int sock, uint8_t dev_id) {
   if (g_control_registry.getSession().in_progress) {
-    sendTelnetMsg(sock, "[WARN] Active learning session already in progress. Use 'wallpad ctl-abort' first.\r\n");
+    sendTelnetMsg(sock, "[WARN] Active learning session already in progress. Use 'ctl q' first.\r\n");
     return;
   }
 
   if (g_control_registry.startActiveLearning(dev_id)) {
     const auto &sess = g_control_registry.getSession();
-    sendTelnetMsgf(sock, "[OK] Active learning started for DevID 0x%02X (Target: Sub1=0x%02X, Sub2=0x%02X).\r\n",
-                   dev_id, sess.target_sub1, sess.target_sub2);
+    if (sess.learn_all) {
+      sendTelnetMsgf(sock, "[OK] Batch active learning started for ALL device groups! (Current: DevID 0x%02X, Sub1=0x%02X, Sub2=0x%02X)\r\n",
+                     sess.target_dev_id, sess.target_sub1, sess.target_sub2);
+    } else {
+      sendTelnetMsgf(sock, "[OK] Active learning started for DevID 0x%02X (Target: Sub1=0x%02X, Sub2=0x%02X).\r\n",
+                     sess.target_dev_id, sess.target_sub1, sess.target_sub2);
+    }
     sendTelnetMsg(sock, "     Gateway is executing multi-step probing packets to discover command semantics...\r\n");
-    sendTelnetMsg(sock, "     Type 'wallpad ctl-learn-status' to track progress or 'wallpad ctl-abort' to cancel.\r\n");
+    sendTelnetMsg(sock, "     Type 'ctl status' to track progress or 'ctl q' to cancel.\r\n");
   } else {
     const auto &sess = g_control_registry.getSession();
     sendTelnetMsgf(sock, "[ERROR] Failed to start active learning: %s\r\n", sess.last_log);
@@ -1742,49 +1749,43 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
     g_doorphone_tracker.clearNvs();
     g_probe_convergence_reset.store(true, std::memory_order_release);
     sendTelnetMsg(sock, "[OK] Auto-probing engine & Doorphone framing reset. Re-analyzing RS-485 bus traffic...\r\n");
-  } else if (strcasecmp(sub, "ctl") == 0) {
-    if (argc >= 2) {
-      const char *ctl_op = embeddedCliGetToken(args, 2);
-      if (strcasecmp(ctl_op, "view") == 0) {
-        if (argc >= 3) {
-          uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 0));
-          s_cli_scratch_buf[0] = '\0';
-          AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
-          wallpadPrintControlDetail(out, dev_id);
-          sendTelnetMsgLen(sock, out.buf, out.offset);
-        } else {
-          sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl view <dev_id> (e.g. 0x19)\r\n");
-        }
-      } else if (strcasecmp(ctl_op, "learn") == 0) {
-        if (argc >= 3) {
-          uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 0));
-          wallpadControlLearn(sock, dev_id);
-        } else {
-          sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl learn <dev_id> (e.g. 0x19)\r\n");
-        }
-      } else if (strcasecmp(ctl_op, "status") == 0 || strcasecmp(ctl_op, "learn-status") == 0) {
-        s_cli_scratch_buf[0] = '\0';
-        AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
-        wallpadPrintControlLearnStatus(out);
-        sendTelnetMsgLen(sock, out.buf, out.offset);
-      } else if (strcasecmp(ctl_op, "abort") == 0) {
-        wallpadControlAbort(sock);
-      } else if (strcasecmp(ctl_op, "reset") == 0) {
-        uint8_t dev_id = (argc >= 3) ? static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 0)) : 0;
-        wallpadControlReset(sock, dev_id);
-      } else {
-        s_cli_scratch_buf[0] = '\0';
-        AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
-        wallpadPrintControlTable(out);
-        sendTelnetMsgLen(sock, out.buf, out.offset);
-      }
-    } else {
-      s_cli_scratch_buf[0] = '\0';
-      AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
-      wallpadPrintControlTable(out);
-      sendTelnetMsgLen(sock, out.buf, out.offset);
-    }
-  } else if (strcasecmp(sub, "ctl-view") == 0) {
+  } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    out.append("\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("                    WALLPAD & PROTOCOL COMMAND REFERENCE                      \r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("Command                           Description\r\n");
+    out.append(Fmt::DIV80);
+    out.append("  wallpad [status]                Show auto-probing status, timings & locked profile\r\n");
+    out.append("  wallpad list                    List available vendor & saved NVS custom profiles\r\n");
+    out.append("  wallpad set <key|id>            Manually switch active wallpad vendor profile\r\n");
+    out.append("  wallpad save <name>             Save current auto-learned profile to NVS slot\r\n");
+    out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
+    out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
+    out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("Tip: Use 'ctl' for device control blueprints & active learning commands.\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("\r\n");
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  } else {
+    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset | help]\r\n");
+  }
+}
+
+void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
+  int sock = getSock(context);
+  int argc = embeddedCliGetTokenCount(args);
+  const char *sub = (argc > 0) ? embeddedCliGetToken(args, 1) : "table";
+
+  if (argc == 0 || strcasecmp(sub, "table") == 0 || strcasecmp(sub, "list") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    wallpadPrintControlTable(out);
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  } else if (strcasecmp(sub, "view") == 0) {
     if (argc >= 2) {
       uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
       s_cli_scratch_buf[0] = '\0';
@@ -1792,27 +1793,63 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
       wallpadPrintControlDetail(out, dev_id);
       sendTelnetMsgLen(sock, out.buf, out.offset);
     } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl-view <dev_id> (e.g. 0x19)\r\n");
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl view <dev_id> (e.g. 0x19)\r\n");
     }
-  } else if (strcasecmp(sub, "ctl-learn") == 0) {
+  } else if (strcasecmp(sub, "learn") == 0) {
+    uint8_t dev_id = 0;
     if (argc >= 2) {
-      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
-      wallpadControlLearn(sock, dev_id);
-    } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl-learn <dev_id> (e.g. 0x19)\r\n");
+      const char *arg = embeddedCliGetToken(args, 2);
+      if (strcasecmp(arg, "all") != 0) {
+        dev_id = static_cast<uint8_t>(strtoul(arg, nullptr, 0));
+      }
     }
-  } else if (strcasecmp(sub, "ctl-learn-status") == 0 || strcasecmp(sub, "ctl-status") == 0) {
+    wallpadControlLearn(sock, dev_id);
+  } else if (strcasecmp(sub, "status") == 0 || strcasecmp(sub, "learn-status") == 0) {
     s_cli_scratch_buf[0] = '\0';
     AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
     wallpadPrintControlLearnStatus(out);
     sendTelnetMsgLen(sock, out.buf, out.offset);
-  } else if (strcasecmp(sub, "ctl-abort") == 0) {
+  } else if (strcasecmp(sub, "q") == 0 || strcasecmp(sub, "abort") == 0) {
     wallpadControlAbort(sock);
-  } else if (strcasecmp(sub, "ctl-reset") == 0) {
-    uint8_t dev_id = (argc >= 2) ? static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0)) : 0;
+  } else if (strcasecmp(sub, "reset") == 0) {
+    uint8_t dev_id = 0;
+    if (argc >= 2) {
+      const char *arg = embeddedCliGetToken(args, 2);
+      if (strcasecmp(arg, "all") != 0) {
+        dev_id = static_cast<uint8_t>(strtoul(arg, nullptr, 0));
+      }
+    }
     wallpadControlReset(sock, dev_id);
+  } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    out.append("\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("             DEVICE GROUP CONTROL BLUEPRINT & LEARNING COMMANDS               \r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("Command                           Description\r\n");
+    out.append(Fmt::DIV80);
+    out.append("  ctl [table|list]                Display learned control blueprint table\r\n");
+    out.append("  ctl view <dev_id>               Inspect detailed packet blueprint & slots\r\n");
+    out.append("  ctl learn [dev_id|all]          Active probing (learn all groups if omitted)\r\n");
+    out.append("  ctl status                      Show active probing real-time progress & logs\r\n");
+    out.append("  ctl q                           Abort active probing & restore baseline\r\n");
+    out.append("  ctl reset [dev_id|all]          Reset blueprint(s) and wipe from NVS flash\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("\r\n");
+    sendTelnetMsgLen(sock, out.buf, out.offset);
   } else {
-    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset | ctl | ctl-view <id> | ctl-learn <id> | ctl-learn-status | ctl-abort | ctl-reset]\r\n");
+    // If user passed a dev_id directly like 'ctl 0x19', treat as 'ctl view 0x19'
+    char *endp = nullptr;
+    uint8_t dev_id = static_cast<uint8_t>(strtoul(sub, &endp, 0));
+    if (endp != sub && dev_id != 0) {
+      s_cli_scratch_buf[0] = '\0';
+      AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+      wallpadPrintControlDetail(out, dev_id);
+      sendTelnetMsgLen(sock, out.buf, out.offset);
+    } else {
+      sendTelnetMsg(sock, "Usage: ctl [view <id> | learn [id] | status | q | reset [id] | help]\r\n");
+    }
   }
 }
 

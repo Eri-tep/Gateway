@@ -9,6 +9,7 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context);
 
 namespace WallpadCli {
 void cmdWallpad(EmbeddedCli *cli, char *args, void *context);
+void cmdCtl(EmbeddedCli *cli, char *args, void *context);
 void cmdTrace(EmbeddedCli *cli, char *args, void *context);
 void cmdStop(EmbeddedCli *cli, char *args, void *context);
 void cmdDevs(EmbeddedCli *cli, char *args, void *context);

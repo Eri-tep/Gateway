@@ -509,15 +509,8 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
 // ============================================================================
 // ACTIVE PROBING DISCOVERY ENGINE (EXTENDED FSM)
 // ============================================================================
-bool ControlTemplateRegistry::startActiveLearning(uint8_t dev_id) {
-  // 1. 오프셋 락 확인 (수렴 완료 사전 안전 검사)
-  auto ad = g_auto_probing_engine.getDescriptor();
-  if (!ad.offsets_locked) {
-    snprintf(_session.last_log, sizeof(_session.last_log), "Cannot start: offsets not locked yet");
-    return false;
-  }
-
-  // 2. 타깃 탐색
+bool ControlTemplateRegistry::setupTargetForProbing(uint8_t dev_id) {
+  // 1. 타깃 탐색
   uint8_t t_sub1 = 0, t_sub2 = 0;
   bool found_target = false;
   for (size_t i = 0; i < g_polling_targets.totalCount(); ++i) {
@@ -535,15 +528,14 @@ bool ControlTemplateRegistry::startActiveLearning(uint8_t dev_id) {
     return false;
   }
 
-  // 3. 기준 상태 스냅샷 확보
-  // 전열교환기는 ACK 조회 시 sub1이 0x42일 수도 있으므로 보정 검색
+  // 2. 기준 상태 스냅샷 확보
   const auto *cached = g_device_repo.find(dev_id, t_sub1, t_sub2);
   if (!cached && dev_id == Config::Devices::DEV_HEAT_EXCHANGER) {
     cached = g_device_repo.find(dev_id, Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK, t_sub2);
   }
 
   if (!cached || cached->last_ack_len == 0) {
-    snprintf(_session.last_log, sizeof(_session.last_log), "Target not cached yet");
+    snprintf(_session.last_log, sizeof(_session.last_log), "Target 0x%02X not cached yet", dev_id);
     return false;
   }
 
@@ -554,6 +546,8 @@ bool ControlTemplateRegistry::startActiveLearning(uint8_t dev_id) {
   _session.target_sub2 = t_sub2;
   _session.current_step = ActiveProbingStep::PROBE_POWER_ON;
   _session.retry_count = 0;
+  _session.candidate_offset = 0;
+  _session.candidate_token = 0;
   _session.baseline_len = cached->last_ack_len;
   std::copy(cached->last_ack_data.begin(), cached->last_ack_data.begin() + cached->last_ack_len, _session.baseline_ack);
   _session.step_start_ms = millis();
@@ -572,9 +566,48 @@ bool ControlTemplateRegistry::startActiveLearning(uint8_t dev_id) {
   return true;
 }
 
+bool ControlTemplateRegistry::startActiveLearning(uint8_t dev_id) {
+  // 1. 오프셋 락 확인 (수렴 완료 사전 안전 검사)
+  auto ad = g_auto_probing_engine.getDescriptor();
+  if (!ad.offsets_locked) {
+    snprintf(_session.last_log, sizeof(_session.last_log), "Cannot start: offsets not locked yet");
+    return false;
+  }
+
+  if (_group_count == 0) {
+    synthesizeFromConvergedCache();
+  }
+  if (_group_count == 0) {
+    snprintf(_session.last_log, sizeof(_session.last_log), "No device groups available to learn");
+    return false;
+  }
+
+  if (dev_id == 0) {
+    // 전체 기기 순차 능동 학습 모드 (Batch Mode)
+    _session.learn_all = true;
+    _session.current_all_idx = 0;
+    while (_session.current_all_idx < _group_count) {
+      uint8_t d_id = _groups[_session.current_all_idx].dev_id;
+      if (d_id != 0 && setupTargetForProbing(d_id)) {
+        return true;
+      }
+      _session.current_all_idx++;
+    }
+    _session.learn_all = false;
+    snprintf(_session.last_log, sizeof(_session.last_log), "Failed to start active learning for any group");
+    return false;
+  } else {
+    // 특정 기기 1개 단독 학습 모드
+    _session.learn_all = false;
+    _session.current_all_idx = 0;
+    return setupTargetForProbing(dev_id);
+  }
+}
+
 void ControlTemplateRegistry::abortActiveLearning() {
   taskENTER_CRITICAL(&_mux);
   if (_session.in_progress) {
+    _session.learn_all = false;
     _session.current_step = ActiveProbingStep::RESTORE_BASELINE;
     snprintf(_session.last_log, sizeof(_session.last_log), "Aborted by user, restoring baseline...");
   }
@@ -789,15 +822,38 @@ void ControlTemplateRegistry::processActiveLearning() {
 
     if (grp->coverage.isFullyCovered()) {
       grp->status = GroupControlTemplate::Status::VERIFIED;
-      _session.current_step = ActiveProbingStep::COMPLETED;
-      snprintf(_session.last_log, sizeof(_session.last_log), "Active probing COMPLETED (Fully Covered)");
     } else {
       grp->status = GroupControlTemplate::Status::CAPTURING;
-      _session.current_step = ActiveProbingStep::COMPLETED;
-      snprintf(_session.last_log, sizeof(_session.last_log), "Active probing finished (Partial coverage)");
     }
-    _session.in_progress = false;
     saveToNvs();
+
+    if (_session.learn_all) {
+      _session.current_all_idx++;
+      bool started_next = false;
+      while (_session.current_all_idx < _group_count) {
+        uint8_t next_id = _groups[_session.current_all_idx].dev_id;
+        if (next_id != 0 && setupTargetForProbing(next_id)) {
+          started_next = true;
+          break;
+        }
+        _session.current_all_idx++;
+      }
+      if (!started_next) {
+        _session.in_progress = false;
+        _session.learn_all = false;
+        _session.current_step = ActiveProbingStep::COMPLETED;
+        snprintf(_session.last_log, sizeof(_session.last_log), "Batch active learning COMPLETED for all %zu groups", _group_count);
+      }
+    } else {
+      _session.in_progress = false;
+      if (strstr(_session.last_log, "Aborted") || strstr(_session.last_log, "aborted")) {
+        _session.current_step = ActiveProbingStep::FAILED;
+        snprintf(_session.last_log, sizeof(_session.last_log), "Active probing aborted by user (Baseline restored)");
+      } else {
+        _session.current_step = ActiveProbingStep::COMPLETED;
+        snprintf(_session.last_log, sizeof(_session.last_log), "Active probing COMPLETED for 0x%02X", _session.target_dev_id);
+      }
+    }
     break;
   }
 
