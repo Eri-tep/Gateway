@@ -48,6 +48,8 @@ struct VendorProfileDescriptor {
   uint8_t has_len_field{0};       // 1: 길이 필드 보유, 0: 암묵적/고정 프레임
   uint8_t seq_offset{0xFF};       // 시퀀스 카운터 위치 (0xFF: 없음)
   uint8_t ack_flag_offset{0xFF};  // ACK 상태 플래그 위치 (0xFF: 없음)
+  uint8_t learned_ctrl_lens[4]{0}; // 관측된 제어(CMD/CTL) 패킷 가변 길이 목록
+  uint8_t ctrl_len_cnt{0};        // 관측된 제어 패킷 길이 가짓수
 };
 
 // ============================================================================

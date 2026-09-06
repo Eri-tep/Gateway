@@ -388,6 +388,12 @@ void AutoProbingEngine::initFromNvs() {
       _desc.seq_offset = prof.seq_offset;
       _desc.has_seq_counter = (prof.seq_offset != 0xFF);
       _desc.ack_flag_offset = prof.ack_flag_offset;
+      _desc.ctrl_len_cnt = prof.ctrl_len_cnt;
+      memcpy(_desc.learned_ctrl_lens, prof.learned_ctrl_lens, sizeof(_desc.learned_ctrl_lens));
+      if (_desc.control_seen && _desc.ctrl_len_cnt == 0) {
+        _desc.learned_ctrl_lens[0] = _desc.learned_query_len;
+        _desc.ctrl_len_cnt = 1;
+      }
       _desc.offsets_locked = true;
       _desc.opcodes_locked = true;
     }
@@ -570,6 +576,7 @@ void AutoProbingEngine::feedControlPair(span<const uint8_t> ctrl_req, span<const
         return; // 타깃 장치 ID 불일치 시 확정 보류
     }
 
+    uint8_t prev_cnt = _desc.ctrl_len_cnt;
     auto add_ctrl_len = [&](uint8_t len) {
       if (len >= 3 && len <= 64) {
         for (uint8_t i = 0; i < _desc.ctrl_len_cnt; ++i) {
@@ -584,6 +591,10 @@ void AutoProbingEngine::feedControlPair(span<const uint8_t> ctrl_req, span<const
 
     // 4) 제어 패킷 길이 상시 수집
     add_ctrl_len(static_cast<uint8_t>(ctrl_req.size()));
+    if (_desc.ctrl_len_cnt > prev_cnt && _desc.is_locked) {
+      should_sync = true;
+      desc_to_sync = _desc;
+    }
 
     // 5) ★ 3회 연속 폐루프 실물 응답 검증 시 제어 코드 확정!
     if (_candidate_ctrl_op == ctrl_op) {
@@ -1066,13 +1077,13 @@ void AutoProbingEngine::reset() {
 
 static const VendorProfileDescriptor s_default_profiles[ProfileRepository::MAX_PROFILES] = {
     // 0: Universal Auto-Probing
-    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF},
+    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     // 1: User Slot 1
-    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF},
+    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     // 2: User Slot 2
-    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF},
+    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     // 3: User Slot 3
-    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF}
+    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0}
 };
 
 static VendorProfileDescriptor s_active_profiles[ProfileRepository::MAX_PROFILES];
@@ -1373,6 +1384,8 @@ void ProfileRepository::syncAutoProfileToNvs(const AutoProbeDescriptor &auto_des
       desc.has_len_field = auto_desc.has_len_field ? 1 : 0;
       desc.seq_offset = auto_desc.seq_offset;
       desc.ack_flag_offset = auto_desc.ack_flag_offset;
+      desc.ctrl_len_cnt = auto_desc.ctrl_len_cnt;
+      memcpy(desc.learned_ctrl_lens, auto_desc.learned_ctrl_lens, sizeof(desc.learned_ctrl_lens));
     }
     s_active_profiles[0] = desc;
   }
