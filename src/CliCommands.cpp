@@ -1463,41 +1463,26 @@ void wallpadPrintControlTable(AppendBuf &out) {
       case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
       }
 
-      const char *type_str = "Unknown";
-      switch (grp.coverage.dev_class) {
-      case DeviceClass::LIGHT: type_str = "Light"; break;
-      case DeviceClass::OUTLET: type_str = "Outlet"; break;
-      case DeviceClass::THERMOSTAT: type_str = "Thermo"; break;
-      case DeviceClass::VENT: type_str = "Vent"; break;
-      case DeviceClass::GAS: type_str = "Gas"; break;
-      default: break;
-      }
+      const char *type_str = "Device";
+      if (grp.temp_slot.discovered) type_str = "Thermo";
+      else if (grp.speed_slot.discovered) type_str = "Vent";
+      else if (grp.close_slot.discovered) type_str = "Gas";
+      else if (grp.power_slot.discovered) type_str = "Switch";
 
-      char cov_str[16]{"0/0"};
-      if (grp.coverage.dev_class == DeviceClass::LIGHT || grp.coverage.dev_class == DeviceClass::OUTLET) {
-        int c = (grp.coverage.power_on_seen?1:0) + (grp.coverage.power_off_seen?1:0);
-        snprintf(cov_str, sizeof(cov_str), "%d/2", c);
-      } else if (grp.coverage.dev_class == DeviceClass::THERMOSTAT) {
-        int c = (grp.coverage.power_on_seen?1:0) + (grp.coverage.power_off_seen?1:0) +
-                (grp.coverage.temp_set_seen?1:0) + (grp.coverage.away_mode_seen?1:0) +
-                (grp.coverage.temp_while_off_seen?1:0) + (grp.coverage.temp_while_away_seen?1:0);
-        snprintf(cov_str, sizeof(cov_str), "%d/6", c);
-      } else if (grp.coverage.dev_class == DeviceClass::VENT) {
-        int c = (grp.coverage.power_on_seen?1:0) + (grp.coverage.power_off_seen?1:0) +
-                (grp.coverage.speed_l1_seen?1:0) + (grp.coverage.speed_l2_seen?1:0) + (grp.coverage.speed_l3_seen?1:0);
-        snprintf(cov_str, sizeof(cov_str), "%d/5", c);
-      } else if (grp.coverage.dev_class == DeviceClass::GAS) {
-        int c = (grp.coverage.valve_close_seen?1:0);
-        snprintf(cov_str, sizeof(cov_str), "%d/1", c);
+      char cov_str[16]{"0/2"};
+      int c = (grp.coverage.power_on_seen ? 1 : 0) + (grp.coverage.power_off_seen ? 1 : 0);
+      int total_c = 2;
+      if (grp.temp_slot.discovered) {
+        c += (grp.coverage.temp_set_seen ? 1 : 0);
+        total_c = 3;
       }
+      snprintf(cov_str, sizeof(cov_str), "%d/%d", c, total_c);
 
       out.appendFormat("0x%02X   %-11s %-8s %-9s %-15s %-14s %s\r\n",
                        grp.dev_id, grp.group_name, type_str, cov_str,
                        pwr_str, param_str, stat_str);
     }
   }
-  out.append(Fmt::DIV80);
-  out.append("Commands: ctl view <id> | ctl learn [id|all] | ctl status | ctl q | ctl reset [id|all]\r\n");
   out.append(Fmt::DIV80EQ);
   out.append("\r\n");
 }

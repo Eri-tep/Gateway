@@ -10,42 +10,19 @@ ControlTemplateRegistry g_control_registry;
 // ============================================================================
 
 DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad) {
-  // 전열교환기(ERV, 0x2B)는 현대통신(STX 0xF7, ETX 0xEE) 규격의 특수 서브주소 체계
-  if ((dev_id == Config::Devices::DEV_HEAT_EXCHANGER && ad.stx == 0xF7 && ad.etx == 0xEE) || dev_id == 0x48) {
-    return DeviceClass::VENT;
-  }
-  if (dev_id == Config::Devices::DEV_THERMOSTAT || dev_id == 0x36) {
-    return DeviceClass::THERMOSTAT;
-  }
-  if (dev_id == 0x1B || dev_id == 0x2C) {
-    return DeviceClass::GAS;
-  }
-  if (dev_id == 0x1F || dev_id == 0x39) {
-    return DeviceClass::OUTLET;
-  }
-  if (dev_id == 0x19 || dev_id == 0x0E || dev_id == 0x31) {
-    return DeviceClass::LIGHT;
-  }
+  (void)dev_id;
+  (void)ad;
   return DeviceClass::UNKNOWN;
 }
 
 bool SlotCoverage::isFullyCovered() const {
-  switch (dev_class) {
-  case DeviceClass::LIGHT:
-    return power_on_seen && power_off_seen;
-  case DeviceClass::OUTLET:
-    return power_on_seen && power_off_seen;
-  case DeviceClass::THERMOSTAT:
-    return power_on_seen && power_off_seen && temp_set_seen && away_mode_seen &&
-           temp_while_off_seen && temp_while_away_seen;
-  case DeviceClass::VENT:
-    return power_on_seen && power_off_seen && speed_l1_seen && speed_l2_seen && speed_l3_seen;
-  case DeviceClass::GAS:
-    return valve_close_seen;
-  case DeviceClass::UNKNOWN:
-  default:
-    return (observation_count >= 3);
+  if (power_on_seen && power_off_seen) {
+    return true;
   }
+  if (valve_close_seen) {
+    return true;
+  }
+  return (observation_count >= 2 && (power_on_seen || power_off_seen));
 }
 
 // ============================================================================
@@ -71,29 +48,8 @@ void ControlTemplateRegistry::clear() {
 }
 
 void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
-  auto ad = g_auto_probing_engine.getDescriptor();
-  group.coverage.dev_class = SlotCoverage::classify(group.dev_id, ad);
-
-  switch (group.coverage.dev_class) {
-  case DeviceClass::LIGHT:
-    snprintf(group.group_name, sizeof(group.group_name), "Light");
-    break;
-  case DeviceClass::THERMOSTAT:
-    snprintf(group.group_name, sizeof(group.group_name), "Thermo");
-    break;
-  case DeviceClass::VENT:
-    snprintf(group.group_name, sizeof(group.group_name), "Vent");
-    break;
-  case DeviceClass::GAS:
-    snprintf(group.group_name, sizeof(group.group_name), "Gas");
-    break;
-  case DeviceClass::OUTLET:
-    snprintf(group.group_name, sizeof(group.group_name), "Outlet");
-    break;
-  default:
-    snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
-    break;
-  }
+  group.coverage.dev_class = DeviceClass::UNKNOWN;
+  snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
 }
 
 GroupControlTemplate *ControlTemplateRegistry::findGroup(uint8_t dev_id) {
@@ -271,6 +227,7 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
       }
 
       autoAssignGroupName(*grp);
+      grp->coverage.dev_class = SlotCoverage::classify(d_id, ad);
       grp->status = GroupControlTemplate::Status::WAITING;
     }
     taskEXIT_CRITICAL(&_mux);
@@ -345,88 +302,90 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     grp->ctl_sub1_override = Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
   }
 
-  // 4. 액션 슬롯 차분 분석 및 매핑
-  uint8_t act_off = (ad.offsets_locked && ad.payload_offset < ctl.length) ? ad.payload_offset : 7;
-  uint8_t ctl_cmd = (act_off < ctl.length) ? ctl.data[act_off] : 0;
-  uint8_t cat_off = (ad.offsets_locked && ad.sub1_offset < ctl.length) ? ad.sub1_offset : 5;
-  uint8_t ctl_cat = (cat_off < ctl.length) ? ctl.data[cat_off] : 0;
+  // 4. 순수 패킷 차분(Differential) 분석 및 슬롯/토큰 자동 추출
+  uint8_t payload_start = (ad.offsets_locked && ad.payload_offset < ctl.length) ? ad.payload_offset : 5;
+  size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length; // CS, ETX 제외
 
-  DeviceClass dclass = grp->coverage.dev_class;
-  if (dclass == DeviceClass::UNKNOWN) {
-    dclass = SlotCoverage::classify(dev_id, ad);
-    grp->coverage.dev_class = dclass;
+  // ctl과 raw_template 사이에서 값이 달라진 바이트 수집
+  uint8_t diff_offsets[8]{0};
+  uint8_t diff_vals[8]{0};
+  size_t diff_count = 0;
+
+  for (size_t i = payload_start; i < end_idx && diff_count < 8; ++i) {
+    if (i == grp->sub1_offset || i == grp->sub2_offset) continue;
+    if (ad.offsets_locked && (i == ad.sub1_offset || i == ad.sub2_offset)) continue;
+
+    if (ctl.data[i] != grp->raw_template[i]) {
+      diff_offsets[diff_count] = static_cast<uint8_t>(i);
+      diff_vals[diff_count] = ctl.data[i];
+      diff_count++;
+    }
   }
 
-  if (dclass == DeviceClass::THERMOSTAT) {
-    if (ctl_cat == 0x45) { // 온도 설정
+  // raw_template과 차이가 아직 없으면 payload_start 위치의 값을 후보로 채택
+  if (diff_count == 0 && payload_start < end_idx) {
+    diff_offsets[0] = payload_start;
+    diff_vals[0] = ctl.data[payload_start];
+    diff_count = 1;
+  }
+
+  if (diff_count == 1) {
+    uint8_t act_off = diff_offsets[0];
+    uint8_t cmd_val = diff_vals[0];
+
+    grp->power_slot.discovered = true;
+    grp->power_slot.action_offset = act_off;
+    grp->power_slot.sample_count++;
+
+    if (!grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
+      if (cmd_val == 1 || cmd_val == 0xFF) {
+        grp->power_slot.on_val = cmd_val;
+        grp->coverage.power_on_seen = true;
+      } else {
+        grp->power_slot.off_val = cmd_val;
+        grp->coverage.power_off_seen = true;
+      }
+    } else if (grp->coverage.power_on_seen && cmd_val != grp->power_slot.on_val) {
+      grp->power_slot.off_val = cmd_val;
+      grp->coverage.power_off_seen = true;
+    } else if (grp->coverage.power_off_seen && cmd_val != grp->power_slot.off_val) {
+      grp->power_slot.on_val = cmd_val;
+      grp->coverage.power_on_seen = true;
+    } else {
+      if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
+      else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
+    }
+  } else if (diff_count >= 2) {
+    uint8_t cat_off = diff_offsets[0];
+    uint8_t cat_val = diff_vals[0];
+    uint8_t act_off = diff_offsets[1];
+    uint8_t cmd_val = diff_vals[1];
+
+    if (cmd_val >= 10 && cmd_val <= 40) {
+      // 연속 수치값 (온도 설정 등)
       grp->temp_slot.discovered = true;
       grp->temp_slot.category_offset = cat_off;
-      grp->temp_slot.category_val = 0x45;
+      grp->temp_slot.category_val = cat_val;
       grp->temp_slot.action_offset = act_off;
-      grp->temp_slot.min_val = 15;
-      grp->temp_slot.max_val = 30;
+      if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val) grp->temp_slot.min_val = cmd_val;
+      if (cmd_val > grp->temp_slot.max_val) grp->temp_slot.max_val = cmd_val;
       grp->temp_slot.sample_count++;
       grp->coverage.temp_set_seen = true;
-    } else { // 전원/외출
+    } else {
+      // 카테고리/모드 + 전원
       grp->power_slot.discovered = true;
       grp->power_slot.category_offset = cat_off;
-      grp->power_slot.category_val = 0x46;
+      grp->power_slot.category_val = cat_val;
       grp->power_slot.action_offset = act_off;
-      if (ctl_cmd == 0x01) {
-        grp->power_slot.on_val = 0x01;
-        grp->coverage.power_on_seen = true;
-      } else if (ctl_cmd == 0x04 || ctl_cmd == 0x02) {
-        grp->power_slot.off_val = ctl_cmd;
-        grp->coverage.power_off_seen = true;
-      } else if (ctl_cmd == 0x03) {
-        grp->coverage.away_mode_seen = true;
-      }
       grp->power_slot.sample_count++;
+      if (!grp->coverage.power_on_seen) {
+        grp->power_slot.on_val = cmd_val;
+        grp->coverage.power_on_seen = true;
+      } else if (cmd_val != grp->power_slot.on_val) {
+        grp->power_slot.off_val = cmd_val;
+        grp->coverage.power_off_seen = true;
+      }
     }
-  } else if (dclass == DeviceClass::VENT) {
-    grp->power_slot.discovered = true;
-    grp->power_slot.action_offset = act_off;
-    if (ctl_cmd == 0x01) {
-      grp->power_slot.on_val = 0x01;
-      grp->coverage.power_on_seen = true;
-    } else if (ctl_cmd == 0x02) {
-      grp->power_slot.off_val = 0x02;
-      grp->coverage.power_off_seen = true;
-    }
-    grp->power_slot.sample_count++;
-
-    // 풍량 슬롯 (보통 act_off+1 또는 8)
-    uint8_t spd_off = act_off + 1;
-    if (spd_off < ctl.length) {
-      grp->speed_slot.discovered = true;
-      grp->speed_slot.action_offset = spd_off;
-      grp->speed_slot.min_val = 1;
-      grp->speed_slot.max_val = 3;
-      grp->speed_slot.sample_count++;
-
-      uint8_t spd_val = ctl.data[spd_off];
-      if (spd_val == 1) grp->coverage.speed_l1_seen = true;
-      else if (spd_val == 2) grp->coverage.speed_l2_seen = true;
-      else if (spd_val == 3) grp->coverage.speed_l3_seen = true;
-    }
-  } else if (dclass == DeviceClass::GAS) {
-    grp->close_slot.discovered = true;
-    grp->close_slot.action_offset = act_off;
-    grp->close_slot.off_val = ctl_cmd;
-    grp->close_slot.sample_count++;
-    grp->coverage.valve_close_seen = true;
-  } else {
-    // LIGHT or OUTLET
-    grp->power_slot.discovered = true;
-    grp->power_slot.action_offset = act_off;
-    if (ctl_cmd == 0x01) {
-      grp->power_slot.on_val = 0x01;
-      grp->coverage.power_on_seen = true;
-    } else if (ctl_cmd == 0x02 || ctl_cmd == 0x00) {
-      grp->power_slot.off_val = ctl_cmd;
-      grp->coverage.power_off_seen = true;
-    }
-    grp->power_slot.sample_count++;
   }
 
   // 5. 학습 상태 전이 (SlotCoverage 완전성 기반)
@@ -468,8 +427,9 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
   if (grp->sub1_offset < grp->frame_len) out.data[grp->sub1_offset] = actual_sub1;
   if (grp->sub2_offset < grp->frame_len) out.data[grp->sub2_offset] = sub2;
 
-  // 액션 슬롯 주입
+  // 액션 슬롯 주입 (오직 학습/발견된 슬롯만 주입)
   if (action == ControlActionType::POWER) {
+    if (!grp->power_slot.discovered) return false;
     if (grp->power_slot.category_offset < grp->frame_len) {
       out.data[grp->power_slot.category_offset] = grp->power_slot.category_val;
     }
@@ -477,6 +437,7 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
       out.data[grp->power_slot.action_offset] = (value > 0) ? grp->power_slot.on_val : grp->power_slot.off_val;
     }
   } else if (action == ControlActionType::SET_TEMP) {
+    if (!grp->temp_slot.discovered) return false;
     if (grp->temp_slot.category_offset < grp->frame_len) {
       out.data[grp->temp_slot.category_offset] = grp->temp_slot.category_val;
     }
@@ -487,12 +448,14 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
       out.data[grp->temp_slot.action_offset] = t_val;
     }
   } else if (action == ControlActionType::FAN_SPEED) {
+    if (!grp->speed_slot.discovered) return false;
     if (grp->speed_slot.action_offset < grp->frame_len) {
       uint8_t min_s = (grp->speed_slot.min_val > 0) ? grp->speed_slot.min_val : 1;
       uint8_t max_s = (grp->speed_slot.max_val > 0) ? grp->speed_slot.max_val : 3;
       out.data[grp->speed_slot.action_offset] = static_cast<uint8_t>(constrain(value, min_s, max_s));
     }
   } else if (action == ControlActionType::VALVE_CLOSE) {
+    if (!grp->close_slot.discovered) return false;
     if (grp->close_slot.action_offset < grp->frame_len) {
       out.data[grp->close_slot.action_offset] = grp->close_slot.off_val;
     }
@@ -648,6 +611,8 @@ void ControlTemplateRegistry::processActiveLearning() {
 
     if (cached && cached->last_updated_ms >= _session.step_start_ms) {
       seen_flag = true;
+      grp->power_slot.discovered = true;
+      grp->power_slot.sample_count++;
       _session.retry_count = 0;
       _session.current_step = next_step;
       _session.step_start_ms = now;
@@ -670,7 +635,7 @@ void ControlTemplateRegistry::processActiveLearning() {
 
   case ActiveProbingStep::VERIFY_POWER_ON_ACK: {
     bool ok = checkAckReceived(grp->coverage.power_on_seen, ActiveProbingStep::PROBE_POWER_OFF);
-    if (ok && grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
+    if (ok && grp->temp_slot.discovered) {
       // 난방 켜기 시 기존 저장된 설정온도 복원 여부 검증
       const auto *cached = g_device_repo.find(_session.target_dev_id, _session.target_sub1, _session.target_sub2);
       if (cached && cached->last_ack_len >= 8) {
@@ -692,9 +657,9 @@ void ControlTemplateRegistry::processActiveLearning() {
 
   case ActiveProbingStep::VERIFY_POWER_OFF_ACK: {
     ActiveProbingStep next_branch = ActiveProbingStep::RESTORE_BASELINE;
-    if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) next_branch = ActiveProbingStep::PROBE_TEMP_L1;
-    else if (grp->coverage.dev_class == DeviceClass::VENT) next_branch = ActiveProbingStep::PROBE_SPEED_L1;
-    else if (grp->coverage.dev_class == DeviceClass::GAS) next_branch = ActiveProbingStep::PROBE_VALVE_CLOSE;
+    if (grp->temp_slot.discovered) next_branch = ActiveProbingStep::PROBE_TEMP_L1;
+    else if (grp->speed_slot.discovered) next_branch = ActiveProbingStep::PROBE_SPEED_L1;
+    else if (grp->close_slot.discovered) next_branch = ActiveProbingStep::PROBE_VALVE_CLOSE;
 
     checkAckReceived(grp->coverage.power_off_seen, next_branch);
     break;
