@@ -1058,16 +1058,23 @@ void wallpadPrintStatus(AppendBuf &out) {
   format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), "11B");
   format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), "11B");
 
+  char len_prefix[16];
+  if (desc.has_len_field) {
+    snprintf(len_prefix, sizeof(len_prefix), "Byte #%u", desc.len_offset);
+  } else {
+    snprintf(len_prefix, sizeof(len_prefix), desc.is_locked ? "Fixed" : "Byte #1");
+  }
+
   char q_val[32], cmd_val[32], ack_val[32];
-  snprintf(q_val, sizeof(q_val), "Byte #1 (%s)", q_str);
+  snprintf(q_val, sizeof(q_val), "%s (%s)", len_prefix, q_str);
   if (desc.ctrl_len_cnt > 0) {
     char cmd_lens_str[24];
     format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), "11B");
-    snprintf(cmd_val, sizeof(cmd_val), "Byte #1 (%s)", cmd_lens_str);
+    snprintf(cmd_val, sizeof(cmd_val), "%s (%s)", len_prefix, cmd_lens_str);
   } else {
-    snprintf(cmd_val, sizeof(cmd_val), "Byte #1 (Waiting)");
+    snprintf(cmd_val, sizeof(cmd_val), "%s (Waiting)", len_prefix);
   }
-  snprintf(ack_val, sizeof(ack_val), "Byte #1 (%s)", ack_str);
+  snprintf(ack_val, sizeof(ack_val), "%s (%s)", len_prefix, ack_str);
 
   const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
   const char *cmd_status = (desc.control_seen && desc.ctrl_len_cnt > 0) ? "[LOCKED]" : "[WAITING]";
@@ -1167,7 +1174,16 @@ void wallpadPrintStatus(AppendBuf &out) {
     opcode_status = "[LOCKED]";         // QRY+CTL+ACK 모두 확정
   }
 
+  char seq_line_buf[32];
+  if (desc.has_seq_counter) {
+    snprintf(seq_line_buf, sizeof(seq_line_buf), "Byte #%u (+1 Counter)", desc.seq_offset);
+  } else {
+    snprintf(seq_line_buf, sizeof(seq_line_buf), desc.offsets_locked ? "None (No Counter)" : "None");
+  }
+  const char *seq_status = desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[NONE]") : "[WAITING]";
+
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "Opcode Offset", op_line_buf, opcode_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sequence", seq_line_buf, seq_status);
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sub-Command", sub1_list_buf, addr_status);
   out.append(Fmt::DIV80);
 

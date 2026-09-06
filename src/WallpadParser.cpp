@@ -383,6 +383,11 @@ void AutoProbingEngine::initFromNvs() {
       _desc.gw_addr_offset = (prof.gw_addr_offset > 0) ? prof.gw_addr_offset : 2;
       _desc.gw_addr = (prof.gw_addr != 0) ? prof.gw_addr : 0x01;
       _desc.learned_query_len = (prof.learned_query_len >= 3) ? prof.learned_query_len : 11;
+      _desc.len_offset = prof.len_offset;
+      _desc.has_len_field = (prof.has_len_field != 0);
+      _desc.seq_offset = prof.seq_offset;
+      _desc.has_seq_counter = (prof.seq_offset != 0xFF);
+      _desc.ack_flag_offset = prof.ack_flag_offset;
       _desc.offsets_locked = true;
       _desc.opcodes_locked = true;
     }
@@ -660,14 +665,50 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   if (min_common_len < 4)
     return false;
 
-  // [Step 1: Opcode Determination]
+  // ==========================================================================
+  // MASTER 10-STEP DETERMINISTIC ELIMINATION PIPELINE
+  // ==========================================================================
+
+  // [Step 2: Length (LEN) Early Detection & Elimination]
+  int len_idx = -1;
+  for (size_t k = 1; k < min_common_len - 1; ++k) {
+    bool exact_match = true;
+    for (size_t m = 0; m < N; ++m) {
+      if (pairs[m].q.data[k] != pairs[m].q.length || pairs[m].r.data[k] != pairs[m].r.length) {
+        exact_match = false;
+        break;
+      }
+    }
+    if (exact_match) {
+      len_idx = static_cast<int>(k);
+      break;
+    }
+    // Check Payload Length (LEN - Delta)
+    for (uint8_t delta : {2, 3, 4, 5}) {
+      bool delta_match = true;
+      for (size_t m = 0; m < N; ++m) {
+        if (pairs[m].q.data[k] != (pairs[m].q.length - delta) ||
+            pairs[m].r.data[k] != (pairs[m].r.length - delta)) {
+          delta_match = false;
+          break;
+        }
+      }
+      if (delta_match) {
+        len_idx = static_cast<int>(k);
+        break;
+      }
+    }
+    if (len_idx >= 0) break;
+  }
+
+  // [Step 3: Opcode (Command) Determination & Elimination]
   int opcode_idx = -1;
   uint8_t learned_q_op = 0, learned_ack_op = 0;
   for (size_t k = 1; k < min_common_len - 1; ++k) {
+    if (static_cast<int>(k) == len_idx) continue;
     uint8_t cq = pairs[0].q.data[k];
     uint8_t cr = pairs[0].r.data[k];
-    if (cq == cr)
-      continue;
+    if (cq == cr) continue;
     bool all_match = true;
     for (size_t m = 1; m < N; ++m) {
       if (pairs[m].q.data[k] != cq || pairs[m].r.data[k] != cr) {
@@ -683,10 +724,14 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     }
   }
 
-  // [Step 2: Address & Symmetry Test (Swapped DA/SA detection)]
+  // [Step 4: Dual Address (SA/DA) Swap & Device Type Promotion]
   int swap_i = -1, swap_j = -1;
+  int promoted_dev_idx = -1;
+  int master_gw_idx = -1;
   for (size_t i = 1; i < min_common_len - 1; ++i) {
+    if (static_cast<int>(i) == len_idx || static_cast<int>(i) == opcode_idx) continue;
     for (size_t j = i + 1; j < min_common_len - 1; ++j) {
+      if (static_cast<int>(j) == len_idx || static_cast<int>(j) == opcode_idx) continue;
       bool is_cross = true;
       for (size_t m = 0; m < N; ++m) {
         if (pairs[m].q.data[i] != pairs[m].r.data[j] ||
@@ -699,111 +744,74 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
       if (is_cross) {
         swap_i = static_cast<int>(i);
         swap_j = static_cast<int>(j);
+        std::set<uint8_t> set_i, set_j;
+        for (size_t m = 0; m < N; ++m) {
+          set_i.insert(pairs[m].q.data[i]);
+          set_j.insert(pairs[m].q.data[j]);
+        }
+        if (set_i.size() == 1 && set_j.size() > 1) {
+          master_gw_idx = static_cast<int>(i);
+          promoted_dev_idx = static_cast<int>(j);
+        } else if (set_j.size() == 1 && set_i.size() > 1) {
+          master_gw_idx = static_cast<int>(j);
+          promoted_dev_idx = static_cast<int>(i);
+        } else {
+          master_gw_idx = static_cast<int>(i);
+          promoted_dev_idx = static_cast<int>(j);
+        }
         break;
       }
     }
     if (swap_i >= 0) break;
   }
 
-  // [Step 3: Device Type & Sub ID Determination]
-  // candidate_cols: 쿼리 패킷에서 값이 2개 이상 다양한 컬럼 (q/r 동일 조건 제거 - DevType은 q≠r 가능)
-  std::vector<size_t> candidate_cols;
-  for (size_t k = 1; k < min_common_len - 1; ++k) {
-    if (static_cast<int>(k) == opcode_idx)
-      continue;
-    std::set<uint8_t> vals;
-    for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
-    if (vals.size() >= 2) candidate_cols.push_back(k);
-  }
-
-  int dev_type_idx = -1;
-  int sub_id_idx = -1;
-
-  // ★ 엄격한 유일성 기준: N의 90% 이상 (최소 2)
-  // - 100%는 복수 상태조회 패킷(단일 기기 2형태 쿼리) 존재 시 락 불가 버그 유발
-  // - 90%는 가짜 상태 바이트를 완벽히 배제하면서도 실제 기기군을 확실하게 검증
-  size_t min_unique = std::max<size_t>(2, N * 9 / 10);
-
-  // Filter 1: Length = f(Candidate) → DevType 오프셋 후보 선택
-  for (size_t cand : candidate_cols) {
-    std::map<uint8_t, size_t> len_map;
-    bool consistent = true;
-    for (size_t m = 0; m < N; ++m) {
-      uint8_t val = pairs[m].q.data[cand];
-      size_t r_len = pairs[m].r.length;
-      if (len_map.count(val) && len_map[val] != r_len) {
-        consistent = false;
-        break;
-      }
-      len_map[val] = r_len;
-    }
-    if (consistent && len_map.size() > 1) {
-      std::set<size_t> distinct_lens;
-      for (auto &kv : len_map) distinct_lens.insert(kv.second);
-      if (distinct_lens.size() > 1) {
-        dev_type_idx = static_cast<int>(cand);
-        break;
-      }
-    }
-  }
-
-  // Filter 2: Instance enumeration - DevType+SubID 조합이 min_unique 이상이면 락
-  if (dev_type_idx >= 0) {
-    for (size_t cand : candidate_cols) {
-      if (static_cast<int>(cand) == dev_type_idx)
-        continue;
-      std::set<uint16_t> combo_keys;
-      for (size_t m = 0; m < N; ++m) {
-        uint16_t k = (static_cast<uint16_t>(pairs[m].q.data[dev_type_idx]) << 8) | pairs[m].q.data[cand];
-        combo_keys.insert(k);
-      }
-      // ★ 완화: 100% unique 대신 75% 이상이면 Sub-ID 오프셋으로 확정
-      if (combo_keys.size() >= min_unique) {
-        sub_id_idx = static_cast<int>(cand);
-        break;
-      }
-    }
-  } else {
-    // Fixed length protocols: 두 컬럼 조합이 min_unique 이상 유니크하면 확정
-    for (size_t cand1 : candidate_cols) {
-      for (size_t cand2 : candidate_cols) {
-        if (cand1 == cand2) continue;
-        std::set<uint16_t> combo_keys;
-        for (size_t m = 0; m < N; ++m) {
-          uint16_t k = (static_cast<uint16_t>(pairs[m].q.data[cand1]) << 8) | pairs[m].q.data[cand2];
-          combo_keys.insert(k);
-        }
-        if (combo_keys.size() >= min_unique) {
-          dev_type_idx = static_cast<int>(cand1);
-          sub_id_idx = static_cast<int>(cand2);
-          break;
-        }
-      }
-      if (dev_type_idx >= 0) break;
-    }
-  }
-
-  // [Step 4: Sub-Command / Invariant Parameter]
-  int sub_cmd_idx = -1;
-  if (dev_type_idx >= 0) {
+  // [Step 5: Sequence Counter Monotonic Increment Detection & Elimination]
+  int seq_idx = -1;
+  if (N >= 3) {
     for (size_t k = 1; k < min_common_len - 1; ++k) {
-      if (static_cast<int>(k) == opcode_idx || static_cast<int>(k) == dev_type_idx ||
-          static_cast<int>(k) == sub_id_idx || static_cast<int>(k) == swap_i ||
-          static_cast<int>(k) == swap_j) {
+      int ik = static_cast<int>(k);
+      if (ik == len_idx || ik == opcode_idx || ik == swap_i || ik == swap_j || ik == promoted_dev_idx)
         continue;
-      }
-      bool eq = true;
-      for (size_t m = 0; m < N; ++m) {
-        if (pairs[m].q.data[k] != pairs[m].r.data[k]) {
-          eq = false;
+      bool is_inc = true;
+      for (size_t m = 0; m < N - 1; ++m) {
+        uint8_t diff = static_cast<uint8_t>((pairs[m + 1].q.data[k] - pairs[m].q.data[k]) & 0xFF);
+        if (diff != 1) {
+          is_inc = false;
           break;
         }
       }
-      if (eq) {
+      if (is_inc) {
+        seq_idx = ik;
+        break;
+      }
+    }
+  }
+
+  // [Step 6: Sub-Command / Service ID Detection & Elimination]
+  int sub_cmd_idx = -1;
+  for (size_t k = 1; k < min_common_len - 1; ++k) {
+    int ik = static_cast<int>(k);
+    if (ik == len_idx || ik == opcode_idx || ik == swap_i || ik == swap_j || ik == seq_idx || ik == promoted_dev_idx)
+      continue;
+    bool eq = true;
+    for (size_t m = 0; m < N; ++m) {
+      if (pairs[m].q.data[k] != pairs[m].r.data[k]) {
+        eq = false;
+        break;
+      }
+    }
+    if (eq) {
+      std::set<uint8_t> vals;
+      for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
+      if (vals.size() == 1) {
+        sub_cmd_idx = ik;
+        break;
+      }
+      if (promoted_dev_idx >= 0) {
         std::map<uint8_t, uint8_t> dep_map;
         bool pure_func = true;
         for (size_t m = 0; m < N; ++m) {
-          uint8_t dt = pairs[m].q.data[dev_type_idx];
+          uint8_t dt = pairs[m].q.data[promoted_dev_idx];
           uint8_t sc = pairs[m].q.data[k];
           if (dep_map.count(dt) && dep_map[dt] != sc) {
             pure_func = false;
@@ -812,14 +820,129 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
           dep_map[dt] = sc;
         }
         if (pure_func && dep_map.size() > 1) {
-          sub_cmd_idx = static_cast<int>(k);
+          sub_cmd_idx = ik;
           break;
         }
       }
     }
   }
 
-  // [Step 5: Finalize Profile & Update State]
+  // [Step 7: Device Type & Sub-ID Determination]
+  std::vector<size_t> candidate_cols;
+  for (size_t k = 1; k < min_common_len - 1; ++k) {
+    int ik = static_cast<int>(k);
+    if (ik == len_idx || ik == opcode_idx || ik == swap_i || ik == swap_j ||
+        ik == seq_idx || ik == sub_cmd_idx || ik == promoted_dev_idx) {
+      continue;
+    }
+    std::set<uint8_t> vals;
+    for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
+    if (vals.size() >= 2) candidate_cols.push_back(k);
+  }
+
+  int dev_type_idx = promoted_dev_idx;
+  int sub_id_idx = -1;
+  size_t min_unique = std::max<size_t>(2, N * 8 / 10);
+
+  if (dev_type_idx >= 0) {
+    // Swapped Dual Address: DevType is already promoted from Swap Target!
+    for (size_t cand : candidate_cols) {
+      std::set<uint16_t> combo_keys;
+      for (size_t m = 0; m < N; ++m) {
+        uint16_t key = (static_cast<uint16_t>(pairs[m].q.data[dev_type_idx]) << 8) | pairs[m].q.data[cand];
+        combo_keys.insert(key);
+      }
+      if (combo_keys.size() >= min_unique) {
+        sub_id_idx = static_cast<int>(cand);
+        break;
+      }
+    }
+  } else {
+    // Stationary Direct Mode:
+    // Filter 1: Length Correlation: Length = f(Candidate)
+    for (size_t cand : candidate_cols) {
+      std::map<uint8_t, size_t> len_map;
+      bool consistent = true;
+      for (size_t m = 0; m < N; ++m) {
+        uint8_t val = pairs[m].q.data[cand];
+        size_t r_len = pairs[m].r.length;
+        if (len_map.count(val) && len_map[val] != r_len) {
+          consistent = false;
+          break;
+        }
+        len_map[val] = r_len;
+      }
+      if (consistent && len_map.size() > 1) {
+        std::set<size_t> distinct_lens;
+        for (auto &kv : len_map) distinct_lens.insert(kv.second);
+        if (distinct_lens.size() > 1) {
+          dev_type_idx = static_cast<int>(cand);
+          break;
+        }
+      }
+    }
+
+    if (dev_type_idx >= 0) {
+      for (size_t cand : candidate_cols) {
+        if (static_cast<int>(cand) == dev_type_idx) continue;
+        std::set<uint16_t> combo_keys;
+        for (size_t m = 0; m < N; ++m) {
+          uint16_t key = (static_cast<uint16_t>(pairs[m].q.data[dev_type_idx]) << 8) | pairs[m].q.data[cand];
+          combo_keys.insert(key);
+        }
+        if (combo_keys.size() >= min_unique) {
+          sub_id_idx = static_cast<int>(cand);
+          break;
+        }
+      }
+    } else {
+      // Fixed length protocols: cluster by cardinalities
+      for (size_t cand1 : candidate_cols) {
+        for (size_t cand2 : candidate_cols) {
+          if (cand1 == cand2) continue;
+          std::set<uint16_t> combo_keys;
+          for (size_t m = 0; m < N; ++m) {
+            uint16_t key = (static_cast<uint16_t>(pairs[m].q.data[cand1]) << 8) | pairs[m].q.data[cand2];
+            combo_keys.insert(key);
+          }
+          if (combo_keys.size() >= min_unique) {
+            std::set<uint8_t> set1, set2;
+            for (size_t m = 0; m < N; ++m) {
+              set1.insert(pairs[m].q.data[cand1]);
+              set2.insert(pairs[m].q.data[cand2]);
+            }
+            if (set1.size() <= set2.size()) {
+              dev_type_idx = static_cast<int>(cand1);
+              sub_id_idx = static_cast<int>(cand2);
+            } else {
+              dev_type_idx = static_cast<int>(cand2);
+              sub_id_idx = static_cast<int>(cand1);
+            }
+            break;
+          }
+        }
+        if (dev_type_idx >= 0) break;
+      }
+    }
+  }
+
+  // [Step 8: ACK / Status Flag Detection & Elimination]
+  int ack_flag_idx = -1;
+  for (size_t k = 1; k < min_common_len - 1; ++k) {
+    int ik = static_cast<int>(k);
+    if (ik == len_idx || ik == opcode_idx || ik == swap_i || ik == swap_j ||
+        ik == seq_idx || ik == sub_cmd_idx || ik == dev_type_idx || ik == sub_id_idx) {
+      continue;
+    }
+    std::set<uint8_t> r_vals;
+    for (size_t m = 0; m < N; ++m) r_vals.insert(pairs[m].r.data[k]);
+    if (r_vals.size() == 1 && (*r_vals.begin() == 0x00 || *r_vals.begin() == 0x01)) {
+      ack_flag_idx = ik;
+      break;
+    }
+  }
+
+  // [Step 10: Finalize Profile & Update State]
   AutoProbeDescriptor desc_to_sync;
   {
     CriticalSectionLocker lock(&_mux);
@@ -838,27 +961,27 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (sub_id_idx >= 0) {
       _desc.sub2_offset = static_cast<uint8_t>(sub_id_idx);
     }
-    _desc.is_swapped_addr = (swap_i >= 0);
+    _desc.len_offset = (len_idx >= 0) ? static_cast<uint8_t>(len_idx) : 0xFF;
+    _desc.has_len_field = (len_idx >= 0);
+    _desc.seq_offset = (seq_idx >= 0) ? static_cast<uint8_t>(seq_idx) : 0xFF;
+    _desc.has_seq_counter = (seq_idx >= 0);
+    _desc.ack_flag_offset = (ack_flag_idx >= 0) ? static_cast<uint8_t>(ack_flag_idx) : 0xFF;
 
-    // ★ swap 구조 보완: gw_addr_offset = swap_j (ACK에서 DevType 위치),
-    // gw_addr = 쿼리의 swap_j 위치에 있는 상수값 (GW 자신의 RS-485 주소)
-    if (swap_i >= 0 && swap_j >= 0 && static_cast<size_t>(swap_j) < min_common_len) {
-      // swap_j = GW 주소가 있는 QUERY 오프셋 = ACK에서 DevType 위치
-      _desc.gw_addr_offset = static_cast<uint8_t>(swap_j);
-      // GW 주소값: 모든 쿼리의 swap_j 위치가 동일한 상수값 (버스에서 관측)
-      _desc.gw_addr = pairs[0].q.data[swap_j];
+    _desc.is_swapped_addr = (swap_i >= 0);
+    if (swap_i >= 0 && master_gw_idx >= 0 && promoted_dev_idx >= 0) {
+      _desc.gw_addr_offset = static_cast<uint8_t>(master_gw_idx);
+      _desc.gw_addr = pairs[0].q.data[master_gw_idx];
     } else if (!_desc.is_swapped_addr && dev_type_idx >= 0) {
-      // swap 없는 경우: ACK DevType 위치 = QUERY DevType 위치 = dev_id_offset
       _desc.gw_addr_offset = _desc.dev_id_offset;
     }
 
-    // ★ 버스 관측 기반 쿼리 패킷 길이 학습 (min_common_len = 실제 쿼리 공통 길이)
     if (min_common_len >= 5 && min_common_len <= 64) {
       _desc.learned_query_len = static_cast<uint8_t>(min_common_len);
     }
 
     _desc.offsets_locked = (dev_type_idx >= 0 && sub_id_idx >= 0);
 
+    // Calculate Payload Boundary
     int max_hdr = 0;
     if (opcode_idx > max_hdr) max_hdr = opcode_idx;
     if (dev_type_idx > max_hdr) max_hdr = dev_type_idx;
@@ -866,6 +989,9 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (sub_id_idx > max_hdr) max_hdr = sub_id_idx;
     if (swap_i > max_hdr) max_hdr = swap_i;
     if (swap_j > max_hdr) max_hdr = swap_j;
+    if (len_idx > max_hdr) max_hdr = len_idx;
+    if (seq_idx > max_hdr) max_hdr = seq_idx;
+    if (ack_flag_idx > max_hdr) max_hdr = ack_flag_idx;
     _desc.payload_offset = static_cast<uint8_t>(max_hdr + 1);
 
     snprintf(_desc.description, sizeof(_desc.description),
@@ -916,6 +1042,11 @@ void AutoProbingEngine::reset() {
   _desc.ack_opcode = 0x04;
   _desc.opcodes_locked = false;
   _desc.control_seen = false;
+  _desc.len_offset = 0xFF;
+  _desc.has_len_field = false;
+  _desc.seq_offset = 0xFF;
+  _desc.has_seq_counter = false;
+  _desc.ack_flag_offset = 0xFF;
   _desc.is_locked = false;
   _consecutive_mismatches = 0;
   strncpy(_desc.description, "Probing bus traffic...", sizeof(_desc.description) - 1);
@@ -935,13 +1066,13 @@ void AutoProbingEngine::reset() {
 
 static const VendorProfileDescriptor s_default_profiles[ProfileRepository::MAX_PROFILES] = {
     // 0: Universal Auto-Probing
-    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11},
+    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF},
     // 1: User Slot 1
-    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11},
+    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF},
     // 2: User Slot 2
-    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11},
+    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF},
     // 3: User Slot 3
-    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11}
+    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF}
 };
 
 static VendorProfileDescriptor s_active_profiles[ProfileRepository::MAX_PROFILES];
@@ -1238,6 +1369,10 @@ void ProfileRepository::syncAutoProfileToNvs(const AutoProbeDescriptor &auto_des
       desc.gw_addr_offset = auto_desc.gw_addr_offset;
       desc.gw_addr = auto_desc.gw_addr;
       desc.learned_query_len = auto_desc.learned_query_len;
+      desc.len_offset = auto_desc.len_offset;
+      desc.has_len_field = auto_desc.has_len_field ? 1 : 0;
+      desc.seq_offset = auto_desc.seq_offset;
+      desc.ack_flag_offset = auto_desc.ack_flag_offset;
     }
     s_active_profiles[0] = desc;
   }

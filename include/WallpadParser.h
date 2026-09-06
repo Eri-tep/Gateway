@@ -44,6 +44,10 @@ struct VendorProfileDescriptor {
   uint8_t gw_addr_offset{2};      // GW 주소 위치 (QUERY 기준) = ACK 기준 DevType 위치
   uint8_t gw_addr{0x01};          // GW 주소값
   uint8_t learned_query_len{11};  // 학습된 쿼리 길이
+  uint8_t len_offset{0xFF};       // 패킷 내 길이 필드 위치 (0xFF: 고정 프레임)
+  uint8_t has_len_field{0};       // 1: 길이 필드 보유, 0: 암묵적/고정 프레임
+  uint8_t seq_offset{0xFF};       // 시퀀스 카운터 위치 (0xFF: 없음)
+  uint8_t ack_flag_offset{0xFF};  // ACK 상태 플래그 위치 (0xFF: 없음)
 };
 
 // ============================================================================
@@ -142,6 +146,11 @@ struct AutoProbeDescriptor {
   uint8_t gw_addr{0x01};      // 버스에서 관측된 GW 자신의 RS-485 주소값 (기본: 0x01)
   // ★ 학습된 쿼리 패킷 길이 (버스 관측 기반, buildQueryPacket 동적 길이 사용)
   uint8_t learned_query_len{11};  // 관측된 쿼리 패킷 최빈 길이 (기본: 11)
+  uint8_t len_offset{0xFF};       // 패킷 내 길이 필드 위치 (0xFF: 고정 프레임)
+  bool has_len_field{false};      // 패킷 내 명시적 길이 필드 유무
+  uint8_t seq_offset{0xFF};       // 시퀀스 카운터 위치 (0xFF: 없음)
+  bool has_seq_counter{false};    // 시퀀스 카운터 유무
+  uint8_t ack_flag_offset{0xFF};  // ACK/Status 플래그 위치 (0xFF: 없음)
   uint8_t learned_ctrl_lens[4]{0}; // 관측된 제어(CMD/CTL) 패킷 가변 길이 목록
   uint8_t ctrl_len_cnt{0};        // 관측된 제어 패킷 길이 가짓수
   uint32_t matched_packets{0};
