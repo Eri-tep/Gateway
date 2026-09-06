@@ -1054,22 +1054,29 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(out + off, out_sz - off, " Byte");
   };
 
+  char def_len_buf[16];
+  if (desc.learned_query_len > 0) {
+    snprintf(def_len_buf, sizeof(def_len_buf), "%u Byte", desc.learned_query_len);
+  } else {
+    snprintf(def_len_buf, sizeof(def_len_buf), "Waiting");
+  }
+
   char q_str[32], ack_str[32];
-  format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), "11 Byte");
-  format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), "11 Byte");
+  format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), def_len_buf);
+  format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), def_len_buf);
 
   char len_prefix[16];
   if (desc.has_len_field) {
     snprintf(len_prefix, sizeof(len_prefix), "Byte #%u", desc.len_offset);
   } else {
-    snprintf(len_prefix, sizeof(len_prefix), desc.is_locked ? "Fixed" : "Byte #1");
+    snprintf(len_prefix, sizeof(len_prefix), desc.is_locked ? "Fixed" : "Waiting");
   }
 
   char q_val[48], cmd_val[48], ack_val[48];
   snprintf(q_val, sizeof(q_val), "%s : %s", len_prefix, q_str);
   if (desc.ctrl_len_cnt > 0) {
     char cmd_lens_str[32];
-    format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), "11 Byte");
+    format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), def_len_buf);
     snprintf(cmd_val, sizeof(cmd_val), "%s : %s", len_prefix, cmd_lens_str);
   } else {
     snprintf(cmd_val, sizeof(cmd_val), "%s : Waiting", len_prefix);
@@ -1137,9 +1144,9 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #%u", desc.sub1_offset);
     snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #%u", desc.sub2_offset);
   } else {
-    snprintf(dev_off_label, sizeof(dev_off_label), "Byte #3 : Init");
-    snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #5 : Init");
-    snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #6 : Init");
+    snprintf(dev_off_label, sizeof(dev_off_label), "Probing...");
+    snprintf(sub1_off_label, sizeof(sub1_off_label), "Probing...");
+    snprintf(sub2_off_label, sizeof(sub2_off_label), "Probing...");
   }
 
   char dev_list_buf[64], sub1_list_buf[64], sub2_list_buf[64];
@@ -1226,7 +1233,10 @@ void wallpadPrintStatus(AppendBuf &out) {
              static_cast<unsigned>(b1), static_cast<unsigned>(b2), static_cast<unsigned>(b3));
     out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
   }
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", "20 ms : CH1~3", "[CONFIG]");
+  char ipg_silence_buf[48];
+  snprintf(ipg_silence_buf, sizeof(ipg_silence_buf), "%u ms : CH1~3",
+           static_cast<unsigned>(Config::Timing::WALLPAD_AUTO_IPG_MS));
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", ipg_silence_buf, "[CONFIG]");
   out.append(Fmt::DIV80);
 
   // 7. Doorphone (CH4 Universal IPG Engine)
@@ -1250,10 +1260,17 @@ void wallpadPrintStatus(AppendBuf &out) {
     }
   }
 
+  char dp_baud_buf[32];
+  snprintf(dp_baud_buf, sizeof(dp_baud_buf), "%u bps", static_cast<unsigned>(g_config.doorphone_baud_rate));
+  char dp_ipg_buf[32];
+  snprintf(dp_ipg_buf, sizeof(dp_ipg_buf), "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_IPG_MS));
+  char dp_debounce_buf[32];
+  snprintf(dp_debounce_buf, sizeof(dp_debounce_buf), "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_DEBOUNCE_MS));
+
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Doorphone (CH4)", "Framing", dp_frame_buf, dp_status_str);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Baudrate", "3840 bps", "[CONFIG]");
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Time-gap", "25 ms", "[CONFIG]");
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Debounce", "500 ms", "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Baudrate", dp_baud_buf, "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Time-gap", dp_ipg_buf, "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Debounce", dp_debounce_buf, "[CONFIG]");
   out.append(Fmt::DIV80);
 
   // 8. Runtime Sync & Telemetry

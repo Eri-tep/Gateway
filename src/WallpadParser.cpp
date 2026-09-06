@@ -1617,7 +1617,10 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
     out.length = pkt_len;
     out.data.fill(0);
     out.data[0] = stx;
-    out.data[1] = pkt_len;  // LEN 필드
+    // ★ LEN 필드: has_len_field 활성화 시에만 len_offset 위치에 기입
+    if (ad.has_len_field && ad.len_offset < pkt_len) {
+      out.data[ad.len_offset] = pkt_len;
+    }
 
     // ★ GW 주소: 버스에서 관측된 ad.gw_addr를 ad.gw_addr_offset 위치에 기입
     // (기존: data[2] = 0x01 하드코딩 → 현재: 관측값 사용)
@@ -1645,7 +1648,9 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
   out.length = pkt_len;
   out.data.fill(0);
   out.data[0] = stx;
-  out.data[1] = pkt_len;
+  if (desc.has_len_field && desc.len_offset < pkt_len) {
+    out.data[desc.len_offset] = pkt_len;
+  }
 
   if (desc.gw_addr_offset < pkt_len) {
     out.data[desc.gw_addr_offset] = (desc.gw_addr != 0) ? desc.gw_addr : 0x01;
