@@ -1410,16 +1410,28 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.append(Fmt::DIV80EQ);
   out.append("                    DEVICE GROUP CONTROL BLUEPRINT TABLE                     \r\n");
   out.append(Fmt::DIV80EQ);
-  out.append("DevID  Group Name     Type        Coverage  Power Slot       Param Slot       Status\r\n");
+  out.append("DevID  Group Name  Type     Coverage  Power Slot      Param Slot     Status\r\n");
   out.append(Fmt::DIV80);
 
   size_t count = g_control_registry.getGroupCount();
   if (count == 0) {
     out.append("  (No control templates learned yet. Waiting for bus traffic or active probe)\r\n");
   } else {
-    for (size_t i = 0; i < count; ++i) {
+    // dev_id 오름차순으로 정렬 복사하여 완벽한 순서 보장
+    GroupControlTemplate grp_list[ControlTemplateRegistry::MAX_GROUPS];
+    size_t valid_cnt = 0;
+    for (size_t i = 0; i < count && valid_cnt < ControlTemplateRegistry::MAX_GROUPS; ++i) {
       GroupControlTemplate grp;
-      if (!g_control_registry.getGroupByIndex(i, grp)) continue;
+      if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
+        grp_list[valid_cnt++] = grp;
+      }
+    }
+    std::sort(grp_list, grp_list + valid_cnt, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
+      return a.dev_id < b.dev_id;
+    });
+
+    for (size_t i = 0; i < valid_cnt; ++i) {
+      const auto &grp = grp_list[i];
 
       char pwr_str[24]{"-"};
       if (grp.power_slot.discovered) {
@@ -1477,7 +1489,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
         snprintf(cov_str, sizeof(cov_str), "%d/1", c);
       }
 
-      out.appendFormat("0x%02X   %-14s %-11s %-9s %-16s %-16s %s\r\n",
+      out.appendFormat("0x%02X   %-11s %-8s %-9s %-15s %-14s %s\r\n",
                        grp.dev_id, grp.group_name, type_str, cov_str,
                        pwr_str, param_str, stat_str);
     }

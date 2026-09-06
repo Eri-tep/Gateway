@@ -23,6 +23,9 @@ RTC_NOINIT_ATTR uint32_t rtc_rescue_magic;
 RTC_NOINIT_ATTR uint32_t rtc_crash_counter;
 constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343; // 'RESC'
 
+RTC_NOINIT_ATTR uint32_t rtc_clean_restart_magic;
+constexpr uint32_t RTC_MAGIC_CLEAN_RESTART = 0x5AA55AA5;
+
 RTC_NOINIT_ATTR RtcWarmCache rtc_warm_cache;
 
 std::atomic<bool> g_rescue_mode{false};
@@ -92,8 +95,15 @@ static const char *s_pending_reboot_reason = nullptr;
 void System_LogResetReason() {
   esp_reset_reason_t reason = esp_reset_reason();
 
-  if (reason == ESP_RST_SW)
+  if (reason == ESP_RST_SW) {
+    if (rtc_clean_restart_magic == RTC_MAGIC_CLEAN_RESTART) {
+      rtc_clean_restart_magic = 0;
+      return;
+    }
+    s_pending_reboot_reason = "Software Reset (esp_restart)";
     return;
+  }
+  rtc_clean_restart_magic = 0;
 
   const char *reason_str = nullptr;
   switch (reason) {
@@ -243,7 +253,7 @@ void System_EnterRescueMode(const char *reason) {
       xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
     }
     vTaskDelay(pdMS_TO_TICKS(200));
-    esp_restart();
+    System_Restart("OTA Firmware Update");
   });
   ArduinoOTA.onError([](ota_error_t error) {
     g_ota_in_progress.store(false, std::memory_order_release);
@@ -1560,6 +1570,7 @@ void System_Restart(const char *reason) {
   WarmCache_SaveToRtc();
   WarmCache_SaveToNvs();
 
+  rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
   vTaskDelay(pdMS_TO_TICKS(150));
   esp_restart();
 }
@@ -1892,7 +1903,7 @@ static void Boot_InitWifiAndOta() {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
       }
       vTaskDelay(pdMS_TO_TICKS(200));
-      esp_restart();
+      System_Restart("OTA Firmware Update");
     });
     ArduinoOTA.onError([](ota_error_t error) {
       g_ota_in_progress.store(false, std::memory_order_release);

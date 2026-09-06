@@ -145,7 +145,7 @@ static void Task_HttpOta(void *pvParameters) {
       ::Serial.println(F("[OTA] Update OK! Rebooting into new firmware in 1s..."));
       http.end();
       vTaskDelay(pdMS_TO_TICKS(1000));
-      esp_restart();
+      System_Restart("HTTP OTA Update");
     }
   } else {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");

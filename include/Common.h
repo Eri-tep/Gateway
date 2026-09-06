@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.3.2";
+constexpr const char *FIRMWARE_VERSION = "v1.3.3";
 } // namespace Config
 
 namespace Config::Task {

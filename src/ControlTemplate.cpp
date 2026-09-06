@@ -136,7 +136,19 @@ GroupControlTemplate *ControlTemplateRegistry::registerOrTouch(uint8_t dev_id, c
   }
 
   if (_group_count < MAX_GROUPS) {
-    GroupControlTemplate &new_grp = _groups[_group_count++];
+    // dev_id 오름차순으로 삽입 위치 탐색 및 정렬 유지
+    size_t insert_idx = _group_count;
+    for (size_t i = 0; i < _group_count; ++i) {
+      if (_groups[i].dev_id > dev_id) {
+        insert_idx = i;
+        break;
+      }
+    }
+    for (size_t i = _group_count; i > insert_idx; --i) {
+      _groups[i] = _groups[i - 1];
+    }
+    _group_count++;
+    GroupControlTemplate &new_grp = _groups[insert_idx];
     new_grp = GroupControlTemplate{};
     new_grp.dev_id = dev_id;
     if (name && strlen(name) > 0) {
@@ -187,7 +199,11 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
     }
     _group_count = 0;
     taskEXIT_CRITICAL(&_mux);
-    saveToNvs();
+    Preferences prefs;
+    if (prefs.begin("ctl_tmpls", false)) {
+      prefs.clear();
+      prefs.end();
+    }
     return true;
   }
 
@@ -259,6 +275,13 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
     }
     taskEXIT_CRITICAL(&_mux);
   }
+
+  taskENTER_CRITICAL(&_mux);
+  std::sort(_groups, _groups + _group_count, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
+    return a.dev_id < b.dev_id;
+  });
+  taskEXIT_CRITICAL(&_mux);
+
   saveToNvs();
 }
 
@@ -790,13 +813,19 @@ void ControlTemplateRegistry::saveToNvs() {
   GroupControlTemplate local_groups[MAX_GROUPS];
   size_t local_count = 0;
 
-  // 1. Critical section에서는 오직 메모리 복사만 신속히 완료
+  // 1. Critical section에서는 오직 메모리 복사만 신속히 완료 (유효한 dev_id만)
   taskENTER_CRITICAL(&_mux);
-  local_count = _group_count;
-  for (size_t i = 0; i < local_count; ++i) {
-    local_groups[i] = _groups[i];
+  for (size_t i = 0; i < _group_count; ++i) {
+    if (_groups[i].dev_id != 0) {
+      local_groups[local_count++] = _groups[i];
+    }
   }
   taskEXIT_CRITICAL(&_mux);
+
+  // dev_id 오름차순 정렬 저장
+  std::sort(local_groups, local_groups + local_count, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
+    return a.dev_id < b.dev_id;
+  });
 
   // 2. Flash I/O (NVS)는 락이 완전히 풀린 상태에서 안전하게 수행 (Panic 방지)
   Preferences prefs;
@@ -819,17 +848,31 @@ void ControlTemplateRegistry::loadFromNvs() {
   if (cnt > MAX_GROUPS) cnt = MAX_GROUPS;
 
   GroupControlTemplate local_groups[MAX_GROUPS];
+  size_t valid_cnt = 0;
   for (size_t i = 0; i < cnt; ++i) {
     char key[16];
     snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
-    prefs.getBytes(key, &local_groups[i], sizeof(GroupControlTemplate));
+    GroupControlTemplate temp{};
+    if (prefs.getBytes(key, &temp, sizeof(GroupControlTemplate)) > 0) {
+      if (temp.dev_id != 0) {
+        local_groups[valid_cnt++] = temp;
+      }
+    }
   }
   prefs.end();
 
+  // dev_id 오름차순 정렬
+  std::sort(local_groups, local_groups + valid_cnt, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
+    return a.dev_id < b.dev_id;
+  });
+
   taskENTER_CRITICAL(&_mux);
-  _group_count = cnt;
-  for (size_t i = 0; i < cnt; ++i) {
+  _group_count = valid_cnt;
+  for (size_t i = 0; i < valid_cnt; ++i) {
     _groups[i] = local_groups[i];
+  }
+  for (size_t i = valid_cnt; i < MAX_GROUPS; ++i) {
+    _groups[i] = GroupControlTemplate{};
   }
   taskEXIT_CRITICAL(&_mux);
 }
