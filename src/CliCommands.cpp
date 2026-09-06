@@ -1468,6 +1468,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
 
       const char *type_str = "SWITCH";
       switch (grp.coverage.dev_class) {
+      case DeviceClass::GAS:        type_str = "GAS"; break;
       case DeviceClass::THERMOSTAT: type_str = "THERMO"; break;
       case DeviceClass::VENT:       type_str = "VENT"; break;
       case DeviceClass::AIRCON:     type_str = "AIRCON"; break;
@@ -1482,6 +1483,10 @@ void wallpadPrintControlTable(AppendBuf &out) {
       int c = 0;
       int total_c = 2;
       switch (grp.coverage.dev_class) {
+      case DeviceClass::GAS:
+        total_c = 1;
+        if (grp.coverage.valve_close_seen || grp.coverage.power_off_seen) c++;
+        break;
       case DeviceClass::THERMOSTAT:
         total_c = 6;
         if (grp.coverage.power_on_seen) c++;

@@ -101,15 +101,30 @@ DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad
   if (has_speed_telemetry) {
     return DeviceClass::VENT;
   }
+  // 가스 밸브 판별: DevID가 0x1B(표준 홈넷 가스)이거나 가스 시그니처 감지 시
+  if (dev_id == 0x1B || has_gas_signature) {
+    return DeviceClass::GAS;
+  }
   if (matched_units > 0) {
     return DeviceClass::SWITCH;
   }
 
-  return DeviceClass::UNKNOWN;
+  // 1차 캐시 타깃만 있고 아직 ACK 페이로드가 비어있는 경우 DevID 기준 기본 클래스 fallback
+  if (dev_id == 0x1B) {
+    return DeviceClass::GAS;
+  }
+  if (dev_id == Config::Devices::DEV_THERMOSTAT) {
+    return DeviceClass::THERMOSTAT;
+  }
+
+  return DeviceClass::SWITCH;
 }
 
 bool SlotCoverage::isFullyCovered() const {
   switch (dev_class) {
+  case DeviceClass::GAS:
+    return valve_close_seen || power_off_seen;
+
   case DeviceClass::SWITCH:
     return (power_on_seen && power_off_seen) || valve_close_seen;
 
@@ -160,6 +175,7 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
   if (strlen(group.group_name) > 0 &&
       strncmp(group.group_name, "Unknown", 7) != 0 &&
       strncmp(group.group_name, "Dev_0x", 6) != 0 &&
+      strcmp(group.group_name, "Gas") != 0 &&
       strcmp(group.group_name, "Thermo") != 0 &&
       strcmp(group.group_name, "Vent") != 0 &&
       strcmp(group.group_name, "Aircon") != 0 &&
@@ -168,6 +184,9 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
   }
 
   switch (group.coverage.dev_class) {
+  case DeviceClass::GAS:
+    snprintf(group.group_name, sizeof(group.group_name), "Gas");
+    break;
   case DeviceClass::SWITCH:
     snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
     break;
@@ -184,7 +203,11 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
     snprintf(group.group_name, sizeof(group.group_name), "Aircon");
     break;
   default:
-    snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
+    if (group.dev_id == 0x1B) {
+      snprintf(group.group_name, sizeof(group.group_name), "Gas");
+    } else {
+      snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
+    }
     break;
   }
 }
@@ -283,8 +306,8 @@ size_t ControlTemplateRegistry::getGroupCount() const {
   size_t cnt = _group_count;
   taskEXIT_CRITICAL(&_mux);
 
-  // Phase 3 (offsets_locked) 수렴이 완료되었는데 템플릿이 아직 비어있다면 정밀 합성!
-  if (cnt == 0 && g_auto_probing_engine.isOffsetsLocked() && g_polling_targets.activeCount() > 0) {
+  // Phase 3 (offsets_locked) 상태에서 활성 타깃이 있는데 등록된 그룹이 적거나 비어있다면 자동 동기화
+  if (g_auto_probing_engine.isOffsetsLocked() && g_polling_targets.activeCount() > 0) {
     const_cast<ControlTemplateRegistry*>(this)->synthesizeFromConvergedCache();
     taskENTER_CRITICAL(&_mux);
     cnt = _group_count;
@@ -510,6 +533,13 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->power_slot.on_val = cmd_val;
       grp->power_slot.sample_count++;
       grp->coverage.call_seen = true;
+    } else if (grp->coverage.dev_class == DeviceClass::GAS) {
+      grp->close_slot.discovered = true;
+      grp->close_slot.action_offset = act_off;
+      grp->close_slot.off_val = cmd_val;
+      grp->close_slot.sample_count++;
+      grp->coverage.valve_close_seen = true;
+      grp->coverage.power_off_seen = true;
     } else {
       grp->power_slot.discovered = true;
       grp->power_slot.action_offset = act_off;
@@ -701,7 +731,11 @@ bool ControlTemplateRegistry::setupTargetForProbing(uint8_t dev_id) {
   _session.target_dev_id = dev_id;
   _session.target_sub1 = t_sub1;
   _session.target_sub2 = t_sub2;
-  _session.current_step = ActiveProbingStep::PROBE_POWER_ON;
+  if (grp && (grp->coverage.dev_class == DeviceClass::GAS || dev_id == 0x1B)) {
+    _session.current_step = ActiveProbingStep::PROBE_VALVE_CLOSE;
+  } else {
+    _session.current_step = ActiveProbingStep::PROBE_POWER_ON;
+  }
   _session.retry_count = 0;
   _session.candidate_offset = 0;
   _session.candidate_token = 0;

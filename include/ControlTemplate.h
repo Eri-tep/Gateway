@@ -38,7 +38,8 @@ struct ActionSlot {
 
 enum class DeviceClass : uint8_t {
   UNKNOWN = 0,
-  SWITCH,     // 지속 릴레이 (ON/OFF) - 조명, 콘센트, 가스밸브, 일괄소등
+  SWITCH,     // 지속 릴레이 (ON/OFF) - 조명, 콘센트, 일괄소등
+  GAS,        // 차단 밸브 (단방향 닫기 / 차단) - 가스 밸브
   MOMENTARY,  // 단방향 순간 펄스 트리거 (호출) - 엘리베이터 호출, 현관문 열림
   THERMOSTAT, // 연속 희망온도 파라미터 (14~36℃ 2개 슬롯) - 난방
   VENT,       // 이산 다단계 풍량 파라미터 (1~3단) - 환기
