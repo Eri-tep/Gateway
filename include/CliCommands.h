@@ -21,6 +21,13 @@ void wallpadSetProfile(int sock, const char *key);
 
 void devsPrintTier1Targets(AppendBuf &out, uint32_t now);
 void devsPrintTier2Cache(AppendBuf &out, uint32_t now);
+
+void wallpadPrintControlTable(AppendBuf &out);
+void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id);
+void wallpadControlLearn(int sock, uint8_t dev_id);
+void wallpadPrintControlLearnStatus(AppendBuf &out);
+void wallpadControlAbort(int sock);
+void wallpadControlReset(int sock, uint8_t dev_id);
 } // namespace WallpadCli
 
 namespace SystemCli {

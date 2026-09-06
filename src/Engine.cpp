@@ -2,6 +2,7 @@
 #include "MgmtRpc.h"
 #include "TelnetCli.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_timer.h"
 #include <stdarg.h>
 
@@ -801,6 +802,21 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
 // [2] 제어 패킷 전송 및 투명 중계
 static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
+  StaticPacket ack_before{};
+  auto *parser = WallpadParserFactory::getActiveParser();
+  if (parser) {
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    span<const uint8_t> ctl_span(ctrlPacket.data.data(), ctrlPacket.length);
+    if (parser->extractDeviceKey(ctl_span, dev_id, sub1, sub2)) {
+      const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
+      if (cached && cached->last_ack_len > 0) {
+        ack_before.channel_id = 1;
+        ack_before.length = cached->last_ack_len;
+        std::copy(cached->last_ack_data.begin(), cached->last_ack_data.begin() + cached->last_ack_len, ack_before.data.begin());
+      }
+    }
+  }
+
   Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
 
   {
@@ -832,6 +848,9 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     g_auto_probing_engine.feedControlPair(
         span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length),
         span<const uint8_t>(ack.data.data(), ack.length));
+    if (!parser || !parser->isQueryPacket(span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length))) {
+      g_control_registry.onControlTransaction(ctrlPacket, ack_before, ack);
+    }
     ack.channel_id = ctrlPacket.channel_id;
 
     // ★ [추가] 스마트싱스/앱(CH6) 전송용 주소 변환 (0x42 -> 0x40 및 Checksum 재계산)
@@ -1090,6 +1109,8 @@ void Task_Ch1(void *pvParameters) {
       }
     }
 
+    g_control_registry.processActiveLearning();
+
     // ★ wallpad reset 신호 처리: s_convergence_done을 리셋하여 재수렴·재락 허용
     if (g_probe_convergence_reset.load(std::memory_order_acquire)) {
       g_probe_convergence_reset.store(false, std::memory_order_release);
@@ -1141,6 +1162,8 @@ void Task_Ch1(void *pvParameters) {
           g_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
           g_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
           g_telnet_tracer.trace("[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). Runtime metrics synchronized.\r\n");
+          g_control_registry.synthesizeFromConvergedCache();
+          g_telnet_tracer.trace("[CTL] Control template synthesis triggered.\r\n");
         }
       } else {
         s_stable_start_ms = 0;

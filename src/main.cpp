@@ -3,6 +3,7 @@
 #include "MgmtRpc.h"
 #include "TelnetCli.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_sntp.h"
 #include "lwip/ip.h"
 #include "lwip/tcp.h"
@@ -1953,6 +1954,7 @@ void setup() {
                 g_config.ap_ssid);
   WarmCache_RestoreOnBoot();
   g_doorphone_tracker.restoreFromNvs();
+  g_control_registry.init();
   Mgmt_Init();
   Boot_InitHardwareAndDevices();
   Boot_InitWifiAndOta();

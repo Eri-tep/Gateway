@@ -2,6 +2,7 @@
 #include "MgmtRpc.h"
 #include "TelnetCli.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_ota_ops.h"
 #include "esp_task_wdt.h"
 #include <cstdarg>
@@ -679,6 +680,12 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
   out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
   out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
+  out.append("  wallpad ctl                     Display learned control blueprint table\r\n");
+  out.append("  wallpad ctl-view <id>           Dump detailed packet template & action slots\r\n");
+  out.append("  wallpad ctl-learn <id>          Start active probing session to learn commands\r\n");
+  out.append("  wallpad ctl-learn-status        Show active probing real-time progress\r\n");
+  out.append("  wallpad ctl-abort               Abort active probing & restore baseline\r\n");
+  out.append("  wallpad ctl-reset [id]          Reset learned control template(s)\r\n");
   out.append("  trace [on|off|ctl|ack|pol|...]  Live packet stream monitoring with filters\r\n");
   out.append("  q                               Shortcut to stop live tracing immediately\r\n");
   out.append(Fmt::DIV80);
@@ -1398,6 +1405,285 @@ void wallpadSetProfile(int sock, const char *key) {
   }
 }
 
+void wallpadPrintControlTable(AppendBuf &out) {
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("                    DEVICE GROUP CONTROL BLUEPRINT TABLE                     \r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("DevID  Group Name     Type        Coverage  Power Slot       Param Slot       Status\r\n");
+  out.append(Fmt::DIV80);
+
+  size_t count = g_control_registry.getGroupCount();
+  if (count == 0) {
+    out.append("  (No control templates learned yet. Waiting for bus traffic or active probe)\r\n");
+  } else {
+    for (size_t i = 0; i < count; ++i) {
+      GroupControlTemplate grp;
+      if (!g_control_registry.getGroupByIndex(i, grp)) continue;
+
+      char pwr_str[24]{"-"};
+      if (grp.power_slot.discovered) {
+        snprintf(pwr_str, sizeof(pwr_str), "#%u (0x%02X/0x%02X)",
+                 grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
+      }
+
+      char param_str[24]{"-"};
+      if (grp.temp_slot.discovered) {
+        snprintf(param_str, sizeof(param_str), "T:#%u (%u~%uC)",
+                 grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
+      } else if (grp.speed_slot.discovered) {
+        snprintf(param_str, sizeof(param_str), "S:#%u (%u~%u)",
+                 grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
+      } else if (grp.close_slot.discovered) {
+        snprintf(param_str, sizeof(param_str), "C:#%u (0x%02X)",
+                 grp.close_slot.action_offset, grp.close_slot.off_val);
+      }
+
+      const char *stat_str = "WAITING";
+      switch (grp.status) {
+      case GroupControlTemplate::Status::EMPTY: stat_str = "EMPTY"; break;
+      case GroupControlTemplate::Status::WAITING: stat_str = "WAITING"; break;
+      case GroupControlTemplate::Status::CAPTURING: stat_str = "CAPTURING"; break;
+      case GroupControlTemplate::Status::PARTIAL: stat_str = "PARTIAL"; break;
+      case GroupControlTemplate::Status::VERIFIED: stat_str = "VERIFIED"; break;
+      case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
+      }
+
+      const char *type_str = "Unknown";
+      switch (grp.coverage.dev_class) {
+      case DeviceClass::LIGHT: type_str = "Light"; break;
+      case DeviceClass::OUTLET: type_str = "Outlet"; break;
+      case DeviceClass::THERMOSTAT: type_str = "Thermo"; break;
+      case DeviceClass::VENT: type_str = "Vent"; break;
+      case DeviceClass::GAS: type_str = "Gas"; break;
+      default: break;
+      }
+
+      char cov_str[16]{"0/0"};
+      if (grp.coverage.dev_class == DeviceClass::LIGHT || grp.coverage.dev_class == DeviceClass::OUTLET) {
+        int c = (grp.coverage.power_on_seen?1:0) + (grp.coverage.power_off_seen?1:0);
+        snprintf(cov_str, sizeof(cov_str), "%d/2", c);
+      } else if (grp.coverage.dev_class == DeviceClass::THERMOSTAT) {
+        int c = (grp.coverage.power_on_seen?1:0) + (grp.coverage.power_off_seen?1:0) +
+                (grp.coverage.temp_set_seen?1:0) + (grp.coverage.away_mode_seen?1:0) +
+                (grp.coverage.temp_while_off_seen?1:0) + (grp.coverage.temp_while_away_seen?1:0);
+        snprintf(cov_str, sizeof(cov_str), "%d/6", c);
+      } else if (grp.coverage.dev_class == DeviceClass::VENT) {
+        int c = (grp.coverage.power_on_seen?1:0) + (grp.coverage.power_off_seen?1:0) +
+                (grp.coverage.speed_l1_seen?1:0) + (grp.coverage.speed_l2_seen?1:0) + (grp.coverage.speed_l3_seen?1:0);
+        snprintf(cov_str, sizeof(cov_str), "%d/5", c);
+      } else if (grp.coverage.dev_class == DeviceClass::GAS) {
+        int c = (grp.coverage.valve_close_seen?1:0);
+        snprintf(cov_str, sizeof(cov_str), "%d/1", c);
+      }
+
+      out.appendFormat("0x%02X   %-14s %-11s %-9s %-16s %-16s %s\r\n",
+                       grp.dev_id, grp.group_name, type_str, cov_str,
+                       pwr_str, param_str, stat_str);
+    }
+  }
+  out.append(Fmt::DIV80);
+  out.append("Commands: wallpad ctl-view <id> | wallpad ctl-learn <id> | wallpad ctl-reset\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("\r\n");
+}
+
+void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
+  const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+  if (!grp) {
+    out.appendFormat("[ERROR] Control blueprint for DevID 0x%02X not found.\r\n", dev_id);
+    return;
+  }
+
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.appendFormat("             CONTROL BLUEPRINT DETAILS: %s (0x%02X)             \r\n",
+                   grp->group_name, grp->dev_id);
+  out.append(Fmt::DIV80EQ);
+  out.appendFormat("Frame Length    : %u Bytes\r\n", grp->frame_len);
+
+  char hex_buf[128]{0};
+  size_t h_off = 0;
+  for (size_t i = 0; i < grp->frame_len && i < 32; ++i) {
+    h_off += snprintf(hex_buf + h_off, sizeof(hex_buf) - h_off, "%02X ", grp->raw_template[i]);
+  }
+  out.appendFormat("Raw Template    : %s\r\n", hex_buf);
+
+  if (grp->sub1_offset != 0xFF) {
+    out.appendFormat("Sub1 (Room) Off : Byte #%u\r\n", grp->sub1_offset);
+  } else {
+    out.append("Sub1 (Room) Off : Unbound\r\n");
+  }
+  if (grp->sub2_offset != 0xFF) {
+    out.appendFormat("Sub2 (Unit) Off : Byte #%u\r\n", grp->sub2_offset);
+  } else {
+    out.append("Sub2 (Unit) Off : Unbound\r\n");
+  }
+
+  out.append(Fmt::DIV80);
+  out.append("Action Slot Details:\r\n");
+
+  if (grp->power_slot.discovered) {
+    out.appendFormat("  [POWER]  Offset: Byte #%u | ON: 0x%02X | OFF: 0x%02X",
+                     grp->power_slot.action_offset, grp->power_slot.on_val, grp->power_slot.off_val);
+    if (grp->power_slot.category_offset != 0xFF) {
+      out.appendFormat(" | Cat: Byte #%u (0x%02X)", grp->power_slot.category_offset, grp->power_slot.category_val);
+    }
+    out.appendFormat(" | Samples: %u\r\n", grp->power_slot.sample_count);
+  } else {
+    out.append("  [POWER]  Not Discovered\r\n");
+  }
+
+  if (grp->temp_slot.discovered) {
+    out.appendFormat("  [TEMP]   Offset: Byte #%u | Range: %u~%u C",
+                     grp->temp_slot.action_offset, grp->temp_slot.min_val, grp->temp_slot.max_val);
+    if (grp->temp_slot.category_offset != 0xFF) {
+      out.appendFormat(" | Cat: Byte #%u (0x%02X)", grp->temp_slot.category_offset, grp->temp_slot.category_val);
+    }
+    out.appendFormat(" | Samples: %u\r\n", grp->temp_slot.sample_count);
+  }
+
+  if (grp->speed_slot.discovered) {
+    out.appendFormat("  [SPEED]  Offset: Byte #%u | Range: %u~%u | Samples: %u\r\n",
+                     grp->speed_slot.action_offset, grp->speed_slot.min_val, grp->speed_slot.max_val,
+                     grp->speed_slot.sample_count);
+  }
+
+  if (grp->close_slot.discovered) {
+    out.appendFormat("  [CLOSE]  Offset: Byte #%u | CloseToken: 0x%02X | Samples: %u\r\n",
+                     grp->close_slot.action_offset, grp->close_slot.off_val, grp->close_slot.sample_count);
+  }
+
+  if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
+    if (grp->away_has_dedicated_temp) {
+      out.appendFormat("Away Fixed Temp : %u C (Dedicated away temperature)\r\n", grp->away_fixed_temp);
+    } else {
+      out.append("Away Fixed Temp : None (Retains target temperature)\r\n");
+    }
+    out.appendFormat("Temp Auto-Recall: %s\r\n", grp->temp_recall_verified ? "VERIFIED (Restores on power ON)" : "Unverified / Not supported");
+  }
+
+  const char *stat_str = "WAITING";
+  switch (grp->status) {
+  case GroupControlTemplate::Status::EMPTY: stat_str = "EMPTY"; break;
+  case GroupControlTemplate::Status::WAITING: stat_str = "WAITING"; break;
+  case GroupControlTemplate::Status::CAPTURING: stat_str = "CAPTURING"; break;
+  case GroupControlTemplate::Status::VERIFIED: stat_str = "VERIFIED (LOCKED)"; break;
+  case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
+  }
+  out.append(Fmt::DIV80);
+  out.appendFormat("Blueprint Status: %s\r\n", stat_str);
+  if (grp->last_learned_ms > 0) {
+    out.appendFormat("Last Learned    : %u ms ago\r\n", millis() - grp->last_learned_ms);
+  }
+  out.append(Fmt::DIV80EQ);
+  out.append("\r\n");
+}
+
+void wallpadControlLearn(int sock, uint8_t dev_id) {
+  if (g_control_registry.getSession().in_progress) {
+    sendTelnetMsg(sock, "[WARN] Active learning session already in progress. Use 'wallpad ctl-abort' first.\r\n");
+    return;
+  }
+
+  if (g_control_registry.startActiveLearning(dev_id)) {
+    const auto &sess = g_control_registry.getSession();
+    sendTelnetMsgf(sock, "[OK] Active learning started for DevID 0x%02X (Target: Sub1=0x%02X, Sub2=0x%02X).\r\n",
+                   dev_id, sess.target_sub1, sess.target_sub2);
+    sendTelnetMsg(sock, "     Gateway is executing multi-step probing packets to discover command semantics...\r\n");
+    sendTelnetMsg(sock, "     Type 'wallpad ctl-learn-status' to track progress or 'wallpad ctl-abort' to cancel.\r\n");
+  } else {
+    const auto &sess = g_control_registry.getSession();
+    sendTelnetMsgf(sock, "[ERROR] Failed to start active learning: %s\r\n", sess.last_log);
+  }
+}
+
+void wallpadPrintControlLearnStatus(AppendBuf &out) {
+  const auto &sess = g_control_registry.getSession();
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("                  ACTIVE PROBING LEARNING SESSION STATUS                     \r\n");
+  out.append(Fmt::DIV80EQ);
+  out.appendFormat("Active Session  : %s\r\n", sess.in_progress ? "RUNNING" : "IDLE / COMPLETED");
+  if (sess.target_dev_id != 0) {
+    out.appendFormat("Target Device   : DevID 0x%02X (Sub1: 0x%02X, Sub2: 0x%02X)\r\n",
+                     sess.target_dev_id, sess.target_sub1, sess.target_sub2);
+  }
+
+  const char *step_str = "IDLE";
+  switch (sess.current_step) {
+  case ActiveProbingStep::IDLE: step_str = "IDLE"; break;
+  case ActiveProbingStep::PREFLIGHT_CHECK: step_str = "PREFLIGHT_CHECK"; break;
+  case ActiveProbingStep::SNAPSHOT_BASELINE: step_str = "SNAPSHOT_BASELINE"; break;
+  case ActiveProbingStep::PROBE_POWER_ON: step_str = "PROBE_POWER_ON"; break;
+  case ActiveProbingStep::VERIFY_POWER_ON_ACK: step_str = "VERIFY_POWER_ON_ACK"; break;
+  case ActiveProbingStep::PROBE_POWER_OFF: step_str = "PROBE_POWER_OFF"; break;
+  case ActiveProbingStep::VERIFY_POWER_OFF_ACK: step_str = "VERIFY_POWER_OFF_ACK"; break;
+  case ActiveProbingStep::PROBE_TEMP_L1: step_str = "PROBE_TEMP_L1"; break;
+  case ActiveProbingStep::VERIFY_TEMP_L1_ACK: step_str = "VERIFY_TEMP_L1_ACK"; break;
+  case ActiveProbingStep::PROBE_TEMP_L2: step_str = "PROBE_TEMP_L2"; break;
+  case ActiveProbingStep::VERIFY_TEMP_L2_ACK: step_str = "VERIFY_TEMP_L2_ACK"; break;
+  case ActiveProbingStep::PROBE_AWAY_MODE: step_str = "PROBE_AWAY_MODE"; break;
+  case ActiveProbingStep::VERIFY_AWAY_ACK: step_str = "VERIFY_AWAY_ACK (Detecting Away Fixed Temp)"; break;
+  case ActiveProbingStep::PROBE_RECALL_CHECK: step_str = "PROBE_RECALL_CHECK (Testing Temp Recall from Away)"; break;
+  case ActiveProbingStep::VERIFY_RECALL_ACK: step_str = "VERIFY_RECALL_ACK (Verifying Auto-Restored Temp)"; break;
+  case ActiveProbingStep::PROBE_TEMP_WHILE_OFF: step_str = "PROBE_TEMP_WHILE_OFF"; break;
+  case ActiveProbingStep::VERIFY_TEMP_WHILE_OFF_ACK: step_str = "VERIFY_TEMP_WHILE_OFF_ACK"; break;
+  case ActiveProbingStep::PROBE_TEMP_WHILE_AWAY: step_str = "PROBE_TEMP_WHILE_AWAY"; break;
+  case ActiveProbingStep::VERIFY_TEMP_WHILE_AWAY_ACK: step_str = "VERIFY_TEMP_WHILE_AWAY_ACK"; break;
+  case ActiveProbingStep::PROBE_SPEED_L1: step_str = "PROBE_SPEED_L1"; break;
+  case ActiveProbingStep::VERIFY_SPEED_L1_ACK: step_str = "VERIFY_SPEED_L1_ACK"; break;
+  case ActiveProbingStep::PROBE_SPEED_L2: step_str = "PROBE_SPEED_L2"; break;
+  case ActiveProbingStep::VERIFY_SPEED_L2_ACK: step_str = "VERIFY_SPEED_L2_ACK"; break;
+  case ActiveProbingStep::PROBE_SPEED_L3: step_str = "PROBE_SPEED_L3"; break;
+  case ActiveProbingStep::VERIFY_SPEED_L3_ACK: step_str = "VERIFY_SPEED_L3_ACK"; break;
+  case ActiveProbingStep::PROBE_VALVE_CLOSE: step_str = "PROBE_VALVE_CLOSE"; break;
+  case ActiveProbingStep::VERIFY_VALVE_CLOSE_ACK: step_str = "VERIFY_VALVE_CLOSE_ACK"; break;
+  case ActiveProbingStep::RESTORE_BASELINE: step_str = "RESTORE_BASELINE"; break;
+  case ActiveProbingStep::VERIFY_RESTORE_ACK: step_str = "VERIFY_RESTORE_ACK"; break;
+  case ActiveProbingStep::COMPLETED: step_str = "COMPLETED (Verified & Saved)"; break;
+  case ActiveProbingStep::FAILED: step_str = "FAILED"; break;
+  }
+  out.appendFormat("Current Step    : %s\r\n", step_str);
+  out.appendFormat("Candidate Slot  : Byte #%u (Token: 0x%02X)\r\n", sess.candidate_offset, sess.candidate_token);
+  out.appendFormat("Retry Count     : %u / 3\r\n", sess.retry_count);
+  out.appendFormat("Diagnostic Log  : %s\r\n", sess.last_log);
+
+  if (sess.baseline_len > 0) {
+    char hex_buf[96]{0};
+    size_t h_off = 0;
+    for (size_t i = 0; i < sess.baseline_len && i < 24; ++i) {
+      h_off += snprintf(hex_buf + h_off, sizeof(hex_buf) - h_off, "%02X ", sess.baseline_ack[i]);
+    }
+    out.appendFormat("Baseline ACK    : %s\r\n", hex_buf);
+  }
+
+  out.append(Fmt::DIV80EQ);
+  out.append("\r\n");
+}
+
+void wallpadControlAbort(int sock) {
+  if (!g_control_registry.getSession().in_progress) {
+    sendTelnetMsg(sock, "[INFO] No active learning session currently running.\r\n");
+    return;
+  }
+  g_control_registry.abortActiveLearning();
+  sendTelnetMsg(sock, "[OK] Active learning session aborting. Reverting device to baseline state...\r\n");
+}
+
+void wallpadControlReset(int sock, uint8_t dev_id) {
+  if (dev_id == 0) {
+    g_control_registry.resetGroup(0);
+    sendTelnetMsg(sock, "[OK] All learned control blueprints reset and cleared from NVS.\r\n");
+  } else {
+    if (g_control_registry.resetGroup(dev_id)) {
+      sendTelnetMsgf(sock, "[OK] Control blueprint for DevID 0x%02X reset and removed from NVS.\r\n", dev_id);
+    } else {
+      sendTelnetMsgf(sock, "[WARN] Control blueprint for DevID 0x%02X not found.\r\n", dev_id);
+    }
+  }
+}
+
 void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
   int sock = getSock(context);
   int argc = embeddedCliGetTokenCount(args);
@@ -1442,13 +1728,79 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
   } else if (strcasecmp(sub, "reset") == 0) {
     g_auto_probing_engine.reset();
     g_doorphone_tracker.clearNvs();
-    // ★ Task_Ch1의 수렴 상태(s_convergence_done)를 리셋하여 재수렴·재락 허용
-    // g_auto_probing_engine.reset()만으로는 Task 내부 static s_convergence_done이
-    // true로 유지되어 analyzeCacheMatrix()가 재호출되지 않는 문제를 수정
     g_probe_convergence_reset.store(true, std::memory_order_release);
     sendTelnetMsg(sock, "[OK] Auto-probing engine & Doorphone framing reset. Re-analyzing RS-485 bus traffic...\r\n");
+  } else if (strcasecmp(sub, "ctl") == 0) {
+    if (argc >= 2) {
+      const char *ctl_op = embeddedCliGetToken(args, 2);
+      if (strcasecmp(ctl_op, "view") == 0) {
+        if (argc >= 3) {
+          uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 0));
+          s_cli_scratch_buf[0] = '\0';
+          AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+          wallpadPrintControlDetail(out, dev_id);
+          sendTelnetMsgLen(sock, out.buf, out.offset);
+        } else {
+          sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl view <dev_id> (e.g. 0x19)\r\n");
+        }
+      } else if (strcasecmp(ctl_op, "learn") == 0) {
+        if (argc >= 3) {
+          uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 0));
+          wallpadControlLearn(sock, dev_id);
+        } else {
+          sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl learn <dev_id> (e.g. 0x19)\r\n");
+        }
+      } else if (strcasecmp(ctl_op, "status") == 0 || strcasecmp(ctl_op, "learn-status") == 0) {
+        s_cli_scratch_buf[0] = '\0';
+        AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+        wallpadPrintControlLearnStatus(out);
+        sendTelnetMsgLen(sock, out.buf, out.offset);
+      } else if (strcasecmp(ctl_op, "abort") == 0) {
+        wallpadControlAbort(sock);
+      } else if (strcasecmp(ctl_op, "reset") == 0) {
+        uint8_t dev_id = (argc >= 3) ? static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 0)) : 0;
+        wallpadControlReset(sock, dev_id);
+      } else {
+        s_cli_scratch_buf[0] = '\0';
+        AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+        wallpadPrintControlTable(out);
+        sendTelnetMsgLen(sock, out.buf, out.offset);
+      }
+    } else {
+      s_cli_scratch_buf[0] = '\0';
+      AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+      wallpadPrintControlTable(out);
+      sendTelnetMsgLen(sock, out.buf, out.offset);
+    }
+  } else if (strcasecmp(sub, "ctl-view") == 0) {
+    if (argc >= 2) {
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+      s_cli_scratch_buf[0] = '\0';
+      AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+      wallpadPrintControlDetail(out, dev_id);
+      sendTelnetMsgLen(sock, out.buf, out.offset);
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl-view <dev_id> (e.g. 0x19)\r\n");
+    }
+  } else if (strcasecmp(sub, "ctl-learn") == 0) {
+    if (argc >= 2) {
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+      wallpadControlLearn(sock, dev_id);
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: wallpad ctl-learn <dev_id> (e.g. 0x19)\r\n");
+    }
+  } else if (strcasecmp(sub, "ctl-learn-status") == 0 || strcasecmp(sub, "ctl-status") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    wallpadPrintControlLearnStatus(out);
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  } else if (strcasecmp(sub, "ctl-abort") == 0) {
+    wallpadControlAbort(sock);
+  } else if (strcasecmp(sub, "ctl-reset") == 0) {
+    uint8_t dev_id = (argc >= 2) ? static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0)) : 0;
+    wallpadControlReset(sock, dev_id);
   } else {
-    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset]\r\n");
+    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset | ctl | ctl-view <id> | ctl-learn <id> | ctl-learn-status | ctl-abort | ctl-reset]\r\n");
   }
 }
 
