@@ -1436,24 +1436,26 @@ void wallpadPrintControlTable(AppendBuf &out) {
       const auto &grp = grp_list[i];
 
       char pwr_str[24]{"-"};
-      if (grp.power_slot.discovered) {
+      if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.power_slot.discovered) {
         snprintf(pwr_str, sizeof(pwr_str), "#%u (0x%02X/0x%02X)",
                  grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
       }
 
       char param_str[24]{"-"};
-      if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
-        snprintf(param_str, sizeof(param_str), "T:#%u S:#%u",
-                 grp.temp_slot.action_offset, grp.speed_slot.action_offset);
-      } else if (grp.temp_slot.discovered) {
-        snprintf(param_str, sizeof(param_str), "T:#%u (%u~%uC)",
-                 grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
-      } else if (grp.speed_slot.discovered) {
-        snprintf(param_str, sizeof(param_str), "S:#%u (%u~%u)",
-                 grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
-      } else if (grp.close_slot.discovered) {
-        snprintf(param_str, sizeof(param_str), "C:#%u (0x%02X)",
-                 grp.close_slot.action_offset, grp.close_slot.off_val);
+      if (grp.coverage.dev_class != DeviceClass::UNKNOWN) {
+        if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "T:#%u S:#%u",
+                   grp.temp_slot.action_offset, grp.speed_slot.action_offset);
+        } else if (grp.temp_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "T:#%u (%u~%uC)",
+                   grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
+        } else if (grp.speed_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "S:#%u (%u~%u)",
+                   grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
+        } else if (grp.close_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "C:#%u (0x%02X)",
+                   grp.close_slot.action_offset, grp.close_slot.off_val);
+        }
       }
 
       const char *stat_str = "WAITING";
@@ -1466,66 +1468,69 @@ void wallpadPrintControlTable(AppendBuf &out) {
       case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
       }
 
-      const char *type_str = "SWITCH";
+      const char *type_str = "-";
       switch (grp.coverage.dev_class) {
       case DeviceClass::GAS:        type_str = "GAS"; break;
       case DeviceClass::THERMOSTAT: type_str = "THERMO"; break;
       case DeviceClass::VENT:       type_str = "VENT"; break;
       case DeviceClass::AIRCON:     type_str = "AIRCON"; break;
       case DeviceClass::MOMENTARY:  type_str = "MOMENTARY"; break;
-      case DeviceClass::SWITCH:
+      case DeviceClass::SWITCH:     type_str = "SWITCH"; break;
+      case DeviceClass::UNKNOWN:
       default:
-        type_str = "SWITCH";
+        type_str = "-";
         break;
       }
 
-      char cov_str[16]{"0/2"};
-      int c = 0;
-      int total_c = 2;
-      switch (grp.coverage.dev_class) {
-      case DeviceClass::GAS:
-        total_c = 1;
-        if (grp.coverage.valve_close_seen || grp.coverage.power_off_seen) c++;
-        break;
-      case DeviceClass::THERMOSTAT:
-        total_c = 6;
-        if (grp.coverage.power_on_seen) c++;
-        if (grp.coverage.power_off_seen) c++;
-        if (grp.coverage.temp_set_seen) c++;
-        if (grp.coverage.away_mode_seen) c++;
-        if (grp.coverage.temp_while_off_seen) c++;
-        if (grp.coverage.temp_while_away_seen) c++;
-        break;
-      case DeviceClass::VENT:
-        total_c = 5;
-        if (grp.coverage.power_on_seen) c++;
-        if (grp.coverage.power_off_seen) c++;
-        if (grp.coverage.speed_l1_seen) c++;
-        if (grp.coverage.speed_l2_seen) c++;
-        if (grp.coverage.speed_l3_seen) c++;
-        break;
-      case DeviceClass::AIRCON:
-        total_c = 7;
-        if (grp.coverage.power_on_seen) c++;
-        if (grp.coverage.power_off_seen) c++;
-        if (grp.coverage.temp_set_seen) c++;
-        if (grp.coverage.speed_l1_seen) c++;
-        if (grp.coverage.speed_l2_seen) c++;
-        if (grp.coverage.speed_l3_seen) c++;
-        if (grp.coverage.temp_while_off_seen) c++;
-        break;
-      case DeviceClass::MOMENTARY:
-        total_c = 1;
-        if (grp.coverage.call_seen) c++;
-        break;
-      case DeviceClass::SWITCH:
-      default:
-        total_c = 2;
-        if (grp.coverage.power_on_seen) c++;
-        if (grp.coverage.power_off_seen) c++;
-        break;
+      char cov_str[16]{"-"};
+      if (grp.coverage.dev_class != DeviceClass::UNKNOWN) {
+        int c = 0;
+        int total_c = 2;
+        switch (grp.coverage.dev_class) {
+        case DeviceClass::GAS:
+          total_c = 1;
+          if (grp.coverage.valve_close_seen || grp.coverage.power_off_seen) c++;
+          break;
+        case DeviceClass::THERMOSTAT:
+          total_c = 6;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          if (grp.coverage.temp_set_seen) c++;
+          if (grp.coverage.away_mode_seen) c++;
+          if (grp.coverage.temp_while_off_seen) c++;
+          if (grp.coverage.temp_while_away_seen) c++;
+          break;
+        case DeviceClass::VENT:
+          total_c = 5;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          if (grp.coverage.speed_l1_seen) c++;
+          if (grp.coverage.speed_l2_seen) c++;
+          if (grp.coverage.speed_l3_seen) c++;
+          break;
+        case DeviceClass::AIRCON:
+          total_c = 7;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          if (grp.coverage.temp_set_seen) c++;
+          if (grp.coverage.speed_l1_seen) c++;
+          if (grp.coverage.speed_l2_seen) c++;
+          if (grp.coverage.speed_l3_seen) c++;
+          if (grp.coverage.temp_while_off_seen) c++;
+          break;
+        case DeviceClass::MOMENTARY:
+          total_c = 1;
+          if (grp.coverage.call_seen) c++;
+          break;
+        case DeviceClass::SWITCH:
+        default:
+          total_c = 2;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          break;
+        }
+        snprintf(cov_str, sizeof(cov_str), "%d/%d", c, total_c);
       }
-      snprintf(cov_str, sizeof(cov_str), "%d/%d", c, total_c);
 
       out.appendFormat("0x%02X   %-11s %-11s %-9s %-15s %-14s %s\r\n",
                        grp.dev_id, grp.group_name, type_str, cov_str,
@@ -1653,13 +1658,33 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                      (cov.valve_close_seen || cov.power_off_seen) ? "DONE" : "WAIT", grp->close_slot.off_val);
     out.appendFormat("  [2/2] Verified      : [%-4s]  Status Locked\r\n",
                      (grp->status == GroupControlTemplate::Status::VERIFIED) ? "DONE" : "WAIT");
-  } else {
+  } else if (cov.dev_class == DeviceClass::AIRCON) {
+    out.appendFormat("  [1/6] Power ON      : [%-4s]  ON=0x%02X\r\n",
+                     cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/6] Target Temp   : [%-4s]  Range=%u~%u C\r\n",
+                     cov.temp_set_seen ? "DONE" : "WAIT", grp->temp_slot.min_val, grp->temp_slot.max_val);
+    out.appendFormat("  [3/6] Fan Speed L1  : [%-4s]  Min=%u\r\n",
+                     cov.speed_l1_seen ? "DONE" : "WAIT", grp->speed_slot.min_val);
+    out.appendFormat("  [4/6] Fan Speed L2  : [%-4s]  Mid=2\r\n",
+                     cov.speed_l2_seen ? "DONE" : "WAIT");
+    out.appendFormat("  [5/6] Fan Speed L3  : [%-4s]  Max=%u\r\n",
+                     cov.speed_l3_seen ? "DONE" : "WAIT", grp->speed_slot.max_val);
+    out.appendFormat("  [6/6] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+                     cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
+  } else if (cov.dev_class == DeviceClass::MOMENTARY) {
+    out.appendFormat("  [1/2] Call Trigger  : [%-4s]  Token=0x%02X\r\n",
+                     cov.call_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/2] Verified      : [%-4s]  Status Locked\r\n",
+                     (grp->status == GroupControlTemplate::Status::VERIFIED) ? "DONE" : "WAIT");
+  } else if (cov.dev_class == DeviceClass::SWITCH) {
     out.appendFormat("  [1/3] Power ON      : [%-4s]  ON=0x%02X\r\n",
                      cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
     out.appendFormat("  [2/3] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
                      cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
     out.appendFormat("  [3/3] Verified      : [%-4s]  Status Locked\r\n",
                      (grp->status == GroupControlTemplate::Status::VERIFIED) ? "DONE" : "WAIT");
+  } else {
+    out.append("  (Unassigned Device Class - Run 'ctl learn' to configure roadmap)\r\n");
   }
 
   out.append(Fmt::DIV80);
@@ -1760,25 +1785,27 @@ void wallpadPrintControlLearnStatus(AppendBuf &out) {
     for (size_t i = 0; i < total_groups; ++i) {
       GroupControlTemplate grp{};
       if (g_control_registry.getGroupByIndex(i, grp)) {
-        const char *cls_str = "SWITCH";
+        const char *cls_str = "-";
         switch (grp.coverage.dev_class) {
         case DeviceClass::THERMOSTAT: cls_str = "THERMOSTAT"; break;
         case DeviceClass::AIRCON:     cls_str = "AIRCON"; break;
         case DeviceClass::VENT:       cls_str = "VENT"; break;
         case DeviceClass::GAS:        cls_str = "GAS"; break;
         case DeviceClass::MOMENTARY:  cls_str = "MOMENTARY"; break;
-        default:                      cls_str = "SWITCH"; break;
+        case DeviceClass::SWITCH:     cls_str = "SWITCH"; break;
+        case DeviceClass::UNKNOWN:
+        default:                      cls_str = "-"; break;
         }
 
         char pwr_b[16];
-        if (grp.power_slot.discovered) {
+        if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.power_slot.discovered) {
           snprintf(pwr_b, sizeof(pwr_b), "#%u", grp.power_slot.action_offset);
         } else {
           snprintf(pwr_b, sizeof(pwr_b), "-");
         }
 
         char tmp_b[16];
-        if (grp.temp_slot.discovered) {
+        if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.temp_slot.discovered) {
           if (grp.temp_slot.telemetry_offset != 0xFF) {
             snprintf(tmp_b, sizeof(tmp_b), "#%u (ENV:#%u)", grp.temp_slot.action_offset, grp.temp_slot.telemetry_offset);
           } else {
@@ -1789,7 +1816,7 @@ void wallpadPrintControlLearnStatus(AppendBuf &out) {
         }
 
         char spd_b[16];
-        if (grp.speed_slot.discovered) {
+        if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.speed_slot.discovered) {
           snprintf(spd_b, sizeof(spd_b), "#%u", grp.speed_slot.action_offset);
         } else {
           snprintf(spd_b, sizeof(spd_b), "-");
@@ -1803,6 +1830,129 @@ void wallpadPrintControlLearnStatus(AppendBuf &out) {
   }
   out.append(Fmt::DIV80EQ);
   out.append("\r\n");
+}
+
+void wallpadControlLearnInteractive(int sock, char *args) {
+  size_t count = g_control_registry.getGroupCount();
+  if (count == 0) {
+    sendTelnetMsg(sock, "\r\n[ERROR] No device IDs detected yet. Please ensure RS-485 bus traffic is active.\r\n");
+    return;
+  }
+
+  // dev_id 오름차순으로 정리
+  GroupControlTemplate grp_list[ControlTemplateRegistry::MAX_GROUPS];
+  size_t valid_cnt = 0;
+  for (size_t i = 0; i < count && valid_cnt < ControlTemplateRegistry::MAX_GROUPS; ++i) {
+    GroupControlTemplate grp;
+    if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
+      grp_list[valid_cnt++] = grp;
+    }
+  }
+  std::sort(grp_list, grp_list + valid_cnt, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
+    return a.dev_id < b.dev_id;
+  });
+
+  sendTelnetMsg(sock, "\r\n");
+  sendTelnetMsg(sock, "================================================================================\r\n");
+  sendTelnetMsg(sock, "             INTERACTIVE DEVICE CONTROL LEARNING WIZARD                        \r\n");
+  sendTelnetMsg(sock, "================================================================================\r\n");
+  sendTelnetMsg(sock, "Discovered Device IDs on Bus: ");
+  for (size_t i = 0; i < valid_cnt; ++i) {
+    sendTelnetMsgf(sock, "0x%02X (%s)%s", grp_list[i].dev_id, grp_list[i].group_name,
+                   (i + 1 < valid_cnt) ? ", " : "\r\n");
+  }
+  sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
+  sendTelnetMsg(sock, "We will guide you through: Light -> Outlet -> Vent -> Thermo -> Gas -> Aircon -> EV\r\n");
+  sendTelnetMsg(sock, "(Operate physical wallpad/switches when prompted. Timeout: 15s per step)\r\n");
+  sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
+
+  struct DeviceTarget {
+    DeviceClass cls;
+    const char *name;
+    const char *step_name;
+  };
+
+  const DeviceTarget targets[] = {
+      {DeviceClass::SWITCH, "Light", "Step 1: Light (조명)"},
+      {DeviceClass::SWITCH, "Outlet", "Step 2: Outlet (콘센트/대기전력)"},
+      {DeviceClass::VENT, "Vent", "Step 3: Ventilation (전열교환기/환기)"},
+      {DeviceClass::THERMOSTAT, "Thermo", "Step 4: Thermostat (난방/온도조절기)"},
+      {DeviceClass::GAS, "Gas", "Step 5: Gas Valve (가스밸브)"},
+      {DeviceClass::AIRCON, "Aircon", "Step 6: Air Conditioner (시스템 에어컨)"},
+      {DeviceClass::MOMENTARY, "Elevator", "Step 7: Elevator (엘리베이터 호출)"},
+  };
+
+  for (size_t t = 0; t < sizeof(targets) / sizeof(targets[0]); ++t) {
+    const auto &target = targets[t];
+
+    sendTelnetMsgf(sock, "\r\n[%s]\r\n", target.step_name);
+    sendTelnetMsgf(sock, ">> Please operate '%s' on your wallpad or wall switch now...\r\n", target.name);
+    sendTelnetMsg(sock, ">> (Waiting for packet transaction... Press any key or wait 15s to skip)\r\n");
+
+    // 이전 상태 백업
+    uint32_t prev_learned_ms[ControlTemplateRegistry::MAX_GROUPS]{0};
+    for (size_t i = 0; i < valid_cnt; ++i) {
+      const GroupControlTemplate *g = g_control_registry.findGroup(grp_list[i].dev_id);
+      if (g) prev_learned_ms[i] = g->last_learned_ms;
+    }
+
+    uint32_t start_ms = millis();
+    uint8_t detected_dev_id = 0;
+
+    while (millis() - start_ms < 15000) {
+      // 1. 소켓 입력 감지 (사용자가 엔터나 아무 키를 누르면 스킵)
+      fd_set rfds;
+      FD_ZERO(&rfds);
+      FD_SET(sock, &rfds);
+      struct timeval tv = {0, 100000}; // 100ms
+      int sel = select(sock + 1, &rfds, nullptr, nullptr, &tv);
+      if (sel > 0 && FD_ISSET(sock, &rfds)) {
+        char ch[16];
+        int r = recv(sock, ch, sizeof(ch), 0);
+        if (r > 0) {
+          sendTelnetMsg(sock, ">> [SKIP] Moving to next device...\r\n");
+          break;
+        }
+      }
+
+      // 2. RS-485 패킷 트랜잭션 감지
+      for (size_t i = 0; i < valid_cnt; ++i) {
+        const GroupControlTemplate *g = g_control_registry.findGroup(grp_list[i].dev_id);
+        if (g && g->last_learned_ms > prev_learned_ms[i]) {
+          detected_dev_id = grp_list[i].dev_id;
+          break;
+        }
+      }
+
+      if (detected_dev_id != 0) {
+        break;
+      }
+    }
+
+    if (detected_dev_id != 0) {
+      // 기기 분류 및 그룹명 확정 등록!
+      g_control_registry.setGroupClass(detected_dev_id, target.cls, target.name);
+
+      sendTelnetMsgf(sock, "\r\n>> [MATCH DETECTED!] DevID 0x%02X matched to '%s'!\r\n",
+                     detected_dev_id, target.name);
+
+      // 즉시 해당 기기의 상세 청사진 출력!
+      s_cli_scratch_buf[0] = '\0';
+      AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+      wallpadPrintControlDetail(out, detected_dev_id);
+      sendTelnetMsgLen(sock, out.buf, out.offset);
+    } else {
+      sendTelnetMsgf(sock, ">> [NONE] No traffic detected for '%s'. Skipping.\r\n", target.name);
+    }
+  }
+
+  sendTelnetMsg(sock, "\r\n================================================================================\r\n");
+  sendTelnetMsg(sock, "             LEARNING WIZARD COMPLETE - UPDATED BLUEPRINT TABLE                \r\n");
+  sendTelnetMsg(sock, "================================================================================\r\n");
+  s_cli_scratch_buf[0] = '\0';
+  AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+  wallpadPrintControlTable(out);
+  sendTelnetMsgLen(sock, out.buf, out.offset);
 }
 
 void wallpadControlAbort(int sock) {
@@ -1919,6 +2069,8 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
     AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
     wallpadPrintControlLearnStatus(out);
     sendTelnetMsgLen(sock, out.buf, out.offset);
+  } else if (strcasecmp(sub, "learn") == 0) {
+    wallpadControlLearnInteractive(sock, args);
   } else if (strcasecmp(sub, "reset") == 0) {
     uint8_t dev_id = 0;
     if (argc >= 2) {
@@ -1954,6 +2106,7 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
     out.append("Command                           Description\r\n");
     out.append(Fmt::DIV80);
     out.append("  ctl                             Display learned control blueprint table\r\n");
+    out.append("  ctl learn                       Run step-by-step interactive learning wizard\r\n");
     out.append("  ctl <dev_id>                    Inspect packet blueprint, roadmap & slots (e.g. ctl 0x18)\r\n");
     out.append("  ctl name <dev_id> <name>        Set custom group name (e.g. Gas, Elevator)\r\n");
     out.append("  ctl status                      Show passive learning engine & blueprint status\r\n");

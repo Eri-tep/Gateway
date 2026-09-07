@@ -145,6 +145,7 @@ public:
   bool getGroupByIndex(size_t index, GroupControlTemplate &out) const;
   bool resetGroup(uint8_t dev_id);
   bool setGroupName(uint8_t dev_id, const char *name);
+  bool setGroupClass(uint8_t dev_id, DeviceClass cls, const char *name = nullptr);
 
   // 순수 이벤트 구동형 삼각 차분 분석 (Triplet Differential Sniffer)
   void onControlTransaction(const StaticPacket &ctl,

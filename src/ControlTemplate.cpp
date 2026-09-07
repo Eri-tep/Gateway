@@ -12,99 +12,40 @@ ControlTemplateRegistry g_control_registry;
 DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad) {
   if (dev_id == 0) return DeviceClass::UNKNOWN;
 
-  // 2차 캐시(g_device_repo) 및 1차 캐시(g_polling_targets)에서 해당 dev_id의 ACK 패킷 페이로드 분석
-  size_t matched_units = 0;
-  bool has_temp_telemetry = false;
-  bool has_speed_telemetry = false;
-  bool has_gas_signature = false;
-  bool has_power_telemetry = false;
+  // 1차/2차 캐시에서 무리한 기기 종류 추측을 완전히 배제합니다.
+  // 오직 인간 실내 생활 기온(14~36℃) 2개 바이트(현재온도, 설정온도)가 명확한 경우만 THERMOSTAT으로 감지하고,
+  // 그 외 모든 기기는 UNKNOWN으로 두어 사용자의 명시적 ctl learn 대화형 러닝을 통해 확정하도록 합니다.
+  size_t temp_byte_count = 0;
 
-  auto analyzeAckPayload = [&](const uint8_t *data, size_t len, uint8_t sub1) {
+  auto analyzeAckPayload = [&](const uint8_t *data, size_t len) {
     if (len < 5) return;
-    matched_units++;
-
     uint8_t payload_start = (ad.offsets_locked && ad.payload_offset < len) ? ad.payload_offset : 7;
     size_t payload_end = (len >= 2) ? (len - 2) : len;
     if (payload_start >= payload_end) return;
 
-    // A. 온도(Thermostat) 시그니처 판별
-    // 실내 인간 생활 온도 (현재온도, 설정온도): 14℃ ~ 36℃ (0x0E ~ 0x24)
-    // 난방 패킷에는 실내온도와 희망온도 2개의 바이트가 상주
-    size_t temp_byte_count = 0;
+    size_t cnt = 0;
     for (size_t k = payload_start; k < payload_end; ++k) {
       uint8_t v = data[k];
-      if (v >= 14 && v <= 36) {
-        temp_byte_count++;
-      }
+      if (v >= 14 && v <= 36) cnt++;
     }
-    if (temp_byte_count >= 2) {
-      has_temp_telemetry = true;
-    }
-
-    // B. 풍량(Ventilation) 시그니처 판별
-    // 풍량은 이산적인 단계(1, 2, 3)를 가지며, 전원 바이트(0/1/2)와 함께 나타남
-    for (size_t k = payload_start; k < payload_end; ++k) {
-      uint8_t v = data[k];
-      if (k + 1 < payload_end) {
-        uint8_t v2 = data[k + 1];
-        if ((v == 1 || v == 2) && (v2 >= 1 && v2 <= 3) && temp_byte_count == 0) {
-          has_speed_telemetry = true;
-        }
-      }
-    }
-
-    // D. 콘센트(Outlet) 시그니처 판별
-    // 콘센트는 릴레이 상태 외에 전력량(W) 텔레메트리 바이트를 포함하므로
-    // 기본 프레임 길이보다 길고(> base_len + 2) 15바이트 이상이며 온도가 아님
-    uint8_t base_len = (ad.learned_query_len > 0) ? ad.learned_query_len : 11;
-    if (len > (base_len + 2) && len >= 15 && temp_byte_count < 2) {
-      has_power_telemetry = true;
-    }
+    if (cnt >= 2) temp_byte_count++;
   };
 
-  // 1) 2차 캐시(g_device_repo) 탐색
   size_t repo_cnt = g_device_repo.count();
   for (size_t i = 0; i < repo_cnt; ++i) {
     DeviceStateEntry snap{};
     if (g_device_repo.getSnapshot(i, snap)) {
       if (snap.dev_id == dev_id && snap.last_ack_len >= 5) {
-        analyzeAckPayload(snap.last_ack_data.data(), snap.last_ack_len, snap.sub1);
+        analyzeAckPayload(snap.last_ack_data.data(), snap.last_ack_len);
       }
     }
   }
 
-  // 2) 1차 캐시(g_polling_targets) 보완 탐색
-  if (matched_units == 0) {
-    size_t target_cnt = g_polling_targets.totalCount();
-    for (size_t i = 0; i < target_cnt; ++i) {
-      PollingTargetEntry target{};
-      if (g_polling_targets.getEntry(i, target)) {
-        if (target.dev_id == dev_id && target.raw_ack_len >= 5) {
-          analyzeAckPayload(target.raw_ack_data.data(), target.raw_ack_len, target.sub1);
-        }
-      }
-    }
-  }
-
-  // 우선순위 판정 (물리 역량 기반)
-  if (has_temp_telemetry && has_speed_telemetry) {
-    return DeviceClass::AIRCON;
-  }
-  if (has_temp_telemetry) {
+  if (temp_byte_count >= 1) {
     return DeviceClass::THERMOSTAT;
   }
-  if (has_speed_telemetry) {
-    return DeviceClass::VENT;
-  }
-  // 가스 밸브 판별: 가스 상태 시그니처 감지 시
-  if (has_gas_signature) {
-    return DeviceClass::GAS;
-  }
-  if (matched_units > 0) {
-    return DeviceClass::SWITCH;
-  }
 
-  return DeviceClass::SWITCH;
+  return DeviceClass::UNKNOWN;
 }
 
 bool SlotCoverage::isFullyCovered() const {
@@ -161,6 +102,7 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
   if (strlen(group.group_name) > 0 &&
       strncmp(group.group_name, "Unknown", 7) != 0 &&
       strncmp(group.group_name, "Dev_0x", 6) != 0 &&
+      strcmp(group.group_name, "-") != 0 &&
       strcmp(group.group_name, "Gas") != 0 &&
       strcmp(group.group_name, "Thermo") != 0 &&
       strcmp(group.group_name, "Vent") != 0 &&
@@ -174,7 +116,7 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
     snprintf(group.group_name, sizeof(group.group_name), "Gas");
     break;
   case DeviceClass::SWITCH:
-    snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
+    snprintf(group.group_name, sizeof(group.group_name), "Light");
     break;
   case DeviceClass::MOMENTARY:
     snprintf(group.group_name, sizeof(group.group_name), "Elevator");
@@ -188,8 +130,9 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
   case DeviceClass::AIRCON:
     snprintf(group.group_name, sizeof(group.group_name), "Aircon");
     break;
+  case DeviceClass::UNKNOWN:
   default:
-    snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
+    snprintf(group.group_name, sizeof(group.group_name), "-");
     break;
   }
 }
@@ -204,6 +147,28 @@ bool ControlTemplateRegistry::setGroupName(uint8_t dev_id, const char *name) {
       _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
       if (strcasecmp(name, "Elevator") == 0 || strcasecmp(name, "EV") == 0) {
         _groups[i].coverage.dev_class = DeviceClass::MOMENTARY;
+      }
+      taskEXIT_CRITICAL(&_mux);
+      saveToNvs();
+      return true;
+    }
+  }
+  taskEXIT_CRITICAL(&_mux);
+  return false;
+}
+
+bool ControlTemplateRegistry::setGroupClass(uint8_t dev_id, DeviceClass cls, const char *name) {
+  if (dev_id == 0) return false;
+
+  taskENTER_CRITICAL(&_mux);
+  for (size_t i = 0; i < _group_count; ++i) {
+    if (_groups[i].dev_id == dev_id) {
+      _groups[i].coverage.dev_class = cls;
+      if (name && strlen(name) > 0) {
+        strncpy(_groups[i].group_name, name, sizeof(_groups[i].group_name) - 1);
+        _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
+      } else {
+        autoAssignGroupName(_groups[i]);
       }
       taskEXIT_CRITICAL(&_mux);
       saveToNvs();
@@ -506,10 +471,13 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     diff_count = 1;
   }
 
-  // 만약 dev_class가 아직 미분류 상태라면 2차 캐시를 통해 즉시 분류 수행
+  // 만약 dev_class가 아직 미분류 상태라면 2차 캐시를 통해 즉시 분류 수행 (Thermostat 감지 시)
   if (grp->coverage.dev_class == DeviceClass::UNKNOWN) {
-    grp->coverage.dev_class = SlotCoverage::classify(dev_id, ad);
-    autoAssignGroupName(*grp);
+    DeviceClass auto_cls = SlotCoverage::classify(dev_id, ad);
+    if (auto_cls != DeviceClass::UNKNOWN) {
+      grp->coverage.dev_class = auto_cls;
+      autoAssignGroupName(*grp);
+    }
   }
 
   if (diff_count == 1) {
