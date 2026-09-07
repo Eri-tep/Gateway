@@ -347,12 +347,43 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   auto *parser = WallpadParserFactory::getActiveParser();
   if (!parser) return;
 
+  auto ad = g_auto_probing_engine.getDescriptor();
+
+  // --------------------------------------------------------------------------
+  // 1. ACK 및 CTL 프레임 4중 방화벽 검증 (STX -> ETX -> Checksum -> Length)
+  // --------------------------------------------------------------------------
+  auto validateFramePure = [&](const StaticPacket &pkt, bool is_ack) -> bool {
+    if (pkt.length < 4 || pkt.length > 64) return false;
+    // (1) STX 확인
+    if (pkt.data[0] != ad.stx) return false;
+    // (2) ETX 확인
+    if (pkt.data[pkt.length - 1] != ad.etx) return false;
+    // (3) Checksum 검증
+    if (ad.checksum_algo != ChecksumAlgo::NONE) {
+      uint8_t calc_cs = parser->calculateChecksum(pkt.data.data(), pkt.length);
+      if (calc_cs != pkt.data[pkt.length - 2]) return false;
+    }
+    // (4) Length 필드 검증 (가변 길이 프로토콜인 경우)
+    if (ad.has_len_field && ad.len_offset < pkt.length) {
+      if (pkt.data[ad.len_offset] != pkt.length) return false;
+    }
+    return true;
+  };
+
+  // ACK 패킷의 4중 방화벽 검증 (노이즈, 훼손된 패킷 차단)
+  if (!validateFramePure(ack_after, true)) return;
+  bool has_before = (ack_before.length >= 5 && validateFramePure(ack_before, true));
+
+  // CTL 패킷 유효성 검증
+  if (!validateFramePure(ctl, false)) return;
+
   span<const uint8_t> ctl_span(ctl.data.data(), ctl.length);
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
   if (!parser->extractDeviceKey(ctl_span, dev_id, sub1, sub2)) return;
 
-  // 1. 상태 변화 감지: ack_before가 존재할 때만 diff 확인, 없으면 골격 부분 학습 허용
-  bool has_before = (ack_before.length >= 5);
+  // --------------------------------------------------------------------------
+  // 2. 상태 변화 감지: ack_before가 존재할 때 diff 확인
+  // --------------------------------------------------------------------------
   bool state_changed = false;
   if (has_before) {
     if (ack_before.length == ack_after.length) {
@@ -368,11 +399,11 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     if (!state_changed) return; // 무의미한 동일 상태 중복 응답은 배제
   }
 
-  // 2. 그룹 템플릿 확보
+  // --------------------------------------------------------------------------
+  // 3. 그룹 템플릿 확보
+  // --------------------------------------------------------------------------
   GroupControlTemplate *grp = registerOrTouch(dev_id);
   if (!grp) return;
-
-  auto ad = g_auto_probing_engine.getDescriptor();
 
   taskENTER_CRITICAL(&_mux);
   // 이전 raw_template을 diff 비교용으로 보존한 뒤 새 패킷 복사
@@ -399,7 +430,9 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   grp->last_learned_ms = millis();
   grp->coverage.observation_count++;
 
-  // 3. 주소 슬롯 마스킹 오프셋 감지
+  // --------------------------------------------------------------------------
+  // 4. 주소 슬롯 마스킹 오프셋 감지 및 SUB 주소 동적 학습 (전열교환기 등 가변 SUB 대응)
+  // --------------------------------------------------------------------------
   if (ad.offsets_locked) {
     grp->sub1_offset = ad.sub1_offset;
     grp->sub2_offset = ad.sub2_offset;
@@ -415,19 +448,39 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     grp->ctl_sub1_override = ctl.data[grp->sub1_offset];
   }
 
-  // 4. 순수 패킷 차분(Differential) 분석 및 슬롯/토큰 자동 추출 (Triplet Differential Sniffer)
-  uint8_t payload_start = (ad.offsets_locked && ad.payload_offset < ctl.length) ? ad.payload_offset : 5;
+  // --------------------------------------------------------------------------
+  // 5. 무사전지식 Full-Spectrum 차분 분석 (Full Differential Scan)
+  // 고정 프레임 필드(STX, LEN, DevID, OP, CS, ETX) 및 주소(SUB1, SUB2)를 엄격히 분리
+  // --------------------------------------------------------------------------
+  size_t start_idx = 1; // STX(0) 제외
   size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length; // CS, ETX 제외
 
-  // ctl과 이전 raw_template(또는 이전 ctl) 사이에서 값이 달라진 바이트 수집
+  // 고정 헤더 필드인지 검사 (사전지식 없이 AutoProbeDescriptor에 확정된 오프셋 기준)
+  auto isFixedFrameField = [&](size_t idx) -> bool {
+    if (idx == 0) return true; // STX
+    if (ad.has_len_field && idx == ad.len_offset) return true; // LEN
+    if (idx == ad.dev_id_offset) return true; // DevID
+    if (idx == ad.opcode_offset) return true; // OP
+    if (ad.is_swapped_addr && idx == ad.gw_addr_offset) return true; // GW 주소
+    return false;
+  };
+
   uint8_t diff_offsets[8]{0};
   uint8_t diff_vals[8]{0};
   size_t diff_count = 0;
 
   auto addDiffOffset = [&](uint8_t offset, uint8_t val) {
-    if (offset < payload_start || offset >= end_idx) return;
-    if (offset == grp->sub1_offset || offset == grp->sub2_offset) return;
-    if (ad.offsets_locked && (offset == ad.sub1_offset || offset == ad.sub2_offset)) return;
+    if (offset < start_idx || offset >= end_idx) return;
+    if (isFixedFrameField(offset)) return;
+
+    // SUB 주소 필드인 경우: 슬롯(데이터)이 아닌 동적 SUB 주소 변이로 격리
+    if (offset == grp->sub1_offset || (ad.offsets_locked && offset == ad.sub1_offset)) {
+      grp->ctl_sub1_override = val;
+      return;
+    }
+    if (offset == grp->sub2_offset || (ad.offsets_locked && offset == ad.sub2_offset)) {
+      return;
+    }
 
     for (size_t d = 0; d < diff_count; ++d) {
       if (diff_offsets[d] == offset) return;
@@ -439,19 +492,17 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     }
   };
 
-  // (1) 이전 CTL 프레임과의 차분 비교
-  for (size_t i = payload_start; i < end_idx; ++i) {
+  // (1) 이전 CTL 프레임과의 전 영역 차분 비교
+  for (size_t i = start_idx; i < end_idx; ++i) {
     if (prev_len > 0 && ctl.data[i] != prev_raw[i]) {
       addDiffOffset(static_cast<uint8_t>(i), ctl.data[i]);
     }
   }
 
   // (2) Triplet 교차 비교: 직전 상태(ACK-)와 직후 상태(ACK+) 간의 상태 변화 오프셋 수집
-  // 제어 패킷(CTL)이 첫 관측이어서 prev_raw와 비교할 수 없더라도,
-  // 기기 응답(ACK- vs ACK+)에서 상태가 변경된 오프셋을 제어 패킷(CTL)의 슬롯으로 교차 바인딩
   if (has_before && ack_before.length == ack_after.length) {
     size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
-    for (size_t k = payload_start; k < ack_end && k < end_idx; ++k) {
+    for (size_t k = start_idx; k < ack_end && k < end_idx; ++k) {
       if (ack_before.data[k] != ack_after.data[k]) {
         addDiffOffset(static_cast<uint8_t>(k), ctl.data[k]);
       }
@@ -468,11 +519,22 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     }
   }
 
-  // 이전 골격과의 차이가 아직 발견되지 않았다면 payload_start 위치의 값을 후보로 채택
-  if (diff_count == 0 && payload_start < end_idx) {
-    diff_offsets[0] = payload_start;
-    diff_vals[0] = ctl.data[payload_start];
-    diff_count = 1;
+  // 이전 골격과의 차이가 아직 발견되지 않았다면 payload_offset 또는 첫 데이터 바이트 채택
+  if (diff_count == 0) {
+    size_t default_cand = (ad.offsets_locked && ad.payload_offset < end_idx) ? ad.payload_offset : 0;
+    if (default_cand == 0) {
+      for (size_t i = start_idx; i < end_idx; ++i) {
+        if (!isFixedFrameField(i) && i != grp->sub1_offset && i != grp->sub2_offset) {
+          default_cand = i;
+          break;
+        }
+      }
+    }
+    if (default_cand > 0 && default_cand < end_idx) {
+      diff_offsets[0] = default_cand;
+      diff_vals[0] = ctl.data[default_cand];
+      diff_count = 1;
+    }
   }
 
   // 만약 dev_class가 아직 미분류 상태라면 2차 캐시를 통해 즉시 분류 수행 (Thermostat 감지 시)
@@ -549,17 +611,27 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         // 위자드가 켜기를 먼저 수행하도록 강제 → 첫 관측 = ON
         grp->power_slot.on_val = cmd_val;
         grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
-        // 두 번째 관측(다른 값) = OFF
-        grp->power_slot.off_val = cmd_val;
-        grp->coverage.power_off_seen = true;
+      } else if (!grp->coverage.power_off_seen) {
+        // 켜기가 완료된 후 들어온 다음 관측 → 끄기(OFF)로 학습
+        if (cmd_val != grp->power_slot.on_val) {
+          grp->power_slot.off_val = cmd_val;
+          grp->coverage.power_off_seen = true;
+        } else if (has_before && ack_before.length == ack_after.length) {
+          // CTL 값은 같더라도 ACK 응답에서 상태 바이트가 달라졌다면 반대 상태로 인정
+          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
+          grp->coverage.power_off_seen = true;
+        }
       } else {
         // 재확인: 이미 학습된 ON/OFF 값과 일치하면 플래그 보강
         if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
         else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
         else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT &&
+                 grp->coverage.power_on_seen && grp->coverage.power_off_seen && !grp->coverage.away_mode_seen) {
+          // THERMOSTAT: ON/OFF 확정 후 들어오는 1바이트 변화는 외출모드 토큰으로 인식
+          grp->coverage.away_mode_seen = true;
+        } else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT &&
                  grp->coverage.power_on_seen && grp->coverage.power_off_seen) {
-          // THERMOSTAT: ON/OFF 이외의 단일 바이트 변화 → 온도 설정 (같은 카테고리 내 VL만 변화)
+          // THERMOSTAT: ON/OFF/외출 확정 후 단일 바이트 변화 → 온도 설정 (VL만 변화)
           grp->temp_slot.discovered = true;
           grp->temp_slot.action_offset = act_off;
           if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val)

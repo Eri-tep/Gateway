@@ -794,7 +794,7 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
 
         if (!on_done || !off_done || !away_done) {
           if (!on_done) {
-            sendTelnetMsgf(s.sock, "\r\n>> [HALF CAPTURED!] DevID 0x%02X (%s) OFF recorded! Please now TURN ON '%s'...\r\n",
+            sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
                            dev_id, tgt.name, tgt.name);
           } else if (!off_done) {
             sendTelnetMsgf(s.sock, "\r\n>> [HALF CAPTURED!] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",

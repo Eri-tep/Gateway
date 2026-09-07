@@ -1581,7 +1581,11 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       else if (i == grp->frame_len - 1) r = "ET";
       else if (i == grp->frame_len - 2) r = "CS";
 
-      if (is_val) {
+      if (i == grp->frame_len - 1) {
+        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", "ET");
+      } else if (i == grp->frame_len - 2) {
+        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", "CS");
+      } else if (is_val) {
         r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "[VL] ");
       } else if (is_ctx) {
         r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "[CX] ");
@@ -1644,7 +1648,11 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       else if (i == len - 1) r = "ET";
       else if (i == len - 2) r = "CS";
 
-      if (is_val) {
+      if (i == len - 1) {
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", "ET");
+      } else if (i == len - 2) {
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", "CS");
+      } else if (is_val) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[VL] ");
       } else if (is_ctx) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[CX] ");
