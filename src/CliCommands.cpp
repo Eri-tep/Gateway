@@ -1863,7 +1863,7 @@ void wallpadControlLearnInteractive(int sock, char *args) {
   }
   sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
   sendTelnetMsg(sock, "We will guide you through: Light -> Outlet -> Vent -> Thermo -> Gas -> Aircon -> EV\r\n");
-  sendTelnetMsg(sock, "(Operate physical wallpad/switches when prompted. Timeout: 15s per step)\r\n");
+  sendTelnetMsg(sock, "(Operate physical wallpad/switches when prompted. Timeout: 45s | Enter: Skip | 'q': Abort)\r\n");
   sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
 
   struct DeviceTarget {
@@ -1882,12 +1882,15 @@ void wallpadControlLearnInteractive(int sock, char *args) {
       {DeviceClass::MOMENTARY, "Elevator", "Step 7: Elevator (엘리베이터 호출)"},
   };
 
+  bool abort_requested = false;
+
   for (size_t t = 0; t < sizeof(targets) / sizeof(targets[0]); ++t) {
+    if (abort_requested) break;
     const auto &target = targets[t];
 
     sendTelnetMsgf(sock, "\r\n[%s]\r\n", target.step_name);
     sendTelnetMsgf(sock, ">> Please operate '%s' on your wallpad or wall switch now...\r\n", target.name);
-    sendTelnetMsg(sock, ">> (Waiting for packet transaction... Press any key or wait 15s to skip)\r\n");
+    sendTelnetMsg(sock, ">> (Waiting for packet transaction... 45s timeout | Enter: Skip | 'q': Abort)\r\n");
 
     // 이전 상태 백업
     uint32_t prev_learned_ms[ControlTemplateRegistry::MAX_GROUPS]{0};
@@ -1899,19 +1902,29 @@ void wallpadControlLearnInteractive(int sock, char *args) {
     uint32_t start_ms = millis();
     uint8_t detected_dev_id = 0;
 
-    while (millis() - start_ms < 15000) {
-      // 1. 소켓 입력 감지 (사용자가 엔터나 아무 키를 누르면 스킵)
+    while (millis() - start_ms < 45000) {
+      // FreeRTOS 및 시스템 WDT 모니터 피딩 (태스크 정지 방지)
+      esp_task_wdt_reset();
+      g_wdt_monitor.feed(5);
+
+      // 1. 소켓 입력 감지 (사용자가 엔터/키를 누르면 스킵, 'q'면 즉시 전체 종료)
       fd_set rfds;
       FD_ZERO(&rfds);
       FD_SET(sock, &rfds);
       struct timeval tv = {0, 100000}; // 100ms
       int sel = select(sock + 1, &rfds, nullptr, nullptr, &tv);
       if (sel > 0 && FD_ISSET(sock, &rfds)) {
-        char ch[16];
-        int r = recv(sock, ch, sizeof(ch), 0);
+        char ch[16]{0};
+        int r = recv(sock, ch, sizeof(ch) - 1, 0);
         if (r > 0) {
-          sendTelnetMsg(sock, ">> [SKIP] Moving to next device...\r\n");
-          break;
+          if (ch[0] == 'q' || ch[0] == 'Q') {
+            sendTelnetMsg(sock, ">> [ABORT] Learning wizard aborted by user.\r\n");
+            abort_requested = true;
+            break;
+          } else {
+            sendTelnetMsg(sock, ">> [SKIP] Moving to next device...\r\n");
+            break;
+          }
         }
       }
 
@@ -1928,6 +1941,8 @@ void wallpadControlLearnInteractive(int sock, char *args) {
         break;
       }
     }
+
+    if (abort_requested) break;
 
     if (detected_dev_id != 0) {
       // 기기 분류 및 그룹명 확정 등록!

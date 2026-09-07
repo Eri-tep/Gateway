@@ -10,41 +10,10 @@ ControlTemplateRegistry g_control_registry;
 // ============================================================================
 
 DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad) {
-  if (dev_id == 0) return DeviceClass::UNKNOWN;
-
-  // 1차/2차 캐시에서 무리한 기기 종류 추측을 완전히 배제합니다.
-  // 오직 인간 실내 생활 기온(14~36℃) 2개 바이트(현재온도, 설정온도)가 명확한 경우만 THERMOSTAT으로 감지하고,
-  // 그 외 모든 기기는 UNKNOWN으로 두어 사용자의 명시적 ctl learn 대화형 러닝을 통해 확정하도록 합니다.
-  size_t temp_byte_count = 0;
-
-  auto analyzeAckPayload = [&](const uint8_t *data, size_t len) {
-    if (len < 5) return;
-    uint8_t payload_start = (ad.offsets_locked && ad.payload_offset < len) ? ad.payload_offset : 7;
-    size_t payload_end = (len >= 2) ? (len - 2) : len;
-    if (payload_start >= payload_end) return;
-
-    size_t cnt = 0;
-    for (size_t k = payload_start; k < payload_end; ++k) {
-      uint8_t v = data[k];
-      if (v >= 14 && v <= 36) cnt++;
-    }
-    if (cnt >= 2) temp_byte_count++;
-  };
-
-  size_t repo_cnt = g_device_repo.count();
-  for (size_t i = 0; i < repo_cnt; ++i) {
-    DeviceStateEntry snap{};
-    if (g_device_repo.getSnapshot(i, snap)) {
-      if (snap.dev_id == dev_id && snap.last_ack_len >= 5) {
-        analyzeAckPayload(snap.last_ack_data.data(), snap.last_ack_len);
-      }
-    }
-  }
-
-  if (temp_byte_count >= 1) {
-    return DeviceClass::THERMOSTAT;
-  }
-
+  (void)dev_id;
+  (void)ad;
+  // 1차/2차 캐시에서 사전 기기 종류 추측을 완전히 배제합니다.
+  // 모든 기기는 UNKNOWN(-)으로 시작하며, 'ctl learn' 대화형 러닝을 통해서만 확정합니다.
   return DeviceClass::UNKNOWN;
 }
 
