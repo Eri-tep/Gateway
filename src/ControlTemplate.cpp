@@ -12,12 +12,7 @@ ControlTemplateRegistry g_control_registry;
 DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad) {
   if (dev_id == 0) return DeviceClass::UNKNOWN;
 
-  // 1. [사용자 지침 유지] 전열교환기(ERV 0x2B, STX 0xF7, ETX 0xEE) 스마트싱스 호환 예외
-  if (dev_id == Config::Devices::DEV_HEAT_EXCHANGER && ad.stx == 0xF7 && ad.etx == 0xEE) {
-    return DeviceClass::VENT;
-  }
-
-  // 2. 2차 캐시(g_device_repo) 및 1차 캐시(g_polling_targets)에서 해당 dev_id의 ACK 패킷 페이로드 분석
+  // 2차 캐시(g_device_repo) 및 1차 캐시(g_polling_targets)에서 해당 dev_id의 ACK 패킷 페이로드 분석
   size_t matched_units = 0;
   bool has_temp_telemetry = false;
   bool has_speed_telemetry = false;
@@ -393,9 +388,8 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
       grp->sub1_offset = sub1_offset;
       grp->sub2_offset = sub2_offset;
 
-      if (d_id == Config::Devices::DEV_HEAT_EXCHANGER && stx == 0xF7 && etx == 0xEE) {
-        grp->ctl_sub1_override = Config::Devices::SUB_HEAT_EXCHANGER_QUERY; // 0x40
-      }
+      // 쿼리 패킷에서 관측된 sub1을 제어 서브주소의 초기값으로 기록
+      grp->ctl_sub1_override = entry.sub1;
 
       grp->coverage.dev_class = dc;
       autoAssignGroupName(*grp);
@@ -454,6 +448,18 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   taskENTER_CRITICAL(&_mux);
   grp->frame_len = ctl.length;
   std::copy(ctl.data.begin(), ctl.data.begin() + std::min<size_t>(ctl.length, 32), grp->raw_template);
+  grp->last_ctl_len = std::min<size_t>(ctl.length, 32);
+  std::copy(ctl.data.begin(), ctl.data.begin() + grp->last_ctl_len, grp->last_ctl_raw);
+
+  grp->last_ack_before_len = std::min<size_t>(ack_before.length, 32);
+  if (grp->last_ack_before_len > 0) {
+    std::copy(ack_before.data.begin(), ack_before.data.begin() + grp->last_ack_before_len, grp->last_ack_before_raw);
+  }
+  grp->last_ack_after_len = std::min<size_t>(ack_after.length, 32);
+  if (grp->last_ack_after_len > 0) {
+    std::copy(ack_after.data.begin(), ack_after.data.begin() + grp->last_ack_after_len, grp->last_ack_after_raw);
+  }
+
   grp->last_learned_ms = millis();
   grp->coverage.observation_count++;
 
@@ -468,9 +474,9 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     }
   }
 
-  // 전열교환기(dev_id 0x2B)는 현대통신(0xF7, 0xEE)인 경우에만 CTL 전송 시 sub1 = 0x40 강제
-  if (dev_id == Config::Devices::DEV_HEAT_EXCHANGER && ad.stx == 0xF7 && ad.etx == 0xEE) {
-    grp->ctl_sub1_override = Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
+  // 월패드가 실제로 송신한 제어 패킷(ctl)의 sub1 주소를 동적 학습
+  if (grp->sub1_offset < ctl.length) {
+    grp->ctl_sub1_override = ctl.data[grp->sub1_offset];
   }
 
   // 4. 순수 패킷 차분(Differential) 분석 및 슬롯/토큰 자동 추출
@@ -654,8 +660,20 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
   out.data.fill(0);
   std::copy(grp->raw_template, grp->raw_template + grp->frame_len, out.data.begin());
 
-  // 주소 슬롯 주입 (전열교환기는 sub1 고정값 강제)
-  uint8_t actual_sub1 = (grp->ctl_sub1_override != 0xFF) ? grp->ctl_sub1_override : sub1;
+  // 단일 유닛 기기 판별: 해당 dev_id로 등록된 기기가 1대 이하인지 동적 확인
+  size_t unit_count = 0;
+  for (size_t i = 0; i < g_device_repo.count(); ++i) {
+    DeviceStateEntry snap{};
+    if (g_device_repo.getSnapshot(i, snap) && snap.dev_id == dev_id) {
+      unit_count++;
+      if (unit_count > 1) break;
+    }
+  }
+
+  // 주소 슬롯 주입:
+  // - 다중 유닛 기기(조명, 각 방 난방 등): 요청된 방 번호(sub1)를 동적으로 주입
+  // - 단일 유닛 기기(전열교환기, 가스 등): 월패드가 실제 쏜 제어 주소(ctl_sub1_override)를 고정 주입
+  uint8_t actual_sub1 = (unit_count <= 1 && grp->ctl_sub1_override != 0xFF) ? grp->ctl_sub1_override : sub1;
   if (grp->sub1_offset < grp->frame_len) out.data[grp->sub1_offset] = actual_sub1;
   if (grp->sub2_offset < grp->frame_len) out.data[grp->sub2_offset] = sub2;
 

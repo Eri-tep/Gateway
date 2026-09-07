@@ -100,6 +100,14 @@ struct GroupControlTemplate {
   bool away_has_dedicated_temp{false}; // 외출 시 특정 온도로 고정 여부
   bool temp_recall_verified{false};    // 켜기/외출해제 시 저장된 온도로 자동 복원 검증 완료
 
+  // 직전 단계 학습 원본 패킷 (Triplet)
+  uint8_t last_ctl_len{0};
+  uint8_t last_ctl_raw[32]{0};
+  uint8_t last_ack_before_len{0};
+  uint8_t last_ack_before_raw[32]{0};
+  uint8_t last_ack_after_len{0};
+  uint8_t last_ack_after_raw[32]{0};
+
   // 학습 진행 상태
   enum class Status : uint8_t {
     EMPTY = 0,     // 기기 미등록
