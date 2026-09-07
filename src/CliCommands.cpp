@@ -1599,7 +1599,10 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   out.append(Fmt::DIV80);
   out.append("Captured ACK Transactions (Pre vs Post State):\r\n");
 
-  auto formatPktWithRoles = [&](const char *label, const uint8_t *raw, size_t len) {
+  // ACK 패킷 출력: cmp/cmp_len은 비교 대상(ACK+면 ACK-, ACK-면 ACK+) → 실제 차분으로 가변 바이트 탐지
+  auto formatPktWithRoles = [&](const char *label,
+                                 const uint8_t *raw, size_t len,
+                                 const uint8_t *cmp, size_t cmp_len) {
     if (!raw || len == 0) return;
     char hex_str[160]{0};
     char rol_str[160]{0};
@@ -1607,16 +1610,21 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     size_t r_len = snprintf(rol_str, sizeof(rol_str), "  %-6s: ", "[Rol]");
 
     for (size_t i = 0; i < len && i < 24; ++i) {
+      // ACK- vs ACK+ 실제 차분으로 가변 바이트 판정
+      bool is_changed = (cmp && i < cmp_len && raw[i] != cmp[i]);
+
+      // 학습된 슬롯 오프셋과의 일치 여부
       bool is_val = (grp->power_slot.discovered && grp->power_slot.action_offset == i) ||
-                    (grp->temp_slot.discovered && grp->temp_slot.action_offset == i) ||
+                    (grp->temp_slot.discovered  && grp->temp_slot.action_offset  == i) ||
                     (grp->speed_slot.discovered && grp->speed_slot.action_offset == i) ||
                     (grp->close_slot.discovered && grp->close_slot.action_offset == i);
       bool is_ctx = (grp->power_slot.discovered && grp->power_slot.category_offset == i) ||
-                    (grp->temp_slot.discovered && grp->temp_slot.category_offset == i) ||
+                    (grp->temp_slot.discovered  && grp->temp_slot.category_offset  == i) ||
                     (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
-      bool is_variable = is_val || is_ctx || is_env;
+      // 가변 = 실제 변한 바이트 OR 학습된 슬롯 위치
+      bool is_variable = is_changed || is_val || is_ctx || is_env;
 
       if (is_variable) {
         h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "[%02X] ", raw[i]);
@@ -1642,6 +1650,9 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[CX] ");
       } else if (is_env) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[EN] ");
+      } else if (is_changed) {
+        // 슬롯 미분류 가변 바이트 → 미지 모니터링 대상
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[~~] ");
       } else {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", r);
       }
@@ -1652,11 +1663,15 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   if (grp->last_ack_before_len > 0 || grp->last_ack_after_len > 0) {
     if (grp->last_ack_before_len > 0) {
       out.append("--------------------------------------------------------------------------------\r\n");
-      formatPktWithRoles("ACK-", grp->last_ack_before_raw, grp->last_ack_before_len);
+      // ACK- 출력: ACK+를 비교 대상으로 → 변한 바이트 탐지
+      formatPktWithRoles("ACK-", grp->last_ack_before_raw, grp->last_ack_before_len,
+                          grp->last_ack_after_raw, grp->last_ack_after_len);
     }
     if (grp->last_ack_after_len > 0) {
       out.append("--------------------------------------------------------------------------------\r\n");
-      formatPktWithRoles("ACK+", grp->last_ack_after_raw, grp->last_ack_after_len);
+      // ACK+ 출력: ACK-를 비교 대상으로 → 변한 바이트 탐지
+      formatPktWithRoles("ACK+", grp->last_ack_after_raw, grp->last_ack_after_len,
+                          grp->last_ack_before_raw, grp->last_ack_before_len);
     }
   } else {
     out.append("  (No device ACK packet captured yet)\r\n");
