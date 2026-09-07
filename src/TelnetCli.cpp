@@ -755,6 +755,14 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
       uint8_t cur_idx = s.wizard_step - 1;
       const auto &tgt = s_wizard_targets[cur_idx];
 
+      // 타 단계에서 이미 학습되어 클래스가 부여된 기기 ID는 현재 단계의 대상이 아니므로 무시/드랍
+      // (예: 환기 0x2B가 이미 확정된 상태에서 난방 단계 진입 시 0x2B 패킷이 들어와도 난방으로 오염되지 않음)
+      const GroupControlTemplate *existing = g_control_registry.findGroup(dev_id);
+      if (existing && existing->coverage.dev_class != DeviceClass::UNKNOWN &&
+          existing->coverage.dev_class != tgt.cls) {
+        continue;
+      }
+
       // 기기 분류 및 그룹명 확정 등록!
       g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
 

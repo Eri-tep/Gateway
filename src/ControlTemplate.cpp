@@ -414,7 +414,7 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     grp->ctl_sub1_override = ctl.data[grp->sub1_offset];
   }
 
-  // 4. 순수 패킷 차분(Differential) 분석 및 슬롯/토큰 자동 추출
+  // 4. 순수 패킷 차분(Differential) 분석 및 슬롯/토큰 자동 추출 (Triplet Differential Sniffer)
   uint8_t payload_start = (ad.offsets_locked && ad.payload_offset < ctl.length) ? ad.payload_offset : 5;
   size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length; // CS, ETX 제외
 
@@ -423,14 +423,47 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   uint8_t diff_vals[8]{0};
   size_t diff_count = 0;
 
-  for (size_t i = payload_start; i < end_idx && diff_count < 8; ++i) {
-    if (i == grp->sub1_offset || i == grp->sub2_offset) continue;
-    if (ad.offsets_locked && (i == ad.sub1_offset || i == ad.sub2_offset)) continue;
+  auto addDiffOffset = [&](uint8_t offset, uint8_t val) {
+    if (offset < payload_start || offset >= end_idx) return;
+    if (offset == grp->sub1_offset || offset == grp->sub2_offset) return;
+    if (ad.offsets_locked && (offset == ad.sub1_offset || offset == ad.sub2_offset)) return;
 
-    if (prev_len > 0 && ctl.data[i] != prev_raw[i]) {
-      diff_offsets[diff_count] = static_cast<uint8_t>(i);
-      diff_vals[diff_count] = ctl.data[i];
+    for (size_t d = 0; d < diff_count; ++d) {
+      if (diff_offsets[d] == offset) return;
+    }
+    if (diff_count < 8) {
+      diff_offsets[diff_count] = offset;
+      diff_vals[diff_count] = val;
       diff_count++;
+    }
+  };
+
+  // (1) 이전 CTL 프레임과의 차분 비교
+  for (size_t i = payload_start; i < end_idx; ++i) {
+    if (prev_len > 0 && ctl.data[i] != prev_raw[i]) {
+      addDiffOffset(static_cast<uint8_t>(i), ctl.data[i]);
+    }
+  }
+
+  // (2) Triplet 교차 비교: 직전 상태(ACK-)와 직후 상태(ACK+) 간의 상태 변화 오프셋 수집
+  // 제어 패킷(CTL)이 첫 관측이어서 prev_raw와 비교할 수 없더라도,
+  // 기기 응답(ACK- vs ACK+)에서 상태가 변경된 오프셋을 제어 패킷(CTL)의 슬롯으로 교차 바인딩
+  if (has_before && ack_before.length == ack_after.length) {
+    size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
+    for (size_t k = payload_start; k < ack_end && k < end_idx; ++k) {
+      if (ack_before.data[k] != ack_after.data[k]) {
+        addDiffOffset(static_cast<uint8_t>(k), ctl.data[k]);
+      }
+    }
+  }
+
+  // diff_offsets를 오프셋 번호 오름차순으로 정렬 (Category -> Action 순서 보장)
+  for (size_t a = 0; a < diff_count; ++a) {
+    for (size_t b = a + 1; b < diff_count; ++b) {
+      if (diff_offsets[a] > diff_offsets[b]) {
+        std::swap(diff_offsets[a], diff_offsets[b]);
+        std::swap(diff_vals[a], diff_vals[b]);
+      }
     }
   }
 
@@ -607,6 +640,9 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         grp->power_slot.off_val = cmd_val;
         grp->coverage.power_off_seen = true;
       }
+      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && cat_val != 0) {
+        grp->coverage.away_mode_seen = true;
+      }
     }
   }
 
@@ -683,6 +719,9 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
     }
   } else if (action == ControlActionType::FAN_SPEED) {
     if (!grp->speed_slot.discovered) return false;
+    if (grp->speed_slot.category_offset < grp->frame_len) {
+      out.data[grp->speed_slot.category_offset] = grp->speed_slot.category_val;
+    }
     if (grp->speed_slot.action_offset < grp->frame_len) {
       uint8_t speed_token = 0;
       if (grp->speed_slot.level_count > 0) {

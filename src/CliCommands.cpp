@@ -1558,7 +1558,8 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.action_offset == i) ||
                     (grp->close_slot.discovered && grp->close_slot.action_offset == i);
       bool is_ctx = (grp->power_slot.discovered && grp->power_slot.category_offset == i) ||
-                    (grp->temp_slot.discovered && grp->temp_slot.category_offset == i);
+                    (grp->temp_slot.discovered && grp->temp_slot.category_offset == i) ||
+                    (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
       // 학습 대상(가변)은 [xx], 고정 골격은 xx 형식 (공백 1개로 컴팩트 정렬)
@@ -1611,7 +1612,8 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.action_offset == i) ||
                     (grp->close_slot.discovered && grp->close_slot.action_offset == i);
       bool is_ctx = (grp->power_slot.discovered && grp->power_slot.category_offset == i) ||
-                    (grp->temp_slot.discovered && grp->temp_slot.category_offset == i);
+                    (grp->temp_slot.discovered && grp->temp_slot.category_offset == i) ||
+                    (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
       bool is_variable = is_val || is_ctx || is_env;
@@ -1793,6 +1795,10 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       out.appendFormat("  [VL]  Speed Slot    : Byte #%u | Range: %u~%u | Samples: %u\r\n",
                        grp->speed_slot.action_offset, grp->speed_slot.min_val, grp->speed_slot.max_val,
                        grp->speed_slot.sample_count);
+    }
+    if (grp->speed_slot.category_offset != 0xFF) {
+      out.appendFormat("  [CX]  Speed Context : Byte #%u (Val: 0x%02X)\r\n",
+                       grp->speed_slot.category_offset, grp->speed_slot.category_val);
     }
   }
 
@@ -2081,6 +2087,50 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       }
     } else {
       sendTelnetMsg(sock, "[ERROR] Usage: ctl name <dev_id> <custom_name> (e.g. ctl name 0x1B Gas)\r\n");
+    }
+  } else if (strcasecmp(sub, "class") == 0 || strcasecmp(sub, "setclass") == 0) {
+    if (argc >= 3) {
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+      const char *cls_str = embeddedCliGetToken(args, 3);
+      const char *custom_name = (argc >= 4) ? embeddedCliGetToken(args, 4) : nullptr;
+      DeviceClass cls = DeviceClass::UNKNOWN;
+      const char *def_name = cls_str;
+
+      if (strcasecmp(cls_str, "light") == 0 || strcasecmp(cls_str, "switch") == 0) {
+        cls = DeviceClass::SWITCH;
+        def_name = "Light";
+      } else if (strcasecmp(cls_str, "outlet") == 0) {
+        cls = DeviceClass::SWITCH;
+        def_name = "Outlet";
+      } else if (strcasecmp(cls_str, "vent") == 0 || strcasecmp(cls_str, "fan") == 0) {
+        cls = DeviceClass::VENT;
+        def_name = "Vent";
+      } else if (strcasecmp(cls_str, "thermo") == 0 || strcasecmp(cls_str, "thermostat") == 0 || strcasecmp(cls_str, "heat") == 0) {
+        cls = DeviceClass::THERMOSTAT;
+        def_name = "Thermo";
+      } else if (strcasecmp(cls_str, "gas") == 0) {
+        cls = DeviceClass::GAS;
+        def_name = "Gas";
+      } else if (strcasecmp(cls_str, "aircon") == 0 || strcasecmp(cls_str, "ac") == 0) {
+        cls = DeviceClass::AIRCON;
+        def_name = "Aircon";
+      } else if (strcasecmp(cls_str, "ev") == 0 || strcasecmp(cls_str, "elevator") == 0) {
+        cls = DeviceClass::MOMENTARY;
+        def_name = "Elevator";
+      }
+
+      if (dev_id == 0 || cls == DeviceClass::UNKNOWN) {
+        sendTelnetMsg(sock, "[ERROR] Usage: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
+      } else {
+        const char *final_name = (custom_name && strlen(custom_name) > 0) ? custom_name : def_name;
+        if (g_control_registry.setGroupClass(dev_id, cls, final_name)) {
+          sendTelnetMsgf(sock, "[OK] DevID 0x%02X class set to %s ('%s') and saved to NVS flash.\r\n", dev_id, cls_str, final_name);
+        } else {
+          sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
+        }
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
     }
   } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
     s_cli_scratch_buf[0] = '\0';
