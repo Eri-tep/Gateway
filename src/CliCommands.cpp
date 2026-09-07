@@ -1419,21 +1419,10 @@ void wallpadPrintControlTable(AppendBuf &out) {
   if (count == 0) {
     out.append("  (No control templates learned yet. Waiting for bus traffic or active probe)\r\n");
   } else {
-    // dev_id 오름차순으로 정렬 복사하여 완벽한 순서 보장
-    GroupControlTemplate grp_list[ControlTemplateRegistry::MAX_GROUPS];
-    size_t valid_cnt = 0;
-    for (size_t i = 0; i < count && valid_cnt < ControlTemplateRegistry::MAX_GROUPS; ++i) {
+    // 레지스트리는 이미 dev_id 오름차순으로 유지되므로 스택 대형 배열 없이 1개씩 안전하게 순회 출력
+    for (size_t i = 0; i < count; ++i) {
       GroupControlTemplate grp;
-      if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
-        grp_list[valid_cnt++] = grp;
-      }
-    }
-    std::sort(grp_list, grp_list + valid_cnt, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
-      return a.dev_id < b.dev_id;
-    });
-
-    for (size_t i = 0; i < valid_cnt; ++i) {
-      const auto &grp = grp_list[i];
+      if (!g_control_registry.getGroupByIndex(i, grp) || grp.dev_id == 0) continue;
 
       char pwr_str[24]{"-"};
       if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.power_slot.discovered) {
@@ -1919,38 +1908,28 @@ void wallpadControlLearnInteractive(TelnetManager::TelnetSession *session, char 
     return;
   }
 
-  // dev_id 오름차순으로 정리
-  GroupControlTemplate grp_list[ControlTemplateRegistry::MAX_GROUPS];
-  size_t valid_cnt = 0;
-  for (size_t i = 0; i < count && valid_cnt < ControlTemplateRegistry::MAX_GROUPS; ++i) {
-    GroupControlTemplate grp;
-    if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
-      grp_list[valid_cnt++] = grp;
-    }
-  }
-  std::sort(grp_list, grp_list + valid_cnt, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
-    return a.dev_id < b.dev_id;
-  });
-
   sendTelnetMsg(sock, "\r\n");
   sendTelnetMsg(sock, "================================================================================\r\n");
   sendTelnetMsg(sock, "             INTERACTIVE DEVICE CONTROL LEARNING WIZARD                        \r\n");
   sendTelnetMsg(sock, "================================================================================\r\n");
   sendTelnetMsg(sock, "Discovered Device IDs on Bus: ");
-  for (size_t i = 0; i < valid_cnt; ++i) {
-    sendTelnetMsgf(sock, "0x%02X (%s)%s", grp_list[i].dev_id, grp_list[i].group_name,
-                   (i + 1 < valid_cnt) ? ", " : "\r\n");
+  size_t valid_cnt = 0;
+  for (size_t i = 0; i < count; ++i) {
+    GroupControlTemplate grp;
+    if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
+      if (valid_cnt > 0) sendTelnetMsg(sock, ", ");
+      sendTelnetMsgf(sock, "0x%02X (%s)", grp.dev_id, grp.group_name);
+      if (valid_cnt < ControlTemplateRegistry::MAX_GROUPS) {
+        session->prev_learned_ms[valid_cnt] = grp.last_learned_ms;
+      }
+      valid_cnt++;
+    }
   }
+  sendTelnetMsg(sock, "\r\n");
   sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
   sendTelnetMsg(sock, "We will guide you through: Light -> Outlet -> Vent -> Thermo -> Gas -> Aircon -> EV\r\n");
   sendTelnetMsg(sock, "(Operate physical wallpad/switches when prompted. Timeout: 45s | Enter: Skip | 'q': Abort)\r\n");
   sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
-
-  // 현재 기기들의 마지막 학습 시각 스냅샷 기록
-  for (size_t i = 0; i < valid_cnt; ++i) {
-    const GroupControlTemplate *g = g_control_registry.findGroup(grp_list[i].dev_id);
-    if (g) session->prev_learned_ms[i] = g->last_learned_ms;
-  }
 
   // 비동기 이벤트-드라이븐 마법사 Step 1 시작 (블로킹/슬립 일절 없음!)
   session->wizard_step = 1;

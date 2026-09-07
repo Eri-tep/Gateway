@@ -684,6 +684,9 @@ static const WizardTargetDef s_wizard_targets[] = {
 };
 static constexpr uint8_t WIZARD_TOTAL_STEPS = sizeof(s_wizard_targets) / sizeof(s_wizard_targets[0]);
 
+// 정적 BSS 스크래치 버퍼 (스택 오버플로우 방지 및 재진입 안전: _cli_mutex 보호 하에 사용)
+static char s_wizard_scratch_buf[4096];
+
 void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool match) {
   if (!s || s->sock < 0 || s->wizard_step == 0) return;
 
@@ -724,8 +727,8 @@ void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool
     sendTelnetMsg(s->sock, "\r\n================================================================================\r\n");
     sendTelnetMsg(s->sock, "             LEARNING WIZARD COMPLETE - UPDATED BLUEPRINT TABLE                \r\n");
     sendTelnetMsg(s->sock, "================================================================================\r\n");
-    char scratch[4096]{0};
-    AppendBuf out{scratch, sizeof(scratch)};
+    s_wizard_scratch_buf[0] = '\0';
+    AppendBuf out{s_wizard_scratch_buf, sizeof(s_wizard_scratch_buf)};
     WallpadCli::wallpadPrintControlTable(out);
     sendTelnetMsgLen(s->sock, out.buf, out.offset);
   }
@@ -758,9 +761,9 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
       sendTelnetMsgf(s.sock, "\r\n>> [MATCH DETECTED!] DevID 0x%02X matched to '%s'!\r\n",
                      dev_id, tgt.name);
 
-      // 즉시 상세 청사진 출력
-      char scratch[4096]{0};
-      AppendBuf out{scratch, sizeof(scratch)};
+      // 즉시 상세 청사진 출력 (정적 버퍼 사용하여 스택 소모 0)
+      s_wizard_scratch_buf[0] = '\0';
+      AppendBuf out{s_wizard_scratch_buf, sizeof(s_wizard_scratch_buf)};
       WallpadCli::wallpadPrintControlDetail(out, dev_id);
       sendTelnetMsgLen(s.sock, out.buf, out.offset);
 

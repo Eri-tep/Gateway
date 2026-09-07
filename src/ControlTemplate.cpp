@@ -332,12 +332,6 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
     taskEXIT_CRITICAL(&_mux);
   }
 
-  taskENTER_CRITICAL(&_mux);
-  std::sort(_groups, _groups + _group_count, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
-    return a.dev_id < b.dev_id;
-  });
-  taskEXIT_CRITICAL(&_mux);
-
   saveToNvs();
 }
 
@@ -721,32 +715,41 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
 // NVS
 // ============================================================================
 void ControlTemplateRegistry::saveToNvs() {
-  GroupControlTemplate local_groups[MAX_GROUPS];
-  size_t local_count = 0;
-
-  // 1. Critical section에서는 오직 메모리 복사만 신속히 완료 (유효한 dev_id만)
+  // 스택 오버플로우 원천 방지:
+  // _groups는 registerOrTouch()에 의해 항상 dev_id 오름차순으로 정렬 유지됩니다.
+  // 따라서 2.7KB의 대형 배열을 스택에 복사하여 std::sort를 수행할 필요가 전혀 없으며,
+  // 유효한 개수를 확인한 뒤 락을 풀고 1건씩 안전하게 NVS에 기록합니다. (스택 소모: 수십 바이트)
+  uint8_t save_count = 0;
   taskENTER_CRITICAL(&_mux);
   for (size_t i = 0; i < _group_count; ++i) {
     if (_groups[i].dev_id != 0) {
-      local_groups[local_count++] = _groups[i];
+      save_count++;
     }
   }
   taskEXIT_CRITICAL(&_mux);
 
-  // dev_id 오름차순 정렬 저장
-  std::sort(local_groups, local_groups + local_count, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
-    return a.dev_id < b.dev_id;
-  });
-
-  // 2. Flash I/O (NVS)는 락이 완전히 풀린 상태에서 안전하게 수행 (Panic 방지)
   Preferences prefs;
   if (!prefs.begin("ctl_tmpls", false)) return;
 
-  prefs.putUChar("cnt", static_cast<uint8_t>(local_count));
-  for (size_t i = 0; i < local_count; ++i) {
-    char key[16];
-    snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
-    prefs.putBytes(key, &local_groups[i], sizeof(GroupControlTemplate));
+  prefs.putUChar("cnt", save_count);
+  uint8_t saved_idx = 0;
+  for (size_t i = 0; i < MAX_GROUPS && saved_idx < save_count; ++i) {
+    GroupControlTemplate temp{};
+    bool has_item = false;
+
+    taskENTER_CRITICAL(&_mux);
+    if (i < _group_count && _groups[i].dev_id != 0) {
+      temp = _groups[i];
+      has_item = true;
+    }
+    taskEXIT_CRITICAL(&_mux);
+
+    if (has_item) {
+      char key[16];
+      snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(saved_idx));
+      prefs.putBytes(key, &temp, sizeof(GroupControlTemplate));
+      saved_idx++;
+    }
   }
   prefs.end();
 }
@@ -758,32 +761,39 @@ void ControlTemplateRegistry::loadFromNvs() {
   uint8_t cnt = prefs.getUChar("cnt", 0);
   if (cnt > MAX_GROUPS) cnt = MAX_GROUPS;
 
-  GroupControlTemplate local_groups[MAX_GROUPS];
-  size_t valid_cnt = 0;
+  // 단일 템플릿(340B) 단위로 읽어서 레지스트리에 순차 적재 (스택 소모 최소화)
+  taskENTER_CRITICAL(&_mux);
+  _group_count = 0;
+  for (size_t i = 0; i < MAX_GROUPS; ++i) {
+    _groups[i] = GroupControlTemplate{};
+  }
+  taskEXIT_CRITICAL(&_mux);
+
   for (size_t i = 0; i < cnt; ++i) {
     char key[16];
     snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
     GroupControlTemplate temp{};
     if (prefs.getBytes(key, &temp, sizeof(GroupControlTemplate)) > 0) {
       if (temp.dev_id != 0) {
-        local_groups[valid_cnt++] = temp;
+        taskENTER_CRITICAL(&_mux);
+        if (_group_count < MAX_GROUPS) {
+          // dev_id 오름차순 삽입 유지
+          size_t insert_idx = _group_count;
+          for (size_t j = 0; j < _group_count; ++j) {
+            if (_groups[j].dev_id > temp.dev_id) {
+              insert_idx = j;
+              break;
+            }
+          }
+          for (size_t j = _group_count; j > insert_idx; --j) {
+            _groups[j] = _groups[j - 1];
+          }
+          _groups[insert_idx] = temp;
+          _group_count++;
+        }
+        taskEXIT_CRITICAL(&_mux);
       }
     }
   }
   prefs.end();
-
-  // dev_id 오름차순 정렬
-  std::sort(local_groups, local_groups + valid_cnt, [](const GroupControlTemplate &a, const GroupControlTemplate &b) {
-    return a.dev_id < b.dev_id;
-  });
-
-  taskENTER_CRITICAL(&_mux);
-  _group_count = valid_cnt;
-  for (size_t i = 0; i < valid_cnt; ++i) {
-    _groups[i] = local_groups[i];
-  }
-  for (size_t i = valid_cnt; i < MAX_GROUPS; ++i) {
-    _groups[i] = GroupControlTemplate{};
-  }
-  taskEXIT_CRITICAL(&_mux);
 }
