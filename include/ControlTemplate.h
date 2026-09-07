@@ -102,7 +102,11 @@ struct GroupControlTemplate {
   bool away_has_dedicated_temp{false}; // 외출 시 특정 온도로 고정 여부
   bool temp_recall_verified{false};    // 켜기/외출해제 시 저장된 온도로 자동 복원 검증 완료
 
-  // 직전 단계 학습 원본 패킷 (Triplet)
+  // 직전 단계 학습 원본 패킷 (CTL- / CTL+, ACK- / ACK+)
+  uint8_t ctl_before_len{0};
+  uint8_t ctl_before_raw[32]{0};
+  uint8_t ctl_after_len{0};
+  uint8_t ctl_after_raw[32]{0};
   uint8_t last_ctl_len{0};
   uint8_t last_ctl_raw[32]{0};
   uint8_t last_ack_before_len{0};

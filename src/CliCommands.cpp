@@ -1565,73 +1565,13 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                    grp->group_name, grp->dev_id, grp->frame_len);
   out.append(Fmt::DIV80EQ);
 
-  // 1. Control Frame Blueprint
+  // 1. Control Frame Blueprint (CTL- / CTL+)
   auto ad = g_auto_probing_engine.getDescriptor();
-  out.append("Control Frame Blueprint:\r\n");
-  if (grp->frame_len > 0) {
-    char hex_line[160]{0};
-    char role_line[160]{0};
-    size_t h_off = snprintf(hex_line, sizeof(hex_line), "  [CTL] ");
-    size_t r_off = snprintf(role_line, sizeof(role_line), "  [Rol] ");
+  out.append("Control Frame Transactions (Pre vs Post State):\r\n");
 
-    for (size_t i = 0; i < grp->frame_len && i < 24; ++i) {
-      bool is_val = (grp->power_slot.discovered && grp->power_slot.action_offset == i) ||
-                    (grp->temp_slot.discovered && grp->temp_slot.action_offset == i) ||
-                    (grp->speed_slot.discovered && grp->speed_slot.action_offset == i) ||
-                    (grp->close_slot.discovered && grp->close_slot.action_offset == i);
-      bool is_ctx = (grp->power_slot.discovered && grp->power_slot.category_offset == i) ||
-                    (grp->temp_slot.discovered && grp->temp_slot.category_offset == i) ||
-                    (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
-      bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
-
-      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, GW, SB, OP)
-      const char *r = nullptr;
-      if (i == 0) r = "ST";
-      else if (i == grp->frame_len - 1) r = "ET";
-      else if (i == grp->frame_len - 2) r = "CS";
-      else if (ad.has_len_field && i == ad.len_offset) r = "LN";
-      else if (ad.is_swapped_addr && i == ad.gw_addr_offset) r = "GW";
-      else if (i == ad.dev_id_offset) r = "ID";
-      else if (ad.offsets_locked && !ad.is_swapped_addr && i == ad.sub1_offset) r = "GW";
-      else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
-      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "SB";
-      else if (i == ad.opcode_offset) r = "OP";
-      else if (ad.offsets_locked && i < ad.payload_offset) r = "HD"; // 헤더 고정 필드
-
-      // 2순위: 고정 롤이 아닌 순수 페이로드 영역만 가변/학습 슬롯으로 표시
-      bool is_payload = (r == nullptr);
-      bool is_variable = is_payload && (is_val || is_ctx || is_env);
-
-      if (is_variable) {
-        h_off += snprintf(hex_line + h_off, sizeof(hex_line) - h_off, "[%02X] ", grp->raw_template[i]);
-      } else {
-        h_off += snprintf(hex_line + h_off, sizeof(hex_line) - h_off, "%02X ", grp->raw_template[i]);
-      }
-
-      if (r != nullptr) {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", r);
-      } else if (is_val) {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "[VL] ");
-      } else if (is_ctx) {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "[CX] ");
-      } else if (is_env) {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "[EN] ");
-      } else {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", "--");
-      }
-    }
-    out.appendFormat("%s\r\n%s\r\n", hex_line, role_line);
-  } else {
-    out.append("  (Control frame not captured yet)\r\n");
-  }
-
-  out.append(Fmt::DIV80);
-  out.append("Captured ACK Transactions (Pre vs Post State):\r\n");
-
-  // ACK 패킷 출력: cmp/cmp_len은 비교 대상(ACK+면 ACK-, ACK-면 ACK+) → 실제 차분으로 가변 바이트 탐지
-  auto formatPktWithRoles = [&](const char *label,
-                                 const uint8_t *raw, size_t len,
-                                 const uint8_t *cmp, size_t cmp_len) {
+  auto formatFrameWithRoles = [&](const char *label,
+                                  const uint8_t *raw, size_t len,
+                                  const uint8_t *cmp, size_t cmp_len) {
     if (!raw || len == 0) return;
     char hex_str[160]{0};
     char rol_str[160]{0};
@@ -1639,10 +1579,8 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     size_t r_len = snprintf(rol_str, sizeof(rol_str), "  %-6s: ", "[Rol]");
 
     for (size_t i = 0; i < len && i < 24; ++i) {
-      // ACK- vs ACK+ 실제 차분으로 가변 바이트 판정
       bool is_changed = (cmp && i < cmp_len && raw[i] != cmp[i]);
 
-      // 학습된 슬롯 오프셋과의 일치 여부
       bool is_val = (grp->power_slot.discovered && grp->power_slot.action_offset == i) ||
                     (grp->temp_slot.discovered  && grp->temp_slot.action_offset  == i) ||
                     (grp->speed_slot.discovered && grp->speed_slot.action_offset == i) ||
@@ -1652,26 +1590,24 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
-      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, GW, SB, OP, HD)
+      // 1순위: 확정된 고정 프레임 골격 (ST, LN, GW, ID, OP, HD, S1, SB, CS, ET)
       const char *r = nullptr;
       if (i == 0) r = "ST";
       else if (i == len - 1) r = "ET";
       else if (i == len - 2) r = "CS";
       else if (ad.has_len_field && i == ad.len_offset) r = "LN";
-      else if (ad.is_swapped_addr && i == ad.gw_addr_offset) r = "ID";
-      else if (ad.is_swapped_addr && i == ad.dev_id_offset) r = "GW";
+      else if (ad.is_swapped_addr && i == ad.gw_addr_offset) r = "GW";
       else if (i == ad.dev_id_offset) r = "ID";
       else if (ad.offsets_locked && !ad.is_swapped_addr && i == ad.sub1_offset) r = "GW";
       else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
       else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "SB";
       else if (i == ad.opcode_offset) r = "OP";
-      else if (ad.offsets_locked && i < ad.payload_offset) r = "HD"; // 헤더 고정 필드
+      else if (ad.offsets_locked && i < ad.payload_offset) r = "HD";
 
-      // 2순위: 고정 롤이 아닌 순수 페이로드 영역만 가변/학습 슬롯으로 표시
+      // 2순위: 순수 페이로드 영역 (ad.payload_offset ~ 체크섬 직전)
       bool is_payload = (r == nullptr);
-      bool is_variable = is_payload && (is_changed || is_val || is_ctx || is_env);
 
-      if (is_variable) {
+      if (is_payload) {
         h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "[%02X] ", raw[i]);
       } else {
         h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "%02X ", raw[i]);
@@ -1686,27 +1622,42 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       } else if (is_env) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[EN] ");
       } else if (is_changed) {
-        // 슬롯 미분류 순수 페이로드 가변 바이트 → 미지 모니터링 대상
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[~~] ");
       } else {
-        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", "--");
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[PL] ");
       }
     }
     out.appendFormat("%s\r\n%s\r\n", hex_str, rol_str);
   };
 
+  if (grp->ctl_before_len > 0 || grp->ctl_after_len > 0 || grp->frame_len > 0) {
+    if (grp->ctl_before_len > 0) {
+      out.append("--------------------------------------------------------------------------------\r\n");
+      formatFrameWithRoles("CTL-", grp->ctl_before_raw, grp->ctl_before_len,
+                           grp->ctl_after_raw, grp->ctl_after_len);
+    }
+    const uint8_t *cur_ctl = (grp->ctl_after_len > 0) ? grp->ctl_after_raw : grp->raw_template;
+    size_t cur_len = (grp->ctl_after_len > 0) ? grp->ctl_after_len : grp->frame_len;
+    out.append("--------------------------------------------------------------------------------\r\n");
+    formatFrameWithRoles("CTL+", cur_ctl, cur_len,
+                         grp->ctl_before_raw, grp->ctl_before_len);
+  } else {
+    out.append("  (Control frame not captured yet)\r\n");
+  }
+
+  out.append(Fmt::DIV80);
+  out.append("Captured ACK Transactions (Pre vs Post State):\r\n");
+
   if (grp->last_ack_before_len > 0 || grp->last_ack_after_len > 0) {
     if (grp->last_ack_before_len > 0) {
       out.append("--------------------------------------------------------------------------------\r\n");
-      // ACK- 출력: ACK+를 비교 대상으로 → 변한 바이트 탐지
-      formatPktWithRoles("ACK-", grp->last_ack_before_raw, grp->last_ack_before_len,
-                          grp->last_ack_after_raw, grp->last_ack_after_len);
+      formatFrameWithRoles("ACK-", grp->last_ack_before_raw, grp->last_ack_before_len,
+                           grp->last_ack_after_raw, grp->last_ack_after_len);
     }
     if (grp->last_ack_after_len > 0) {
       out.append("--------------------------------------------------------------------------------\r\n");
-      // ACK+ 출력: ACK-를 비교 대상으로 → 변한 바이트 탐지
-      formatPktWithRoles("ACK+", grp->last_ack_after_raw, grp->last_ack_after_len,
-                          grp->last_ack_before_raw, grp->last_ack_before_len);
+      formatFrameWithRoles("ACK+", grp->last_ack_after_raw, grp->last_ack_after_len,
+                           grp->last_ack_before_raw, grp->last_ack_before_len);
     }
   } else {
     out.append("  (No device ACK packet captured yet)\r\n");

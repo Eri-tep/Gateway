@@ -418,10 +418,17 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     std::copy(grp->raw_template, grp->raw_template + std::min<size_t>(prev_len, 32), prev_raw);
   }
 
+  if (grp->last_ctl_len > 0) {
+    grp->ctl_before_len = grp->last_ctl_len;
+    std::copy(grp->last_ctl_raw, grp->last_ctl_raw + grp->ctl_before_len, grp->ctl_before_raw);
+  }
+
   grp->frame_len = ctl.length;
   std::copy(ctl.data.begin(), ctl.data.begin() + std::min<size_t>(ctl.length, 32), grp->raw_template);
   grp->last_ctl_len = std::min<size_t>(ctl.length, 32);
   std::copy(ctl.data.begin(), ctl.data.begin() + grp->last_ctl_len, grp->last_ctl_raw);
+  grp->ctl_after_len = grp->last_ctl_len;
+  std::copy(grp->last_ctl_raw, grp->last_ctl_raw + grp->ctl_after_len, grp->ctl_after_raw);
 
   grp->last_ack_before_len = std::min<size_t>(ack_before.length, 32);
   if (grp->last_ack_before_len > 0) {
@@ -457,93 +464,92 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   // 5. 무사전지식 Full-Spectrum 차분 분석 (Full Differential Scan)
   // 고정 프레임 필드(STX, LEN, DevID, OP, CS, ETX) 및 주소(SUB1, SUB2)를 엄격히 분리
   // --------------------------------------------------------------------------
-  // 순수 페이로드(Pure Payload) 시작 및 종료 인덱스 (명세 기반)
   size_t start_idx = (ad.offsets_locked && ad.payload_offset > 0) ? ad.payload_offset : 1;
-  size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length; // CS, ETX 제외
+  size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length;
 
-  // 고정 뼈대(Skeleton) 필드인지 검사 (사전지식 없이 AutoProbeDescriptor에 확정된 명세 기준)
   auto isFixedFrameField = [&](size_t idx) -> bool {
-    if (idx == 0) return true; // STX
-    if (idx >= ctl.length - 2) return true; // CS, ETX
-    if (ad.has_len_field && idx == ad.len_offset) return true; // LEN
-    if (idx == ad.dev_id_offset) return true; // DevID (DA)
-    if (idx == ad.opcode_offset) return true; // OP
-    if (ad.is_swapped_addr && idx == ad.gw_addr_offset) return true; // GW 주소 (SA)
-    if (idx == grp->sub1_offset || (ad.offsets_locked && idx == ad.sub1_offset)) return true; // SUB1 / Gateway
-    if (idx == grp->sub2_offset || (ad.offsets_locked && idx == ad.sub2_offset)) return true; // SUB2 / Sub-ID
-    if (ad.offsets_locked && idx < ad.payload_offset) return true; // 명세된 페이로드 시작 전 모든 헤더 마스킹
+    if (idx == 0) return true;
+    if (idx >= ctl.length - 2) return true;
+    if (ad.has_len_field && idx == ad.len_offset) return true;
+    if (idx == ad.dev_id_offset) return true;
+    if (idx == ad.opcode_offset) return true;
+    if (ad.is_swapped_addr && idx == ad.gw_addr_offset) return true;
+    if (idx == grp->sub1_offset || (ad.offsets_locked && idx == ad.sub1_offset)) return true;
+    if (idx == grp->sub2_offset || (ad.offsets_locked && idx == ad.sub2_offset)) return true;
+    if (ad.offsets_locked && idx < ad.payload_offset) return true;
     return false;
   };
 
-  uint8_t diff_offsets[8]{0};
-  uint8_t diff_vals[8]{0};
-  size_t diff_count = 0;
+  // CTL 프레임에서 실제로 값이 변한 오프셋 수집 (명령 트리거 바이트)
+  uint8_t ctl_diff_offsets[8]{0};
+  uint8_t ctl_diff_vals[8]{0};
+  size_t ctl_diff_count = 0;
 
-  auto addDiffOffset = [&](uint8_t offset, uint8_t val) {
-    if (offset < start_idx || offset >= end_idx) return;
-    if (isFixedFrameField(offset)) return;
-
-    for (size_t d = 0; d < diff_count; ++d) {
-      if (diff_offsets[d] == offset) return;
-    }
-    if (diff_count < 8) {
-      diff_offsets[diff_count] = offset;
-      diff_vals[diff_count] = val;
-      diff_count++;
-    }
-  };
-
-  // (1) 이전 CTL 프레임과의 전 영역 차분 비교
   for (size_t i = start_idx; i < end_idx; ++i) {
+    if (isFixedFrameField(i)) continue;
     if (prev_len > 0 && ctl.data[i] != prev_raw[i]) {
-      addDiffOffset(static_cast<uint8_t>(i), ctl.data[i]);
+      if (ctl_diff_count < 8) {
+        ctl_diff_offsets[ctl_diff_count] = static_cast<uint8_t>(i);
+        ctl_diff_vals[ctl_diff_count] = ctl.data[i];
+        ctl_diff_count++;
+      }
     }
   }
 
-  // (2) Triplet 교차 비교: 직전 상태(ACK-)와 직후 상태(ACK+) 간의 상태 변화 오프셋 수집
-  // 길이가 다르더라도(예: 18B 상세상태 vs 13B 즉시응답) start_idx(순수 페이로드 시작점)부터 
-  // 양쪽 모두 유효한 페이로드 영역 내에서 1:1 바이트 상태 변화를 포착
+  // ACK 응답에서 변한 오프셋 수집 (장치 상태 바이트)
+  uint8_t ack_diff_offsets[8]{0};
+  size_t ack_diff_count = 0;
   if (has_before) {
     size_t ack_b_end = (ack_before.length >= 2) ? (ack_before.length - 2) : ack_before.length;
     size_t ack_a_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
     size_t common_payload_end = std::min({ack_b_end, ack_a_end, end_idx});
-
     for (size_t k = start_idx; k < common_payload_end; ++k) {
+      if (isFixedFrameField(k)) continue;
       if (ack_before.data[k] != ack_after.data[k]) {
-        addDiffOffset(static_cast<uint8_t>(k), ctl.data[k]);
-      }
-    }
-  }
-
-  // diff_offsets를 오프셋 번호 오름차순으로 정렬 (Category -> Action 순서 보장)
-  for (size_t a = 0; a < diff_count; ++a) {
-    for (size_t b = a + 1; b < diff_count; ++b) {
-      if (diff_offsets[a] > diff_offsets[b]) {
-        std::swap(diff_offsets[a], diff_offsets[b]);
-        std::swap(diff_vals[a], diff_vals[b]);
-      }
-    }
-  }
-
-  // 이전 골격과의 차이가 아직 발견되지 않았다면 payload_offset 또는 첫 데이터 바이트 채택
-  if (diff_count == 0) {
-    size_t default_cand = (ad.offsets_locked && ad.payload_offset < end_idx) ? ad.payload_offset : 0;
-    if (default_cand == 0) {
-      for (size_t i = start_idx; i < end_idx; ++i) {
-        if (!isFixedFrameField(i) && i != grp->sub1_offset && i != grp->sub2_offset) {
-          default_cand = i;
-          break;
+        if (ack_diff_count < 8) {
+          ack_diff_offsets[ack_diff_count++] = static_cast<uint8_t>(k);
         }
       }
     }
-    if (default_cand > 0 && default_cand < end_idx) {
-      diff_offsets[0] = default_cand;
-      diff_vals[0] = ctl.data[default_cand];
-      diff_count = 1;
+  }
+
+  // 제어 오프셋 선정:
+  // 1순위: CTL 패킷에서 실제 변화가 발생한 바이트 (예: Byte #7 0x01 vs 0x02)
+  // 2순위: ACK에서 상태 변화가 발생한 바이트
+  // 3순위: 페이로드의 첫 번째 가변 바이트
+  uint8_t act_off = 0xFF;
+  uint8_t cmd_val = 0;
+  uint8_t cat_off = 0xFF;
+  uint8_t cat_val = 0;
+
+  if (ctl_diff_count > 0) {
+    act_off = ctl_diff_offsets[0];
+    cmd_val = ctl_diff_vals[0];
+    if (ctl_diff_count > 1) {
+      cat_off = ctl_diff_offsets[0];
+      cat_val = ctl_diff_vals[0];
+      act_off = ctl_diff_offsets[1];
+      cmd_val = ctl_diff_vals[1];
+    }
+  } else if (ack_diff_count > 0) {
+    act_off = ack_diff_offsets[0];
+    cmd_val = ctl.data[act_off];
+  } else {
+    for (size_t i = start_idx; i < end_idx; ++i) {
+      if (!isFixedFrameField(i)) {
+        act_off = static_cast<uint8_t>(i);
+        cmd_val = ctl.data[i];
+        break;
+      }
     }
   }
 
-  // 만약 dev_class가 아직 미분류 상태라면 2차 캐시를 통해 즉시 분류 수행 (Thermostat 감지 시)
+  if (act_off == 0xFF || act_off >= end_idx) {
+    act_off = static_cast<uint8_t>(start_idx);
+    cmd_val = ctl.data[act_off];
+  }
+
+  // 만약 dev_class가 아직 미분류 상태라면 2차 캐시를 통해 즉시 분류 수행
   if (grp->coverage.dev_class == DeviceClass::UNKNOWN) {
     DeviceClass auto_cls = SlotCoverage::classify(dev_id, ad);
     if (auto_cls != DeviceClass::UNKNOWN) {
@@ -552,287 +558,102 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     }
   }
 
-  if (diff_count == 1) {
-    uint8_t act_off = diff_offsets[0];
-    uint8_t cmd_val = diff_vals[0];
-
-    if (grp->coverage.dev_class == DeviceClass::MOMENTARY) {
-      grp->power_slot.discovered = true;
-      grp->power_slot.action_offset = act_off;
-      grp->power_slot.on_val = cmd_val;
-      grp->power_slot.sample_count++;
-      grp->coverage.call_seen = true;
-    } else if (grp->coverage.dev_class == DeviceClass::GAS) {
-      grp->close_slot.discovered = true;
-      grp->close_slot.action_offset = act_off;
-      grp->close_slot.off_val = cmd_val;
-      grp->close_slot.sample_count++;
-      grp->coverage.valve_close_seen = true;
-      grp->coverage.power_off_seen = true;
-    } else if (grp->coverage.dev_class == DeviceClass::VENT) {
-      // 전열교환기(환기): 위자드 켜기→끄기 순서 기반 순차 학습
-      // 첫 관측=ON, 두 번째(다른 값)=OFF, 이후=풍량 토큰 (하드코딩/사전지식 없음)
-      grp->power_slot.discovered = true;
-      grp->power_slot.action_offset = act_off;
-      grp->power_slot.sample_count++;
-
-      if (!grp->coverage.power_on_seen) {
-        // 위자드가 켜기를 먼저 수행하도록 강제 → 첫 관측 = ON
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen) {
-        // 두 번째 관측 = OFF (다른 값이거나 토글인 경우)
-        if (cmd_val != grp->power_slot.on_val) {
-          grp->power_slot.off_val = cmd_val;
-        } else {
-          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
-        }
-        grp->coverage.power_off_seen = true;
-      } else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen &&
-                 cmd_val != grp->power_slot.off_val) {
-        // 전원 ON/OFF 확정 이후 → 풍량(Speed) 레벨로 동적 축적
-        grp->speed_slot.discovered = true;
-        grp->speed_slot.action_offset = act_off;
-        grp->speed_slot.sample_count++;
-
-        bool token_exists = false;
-        for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
-          if (grp->speed_slot.level_tokens[k] == cmd_val) {
-            token_exists = true;
-            break;
-          }
-        }
-        if (!token_exists && grp->speed_slot.level_count < 4) {
-          grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
-          grp->speed_slot.min_val = 1;
-          grp->speed_slot.max_val = grp->speed_slot.level_count;
-        }
-        if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
-        if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
-        if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
-      }
-    } else {
-      // 위자드 켜기→끄기 순서 기반 순차 학습 (하드코딩/사전지식 없음)
-      grp->power_slot.discovered = true;
-      grp->power_slot.action_offset = act_off;
-      grp->power_slot.sample_count++;
-
-      if (!grp->coverage.power_on_seen) {
-        // 위자드가 켜기를 먼저 수행하도록 강제 → 첫 관측 = ON
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen) {
-        // 켜기가 완료된 후 들어온 다음 관측 → 끄기(OFF)로 학습
-        if (cmd_val != grp->power_slot.on_val) {
-          grp->power_slot.off_val = cmd_val;
-          grp->coverage.power_off_seen = true;
-        } else {
-          // CTL 값이 동일(토글 커맨드)하거나 같은 값이 연속 전송된 경우:
-          // ACK 응답의 페이로드 바이트가 바뀌었는지 확인하거나 반대 상태로 인정
-          if (has_before && ack_before.length == ack_after.length && act_off < ack_after.length &&
-              ack_before.data[act_off] != ack_after.data[act_off]) {
-            grp->power_slot.off_val = ack_after.data[act_off];
-          } else {
-            grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
-          }
-          grp->coverage.power_off_seen = true;
-        }
-      } else {
-        // 재확인: 이미 학습된 ON/OFF 값과 일치하면 플래그 보강
-        if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
-        else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
-        else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT &&
-                 grp->coverage.power_on_seen && grp->coverage.power_off_seen && !grp->coverage.away_mode_seen) {
-          // THERMOSTAT: ON/OFF 확정 후 들어오는 1바이트 변화는 외출모드 토큰으로 인식
-          grp->coverage.away_mode_seen = true;
-        } else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT &&
-                 grp->coverage.power_on_seen && grp->coverage.power_off_seen) {
-          // THERMOSTAT: ON/OFF/외출 확정 후 단일 바이트 변화 → 온도 설정 (VL만 변화)
-          grp->temp_slot.discovered = true;
-          grp->temp_slot.action_offset = act_off;
-          if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val)
-            grp->temp_slot.min_val = cmd_val;
-          if (cmd_val > grp->temp_slot.max_val)
-            grp->temp_slot.max_val = cmd_val;
-          grp->temp_slot.sample_count++;
-          grp->coverage.temp_set_seen = true;
-        }
-      }
-    }
-  } else if (diff_count >= 2) {
-    uint8_t cat_off = diff_offsets[0];
-    uint8_t cat_val = diff_vals[0];
-    uint8_t act_off = diff_offsets[1];
-    uint8_t cmd_val = diff_vals[1];
-
-    if (grp->coverage.dev_class == DeviceClass::VENT || grp->coverage.dev_class == DeviceClass::AIRCON) {
-      if (grp->coverage.dev_class == DeviceClass::VENT) {
-        grp->power_slot.discovered = true;
-        grp->power_slot.category_offset = cat_off;
-        grp->power_slot.category_val = cat_val;
-        grp->power_slot.action_offset = act_off;
-        grp->power_slot.sample_count++;
-
-        // 위자드 켜기→끄기 순서 기반 순차 학습 (하드코딩/사전지식 없음)
-        if (!grp->coverage.power_on_seen) {
-          grp->power_slot.on_val = cmd_val;
-          grp->coverage.power_on_seen = true;
-        } else if (!grp->coverage.power_off_seen) {
-          if (cmd_val != grp->power_slot.on_val) {
-            grp->power_slot.off_val = cmd_val;
-          } else {
-            grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
-          }
-          grp->coverage.power_off_seen = true;
-        }
-      }
-
-      // 풍량 슬롯: 전원 ON/OFF가 모두 학습된 이후에만 관측치를 레벨 토큰으로 학습 (동시 학습 방지)
-      if (grp->coverage.power_on_seen && grp->coverage.power_off_seen &&
-          (grp->coverage.dev_class != DeviceClass::VENT || cmd_val != grp->power_slot.off_val)) {
-        grp->speed_slot.discovered = true;
-        grp->speed_slot.category_offset = cat_off;
-        grp->speed_slot.category_val = cat_val;
-        grp->speed_slot.action_offset = act_off;
-        grp->speed_slot.sample_count++;
-
-        bool token_exists = false;
-        for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
-          if (grp->speed_slot.level_tokens[k] == cmd_val) {
-            token_exists = true;
-            break;
-          }
-        }
-        if (!token_exists && grp->speed_slot.level_count < 4) {
-          grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
-          grp->speed_slot.min_val = 1;
-          grp->speed_slot.max_val = grp->speed_slot.level_count;
-        }
-
-        if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
-        if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
-        if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
-      }
-    } else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
-      // THERMOSTAT 전용: 카테고리 바이트로 전원/온도/외출모드 구분
-      grp->power_slot.discovered = true;
+  // --------------------------------------------------------------------------
+  // 보편적 슬롯 매핑 (Universal Slot Mapping)
+  // --------------------------------------------------------------------------
+  if (grp->coverage.dev_class == DeviceClass::MOMENTARY) {
+    grp->power_slot.discovered = true;
+    grp->power_slot.action_offset = act_off;
+    grp->power_slot.on_val = cmd_val;
+    grp->power_slot.sample_count++;
+    grp->coverage.call_seen = true;
+  } else if (grp->coverage.dev_class == DeviceClass::GAS) {
+    grp->close_slot.discovered = true;
+    grp->close_slot.action_offset = act_off;
+    grp->close_slot.off_val = cmd_val;
+    grp->close_slot.sample_count++;
+    grp->coverage.valve_close_seen = true;
+    grp->coverage.power_off_seen = true;
+  } else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
+    grp->power_slot.discovered = true;
+    grp->power_slot.action_offset = act_off;
+    if (cat_off != 0xFF) {
       grp->power_slot.category_offset = cat_off;
       grp->power_slot.category_val = cat_val;
-      grp->power_slot.action_offset = act_off;
-      grp->power_slot.sample_count++;
+    }
+    grp->power_slot.sample_count++;
 
-      if (!grp->coverage.power_on_seen) {
-        // 위자드 1단계 = ON
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen) {
-        // 위자드 2단계 = OFF
-        if (cmd_val != grp->power_slot.on_val) {
-          grp->power_slot.off_val = cmd_val;
-        } else {
-          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
-        }
-        grp->coverage.power_off_seen = true;
-      } else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen && !grp->coverage.away_mode_seen) {
-        // 위자드 3단계 = 외출 모드 (ON/OFF 값과 다른 값이거나 카테고리가 다른 경우)
-        if (cat_val != grp->power_slot.category_val || (cmd_val != grp->power_slot.on_val && cmd_val != grp->power_slot.off_val)) {
-          grp->coverage.away_mode_seen = true;
-        }
-      } else {
-        if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
-        else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
-        else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen && grp->coverage.away_mode_seen) {
-          // ON/OFF/외출모드 확정 이후 관측되는 연속 수치값 -> 희망온도 설정
-          grp->temp_slot.discovered = true;
-          grp->temp_slot.category_offset = cat_off;
-          grp->temp_slot.category_val = cat_val;
-          grp->temp_slot.action_offset = act_off;
-          if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val)
-            grp->temp_slot.min_val = cmd_val;
-          if (cmd_val > grp->temp_slot.max_val)
-            grp->temp_slot.max_val = cmd_val;
-          grp->temp_slot.sample_count++;
-          grp->coverage.temp_set_seen = true;
-
-          // [동적 ENV 학습] ACK 응답에서 현재 실내온도 바이트 자동 탐지
-          if (ack_after.length >= 5) {
-            uint8_t best_env = 0xFF;
-            int best_score = -1;
-            size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
-            for (size_t k = 0; k < ack_end; ++k) {
-              if (k == 0 || k == ad.dev_id_offset || k == ad.sub1_offset ||
-                  k == ad.sub2_offset || k == ad.opcode_offset) continue;
-              if (k == act_off || k == cat_off) continue;
-              uint8_t v = ack_after.data[k];
-              if (v >= 12 && v <= 38) {
-                int score = 10;
-                int dist = std::abs(static_cast<int>(k) - static_cast<int>(act_off));
-                if (dist == 1) score += 30;
-                else if (dist == 2) score += 10;
-                if (v >= 15 && v <= 33) score += 15;
-                if (score > best_score) {
-                  best_score = score;
-                  best_env = static_cast<uint8_t>(k);
-                }
-              }
-            }
-            if (best_env != 0xFF)
-              grp->temp_slot.telemetry_offset = best_env;
-          }
-        }
-      }
-    } else if (cmd_val >= 10 && cmd_val <= 40) {
-      // 연속 수치값 온도 설정 (THERMOSTAT 외 기기: AIRCON 등)
+    if (!grp->coverage.power_on_seen) {
+      grp->power_slot.on_val = cmd_val;
+      grp->coverage.power_on_seen = true;
+    } else if (!grp->coverage.power_off_seen) {
+      grp->power_slot.off_val = (cmd_val != grp->power_slot.on_val) ? cmd_val : ((cmd_val == 0x01) ? 0x02 : 0x01);
+      grp->coverage.power_off_seen = true;
+    } else if (!grp->coverage.away_mode_seen) {
+      grp->coverage.away_mode_seen = true;
+    } else {
       grp->temp_slot.discovered = true;
-      grp->temp_slot.category_offset = cat_off;
-      grp->temp_slot.category_val = cat_val;
       grp->temp_slot.action_offset = act_off;
       if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val) grp->temp_slot.min_val = cmd_val;
       if (cmd_val > grp->temp_slot.max_val) grp->temp_slot.max_val = cmd_val;
       grp->temp_slot.sample_count++;
       grp->coverage.temp_set_seen = true;
-      // [동적 ENV 학습]
-      if (ack_after.length >= 5) {
-        uint8_t best_env = 0xFF;
-        int best_score = -1;
-        size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
-        for (size_t k = 0; k < ack_end; ++k) {
-          if (k == 0 || k == ad.dev_id_offset || k == ad.sub1_offset || k == ad.sub2_offset || k == ad.opcode_offset) continue;
-          if (k == act_off || k == cat_off) continue;
-          uint8_t v = ack_after.data[k];
-          if (v >= 12 && v <= 38) {
-            int score = 10;
-            int dist = std::abs(static_cast<int>(k) - static_cast<int>(act_off));
-            if (dist == 1) score += 30;
-            else if (dist == 2) score += 10;
-            if (v >= 15 && v <= 33) score += 15;
-            if (score > best_score) {
-              best_score = score;
-              best_env = static_cast<uint8_t>(k);
-            }
-          }
-        }
-        if (best_env != 0xFF)
-          grp->temp_slot.telemetry_offset = best_env;
-      }
+    }
+  } else if (grp->coverage.dev_class == DeviceClass::VENT) {
+    grp->power_slot.discovered = true;
+    grp->power_slot.action_offset = act_off;
+    grp->power_slot.sample_count++;
+
+    if (!grp->coverage.power_on_seen) {
+      grp->power_slot.on_val = cmd_val;
+      grp->coverage.power_on_seen = true;
+    } else if (!grp->coverage.power_off_seen) {
+      grp->power_slot.off_val = (cmd_val != grp->power_slot.on_val) ? cmd_val : ((cmd_val == 0x01) ? 0x02 : 0x01);
+      grp->coverage.power_off_seen = true;
     } else {
-      // 카테고리/모드 + 전원 (THERMOSTAT 외): 위자드 켜기→끄기 순서 기반 순차 학습
-      grp->power_slot.discovered = true;
+      grp->speed_slot.discovered = true;
+      grp->speed_slot.action_offset = act_off;
+      grp->speed_slot.sample_count++;
+      bool exists = false;
+      for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
+        if (grp->speed_slot.level_tokens[k] == cmd_val) { exists = true; break; }
+      }
+      if (!exists && grp->speed_slot.level_count < 4) {
+        grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
+        grp->speed_slot.min_val = 1;
+        grp->speed_slot.max_val = grp->speed_slot.level_count;
+      }
+      if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
+      if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
+      if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
+    }
+  } else {
+    // SWITCH (조명, 콘센트 등 ON/OFF 기기 공통)
+    grp->power_slot.discovered = true;
+    grp->power_slot.action_offset = act_off;
+    if (cat_off != 0xFF) {
       grp->power_slot.category_offset = cat_off;
       grp->power_slot.category_val = cat_val;
-      grp->power_slot.action_offset = act_off;
-      grp->power_slot.sample_count++;
+    }
+    grp->power_slot.sample_count++;
 
-      if (!grp->coverage.power_on_seen) {
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
+    if (!grp->coverage.power_on_seen) {
+      grp->power_slot.on_val = cmd_val;
+      grp->coverage.power_on_seen = true;
+    } else if (!grp->coverage.power_off_seen) {
+      if (cmd_val != grp->power_slot.on_val) {
         grp->power_slot.off_val = cmd_val;
-        grp->coverage.power_off_seen = true;
       } else {
-        if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
-        else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
+        if (ack_diff_count > 0 && ack_diff_offsets[0] < ack_after.length) {
+          grp->power_slot.off_val = ack_after.data[ack_diff_offsets[0]];
+        } else {
+          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : ((cmd_val == 0x02) ? 0x01 : 0x02);
+        }
       }
+      grp->coverage.power_off_seen = true;
+    } else {
+      if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
+      else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
     }
   }
 
