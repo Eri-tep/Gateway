@@ -594,10 +594,15 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->power_slot.on_val = cmd_val;
       grp->coverage.power_on_seen = true;
     } else if (!grp->coverage.power_off_seen) {
-      grp->power_slot.off_val = (cmd_val != grp->power_slot.on_val) ? cmd_val : ((cmd_val == 0x01) ? 0x02 : 0x01);
-      grp->coverage.power_off_seen = true;
+      // 1차 제어값(ON)과 다른 새로운 제어값이 들어왔을 때만 2차 제어값(OFF)으로 확정 (중복 재전송 패킷 완벽 무시)
+      if (cmd_val != grp->power_slot.on_val) {
+        grp->power_slot.off_val = cmd_val;
+        grp->coverage.power_off_seen = true;
+      }
     } else if (!grp->coverage.away_mode_seen) {
-      grp->coverage.away_mode_seen = true;
+      if (cmd_val != grp->power_slot.on_val && cmd_val != grp->power_slot.off_val) {
+        grp->coverage.away_mode_seen = true;
+      }
     } else {
       grp->temp_slot.discovered = true;
       grp->temp_slot.action_offset = act_off;
@@ -609,28 +614,14 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   } else if (grp->coverage.dev_class == DeviceClass::VENT) {
     grp->power_slot.discovered = true;
     grp->power_slot.action_offset = act_off;
-    if (cat_off != 0xFF) {
-      grp->power_slot.category_offset = cat_off;
-      grp->power_slot.category_val = cat_val;
-    }
     grp->power_slot.sample_count++;
 
-    // ACK에서 활성/비활성 여부 판정 (ACK 상태 바이트 또는 ctl 차분값 기반)
-    bool is_turning_off = false;
-    if (has_before && ack_diff_count > 0 && ack_diff_offsets[0] < ack_after.length) {
-      // ACK 응답의 상태값이 0 또는 감소했다면 OFF로 판별
-      uint8_t ack_after_val = ack_after.data[ack_diff_offsets[0]];
-      uint8_t ack_before_val = (ack_diff_offsets[0] < ack_before.length) ? ack_before.data[ack_diff_offsets[0]] : 0;
-      if (ack_after_val == 0x00 && ack_before_val > 0x00) {
-        is_turning_off = true;
-      }
-    }
-
-    if (is_turning_off) {
-      grp->power_slot.off_val = cmd_val;
-      grp->coverage.power_off_seen = true;
-    } else if (!grp->coverage.power_on_seen) {
+    if (!grp->coverage.power_on_seen) {
       grp->power_slot.on_val = cmd_val;
+      if (cat_off != 0xFF) {
+        grp->power_slot.category_offset = cat_off;
+        grp->power_slot.category_val = cat_val;
+      }
       grp->coverage.power_on_seen = true;
       // 1단 풍량으로도 동시 등록
       if (!grp->speed_slot.discovered) {
@@ -647,8 +638,11 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         grp->coverage.speed_l1_seen = true;
       }
     } else if (!grp->coverage.power_off_seen) {
-      grp->power_slot.off_val = (cmd_val != grp->power_slot.on_val) ? cmd_val : ((cmd_val == 0x01) ? 0x02 : 0x01);
-      grp->coverage.power_off_seen = true;
+      // 1차 제어값(ON)과 다른 새로운 제어값이 들어왔을 때만 2차 제어값(OFF)으로 확정 (사전지식/특정값 하드코딩 완전 배제)
+      if (cmd_val != grp->power_slot.on_val) {
+        grp->power_slot.off_val = cmd_val;
+        grp->coverage.power_off_seen = true;
+      }
     } else {
       grp->speed_slot.discovered = true;
       grp->speed_slot.action_offset = act_off;
@@ -684,16 +678,11 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->power_slot.on_val = cmd_val;
       grp->coverage.power_on_seen = true;
     } else if (!grp->coverage.power_off_seen) {
+      // 1차 제어값(ON)과 다른 새로운 제어값이 들어왔을 때만 2차 제어값(OFF)으로 확정 (중복 재전송 패킷 완벽 무시)
       if (cmd_val != grp->power_slot.on_val) {
         grp->power_slot.off_val = cmd_val;
-      } else {
-        if (ack_diff_count > 0 && ack_diff_offsets[0] < ack_after.length) {
-          grp->power_slot.off_val = ack_after.data[ack_diff_offsets[0]];
-        } else {
-          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : ((cmd_val == 0x02) ? 0x01 : 0x02);
-        }
+        grp->coverage.power_off_seen = true;
       }
-      grp->coverage.power_off_seen = true;
     } else {
       if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
       else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
