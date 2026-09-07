@@ -474,8 +474,15 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     if (idx == ad.dev_id_offset) return true;
     if (idx == ad.opcode_offset) return true;
     if (ad.is_swapped_addr && idx == ad.gw_addr_offset) return true;
-    if (idx == grp->sub1_offset || (ad.offsets_locked && idx == ad.sub1_offset)) return true;
-    if (idx == grp->sub2_offset || (ad.offsets_locked && idx == ad.sub2_offset)) return true;
+    // Sub1/Sub2 주소 위치라도 프레임 간 값이 변한다면 고정 장치 주소가 아니라 명령 컨텍스트(Category)로 취급
+    if (idx == grp->sub1_offset || (ad.offsets_locked && idx == ad.sub1_offset)) {
+      if (prev_len > 0 && ctl.data[idx] != prev_raw[idx]) return false;
+      return true;
+    }
+    if (idx == grp->sub2_offset || (ad.offsets_locked && idx == ad.sub2_offset)) {
+      if (prev_len > 0 && ctl.data[idx] != prev_raw[idx]) return false;
+      return true;
+    }
     if (ad.offsets_locked && idx < ad.payload_offset) return true;
     return false;
   };
@@ -602,17 +609,53 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   } else if (grp->coverage.dev_class == DeviceClass::VENT) {
     grp->power_slot.discovered = true;
     grp->power_slot.action_offset = act_off;
+    if (cat_off != 0xFF) {
+      grp->power_slot.category_offset = cat_off;
+      grp->power_slot.category_val = cat_val;
+    }
     grp->power_slot.sample_count++;
 
-    if (!grp->coverage.power_on_seen) {
+    // ACK에서 활성/비활성 여부 판정 (ACK 상태 바이트 또는 ctl 차분값 기반)
+    bool is_turning_off = false;
+    if (has_before && ack_diff_count > 0 && ack_diff_offsets[0] < ack_after.length) {
+      // ACK 응답의 상태값이 0 또는 감소했다면 OFF로 판별
+      uint8_t ack_after_val = ack_after.data[ack_diff_offsets[0]];
+      uint8_t ack_before_val = (ack_diff_offsets[0] < ack_before.length) ? ack_before.data[ack_diff_offsets[0]] : 0;
+      if (ack_after_val == 0x00 && ack_before_val > 0x00) {
+        is_turning_off = true;
+      }
+    }
+
+    if (is_turning_off) {
+      grp->power_slot.off_val = cmd_val;
+      grp->coverage.power_off_seen = true;
+    } else if (!grp->coverage.power_on_seen) {
       grp->power_slot.on_val = cmd_val;
       grp->coverage.power_on_seen = true;
+      // 1단 풍량으로도 동시 등록
+      if (!grp->speed_slot.discovered) {
+        grp->speed_slot.discovered = true;
+        grp->speed_slot.action_offset = act_off;
+        if (cat_off != 0xFF) {
+          grp->speed_slot.category_offset = cat_off;
+          grp->speed_slot.category_val = cat_val;
+        }
+        grp->speed_slot.level_tokens[0] = cmd_val;
+        grp->speed_slot.level_count = 1;
+        grp->speed_slot.min_val = 1;
+        grp->speed_slot.max_val = 1;
+        grp->coverage.speed_l1_seen = true;
+      }
     } else if (!grp->coverage.power_off_seen) {
       grp->power_slot.off_val = (cmd_val != grp->power_slot.on_val) ? cmd_val : ((cmd_val == 0x01) ? 0x02 : 0x01);
       grp->coverage.power_off_seen = true;
     } else {
       grp->speed_slot.discovered = true;
       grp->speed_slot.action_offset = act_off;
+      if (cat_off != 0xFF) {
+        grp->speed_slot.category_offset = cat_off;
+        grp->speed_slot.category_val = cat_val;
+      }
       grp->speed_slot.sample_count++;
       bool exists = false;
       for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {

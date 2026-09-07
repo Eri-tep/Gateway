@@ -1437,6 +1437,11 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.append("DevID  Group Name  Capability  Coverage  Power Slot      Param Slot     Status\r\n");
   out.append(Fmt::DIV80);
 
+  // 캐시가 수렴되었으나 템플릿이 비어있다면 자동 합성 시도
+  if (g_control_registry.getGroupCount() == 0) {
+    g_control_registry.synthesizeFromConvergedCache();
+  }
+
   size_t count = g_control_registry.getGroupCount();
   if (count == 0) {
     out.append("  (No control templates learned yet. Waiting for bus traffic or active probe)\r\n");
@@ -1447,9 +1452,11 @@ void wallpadPrintControlTable(AppendBuf &out) {
       if (!g_control_registry.getGroupByIndex(i, grp) || grp.dev_id == 0) continue;
 
       char pwr_str[24]{"-"};
-      if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.power_slot.discovered) {
+      if (grp.power_slot.discovered) {
         snprintf(pwr_str, sizeof(pwr_str), "#%u (0x%02X/0x%02X)",
                  grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
+      } else if (grp.frame_len > 0) {
+        snprintf(pwr_str, sizeof(pwr_str), "[SKELETON]");
       }
 
       char param_str[24]{"-"};
@@ -1472,7 +1479,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
       const char *stat_str = "WAITING";
       switch (grp.status) {
       case GroupControlTemplate::Status::EMPTY: stat_str = "EMPTY"; break;
-      case GroupControlTemplate::Status::WAITING: stat_str = "WAITING"; break;
+      case GroupControlTemplate::Status::WAITING: stat_str = (grp.frame_len > 0) ? "STANDBY" : "WAITING"; break;
       case GroupControlTemplate::Status::CAPTURING: stat_str = "CAPTURING"; break;
       case GroupControlTemplate::Status::PARTIAL: stat_str = "PARTIAL"; break;
       case GroupControlTemplate::Status::VERIFIED: stat_str = "VERIFIED"; break;
