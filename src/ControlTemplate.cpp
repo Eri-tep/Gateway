@@ -457,16 +457,21 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   // 5. 무사전지식 Full-Spectrum 차분 분석 (Full Differential Scan)
   // 고정 프레임 필드(STX, LEN, DevID, OP, CS, ETX) 및 주소(SUB1, SUB2)를 엄격히 분리
   // --------------------------------------------------------------------------
-  size_t start_idx = 1; // STX(0) 제외
+  // 순수 페이로드(Pure Payload) 시작 및 종료 인덱스 (명세 기반)
+  size_t start_idx = (ad.offsets_locked && ad.payload_offset > 0) ? ad.payload_offset : 1;
   size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length; // CS, ETX 제외
 
-  // 고정 헤더 필드인지 검사 (사전지식 없이 AutoProbeDescriptor에 확정된 오프셋 기준)
+  // 고정 뼈대(Skeleton) 필드인지 검사 (사전지식 없이 AutoProbeDescriptor에 확정된 명세 기준)
   auto isFixedFrameField = [&](size_t idx) -> bool {
     if (idx == 0) return true; // STX
+    if (idx >= ctl.length - 2) return true; // CS, ETX
     if (ad.has_len_field && idx == ad.len_offset) return true; // LEN
-    if (idx == ad.dev_id_offset) return true; // DevID
+    if (idx == ad.dev_id_offset) return true; // DevID (DA)
     if (idx == ad.opcode_offset) return true; // OP
-    if (ad.is_swapped_addr && idx == ad.gw_addr_offset) return true; // GW 주소
+    if (ad.is_swapped_addr && idx == ad.gw_addr_offset) return true; // GW 주소 (SA)
+    if (idx == grp->sub1_offset || (ad.offsets_locked && idx == ad.sub1_offset)) return true; // SUB1 / Gateway
+    if (idx == grp->sub2_offset || (ad.offsets_locked && idx == ad.sub2_offset)) return true; // SUB2 / Sub-ID
+    if (ad.offsets_locked && idx < ad.payload_offset) return true; // 명세된 페이로드 시작 전 모든 헤더 마스킹
     return false;
   };
 
@@ -477,15 +482,6 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   auto addDiffOffset = [&](uint8_t offset, uint8_t val) {
     if (offset < start_idx || offset >= end_idx) return;
     if (isFixedFrameField(offset)) return;
-
-    // SUB 주소 필드인 경우: 슬롯(데이터)이 아닌 동적 SUB 주소 변이로 격리
-    if (offset == grp->sub1_offset || (ad.offsets_locked && offset == ad.sub1_offset)) {
-      grp->ctl_sub1_override = val;
-      return;
-    }
-    if (offset == grp->sub2_offset || (ad.offsets_locked && offset == ad.sub2_offset)) {
-      return;
-    }
 
     for (size_t d = 0; d < diff_count; ++d) {
       if (diff_offsets[d] == offset) return;
@@ -505,9 +501,14 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   }
 
   // (2) Triplet 교차 비교: 직전 상태(ACK-)와 직후 상태(ACK+) 간의 상태 변화 오프셋 수집
-  if (has_before && ack_before.length == ack_after.length) {
-    size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
-    for (size_t k = start_idx; k < ack_end && k < end_idx; ++k) {
+  // 길이가 다르더라도(예: 18B 상세상태 vs 13B 즉시응답) start_idx(순수 페이로드 시작점)부터 
+  // 양쪽 모두 유효한 페이로드 영역 내에서 1:1 바이트 상태 변화를 포착
+  if (has_before) {
+    size_t ack_b_end = (ack_before.length >= 2) ? (ack_before.length - 2) : ack_before.length;
+    size_t ack_a_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
+    size_t common_payload_end = std::min({ack_b_end, ack_a_end, end_idx});
+
+    for (size_t k = start_idx; k < common_payload_end; ++k) {
       if (ack_before.data[k] != ack_after.data[k]) {
         addDiffOffset(static_cast<uint8_t>(k), ctl.data[k]);
       }

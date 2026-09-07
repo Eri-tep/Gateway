@@ -1584,16 +1584,19 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
-      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, S1, S2, OP)
+      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, GW, SB, OP)
       const char *r = nullptr;
       if (i == 0) r = "ST";
       else if (i == grp->frame_len - 1) r = "ET";
       else if (i == grp->frame_len - 2) r = "CS";
       else if (ad.has_len_field && i == ad.len_offset) r = "LN";
+      else if (ad.is_swapped_addr && i == ad.gw_addr_offset) r = "GW";
       else if (i == ad.dev_id_offset) r = "ID";
+      else if (ad.offsets_locked && !ad.is_swapped_addr && i == ad.sub1_offset) r = "GW";
       else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
-      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "S2";
+      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "SB";
       else if (i == ad.opcode_offset) r = "OP";
+      else if (ad.offsets_locked && i < ad.payload_offset) r = "HD"; // 헤더 고정 필드
 
       // 2순위: 고정 롤이 아닌 순수 페이로드 영역만 가변/학습 슬롯으로 표시
       bool is_payload = (r == nullptr);
@@ -1649,7 +1652,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
-      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, GW, S1, S2, OP)
+      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, GW, SB, OP, HD)
       const char *r = nullptr;
       if (i == 0) r = "ST";
       else if (i == len - 1) r = "ET";
@@ -1658,9 +1661,11 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       else if (ad.is_swapped_addr && i == ad.gw_addr_offset) r = "ID";
       else if (ad.is_swapped_addr && i == ad.dev_id_offset) r = "GW";
       else if (i == ad.dev_id_offset) r = "ID";
+      else if (ad.offsets_locked && !ad.is_swapped_addr && i == ad.sub1_offset) r = "GW";
       else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
-      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "S2";
+      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "SB";
       else if (i == ad.opcode_offset) r = "OP";
+      else if (ad.offsets_locked && i < ad.payload_offset) r = "HD"; // 헤더 고정 필드
 
       // 2순위: 고정 롤이 아닌 순수 페이로드 영역만 가변/학습 슬롯으로 표시
       bool is_payload = (r == nullptr);
