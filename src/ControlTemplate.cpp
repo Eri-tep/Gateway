@@ -101,20 +101,12 @@ DeviceClass SlotCoverage::classify(uint8_t dev_id, const AutoProbeDescriptor &ad
   if (has_speed_telemetry) {
     return DeviceClass::VENT;
   }
-  // 가스 밸브 판별: DevID가 0x1B(표준 홈넷 가스)이거나 가스 시그니처 감지 시
-  if (dev_id == 0x1B || has_gas_signature) {
+  // 가스 밸브 판별: 가스 상태 시그니처 감지 시
+  if (has_gas_signature) {
     return DeviceClass::GAS;
   }
   if (matched_units > 0) {
     return DeviceClass::SWITCH;
-  }
-
-  // 1차 캐시 타깃만 있고 아직 ACK 페이로드가 비어있는 경우 DevID 기준 기본 클래스 fallback
-  if (dev_id == 0x1B) {
-    return DeviceClass::GAS;
-  }
-  if (dev_id == Config::Devices::DEV_THERMOSTAT) {
-    return DeviceClass::THERMOSTAT;
   }
 
   return DeviceClass::SWITCH;
@@ -166,7 +158,6 @@ void ControlTemplateRegistry::clear() {
     _groups[i] = GroupControlTemplate{};
   }
   _group_count = 0;
-  _session = ActiveLearningSession{};
   taskEXIT_CRITICAL(&_mux);
 }
 
@@ -203,11 +194,7 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
     snprintf(group.group_name, sizeof(group.group_name), "Aircon");
     break;
   default:
-    if (group.dev_id == 0x1B) {
-      snprintf(group.group_name, sizeof(group.group_name), "Gas");
-    } else {
-      snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
-    }
+    snprintf(group.group_name, sizeof(group.group_name), "Dev_0x%02X", group.dev_id);
     break;
   }
 }
@@ -334,7 +321,6 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
       _groups[i] = GroupControlTemplate{};
     }
     _group_count = 0;
-    _session = ActiveLearningSession{};
     taskEXIT_CRITICAL(&_mux);
 
     Preferences prefs;
@@ -353,9 +339,6 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
       }
       _groups[_group_count - 1] = GroupControlTemplate{};
       _group_count--;
-      if (_session.in_progress && _session.target_dev_id == dev_id) {
-        _session = ActiveLearningSession{};
-      }
       taskEXIT_CRITICAL(&_mux);
       saveToNvs();
       return true;
@@ -590,6 +573,36 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       if (cmd_val > grp->temp_slot.max_val) grp->temp_slot.max_val = cmd_val;
       grp->temp_slot.sample_count++;
       grp->coverage.temp_set_seen = true;
+
+      // [동적 ENV 학습] 운용자가 온도를 설정했을 때, 응답 패킷(ack_after)에서
+      // 설정온도와 인접하며 실내 기온 구간(12~38℃)에 머무는 바이트를 현재온도(ENV) 슬롯으로 동적 확정
+      if (ack_after.length >= 5) {
+        uint8_t best_env = 0xFF;
+        int best_score = -1;
+        size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
+
+        for (size_t k = 0; k < ack_end; ++k) {
+          if (k == 0 || k == ad.dev_id_offset || k == ad.sub1_offset || k == ad.sub2_offset || k == ad.opcode_offset) continue;
+          if (k == act_off || k == cat_off) continue;
+
+          uint8_t v = ack_after.data[k];
+          if (v >= 12 && v <= 38) {
+            int score = 10;
+            int dist = std::abs(static_cast<int>(k) - static_cast<int>(act_off));
+            if (dist == 1) score += 30; // 설정온도 인접 최우선
+            else if (dist == 2) score += 10;
+            if (v >= 15 && v <= 33) score += 15; // 한국 실내 생활 기온 구간
+
+            if (score > best_score) {
+              best_score = score;
+              best_env = static_cast<uint8_t>(k);
+            }
+          }
+        }
+        if (best_env != 0xFF) {
+          grp->temp_slot.telemetry_offset = best_env;
+        }
+      }
     } else {
       // 카테고리/모드 + 전원
       grp->power_slot.discovered = true;
@@ -603,9 +616,6 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       } else if (cmd_val != grp->power_slot.on_val) {
         grp->power_slot.off_val = cmd_val;
         grp->coverage.power_off_seen = true;
-      }
-      if (cmd_val == 0x03) {
-        grp->coverage.away_mode_seen = true;
       }
     }
   }
@@ -689,369 +699,6 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
     out.data[out.length - 1] = parser->getEtx();
   }
   return true;
-}
-
-// ============================================================================
-// ACTIVE PROBING DISCOVERY ENGINE (EXTENDED FSM)
-// ============================================================================
-bool ControlTemplateRegistry::setupTargetForProbing(uint8_t dev_id) {
-  // 1. 타깃 탐색
-  uint8_t t_sub1 = 0, t_sub2 = 0;
-  bool found_target = false;
-  for (size_t i = 0; i < g_polling_targets.totalCount(); ++i) {
-    PollingTargetEntry entry;
-    if (g_polling_targets.getEntry(i, entry) && entry.dev_id == dev_id && entry.is_active) {
-      t_sub1 = entry.sub1;
-      t_sub2 = entry.sub2;
-      found_target = true;
-      break;
-    }
-  }
-
-  if (!found_target) {
-    snprintf(_session.last_log, sizeof(_session.last_log), "No active target for 0x%02X", dev_id);
-    return false;
-  }
-
-  // 2. 기준 상태 스냅샷 확보
-  const auto *cached = g_device_repo.find(dev_id, t_sub1, t_sub2);
-  if (!cached && dev_id == Config::Devices::DEV_HEAT_EXCHANGER) {
-    cached = g_device_repo.find(dev_id, Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK, t_sub2);
-  }
-
-  if (!cached || cached->last_ack_len == 0) {
-    snprintf(_session.last_log, sizeof(_session.last_log), "Target 0x%02X not cached yet", dev_id);
-    return false;
-  }
-
-  GroupControlTemplate *grp = registerOrTouch(dev_id);
-
-  taskENTER_CRITICAL(&_mux);
-  _session.in_progress = true;
-  _session.target_dev_id = dev_id;
-  _session.target_sub1 = t_sub1;
-  _session.target_sub2 = t_sub2;
-  if (grp && (grp->coverage.dev_class == DeviceClass::GAS || dev_id == 0x1B)) {
-    _session.current_step = ActiveProbingStep::PROBE_VALVE_CLOSE;
-  } else {
-    _session.current_step = ActiveProbingStep::PROBE_POWER_ON;
-  }
-  _session.retry_count = 0;
-  _session.candidate_offset = 0;
-  _session.candidate_token = 0;
-  _session.baseline_len = cached->last_ack_len;
-  std::copy(cached->last_ack_data.begin(), cached->last_ack_data.begin() + cached->last_ack_len, _session.baseline_ack);
-  _session.step_start_ms = millis();
-  snprintf(_session.last_log, sizeof(_session.last_log), "Active probing started for 0x%02X (%02X:%02X)",
-           dev_id, t_sub1, t_sub2);
-
-  if (grp) {
-    grp->status = GroupControlTemplate::Status::PROBING;
-    if (dev_id == Config::Devices::DEV_HEAT_EXCHANGER) {
-      grp->ctl_sub1_override = Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
-    }
-  }
-  taskEXIT_CRITICAL(&_mux);
-
-  return true;
-}
-
-bool ControlTemplateRegistry::startActiveLearning(uint8_t dev_id) {
-  // 1. 오프셋 락 확인 (수렴 완료 사전 안전 검사)
-  auto ad = g_auto_probing_engine.getDescriptor();
-  if (!ad.offsets_locked) {
-    snprintf(_session.last_log, sizeof(_session.last_log), "Cannot start: offsets not locked yet");
-    return false;
-  }
-
-  if (_group_count == 0) {
-    synthesizeFromConvergedCache();
-  }
-  if (_group_count == 0) {
-    snprintf(_session.last_log, sizeof(_session.last_log), "No device groups available to learn");
-    return false;
-  }
-
-  if (dev_id == 0) {
-    // 전체 기기 순차 능동 학습 모드 (Batch Mode)
-    _session.learn_all = true;
-    _session.current_all_idx = 0;
-    while (_session.current_all_idx < _group_count) {
-      uint8_t d_id = _groups[_session.current_all_idx].dev_id;
-      if (d_id != 0 && setupTargetForProbing(d_id)) {
-        return true;
-      }
-      _session.current_all_idx++;
-    }
-    _session.learn_all = false;
-    snprintf(_session.last_log, sizeof(_session.last_log), "Failed to start active learning for any group");
-    return false;
-  } else {
-    // 특정 기기 1개 단독 학습 모드
-    _session.learn_all = false;
-    _session.current_all_idx = 0;
-    return setupTargetForProbing(dev_id);
-  }
-}
-
-void ControlTemplateRegistry::abortActiveLearning() {
-  taskENTER_CRITICAL(&_mux);
-  if (_session.in_progress) {
-    _session.learn_all = false;
-    _session.current_step = ActiveProbingStep::RESTORE_BASELINE;
-    snprintf(_session.last_log, sizeof(_session.last_log), "Aborted by user, restoring baseline...");
-  }
-  taskEXIT_CRITICAL(&_mux);
-}
-
-void ControlTemplateRegistry::processActiveLearning() {
-  if (!_session.in_progress) return;
-
-  uint32_t now = millis();
-  if (now - _session.step_start_ms < 200) return; // 단계 간 인터벌
-
-  GroupControlTemplate *grp = findGroup(_session.target_dev_id);
-  if (!grp) {
-    _session.in_progress = false;
-    return;
-  }
-
-  auto sendProbe = [&](ControlActionType act, int val, ActiveProbingStep next_step, const char *log_msg) {
-    StaticPacket pkt{};
-    if (buildControlPacket(_session.target_dev_id, _session.target_sub1, _session.target_sub2, act, val, pkt)) {
-      pkt.channel_id = 6;
-      (void)Queue_EnqueueDropHead(g_ch1_vip_queue, pkt);
-      _session.current_step = next_step;
-      _session.step_start_ms = now;
-      snprintf(_session.last_log, sizeof(_session.last_log), "%s", log_msg);
-    } else {
-      _session.current_step = ActiveProbingStep::FAILED;
-      _session.in_progress = false;
-    }
-  };
-
-  auto checkAckReceived = [&](bool &seen_flag, ActiveProbingStep next_step) {
-    const auto *cached = g_device_repo.find(_session.target_dev_id, _session.target_sub1, _session.target_sub2);
-    if (!cached && _session.target_dev_id == Config::Devices::DEV_HEAT_EXCHANGER) {
-      cached = g_device_repo.find(_session.target_dev_id, Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK, _session.target_sub2);
-    }
-
-    if (cached && cached->last_updated_ms >= _session.step_start_ms) {
-      seen_flag = true;
-      grp->power_slot.discovered = true;
-      grp->power_slot.sample_count++;
-      _session.retry_count = 0;
-      _session.current_step = next_step;
-      _session.step_start_ms = now;
-      return true;
-    } else if (now - _session.step_start_ms > 1000) {
-      _session.retry_count++;
-      if (_session.retry_count >= 3) {
-        _session.current_step = ActiveProbingStep::RESTORE_BASELINE;
-      } else {
-        _session.step_start_ms = now; // 재시도
-      }
-    }
-    return false;
-  };
-
-  switch (_session.current_step) {
-  case ActiveProbingStep::PROBE_POWER_ON:
-    sendProbe(ControlActionType::POWER, 1, ActiveProbingStep::VERIFY_POWER_ON_ACK, "Probing Power ON...");
-    break;
-
-  case ActiveProbingStep::VERIFY_POWER_ON_ACK: {
-    bool ok = checkAckReceived(grp->coverage.power_on_seen, ActiveProbingStep::PROBE_POWER_OFF);
-    if (ok && grp->temp_slot.discovered) {
-      // 난방 켜기 시 기존 저장된 설정온도 복원 여부 검증
-      const auto *cached = g_device_repo.find(_session.target_dev_id, _session.target_sub1, _session.target_sub2);
-      if (cached && cached->last_ack_len >= 8) {
-        uint8_t restored_t = cached->last_ack_data[7];
-        if (restored_t >= 15 && restored_t <= 35) {
-          grp->temp_slot.discovered = true;
-          grp->temp_slot.min_val = 15;
-          grp->temp_slot.max_val = 30;
-          snprintf(_session.last_log, sizeof(_session.last_log), "Power ON ACK verified: Restored Temp = %u C", restored_t);
-        }
-      }
-    }
-    break;
-  }
-
-  case ActiveProbingStep::PROBE_POWER_OFF:
-    sendProbe(ControlActionType::POWER, 0, ActiveProbingStep::VERIFY_POWER_OFF_ACK, "Probing Power OFF...");
-    break;
-
-  case ActiveProbingStep::VERIFY_POWER_OFF_ACK: {
-    ActiveProbingStep next_branch = ActiveProbingStep::RESTORE_BASELINE;
-    if (grp->coverage.dev_class == DeviceClass::THERMOSTAT || grp->temp_slot.discovered) next_branch = ActiveProbingStep::PROBE_TEMP_L1;
-    else if (grp->coverage.dev_class == DeviceClass::VENT || grp->speed_slot.discovered) next_branch = ActiveProbingStep::PROBE_SPEED_L1;
-    else if (grp->close_slot.discovered) next_branch = ActiveProbingStep::PROBE_VALVE_CLOSE;
-
-    checkAckReceived(grp->coverage.power_off_seen, next_branch);
-    break;
-  }
-
-  // ── 난방 단계
-  case ActiveProbingStep::PROBE_TEMP_L1:
-    sendProbe(ControlActionType::SET_TEMP, 15, ActiveProbingStep::VERIFY_TEMP_L1_ACK, "Probing Temp L1 (15C)...");
-    break;
-
-  case ActiveProbingStep::VERIFY_TEMP_L1_ACK:
-    checkAckReceived(grp->coverage.temp_set_seen, ActiveProbingStep::PROBE_TEMP_L2);
-    break;
-
-  case ActiveProbingStep::PROBE_TEMP_L2:
-    sendProbe(ControlActionType::SET_TEMP, 25, ActiveProbingStep::VERIFY_TEMP_L2_ACK, "Probing Baseline Temp (25C)...");
-    break;
-
-  case ActiveProbingStep::VERIFY_TEMP_L2_ACK:
-    checkAckReceived(grp->coverage.temp_set_seen, ActiveProbingStep::PROBE_AWAY_MODE);
-    break;
-
-  case ActiveProbingStep::PROBE_AWAY_MODE:
-    sendProbe(ControlActionType::POWER, 3, ActiveProbingStep::VERIFY_AWAY_ACK, "Probing Away Mode...");
-    break;
-
-  case ActiveProbingStep::VERIFY_AWAY_ACK: {
-    bool ok = checkAckReceived(grp->coverage.away_mode_seen, ActiveProbingStep::PROBE_RECALL_CHECK);
-    if (ok) {
-      // 외출 진입 시 특정 온도로 고정되는지 판별
-      const auto *cached = g_device_repo.find(_session.target_dev_id, _session.target_sub1, _session.target_sub2);
-      if (cached && cached->last_ack_len >= 8) {
-        uint8_t away_t = cached->last_ack_data[7];
-        if (away_t != 25 && away_t >= 5 && away_t <= 20) {
-          grp->away_has_dedicated_temp = true;
-          grp->away_fixed_temp = away_t;
-          snprintf(_session.last_log, sizeof(_session.last_log), "Away mode fixed temp detected: %u C", away_t);
-        }
-      }
-    }
-    break;
-  }
-
-  case ActiveProbingStep::PROBE_RECALL_CHECK:
-    // 외출 상태에서 순수 전원 켜기(cmd=0x01) 송출하여 원래 25C로 복원되는지 검증
-    sendProbe(ControlActionType::POWER, 1, ActiveProbingStep::VERIFY_RECALL_ACK, "Testing Temp Recall from Away (cmd=0x01)...");
-    break;
-
-  case ActiveProbingStep::VERIFY_RECALL_ACK: {
-    bool dummy = false;
-    bool ok = checkAckReceived(dummy, ActiveProbingStep::PROBE_TEMP_WHILE_OFF);
-    if (ok) {
-      const auto *cached = g_device_repo.find(_session.target_dev_id, _session.target_sub1, _session.target_sub2);
-      if (cached && cached->last_ack_len >= 8) {
-        uint8_t recalled_t = cached->last_ack_data[7];
-        if (recalled_t == 25) {
-          grp->temp_recall_verified = true;
-          snprintf(_session.last_log, sizeof(_session.last_log), "Temp Recall VERIFIED! Successfully restored 25 C from Away");
-        }
-      }
-    }
-    break;
-  }
-
-  case ActiveProbingStep::PROBE_TEMP_WHILE_OFF:
-    // 전원 OFF 상태에서 온도 설정 송출
-    sendProbe(ControlActionType::SET_TEMP, 22, ActiveProbingStep::VERIFY_TEMP_WHILE_OFF_ACK, "Probing Temp-while-OFF compound...");
-    break;
-
-  case ActiveProbingStep::VERIFY_TEMP_WHILE_OFF_ACK:
-    checkAckReceived(grp->coverage.temp_while_off_seen, ActiveProbingStep::PROBE_TEMP_WHILE_AWAY);
-    break;
-
-  case ActiveProbingStep::PROBE_TEMP_WHILE_AWAY:
-    // 외출 상태에서 온도 설정 송출
-    sendProbe(ControlActionType::SET_TEMP, 24, ActiveProbingStep::VERIFY_TEMP_WHILE_AWAY_ACK, "Probing Temp-while-AWAY compound...");
-    break;
-
-  case ActiveProbingStep::VERIFY_TEMP_WHILE_AWAY_ACK:
-    checkAckReceived(grp->coverage.temp_while_away_seen, ActiveProbingStep::RESTORE_BASELINE);
-    break;
-
-  // ── 환기 단계
-  case ActiveProbingStep::PROBE_SPEED_L1:
-    sendProbe(ControlActionType::FAN_SPEED, 1, ActiveProbingStep::VERIFY_SPEED_L1_ACK, "Probing Fan Speed 1...");
-    break;
-
-  case ActiveProbingStep::VERIFY_SPEED_L1_ACK:
-    checkAckReceived(grp->coverage.speed_l1_seen, ActiveProbingStep::PROBE_SPEED_L2);
-    break;
-
-  case ActiveProbingStep::PROBE_SPEED_L2:
-    sendProbe(ControlActionType::FAN_SPEED, 2, ActiveProbingStep::VERIFY_SPEED_L2_ACK, "Probing Fan Speed 2...");
-    break;
-
-  case ActiveProbingStep::VERIFY_SPEED_L2_ACK:
-    checkAckReceived(grp->coverage.speed_l2_seen, ActiveProbingStep::PROBE_SPEED_L3);
-    break;
-
-  case ActiveProbingStep::PROBE_SPEED_L3:
-    sendProbe(ControlActionType::FAN_SPEED, 3, ActiveProbingStep::VERIFY_SPEED_L3_ACK, "Probing Fan Speed 3...");
-    break;
-
-  case ActiveProbingStep::VERIFY_SPEED_L3_ACK:
-    checkAckReceived(grp->coverage.speed_l3_seen, ActiveProbingStep::RESTORE_BASELINE);
-    break;
-
-  // ── 가스 단계
-  case ActiveProbingStep::PROBE_VALVE_CLOSE:
-    sendProbe(ControlActionType::VALVE_CLOSE, 1, ActiveProbingStep::VERIFY_VALVE_CLOSE_ACK, "Probing Gas Valve Close...");
-    break;
-
-  case ActiveProbingStep::VERIFY_VALVE_CLOSE_ACK:
-    checkAckReceived(grp->coverage.valve_close_seen, ActiveProbingStep::RESTORE_BASELINE);
-    break;
-
-  // ── 복원 및 완료
-  case ActiveProbingStep::RESTORE_BASELINE: {
-    StaticPacket restore_pkt{};
-    if (buildControlPacket(_session.target_dev_id, _session.target_sub1, _session.target_sub2,
-                           ControlActionType::POWER, 0, restore_pkt)) {
-      restore_pkt.channel_id = 6;
-      (void)Queue_EnqueueDropHead(g_ch1_vip_queue, restore_pkt);
-    }
-
-    if (grp->coverage.isFullyCovered()) {
-      grp->status = GroupControlTemplate::Status::VERIFIED;
-    } else {
-      grp->status = GroupControlTemplate::Status::CAPTURING;
-    }
-    saveToNvs();
-
-    if (_session.learn_all) {
-      _session.current_all_idx++;
-      bool started_next = false;
-      while (_session.current_all_idx < _group_count) {
-        uint8_t next_id = _groups[_session.current_all_idx].dev_id;
-        if (next_id != 0 && setupTargetForProbing(next_id)) {
-          started_next = true;
-          break;
-        }
-        _session.current_all_idx++;
-      }
-      if (!started_next) {
-        _session.in_progress = false;
-        _session.learn_all = false;
-        _session.current_step = ActiveProbingStep::COMPLETED;
-        snprintf(_session.last_log, sizeof(_session.last_log), "Batch active learning COMPLETED for all %zu groups", _group_count);
-      }
-    } else {
-      _session.in_progress = false;
-      if (strstr(_session.last_log, "Aborted") || strstr(_session.last_log, "aborted")) {
-        _session.current_step = ActiveProbingStep::FAILED;
-        snprintf(_session.last_log, sizeof(_session.last_log), "Active probing aborted by user (Baseline restored)");
-      } else {
-        _session.current_step = ActiveProbingStep::COMPLETED;
-        snprintf(_session.last_log, sizeof(_session.last_log), "Active probing COMPLETED for 0x%02X", _session.target_dev_id);
-      }
-    }
-    break;
-  }
-
-  default:
-    break;
-  }
 }
 
 // ============================================================================

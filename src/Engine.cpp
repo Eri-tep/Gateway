@@ -1109,8 +1109,6 @@ void Task_Ch1(void *pvParameters) {
       }
     }
 
-    g_control_registry.processActiveLearning();
-
     // ★ wallpad reset 신호 처리: s_convergence_done을 리셋하여 재수렴·재락 허용
     if (g_probe_convergence_reset.load(std::memory_order_acquire)) {
       g_probe_convergence_reset.store(false, std::memory_order_release);
