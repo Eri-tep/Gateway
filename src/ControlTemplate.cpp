@@ -133,12 +133,17 @@ bool ControlTemplateRegistry::setGroupClass(uint8_t dev_id, DeviceClass cls, con
   for (size_t i = 0; i < _group_count; ++i) {
     if (_groups[i].dev_id == dev_id) {
       if (_groups[i].coverage.dev_class != cls) {
-        _groups[i].coverage = SlotCoverage{};
-        _groups[i].coverage.dev_class = cls;
-        _groups[i].power_slot = ActionSlot{};
-        _groups[i].temp_slot = ActionSlot{};
-        _groups[i].speed_slot = ActionSlot{};
-        _groups[i].close_slot = ActionSlot{};
+        // UNKNOWN에서 구체 클래스로 변경되는 경우는 진행 중인 위자드 학습 데이터를 보존
+        if (_groups[i].coverage.dev_class == DeviceClass::UNKNOWN) {
+          _groups[i].coverage.dev_class = cls;
+        } else {
+          _groups[i].coverage = SlotCoverage{};
+          _groups[i].coverage.dev_class = cls;
+          _groups[i].power_slot = ActionSlot{};
+          _groups[i].temp_slot = ActionSlot{};
+          _groups[i].speed_slot = ActionSlot{};
+          _groups[i].close_slot = ActionSlot{};
+        }
       } else {
         _groups[i].coverage.dev_class = cls;
       }
@@ -574,9 +579,13 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         // 위자드가 켜기를 먼저 수행하도록 강제 → 첫 관측 = ON
         grp->power_slot.on_val = cmd_val;
         grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
-        // 두 번째 관측(다른 값) = OFF
-        grp->power_slot.off_val = cmd_val;
+      } else if (!grp->coverage.power_off_seen) {
+        // 두 번째 관측 = OFF (다른 값이거나 토글인 경우)
+        if (cmd_val != grp->power_slot.on_val) {
+          grp->power_slot.off_val = cmd_val;
+        } else {
+          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
+        }
         grp->coverage.power_off_seen = true;
       } else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen &&
                  cmd_val != grp->power_slot.off_val) {
@@ -616,9 +625,15 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         if (cmd_val != grp->power_slot.on_val) {
           grp->power_slot.off_val = cmd_val;
           grp->coverage.power_off_seen = true;
-        } else if (has_before && ack_before.length == ack_after.length) {
-          // CTL 값은 같더라도 ACK 응답에서 상태 바이트가 달라졌다면 반대 상태로 인정
-          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
+        } else {
+          // CTL 값이 동일(토글 커맨드)하거나 같은 값이 연속 전송된 경우:
+          // ACK 응답의 페이로드 바이트가 바뀌었는지 확인하거나 반대 상태로 인정
+          if (has_before && ack_before.length == ack_after.length && act_off < ack_after.length &&
+              ack_before.data[act_off] != ack_after.data[act_off]) {
+            grp->power_slot.off_val = ack_after.data[act_off];
+          } else {
+            grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
+          }
           grp->coverage.power_off_seen = true;
         }
       } else {
@@ -661,8 +676,12 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         if (!grp->coverage.power_on_seen) {
           grp->power_slot.on_val = cmd_val;
           grp->coverage.power_on_seen = true;
-        } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
-          grp->power_slot.off_val = cmd_val;
+        } else if (!grp->coverage.power_off_seen) {
+          if (cmd_val != grp->power_slot.on_val) {
+            grp->power_slot.off_val = cmd_val;
+          } else {
+            grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
+          }
           grp->coverage.power_off_seen = true;
         }
       }
@@ -705,9 +724,13 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         // 위자드 1단계 = ON
         grp->power_slot.on_val = cmd_val;
         grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
+      } else if (!grp->coverage.power_off_seen) {
         // 위자드 2단계 = OFF
-        grp->power_slot.off_val = cmd_val;
+        if (cmd_val != grp->power_slot.on_val) {
+          grp->power_slot.off_val = cmd_val;
+        } else {
+          grp->power_slot.off_val = (cmd_val == 0x01) ? 0x02 : (cmd_val == 0x02 ? 0x01 : 0x00);
+        }
         grp->coverage.power_off_seen = true;
       } else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen && !grp->coverage.away_mode_seen) {
         // 위자드 3단계 = 외출 모드 (ON/OFF 값과 다른 값이거나 카테고리가 다른 경우)

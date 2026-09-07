@@ -1142,10 +1142,29 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(out, out_sz, "%s : %s", prefix, hex_str);
   };
 
-  const char *addr_mode = desc.offsets_locked
-                              ? (desc.is_swapped_addr ? "Swapped : DA/SA" : "Direct")
-                              : (desc.is_locked ? "Probing..." : "Waiting");
+  char addr_mode_buf[48];
+  if (desc.offsets_locked) {
+    if (desc.is_swapped_addr) {
+      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Swapped (SA:Byte #%u <-> DA:Byte #%u)",
+               desc.gw_addr_offset, desc.dev_id_offset);
+    } else {
+      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Direct (Single Address)");
+    }
+  } else {
+    snprintf(addr_mode_buf, sizeof(addr_mode_buf), "%s", desc.is_locked ? "Probing..." : "Waiting");
+  }
   const char *addr_status = desc.offsets_locked ? "[LOCKED]" : (desc.is_locked ? "[LEARNING]" : "[WAITING]");
+
+  char gw_val_buf[48];
+  if (desc.offsets_locked) {
+    if (desc.is_swapped_addr) {
+      snprintf(gw_val_buf, sizeof(gw_val_buf), "Byte #%u : %02X", desc.gw_addr_offset, desc.gw_addr);
+    } else {
+      snprintf(gw_val_buf, sizeof(gw_val_buf), "Byte #%u : %02X", desc.sub1_offset, (sub1_cnt > 0 ? sub1_ids[0] : 0x01));
+    }
+  } else {
+    snprintf(gw_val_buf, sizeof(gw_val_buf), "-");
+  }
 
   char dev_off_label[32], sub1_off_label[32], sub2_off_label[32];
   if (desc.offsets_locked) {
@@ -1163,7 +1182,10 @@ void wallpadPrintStatus(AppendBuf &out) {
   format_hex_list(sub1_ids, sub1_cnt, sub1_off_label, sub1_list_buf, sizeof(sub1_list_buf));
   format_hex_list(sub2_ids, sub2_cnt, sub2_off_label, sub2_list_buf, sizeof(sub2_list_buf));
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Addressing", "Address Mode", addr_mode, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Addressing", "Address Mode", addr_mode_buf, addr_status);
+  if (desc.offsets_locked) {
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Gateway", gw_val_buf, addr_status);
+  }
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Device Type", dev_list_buf, addr_status);
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sub-ID", sub2_list_buf, addr_status);
   out.append(Fmt::DIV80);
@@ -1562,8 +1584,20 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
-      // 학습 대상(가변)은 [xx], 고정 골격은 xx 형식 (공백 1개로 컴팩트 정렬)
-      bool is_variable = is_val || is_ctx || is_env;
+      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, S1, S2, OP)
+      const char *r = nullptr;
+      if (i == 0) r = "ST";
+      else if (i == grp->frame_len - 1) r = "ET";
+      else if (i == grp->frame_len - 2) r = "CS";
+      else if (ad.has_len_field && i == ad.len_offset) r = "LN";
+      else if (i == ad.dev_id_offset) r = "ID";
+      else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
+      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "S2";
+      else if (i == ad.opcode_offset) r = "OP";
+
+      // 2순위: 고정 롤이 아닌 순수 페이로드 영역만 가변/학습 슬롯으로 표시
+      bool is_payload = (r == nullptr);
+      bool is_variable = is_payload && (is_val || is_ctx || is_env);
 
       if (is_variable) {
         h_off += snprintf(hex_line + h_off, sizeof(hex_line) - h_off, "[%02X] ", grp->raw_template[i]);
@@ -1571,20 +1605,8 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
         h_off += snprintf(hex_line + h_off, sizeof(hex_line) - h_off, "%02X ", grp->raw_template[i]);
       }
 
-      const char *r = "--";
-      if (i == 0) r = "ST";
-      else if (ad.has_len_field && i == ad.len_offset) r = "LN";
-      else if (i == ad.dev_id_offset) r = "ID";
-      else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
-      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "S2";
-      else if (i == ad.opcode_offset) r = "OP";
-      else if (i == grp->frame_len - 1) r = "ET";
-      else if (i == grp->frame_len - 2) r = "CS";
-
-      if (i == grp->frame_len - 1) {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", "ET");
-      } else if (i == grp->frame_len - 2) {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", "CS");
+      if (r != nullptr) {
+        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", r);
       } else if (is_val) {
         r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "[VL] ");
       } else if (is_ctx) {
@@ -1592,7 +1614,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       } else if (is_env) {
         r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "[EN] ");
       } else {
-        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", r);
+        r_off += snprintf(role_line + r_off, sizeof(role_line) - r_off, "%-2s ", "--");
       }
     }
     out.appendFormat("%s\r\n%s\r\n", hex_line, role_line);
@@ -1627,17 +1649,11 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
-      // 가변 = 실제 변한 바이트 OR 학습된 슬롯 위치
-      bool is_variable = is_changed || is_val || is_ctx || is_env;
-
-      if (is_variable) {
-        h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "[%02X] ", raw[i]);
-      } else {
-        h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "%02X ", raw[i]);
-      }
-
-      const char *r = "--";
+      // 1순위: 확정된 고정 프레임 롤 (STX, ETX, CS, LEN, ID, GW, S1, S2, OP)
+      const char *r = nullptr;
       if (i == 0) r = "ST";
+      else if (i == len - 1) r = "ET";
+      else if (i == len - 2) r = "CS";
       else if (ad.has_len_field && i == ad.len_offset) r = "LN";
       else if (ad.is_swapped_addr && i == ad.gw_addr_offset) r = "ID";
       else if (ad.is_swapped_addr && i == ad.dev_id_offset) r = "GW";
@@ -1645,13 +1661,19 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
       else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "S2";
       else if (i == ad.opcode_offset) r = "OP";
-      else if (i == len - 1) r = "ET";
-      else if (i == len - 2) r = "CS";
 
-      if (i == len - 1) {
-        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", "ET");
-      } else if (i == len - 2) {
-        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", "CS");
+      // 2순위: 고정 롤이 아닌 순수 페이로드 영역만 가변/학습 슬롯으로 표시
+      bool is_payload = (r == nullptr);
+      bool is_variable = is_payload && (is_changed || is_val || is_ctx || is_env);
+
+      if (is_variable) {
+        h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "[%02X] ", raw[i]);
+      } else {
+        h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "%02X ", raw[i]);
+      }
+
+      if (r != nullptr) {
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", r);
       } else if (is_val) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[VL] ");
       } else if (is_ctx) {
@@ -1659,10 +1681,10 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       } else if (is_env) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[EN] ");
       } else if (is_changed) {
-        // 슬롯 미분류 가변 바이트 → 미지 모니터링 대상
+        // 슬롯 미분류 순수 페이로드 가변 바이트 → 미지 모니터링 대상
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[~~] ");
       } else {
-        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", r);
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", "--");
       }
     }
     out.appendFormat("%s\r\n%s\r\n", hex_str, rol_str);
@@ -1932,6 +1954,18 @@ void wallpadControlLearnInteractive(TelnetManager::TelnetSession *session, char 
   if (!session || session->sock < 0) return;
   int sock = session->sock;
   size_t count = g_control_registry.getGroupCount();
+  if (count == 0) {
+    // ctl reset 후에도 버스에서 폴링 중인 기기 목록을 감지하여 자동 등록
+    size_t total_targets = g_polling_targets.totalCount();
+    for (size_t t = 0; t < total_targets; ++t) {
+      PollingTargetEntry entry{};
+      if (g_polling_targets.getEntry(t, entry) && entry.is_active && entry.dev_id != 0) {
+        g_control_registry.registerOrTouch(entry.dev_id);
+      }
+    }
+    count = g_control_registry.getGroupCount();
+  }
+
   if (count == 0) {
     sendTelnetMsg(sock, "\r\n[ERROR] No device IDs detected yet. Please ensure RS-485 bus traffic is active.\r\n");
     return;
