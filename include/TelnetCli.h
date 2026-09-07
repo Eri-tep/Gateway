@@ -62,6 +62,11 @@ public:
     char txBuf[256];
     size_t txLen = 0;
 
+    // 대화형 학습 마법사 (ctl learn) 논블로킹 상태 머신
+    uint8_t wizard_step{0};          // 0: 비활성, 1~7: 각 기기 단계
+    uint32_t wizard_step_start_ms{0}; // 현재 단계 시작 시각 (타임아웃 45s 검사용)
+    uint32_t prev_learned_ms[8]{0};   // 기기별 이전 학습 시각 스냅샷
+
     void reset() {
       if (sock >= 0) {
         close(sock);
@@ -77,6 +82,9 @@ public:
       pwLen = 0;
       needsSend = false;
       txLen = 0;
+      wizard_step = 0;
+      wizard_step_start_ms = 0;
+      memset(prev_learned_ms, 0, sizeof(prev_learned_ms));
       cli.reset();
     }
   };
@@ -141,6 +149,11 @@ public:
       return &_sessions[index];
     return nullptr;
   }
+
+  // 대화형 학습 마법사 (ctl learn) 비동기 이벤트 핸들러
+  void notifyControlTransaction(uint8_t dev_id);
+  void handleWizardStepAdvance(TelnetSession *s, bool skipped, bool match);
+  void handleWizardInput(TelnetSession *s, char c);
 };
 
 // ============================================================================

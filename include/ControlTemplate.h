@@ -30,6 +30,8 @@ struct ActionSlot {
   uint8_t off_val{0x02};         // OFF / Inactive 토큰
   uint8_t min_val{0};            // 최소값 (온도 15℃, 풍량 1 등)
   uint8_t max_val{0};            // 최대값 (온도 30℃, 풍량 3 등)
+  uint8_t level_tokens[4]{0};    // 동적 관측된 이산 단계별 토큰 (예: 풍량 L1/L2/L3 등)
+  uint8_t level_count{0};        // 등록된 이산 단계 토큰 개수
   uint16_t sample_count{0};      // 관측/검증 횟수
 };
 

@@ -380,6 +380,13 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   auto ad = g_auto_probing_engine.getDescriptor();
 
   taskENTER_CRITICAL(&_mux);
+  // 이전 raw_template을 diff 비교용으로 보존한 뒤 새 패킷 복사
+  uint8_t prev_raw[32]{0};
+  uint8_t prev_len = grp->frame_len;
+  if (prev_len > 0) {
+    std::copy(grp->raw_template, grp->raw_template + std::min<size_t>(prev_len, 32), prev_raw);
+  }
+
   grp->frame_len = ctl.length;
   std::copy(ctl.data.begin(), ctl.data.begin() + std::min<size_t>(ctl.length, 32), grp->raw_template);
   grp->last_ctl_len = std::min<size_t>(ctl.length, 32);
@@ -417,7 +424,7 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   uint8_t payload_start = (ad.offsets_locked && ad.payload_offset < ctl.length) ? ad.payload_offset : 5;
   size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length; // CS, ETX 제외
 
-  // ctl과 raw_template 사이에서 값이 달라진 바이트 수집
+  // ctl과 이전 raw_template(또는 이전 ctl) 사이에서 값이 달라진 바이트 수집
   uint8_t diff_offsets[8]{0};
   uint8_t diff_vals[8]{0};
   size_t diff_count = 0;
@@ -426,14 +433,14 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     if (i == grp->sub1_offset || i == grp->sub2_offset) continue;
     if (ad.offsets_locked && (i == ad.sub1_offset || i == ad.sub2_offset)) continue;
 
-    if (ctl.data[i] != grp->raw_template[i]) {
+    if (prev_len > 0 && ctl.data[i] != prev_raw[i]) {
       diff_offsets[diff_count] = static_cast<uint8_t>(i);
       diff_vals[diff_count] = ctl.data[i];
       diff_count++;
     }
   }
 
-  // raw_template과 차이가 아직 없으면 payload_start 위치의 값을 후보로 채택
+  // 이전 골격과의 차이가 아직 발견되지 않았다면 payload_start 위치의 값을 후보로 채택
   if (diff_count == 0 && payload_start < end_idx) {
     diff_offsets[0] = payload_start;
     diff_vals[0] = ctl.data[payload_start];
@@ -466,6 +473,39 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->close_slot.sample_count++;
       grp->coverage.valve_close_seen = true;
       grp->coverage.power_off_seen = true;
+    } else if (grp->coverage.dev_class == DeviceClass::VENT) {
+      // 전열교환기(환기): 단일 바이트 제어 슬롯에서 전원 및 풍량 이산 토큰을 동적 관측
+      // 하드코딩 없이 버스에서 관측되는 값을 level_tokens 배열에 순차적으로 동적 등록
+      grp->speed_slot.discovered = true;
+      grp->speed_slot.action_offset = act_off;
+      grp->speed_slot.sample_count++;
+
+      // 기존 등록 여부 확인
+      bool token_exists = false;
+      for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
+        if (grp->speed_slot.level_tokens[k] == cmd_val) {
+          token_exists = true;
+          break;
+        }
+      }
+      if (!token_exists && grp->speed_slot.level_count < 4) {
+        grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
+        grp->speed_slot.min_val = 1;
+        grp->speed_slot.max_val = grp->speed_slot.level_count;
+      }
+
+      // 관측된 개수에 맞춰 순차적으로 레벨 로드맵 활성화
+      if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
+      if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
+      if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
+
+      // 전원 슬롯과의 연동: 최초 토큰을 ON 토큰으로 채택
+      grp->power_slot.discovered = true;
+      grp->power_slot.action_offset = act_off;
+      if (!grp->coverage.power_on_seen) {
+        grp->power_slot.on_val = cmd_val;
+        grp->coverage.power_on_seen = true;
+      }
     } else {
       grp->power_slot.discovered = true;
       grp->power_slot.action_offset = act_off;
@@ -496,16 +536,29 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     uint8_t act_off = diff_offsets[1];
     uint8_t cmd_val = diff_vals[1];
 
-    if ((grp->coverage.dev_class == DeviceClass::VENT || grp->coverage.dev_class == DeviceClass::AIRCON) &&
-        cmd_val >= 1 && cmd_val <= 3) {
+    if (grp->coverage.dev_class == DeviceClass::VENT || grp->coverage.dev_class == DeviceClass::AIRCON) {
       grp->speed_slot.discovered = true;
+      grp->speed_slot.category_offset = cat_off;
+      grp->speed_slot.category_val = cat_val;
       grp->speed_slot.action_offset = act_off;
-      grp->speed_slot.min_val = 1;
-      grp->speed_slot.max_val = 3;
       grp->speed_slot.sample_count++;
-      if (cmd_val == 1) grp->coverage.speed_l1_seen = true;
-      else if (cmd_val == 2) grp->coverage.speed_l2_seen = true;
-      else if (cmd_val == 3) grp->coverage.speed_l3_seen = true;
+
+      bool token_exists = false;
+      for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
+        if (grp->speed_slot.level_tokens[k] == cmd_val) {
+          token_exists = true;
+          break;
+        }
+      }
+      if (!token_exists && grp->speed_slot.level_count < 4) {
+        grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
+        grp->speed_slot.min_val = 1;
+        grp->speed_slot.max_val = grp->speed_slot.level_count;
+      }
+
+      if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
+      if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
+      if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
     } else if (cmd_val >= 10 && cmd_val <= 40) {
       // 연속 수치값 (온도 설정 등)
       grp->temp_slot.discovered = true;
@@ -637,9 +690,17 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
   } else if (action == ControlActionType::FAN_SPEED) {
     if (!grp->speed_slot.discovered) return false;
     if (grp->speed_slot.action_offset < grp->frame_len) {
-      uint8_t min_s = (grp->speed_slot.min_val > 0) ? grp->speed_slot.min_val : 1;
-      uint8_t max_s = (grp->speed_slot.max_val > 0) ? grp->speed_slot.max_val : 3;
-      out.data[grp->speed_slot.action_offset] = static_cast<uint8_t>(constrain(value, min_s, max_s));
+      uint8_t speed_token = 0;
+      if (grp->speed_slot.level_count > 0) {
+        // 동적 학습된 토큰 테이블 참조 (1-based -> 0-based 인덱스)
+        int idx = constrain(value - 1, 0, grp->speed_slot.level_count - 1);
+        speed_token = grp->speed_slot.level_tokens[idx];
+      } else {
+        uint8_t min_s = (grp->speed_slot.min_val > 0) ? grp->speed_slot.min_val : 1;
+        uint8_t max_s = (grp->speed_slot.max_val > 0) ? grp->speed_slot.max_val : 3;
+        speed_token = static_cast<uint8_t>(constrain(value, min_s, max_s));
+      }
+      out.data[grp->speed_slot.action_offset] = speed_token;
     }
   } else if (action == ControlActionType::VALVE_CLOSE) {
     if (!grp->close_slot.discovered) return false;

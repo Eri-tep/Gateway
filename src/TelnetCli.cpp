@@ -1,6 +1,7 @@
 #include "TelnetCli.h"
 #include "CliCommands.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_ota_ops.h"
 #include "esp_task_wdt.h"
 #include <cstdarg>
@@ -462,6 +463,9 @@ void TelnetManager::onClientData(TelnetSession *session, const char *data,
       } else if (isprint(c) && session->pwLen < sizeof(session->pwBuffer) - 1) {
         session->pwBuffer[session->pwLen++] = c;
       }
+    } else if (session->wizard_step > 0) {
+      // 대화형 학습 마법사 동작 중에는 전용 키 핸들러로 전달 (q: 취소, Enter: 다음 스킵)
+      handleWizardInput(session, (char)c);
     } else if (session->cli) {
       embeddedCliReceiveChar(session->cli.get(), (char)c);
     }
@@ -659,6 +663,113 @@ void TelnetManager::cmdExit(EmbeddedCli *cli, char *args, void *context) {
   }
 }
 
+// ============================================================================
+// INTERACTIVE CONTROL LEARNING WIZARD (NON-BLOCKING EVENT-DRIVEN FSM)
+// ============================================================================
+
+struct WizardTargetDef {
+  DeviceClass cls;
+  const char *name;
+  const char *step_name;
+};
+
+static const WizardTargetDef s_wizard_targets[] = {
+    {DeviceClass::SWITCH, "Light", "Step 1: Light (조명)"},
+    {DeviceClass::SWITCH, "Outlet", "Step 2: Outlet (콘센트/대기전력)"},
+    {DeviceClass::VENT, "Vent", "Step 3: Ventilation (전열교환기/환기)"},
+    {DeviceClass::THERMOSTAT, "Thermo", "Step 4: Thermostat (난방/온도조절기)"},
+    {DeviceClass::GAS, "Gas", "Step 5: Gas Valve (가스밸브)"},
+    {DeviceClass::AIRCON, "Aircon", "Step 6: Air Conditioner (시스템 에어컨)"},
+    {DeviceClass::MOMENTARY, "Elevator", "Step 7: Elevator (엘리베이터 호출)"},
+};
+static constexpr uint8_t WIZARD_TOTAL_STEPS = sizeof(s_wizard_targets) / sizeof(s_wizard_targets[0]);
+
+void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool match) {
+  if (!s || s->sock < 0 || s->wizard_step == 0) return;
+
+  uint8_t cur_idx = s->wizard_step - 1; // 0-based
+  if (cur_idx >= WIZARD_TOTAL_STEPS) {
+    s->wizard_step = 0;
+    return;
+  }
+
+  if (skipped && !match) {
+    sendTelnetMsgf(s->sock, ">> [SKIP] No traffic detected for '%s'. Skipping to next...\r\n",
+                   s_wizard_targets[cur_idx].name);
+  }
+
+  uint8_t next_idx = cur_idx + 1;
+  if (next_idx < WIZARD_TOTAL_STEPS) {
+    s->wizard_step = next_idx + 1;
+    s->wizard_step_start_ms = millis();
+    s->last_activity_ms = millis();
+
+    // 다음 단계 기기들의 마지막 학습 시각 스냅샷 갱신
+    size_t count = g_control_registry.getGroupCount();
+    size_t valid_cnt = 0;
+    for (size_t i = 0; i < count && valid_cnt < ControlTemplateRegistry::MAX_GROUPS; ++i) {
+      GroupControlTemplate grp;
+      if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
+        s->prev_learned_ms[valid_cnt++] = grp.last_learned_ms;
+      }
+    }
+
+    sendTelnetMsgf(s->sock, "\r\n[%s]\r\n", s_wizard_targets[next_idx].step_name);
+    sendTelnetMsgf(s->sock, ">> Please operate '%s' on your wallpad or wall switch now...\r\n",
+                   s_wizard_targets[next_idx].name);
+    sendTelnetMsg(s->sock, ">> (Waiting for packet transaction... 45s timeout | Enter: Skip | 'q': Abort)\r\n");
+  } else {
+    // 모든 단계 완료!
+    s->wizard_step = 0;
+    sendTelnetMsg(s->sock, "\r\n================================================================================\r\n");
+    sendTelnetMsg(s->sock, "             LEARNING WIZARD COMPLETE - UPDATED BLUEPRINT TABLE                \r\n");
+    sendTelnetMsg(s->sock, "================================================================================\r\n");
+    char scratch[4096]{0};
+    AppendBuf out{scratch, sizeof(scratch)};
+    WallpadCli::wallpadPrintControlTable(out);
+    sendTelnetMsgLen(s->sock, out.buf, out.offset);
+  }
+}
+
+void TelnetManager::handleWizardInput(TelnetSession *s, char c) {
+  if (!s || s->sock < 0 || s->wizard_step == 0) return;
+
+  if (c == 'q' || c == 'Q') {
+    sendTelnetMsg(s->sock, ">> [ABORT] Learning wizard aborted by user.\r\n");
+    s->wizard_step = 0;
+  } else if (c == '\r' || c == '\n') {
+    handleWizardStepAdvance(s, true, false);
+  }
+}
+
+void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
+  if (dev_id == 0) return;
+
+  MutexLocker cliLock(_cli_mutex);
+  for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
+    TelnetSession &s = _sessions[i];
+    if (s.sock >= 0 && s.wizard_step >= 1 && s.wizard_step <= WIZARD_TOTAL_STEPS) {
+      uint8_t cur_idx = s.wizard_step - 1;
+      const auto &tgt = s_wizard_targets[cur_idx];
+
+      // 기기 분류 및 그룹명 확정 등록!
+      g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
+
+      sendTelnetMsgf(s.sock, "\r\n>> [MATCH DETECTED!] DevID 0x%02X matched to '%s'!\r\n",
+                     dev_id, tgt.name);
+
+      // 즉시 상세 청사진 출력
+      char scratch[4096]{0};
+      AppendBuf out{scratch, sizeof(scratch)};
+      WallpadCli::wallpadPrintControlDetail(out, dev_id);
+      sendTelnetMsgLen(s.sock, out.buf, out.offset);
+
+      // 다음 단계로 비동기 즉시 전이
+      handleWizardStepAdvance(&s, false, true);
+    }
+  }
+}
+
 void TelnetManager::onClientConnect(int new_sock,
                                     const struct sockaddr_in &client_addr,
                                     uint32_t now) {
@@ -844,6 +955,11 @@ void TelnetManager::tick() {
       sendTelnetMsg(s.sock, "\r\n[SYSTEM] Disconnected due to inactivity.\r\n");
       handleClientDisconnect(&s);
       continue;
+    }
+
+    // [마법사 비동기 타임아웃] 단계당 45초 동안 패킷 및 입력 미발생 시 자동 스킵
+    if (s.wizard_step > 0 && TimeUtils::isElapsed(s.wizard_step_start_ms, 45000)) {
+      handleWizardStepAdvance(&s, true, false);
     }
 
     if (FD_ISSET(s.sock, &errorfds)) {

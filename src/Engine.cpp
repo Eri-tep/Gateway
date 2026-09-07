@@ -803,9 +803,9 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 // [2] 제어 패킷 전송 및 투명 중계
 static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
   StaticPacket ack_before{};
+  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
   auto *parser = WallpadParserFactory::getActiveParser();
   if (parser) {
-    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
     span<const uint8_t> ctl_span(ctrlPacket.data.data(), ctrlPacket.length);
     if (parser->extractDeviceKey(ctl_span, dev_id, sub1, sub2)) {
       const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
@@ -850,6 +850,9 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
         span<const uint8_t>(ack.data.data(), ack.length));
     if (!parser || !parser->isQueryPacket(span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length))) {
       g_control_registry.onControlTransaction(ctrlPacket, ack_before, ack);
+      if (dev_id != 0) {
+        g_telnet_manager.notifyControlTransaction(dev_id);
+      }
     }
     ack.channel_id = ctrlPacket.channel_id;
 
