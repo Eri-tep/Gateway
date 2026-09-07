@@ -64,6 +64,7 @@ public:
 
     // 대화형 학습 마법사 (ctl learn) 논블로킹 상태 머신
     uint8_t wizard_step{0};          // 0: 비활성, 1~7: 각 기기 단계
+    uint8_t wizard_dev_id{0};        // 현재 단계에 바인딩된 기기 ID (Fresh State 관리용)
     uint32_t wizard_step_start_ms{0}; // 현재 단계 시작 시각 (타임아웃 45s 검사용)
     uint32_t prev_learned_ms[8]{0};   // 기기별 이전 학습 시각 스냅샷
 

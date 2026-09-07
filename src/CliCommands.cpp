@@ -1954,6 +1954,7 @@ void wallpadControlLearnInteractive(TelnetManager::TelnetSession *session, char 
 
   // 비동기 이벤트-드라이븐 마법사 Step 1 시작 (블로킹/슬립 일절 없음!)
   session->wizard_step = 1;
+  session->wizard_dev_id = 0;
   session->wizard_step_start_ms = millis();
   session->last_activity_ms = millis();
 

@@ -704,6 +704,7 @@ void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool
   uint8_t next_idx = cur_idx + 1;
   if (next_idx < WIZARD_TOTAL_STEPS) {
     s->wizard_step = next_idx + 1;
+    s->wizard_dev_id = 0;
     s->wizard_step_start_ms = millis();
     s->last_activity_ms = millis();
 
@@ -763,12 +764,21 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
       uint8_t cur_idx = s.wizard_step - 1;
       const auto &tgt = s_wizard_targets[cur_idx];
 
+      // 현재 단계에서 한 기기(wizard_dev_id)가 학습을 시작했다면 다른 기기 패킷은 혼선 방지를 위해 무시
+      if (s.wizard_dev_id != 0 && s.wizard_dev_id != dev_id) {
+        continue;
+      }
+
       // 타 단계에서 이미 학습되어 클래스가 부여된 기기 ID는 현재 단계의 대상이 아니므로 무시/드랍
-      // (예: 환기 0x2B가 이미 확정된 상태에서 난방 단계 진입 시 0x2B 패킷이 들어와도 난방으로 오염되지 않음)
       const GroupControlTemplate *existing = g_control_registry.findGroup(dev_id);
       if (existing && existing->coverage.dev_class != DeviceClass::UNKNOWN &&
           existing->coverage.dev_class != tgt.cls) {
         continue;
+      }
+
+      // 현재 단계에 처음으로 매칭되는 기기라면 ID 바인딩
+      if (s.wizard_dev_id == 0) {
+        s.wizard_dev_id = dev_id;
       }
 
       // 기기 분류 및 그룹명 확정 등록!

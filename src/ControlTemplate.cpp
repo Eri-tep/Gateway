@@ -132,7 +132,16 @@ bool ControlTemplateRegistry::setGroupClass(uint8_t dev_id, DeviceClass cls, con
   taskENTER_CRITICAL(&_mux);
   for (size_t i = 0; i < _group_count; ++i) {
     if (_groups[i].dev_id == dev_id) {
-      _groups[i].coverage.dev_class = cls;
+      if (_groups[i].coverage.dev_class != cls) {
+        _groups[i].coverage = SlotCoverage{};
+        _groups[i].coverage.dev_class = cls;
+        _groups[i].power_slot = ActionSlot{};
+        _groups[i].temp_slot = ActionSlot{};
+        _groups[i].speed_slot = ActionSlot{};
+        _groups[i].close_slot = ActionSlot{};
+      } else {
+        _groups[i].coverage.dev_class = cls;
+      }
       if (name && strlen(name) > 0) {
         strncpy(_groups[i].group_name, name, sizeof(_groups[i].group_name) - 1);
         _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
@@ -221,14 +230,6 @@ size_t ControlTemplateRegistry::getGroupCount() const {
   taskENTER_CRITICAL(&_mux);
   size_t cnt = _group_count;
   taskEXIT_CRITICAL(&_mux);
-
-  // Phase 3 (offsets_locked) 상태에서 활성 타깃이 있는데 등록된 그룹이 적거나 비어있다면 자동 동기화
-  if (g_auto_probing_engine.isOffsetsLocked() && g_polling_targets.activeCount() > 0) {
-    const_cast<ControlTemplateRegistry*>(this)->synthesizeFromConvergedCache();
-    taskENTER_CRITICAL(&_mux);
-    cnt = _group_count;
-    taskEXIT_CRITICAL(&_mux);
-  }
   return cnt;
 }
 
@@ -594,8 +595,9 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         }
       }
 
-      // 풍량 슬롯: OFF 값이 아닌 토큰을 레벨 토큰으로 학습
-      if (grp->coverage.dev_class != DeviceClass::VENT || cmd_val != grp->power_slot.off_val) {
+      // 풍량 슬롯: 전원 ON/OFF가 모두 학습된 이후에만 관측치를 레벨 토큰으로 학습 (동시 학습 방지)
+      if (grp->coverage.power_on_seen && grp->coverage.power_off_seen &&
+          (grp->coverage.dev_class != DeviceClass::VENT || cmd_val != grp->power_slot.off_val)) {
         grp->speed_slot.discovered = true;
         grp->speed_slot.category_offset = cat_off;
         grp->speed_slot.category_val = cat_val;
@@ -628,60 +630,58 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->power_slot.sample_count++;
 
       if (!grp->coverage.power_on_seen) {
-        // 위자드 첫 관측 = ON
+        // 위자드 1단계 = ON
         grp->power_slot.on_val = cmd_val;
         grp->coverage.power_on_seen = true;
       } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
-        // 두 번째 관측(다른 값) = OFF
+        // 위자드 2단계 = OFF
         grp->power_slot.off_val = cmd_val;
         grp->coverage.power_off_seen = true;
+      } else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen && !grp->coverage.away_mode_seen) {
+        // 위자드 3단계 = 외출 모드 (ON/OFF 값과 다른 값이거나 카테고리가 다른 경우)
+        if (cat_val != grp->power_slot.category_val || (cmd_val != grp->power_slot.on_val && cmd_val != grp->power_slot.off_val)) {
+          grp->coverage.away_mode_seen = true;
+        }
       } else {
         if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
         else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
-        else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen) {
-          // ON/OFF 확정 이후: 카테고리 바이트로 온도 vs 외출모드 구분
-          // 온도 슬롯 카테고리와 같거나 아직 미확정이면 온도 설정, 다른 카테고리이면 외출모드
-          bool is_temp = !grp->temp_slot.discovered ||
-                         (cat_val == grp->temp_slot.category_val);
-          if (is_temp) {
-            grp->temp_slot.discovered = true;
-            grp->temp_slot.category_offset = cat_off;
-            grp->temp_slot.category_val = cat_val;
-            grp->temp_slot.action_offset = act_off;
-            if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val)
-              grp->temp_slot.min_val = cmd_val;
-            if (cmd_val > grp->temp_slot.max_val)
-              grp->temp_slot.max_val = cmd_val;
-            grp->temp_slot.sample_count++;
-            grp->coverage.temp_set_seen = true;
-            // [동적 ENV 학습] ACK 응답에서 현재 실내온도 바이트 자동 탐지
-            if (ack_after.length >= 5) {
-              uint8_t best_env = 0xFF;
-              int best_score = -1;
-              size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
-              for (size_t k = 0; k < ack_end; ++k) {
-                if (k == 0 || k == ad.dev_id_offset || k == ad.sub1_offset ||
-                    k == ad.sub2_offset || k == ad.opcode_offset) continue;
-                if (k == act_off || k == cat_off) continue;
-                uint8_t v = ack_after.data[k];
-                if (v >= 12 && v <= 38) {
-                  int score = 10;
-                  int dist = std::abs(static_cast<int>(k) - static_cast<int>(act_off));
-                  if (dist == 1) score += 30;
-                  else if (dist == 2) score += 10;
-                  if (v >= 15 && v <= 33) score += 15;
-                  if (score > best_score) {
-                    best_score = score;
-                    best_env = static_cast<uint8_t>(k);
-                  }
+        else if (grp->coverage.power_on_seen && grp->coverage.power_off_seen && grp->coverage.away_mode_seen) {
+          // ON/OFF/외출모드 확정 이후 관측되는 연속 수치값 -> 희망온도 설정
+          grp->temp_slot.discovered = true;
+          grp->temp_slot.category_offset = cat_off;
+          grp->temp_slot.category_val = cat_val;
+          grp->temp_slot.action_offset = act_off;
+          if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val)
+            grp->temp_slot.min_val = cmd_val;
+          if (cmd_val > grp->temp_slot.max_val)
+            grp->temp_slot.max_val = cmd_val;
+          grp->temp_slot.sample_count++;
+          grp->coverage.temp_set_seen = true;
+
+          // [동적 ENV 학습] ACK 응답에서 현재 실내온도 바이트 자동 탐지
+          if (ack_after.length >= 5) {
+            uint8_t best_env = 0xFF;
+            int best_score = -1;
+            size_t ack_end = (ack_after.length >= 2) ? (ack_after.length - 2) : ack_after.length;
+            for (size_t k = 0; k < ack_end; ++k) {
+              if (k == 0 || k == ad.dev_id_offset || k == ad.sub1_offset ||
+                  k == ad.sub2_offset || k == ad.opcode_offset) continue;
+              if (k == act_off || k == cat_off) continue;
+              uint8_t v = ack_after.data[k];
+              if (v >= 12 && v <= 38) {
+                int score = 10;
+                int dist = std::abs(static_cast<int>(k) - static_cast<int>(act_off));
+                if (dist == 1) score += 30;
+                else if (dist == 2) score += 10;
+                if (v >= 15 && v <= 33) score += 15;
+                if (score > best_score) {
+                  best_score = score;
+                  best_env = static_cast<uint8_t>(k);
                 }
               }
-              if (best_env != 0xFF)
-                grp->temp_slot.telemetry_offset = best_env;
             }
-          } else {
-            // 온도 카테고리와 다른 카테고리 → 외출모드
-            grp->coverage.away_mode_seen = true;
+            if (best_env != 0xFF)
+              grp->temp_slot.telemetry_offset = best_env;
           }
         }
       }
