@@ -776,25 +776,13 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
         continue;
       }
 
-      // 현재 단계에 처음으로 매칭되는 기기라면 ID 바인딩 및 기존 학습 슬롯 초기화 (NVS 잔존값으로 인한 즉시 완료 방지)
+      // 현재 단계에 처음으로 매칭되는 기기라면 ID 바인딩
       if (s.wizard_dev_id == 0) {
         s.wizard_dev_id = dev_id;
-        // 기기 분류 및 그룹명 확정 등록과 동시에 해당 단계의 슬롯 커버리지 깨끗이 초기화
-        g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
-        GroupControlTemplate *target_grp = g_control_registry.findGroup(dev_id);
-        if (target_grp) {
-          target_grp->coverage = SlotCoverage{};
-          target_grp->coverage.dev_class = tgt.cls;
-          target_grp->power_slot = ActionSlot{};
-          target_grp->speed_slot = ActionSlot{};
-          target_grp->temp_slot = ActionSlot{};
-          target_grp->close_slot = ActionSlot{};
-          target_grp->status = GroupControlTemplate::Status::CAPTURING;
-        }
-      } else {
-        // 기기 분류 및 그룹명 확정 등록!
-        g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
       }
+
+      // 기기 분류 및 그룹명 확정 등록!
+      g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
 
       const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
       bool need_dual_action = (tgt.cls != DeviceClass::MOMENTARY);

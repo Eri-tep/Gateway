@@ -1949,6 +1949,19 @@ void wallpadControlLearnInteractive(TelnetManager::TelnetSession *session, char 
         session->prev_learned_ms[valid_cnt] = grp.last_learned_ms;
       }
       valid_cnt++;
+
+      // ★ [핵심] 위자드 시작 시 패킷 수신 '전'에 기존 학습 슬롯을 깨끗이 초기화
+      // (이전 실행의 NVS 잔존값으로 인해 켜기 1회 시 끄기까지 즉시 스킵되는 현상 원천 차단)
+      GroupControlTemplate *live_grp = g_control_registry.findGroup(grp.dev_id);
+      if (live_grp) {
+        live_grp->coverage = SlotCoverage{};
+        live_grp->coverage.dev_class = DeviceClass::UNKNOWN;
+        live_grp->power_slot = ActionSlot{};
+        live_grp->speed_slot = ActionSlot{};
+        live_grp->temp_slot = ActionSlot{};
+        live_grp->close_slot = ActionSlot{};
+        live_grp->status = GroupControlTemplate::Status::CAPTURING;
+      }
     }
   }
   sendTelnetMsg(sock, "\r\n");
