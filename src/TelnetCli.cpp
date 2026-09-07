@@ -718,8 +718,16 @@ void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool
     }
 
     sendTelnetMsgf(s->sock, "\r\n[%s]\r\n", s_wizard_targets[next_idx].step_name);
-    sendTelnetMsgf(s->sock, ">> Please operate '%s' on your wallpad or wall switch now...\r\n",
-                   s_wizard_targets[next_idx].name);
+    if (s_wizard_targets[next_idx].cls == DeviceClass::SWITCH || s_wizard_targets[next_idx].cls == DeviceClass::VENT) {
+      sendTelnetMsgf(s->sock, ">> Please TURN ON and TURN OFF '%s' on your wallpad/switch now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    } else if (s_wizard_targets[next_idx].cls == DeviceClass::THERMOSTAT) {
+      sendTelnetMsgf(s->sock, ">> Please TURN ON, TURN OFF, then activate Away Mode for '%s' on your wallpad now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    } else {
+      sendTelnetMsgf(s->sock, ">> Please operate '%s' on your wallpad or wall switch now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    }
     sendTelnetMsg(s->sock, ">> (Waiting for packet transaction... 45s timeout | Enter: Skip | 'q': Abort)\r\n");
   } else {
     // 모든 단계 완료!
@@ -765,6 +773,23 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
 
       // 기기 분류 및 그룹명 확정 등록!
       g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
+
+      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+      bool need_dual_action = (tgt.cls == DeviceClass::SWITCH || tgt.cls == DeviceClass::VENT);
+
+      if (need_dual_action && grp) {
+        bool on_done = grp->coverage.power_on_seen;
+        bool off_done = grp->coverage.power_off_seen;
+
+        if (!on_done || !off_done) {
+          sendTelnetMsgf(s.sock, "\r\n>> [HALF CAPTURED!] DevID 0x%02X (%s) %s recorded!\r\n",
+                         dev_id, tgt.name, on_done ? "ON" : "OFF");
+          sendTelnetMsgf(s.sock, ">> Please now %s '%s' on your wallpad to complete both ON & OFF learning...\r\n",
+                         on_done ? "TURN OFF" : "TURN ON", tgt.name);
+          s.wizard_step_start_ms = millis(); // 타이머 리셋
+          continue; // 아직 한쪽만 수집되었으므로 다음 단계로 전이하지 않음!
+        }
+      }
 
       sendTelnetMsgf(s.sock, "\r\n>> [MATCH DETECTED!] DevID 0x%02X matched to '%s'!\r\n",
                      dev_id, tgt.name);

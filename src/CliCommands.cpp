@@ -1943,7 +1943,7 @@ void wallpadControlLearnInteractive(TelnetManager::TelnetSession *session, char 
   session->last_activity_ms = millis();
 
   sendTelnetMsg(sock, "\r\n[Step 1: Light (조명)]\r\n");
-  sendTelnetMsg(sock, ">> Please operate 'Light' on your wallpad or wall switch now...\r\n");
+  sendTelnetMsg(sock, ">> Please TURN ON and TURN OFF 'Light' on your wallpad/switch now...\r\n");
   sendTelnetMsg(sock, ">> (Waiting for packet transaction... 45s timeout | Enter: Skip | 'q': Abort)\r\n");
 }
 

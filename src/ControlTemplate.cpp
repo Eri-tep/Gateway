@@ -33,7 +33,7 @@ bool SlotCoverage::isFullyCovered() const {
             temp_while_off_seen && temp_while_away_seen);
 
   case DeviceClass::VENT:
-    return (power_on_seen && power_off_seen && speed_l1_seen && speed_l2_seen && speed_l3_seen);
+    return (power_on_seen && power_off_seen && speed_l1_seen);
 
   case DeviceClass::AIRCON:
     return (power_on_seen && power_off_seen && temp_set_seen &&
@@ -501,44 +501,32 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->coverage.valve_close_seen = true;
       grp->coverage.power_off_seen = true;
     } else if (grp->coverage.dev_class == DeviceClass::VENT) {
-      // 전열교환기(환기): 단일 바이트 제어 슬롯에서 전원 및 풍량 이산 토큰을 동적 관측
-      // 하드코딩 없이 버스에서 관측되는 값을 level_tokens 배열에 순차적으로 동적 등록
-      grp->speed_slot.discovered = true;
-      grp->speed_slot.action_offset = act_off;
-      grp->speed_slot.sample_count++;
-
-      // 기존 등록 여부 확인
-      bool token_exists = false;
-      for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
-        if (grp->speed_slot.level_tokens[k] == cmd_val) {
-          token_exists = true;
-          break;
-        }
-      }
-      if (!token_exists && grp->speed_slot.level_count < 4) {
-        grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
-        grp->speed_slot.min_val = 1;
-        grp->speed_slot.max_val = grp->speed_slot.level_count;
-      }
-
-      // 관측된 개수에 맞춰 순차적으로 레벨 로드맵 활성화
-      if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
-      if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
-      if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
-
-      // 전원 슬롯과의 연동: 최초 토큰을 ON 토큰으로 채택
-      grp->power_slot.discovered = true;
-      grp->power_slot.action_offset = act_off;
-      if (!grp->coverage.power_on_seen) {
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-      }
-    } else {
+      // 전열교환기(환기): 전원 슬롯 우선 학습 후 추가 관측치를 풍량 레벨로 점진 학습
       grp->power_slot.discovered = true;
       grp->power_slot.action_offset = act_off;
       grp->power_slot.sample_count++;
 
-      if (!grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
+      // ACK- -> ACK+ 물리 상태 전이 기반 ON/OFF 판별
+      int state_dir = 0;
+      if (has_before && ack_before.length == ack_after.length && act_off < ack_after.length) {
+        uint8_t pre_st = ack_before.data[act_off];
+        uint8_t post_st = ack_after.data[act_off];
+        if (pre_st == 0x01 && (post_st == 0x02 || post_st == 0x00)) {
+          state_dir = -1; // ON -> OFF
+        } else if ((pre_st == 0x02 || pre_st == 0x00) && post_st == 0x01) {
+          state_dir = +1; // OFF -> ON
+        } else if (pre_st < post_st) {
+          state_dir = (cmd_val == 0) ? -1 : +1;
+        }
+      }
+
+      if (state_dir == -1) {
+        grp->power_slot.off_val = cmd_val;
+        grp->coverage.power_off_seen = true;
+      } else if (state_dir == +1) {
+        grp->power_slot.on_val = cmd_val;
+        grp->coverage.power_on_seen = true;
+      } else if (!grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
         if (cmd_val == 1 || cmd_val == 0xFF) {
           grp->power_slot.on_val = cmd_val;
           grp->coverage.power_on_seen = true;
@@ -546,15 +534,86 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
           grp->power_slot.off_val = cmd_val;
           grp->coverage.power_off_seen = true;
         }
-      } else if (grp->coverage.power_on_seen && cmd_val != grp->power_slot.on_val) {
+      } else if (grp->coverage.power_on_seen && !grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
         grp->power_slot.off_val = cmd_val;
         grp->coverage.power_off_seen = true;
-      } else if (grp->coverage.power_off_seen && cmd_val != grp->power_slot.off_val) {
+      } else if (grp->coverage.power_off_seen && !grp->coverage.power_on_seen && cmd_val != grp->power_slot.off_val) {
         grp->power_slot.on_val = cmd_val;
         grp->coverage.power_on_seen = true;
       } else {
-        if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
-        else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
+        // 전원 ON/OFF 확정 이후 관측되는 값 또는 켜진 상태에서의 토큰은 풍량(Speed) 레벨로 동적 축적
+        if (cmd_val != grp->power_slot.off_val) {
+          grp->speed_slot.discovered = true;
+          grp->speed_slot.action_offset = act_off;
+          grp->speed_slot.sample_count++;
+
+          bool token_exists = false;
+          for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
+            if (grp->speed_slot.level_tokens[k] == cmd_val) {
+              token_exists = true;
+              break;
+            }
+          }
+          if (!token_exists && grp->speed_slot.level_count < 4) {
+            grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
+            grp->speed_slot.min_val = 1;
+            grp->speed_slot.max_val = grp->speed_slot.level_count;
+          }
+          if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
+          if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
+          if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
+        }
+      }
+    } else {
+      grp->power_slot.discovered = true;
+      grp->power_slot.action_offset = act_off;
+      grp->power_slot.sample_count++;
+
+      // ACK- -> ACK+ 물리 상태 전이 기반 ON/OFF 판별
+      int state_dir = 0; // +1: ON(켜짐), -1: OFF(꺼짐)
+      if (has_before && ack_before.length == ack_after.length && act_off < ack_after.length) {
+        uint8_t pre_st = ack_before.data[act_off];
+        uint8_t post_st = ack_after.data[act_off];
+        if (pre_st == 0x01 && (post_st == 0x02 || post_st == 0x00)) {
+          state_dir = -1; // ON -> OFF
+        } else if ((pre_st == 0x02 || pre_st == 0x00) && post_st == 0x01) {
+          state_dir = +1; // OFF -> ON
+        } else if (pre_st < post_st) {
+          // 일반적인 상태 증가 또는 켜짐
+          state_dir = (cmd_val == 0) ? -1 : +1;
+        }
+      }
+
+      if (state_dir == -1) {
+        grp->power_slot.off_val = cmd_val;
+        grp->coverage.power_off_seen = true;
+      } else if (state_dir == +1) {
+        grp->power_slot.on_val = cmd_val;
+        grp->coverage.power_on_seen = true;
+      } else {
+        // 단독 패킷이거나 ACK 전이 정보가 없을 때
+        if (!grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
+          if (cmd_val == 1 || cmd_val == 0xFF) {
+            grp->power_slot.on_val = cmd_val;
+            grp->coverage.power_on_seen = true;
+          } else {
+            grp->power_slot.off_val = cmd_val;
+            grp->coverage.power_off_seen = true;
+          }
+        } else if (grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
+          if (cmd_val != grp->power_slot.on_val) {
+            grp->power_slot.off_val = cmd_val;
+            grp->coverage.power_off_seen = true;
+          }
+        } else if (grp->coverage.power_off_seen && !grp->coverage.power_on_seen) {
+          if (cmd_val != grp->power_slot.off_val) {
+            grp->power_slot.on_val = cmd_val;
+            grp->coverage.power_on_seen = true;
+          }
+        } else {
+          if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
+          else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
+        }
       }
     }
   } else if (diff_count >= 2) {
@@ -564,28 +623,55 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     uint8_t cmd_val = diff_vals[1];
 
     if (grp->coverage.dev_class == DeviceClass::VENT || grp->coverage.dev_class == DeviceClass::AIRCON) {
-      grp->speed_slot.discovered = true;
-      grp->speed_slot.category_offset = cat_off;
-      grp->speed_slot.category_val = cat_val;
-      grp->speed_slot.action_offset = act_off;
-      grp->speed_slot.sample_count++;
+      if (grp->coverage.dev_class == DeviceClass::VENT) {
+        grp->power_slot.discovered = true;
+        grp->power_slot.category_offset = cat_off;
+        grp->power_slot.category_val = cat_val;
+        grp->power_slot.action_offset = act_off;
+        grp->power_slot.sample_count++;
 
-      bool token_exists = false;
-      for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
-        if (grp->speed_slot.level_tokens[k] == cmd_val) {
-          token_exists = true;
-          break;
+        if (!grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
+          if (cmd_val == 1 || cmd_val == 0xFF) {
+            grp->power_slot.on_val = cmd_val;
+            grp->coverage.power_on_seen = true;
+          } else {
+            grp->power_slot.off_val = cmd_val;
+            grp->coverage.power_off_seen = true;
+          }
+        } else if (grp->coverage.power_on_seen && !grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val) {
+          grp->power_slot.off_val = cmd_val;
+          grp->coverage.power_off_seen = true;
+        } else if (grp->coverage.power_off_seen && !grp->coverage.power_on_seen && cmd_val != grp->power_slot.off_val) {
+          grp->power_slot.on_val = cmd_val;
+          grp->coverage.power_on_seen = true;
         }
       }
-      if (!token_exists && grp->speed_slot.level_count < 4) {
-        grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
-        grp->speed_slot.min_val = 1;
-        grp->speed_slot.max_val = grp->speed_slot.level_count;
-      }
 
-      if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
-      if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
-      if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
+      // 풍량 슬롯: OFF 값이 아닌 토큰을 레벨 토큰으로 학습
+      if (grp->coverage.dev_class != DeviceClass::VENT || cmd_val != grp->power_slot.off_val) {
+        grp->speed_slot.discovered = true;
+        grp->speed_slot.category_offset = cat_off;
+        grp->speed_slot.category_val = cat_val;
+        grp->speed_slot.action_offset = act_off;
+        grp->speed_slot.sample_count++;
+
+        bool token_exists = false;
+        for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
+          if (grp->speed_slot.level_tokens[k] == cmd_val) {
+            token_exists = true;
+            break;
+          }
+        }
+        if (!token_exists && grp->speed_slot.level_count < 4) {
+          grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
+          grp->speed_slot.min_val = 1;
+          grp->speed_slot.max_val = grp->speed_slot.level_count;
+        }
+
+        if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
+        if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
+        if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
+      }
     } else if (cmd_val >= 10 && cmd_val <= 40) {
       // 연속 수치값 (온도 설정 등)
       grp->temp_slot.discovered = true;
@@ -633,14 +719,53 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->power_slot.category_val = cat_val;
       grp->power_slot.action_offset = act_off;
       grp->power_slot.sample_count++;
-      if (!grp->coverage.power_on_seen) {
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-      } else if (cmd_val != grp->power_slot.on_val) {
+
+      // ACK- -> ACK+ 물리 상태 전이 기반 ON/OFF 판별
+      int state_dir = 0; // +1: ON(켜짐), -1: OFF(꺼짐)
+      if (has_before && ack_before.length == ack_after.length && act_off < ack_after.length) {
+        uint8_t pre_st = ack_before.data[act_off];
+        uint8_t post_st = ack_after.data[act_off];
+        if (pre_st == 0x01 && (post_st == 0x02 || post_st == 0x00)) {
+          state_dir = -1; // ON -> OFF
+        } else if ((pre_st == 0x02 || pre_st == 0x00) && post_st == 0x01) {
+          state_dir = +1; // OFF -> ON
+        } else if (pre_st < post_st) {
+          state_dir = (cmd_val == 0) ? -1 : +1;
+        }
+      }
+
+      if (state_dir == -1) {
         grp->power_slot.off_val = cmd_val;
         grp->coverage.power_off_seen = true;
+      } else if (state_dir == +1) {
+        grp->power_slot.on_val = cmd_val;
+        grp->coverage.power_on_seen = true;
+      } else {
+        if (!grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
+          if (cmd_val == 1 || cmd_val == 0xFF) {
+            grp->power_slot.on_val = cmd_val;
+            grp->coverage.power_on_seen = true;
+          } else {
+            grp->power_slot.off_val = cmd_val;
+            grp->coverage.power_off_seen = true;
+          }
+        } else if (grp->coverage.power_on_seen && !grp->coverage.power_off_seen) {
+          if (cmd_val != grp->power_slot.on_val) {
+            grp->power_slot.off_val = cmd_val;
+            grp->coverage.power_off_seen = true;
+          }
+        } else if (grp->coverage.power_off_seen && !grp->coverage.power_on_seen) {
+          if (cmd_val != grp->power_slot.off_val) {
+            grp->power_slot.on_val = cmd_val;
+            grp->coverage.power_on_seen = true;
+          }
+        } else {
+          if (cmd_val == grp->power_slot.on_val) grp->coverage.power_on_seen = true;
+          else if (cmd_val == grp->power_slot.off_val) grp->coverage.power_off_seen = true;
+        }
       }
-      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && cat_val != 0) {
+
+      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && cat_val != 0 && cmd_val != grp->power_slot.on_val && cmd_val != grp->power_slot.off_val) {
         grp->coverage.away_mode_seen = true;
       }
     }
