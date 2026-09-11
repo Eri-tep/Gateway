@@ -18,6 +18,11 @@
       "version": 1
     },
     {
+      "component": "main",
+      "capability": "digituniverse06711.childDeviceManager",
+      "version": 1
+    },
+    {
       "component": "wallpad",
       "capability": "switch",
       "version": 1

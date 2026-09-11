@@ -1,0 +1,41 @@
+{
+  "name": "Child Device Manager",
+  "attributes": {
+    "action": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "add",
+              "remove"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "value"
+        ]
+      }
+    }
+  },
+  "commands": {
+    "setAction": {
+      "arguments": [
+        {
+          "name": "action",
+          "schema": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "add",
+              "remove"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

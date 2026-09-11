@@ -120,4 +120,11 @@ function GatewayClient.set_uart_config(ip, port, ch, baud, format)
   })
 end
 
+function GatewayClient.doorphone_action(ip, port, action)
+  return GatewayClient.send_rpc(ip, port, {
+    cmd = "doorphone_action",
+    action = action
+  })
+end
+
 return GatewayClient

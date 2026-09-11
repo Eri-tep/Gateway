@@ -169,6 +169,93 @@ function CommandHandlers.handle_start_ota(driver, device, command)
   end, "ota_resume_timer")
 end
 
+-- ============================================================================
+-- Child Device Manager 드롭다운 액션 핸들러 (Add / Remove / Idle)
+-- ============================================================================
+
+local CHILD_DOORPHONE_ID = "esp32_gateway_doorphone_child"
+
+function CommandHandlers.handle_child_device_action(driver, device, command)
+  local action = (command.args and command.args.action) or "idle"
+  local comp_main = device.profile.components["main"]
+  local cap_mgr = capabilities["digituniverse06711.childDeviceManager"]
+
+  log.info(string.format("🎛️ [CMD] Child Device Manager Action requested: %s", tostring(action)))
+
+  if cap_mgr and comp_main then
+    device:emit_component_event(comp_main, cap_mgr.action({ value = action }))
+  end
+
+  if action == "add" then
+    local exists = false
+    for _, dev in ipairs(driver:get_devices()) do
+      if dev.device_network_id == CHILD_DOORPHONE_ID then
+        exists = true
+        break
+      end
+    end
+
+    if not exists then
+      log.info("🚪 [CHILD] Creating Doorphone Child Device...")
+      local success, err = driver:try_create_device({
+        type = "EDGE_CHILD",
+        label = "도어폰",
+        profile = "doorphone-device",
+        parent_device_id = device.id,
+        parent_assigned_child_key = "doorphone"
+      })
+      if not success then
+        log.error("❌ [CHILD] Failed to create doorphone child device: " .. tostring(err))
+      end
+    else
+      log.info("ℹ️ [CHILD] Doorphone child device already exists")
+    end
+
+    -- 1.5초 후 자동으로 Idle 복귀
+    device.thread:call_with_delay(1.5, function()
+      if cap_mgr and comp_main then
+        device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
+      end
+    end)
+  elseif action == "remove" then
+    log.info("🗑️ [CHILD] Removing Doorphone Child Device...")
+    for _, dev in ipairs(driver:get_devices()) do
+      if dev.parent_assigned_child_key == "doorphone" or dev.device_network_id == CHILD_DOORPHONE_ID then
+        dev:try_delete()
+        log.info("✅ [CHILD] Doorphone child device deleted: " .. tostring(dev.label))
+      end
+    end
+
+    -- 1.5초 후 자동으로 Idle 복귀
+    device.thread:call_with_delay(1.5, function()
+      if cap_mgr and comp_main then
+        device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
+      end
+    end)
+  end
+end
+
+-- ============================================================================
+-- Doorphone Momentary Push 핸들러 (자식 기기 문열림 제어)
+-- ============================================================================
+
+function CommandHandlers.handle_momentary_push(driver, device, command)
+  local comp_id = command.component or "main"
+  log.info(string.format("🚪 [DOORPHONE] Door Open requested on component: %s", comp_id))
+
+  -- 부모(게이트웨이) 기기 찾기
+  local parent_device = device:get_parent_device() or device
+  local ip = parent_device.preferences.gatewayIp or "172.30.1.3"
+  local port = parent_device.preferences.gatewayPort or 8900
+
+  local action = (comp_id == "lobby") and "open_lobby" or "open_front"
+  log.info(string.format("🚪 [DOORPHONE] Dispatching 3-step sequence RPC: %s to %s:%d", action, ip, port))
+  local res, err = gateway_client.doorphone_action(ip, port, action)
+  if not res then
+    log.error("❌ [DOORPHONE] Doorphone action failed: " .. tostring(err))
+  end
+end
+
 CommandHandlers.refresh_telemetry = refresh_telemetry
 
 return CommandHandlers

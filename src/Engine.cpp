@@ -1488,6 +1488,19 @@ void Task_Ch4(void *pvParameters) {
           if (!is_debounce) {
             last_pkt = packet;
             last_pkt_ms = now;
+
+            // 도어폰 초인종(벨) 수신 상태 감지
+            if (packet.length >= 2) {
+              uint8_t opcode = packet.data[1];
+              if (opcode == 0xB5) { // BELL_DOOR
+                g_doorphone_state.front_bell.store(true, std::memory_order_release);
+                g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
+              } else if (opcode == 0x5A || opcode == 0x5F) { // BELL_LOBBY or CALL_LOBBY
+                g_doorphone_state.lobby_bell.store(true, std::memory_order_release);
+                g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
+              }
+            }
+
             xQueueSend(g_ch4_to_tcp_queue, &packet, 0);
             g_telnet_tracer.trace(4, false, TraceType::RMT, packet);
             g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);

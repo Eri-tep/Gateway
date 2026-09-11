@@ -1,0 +1,25 @@
+name: doorphone-device
+components:
+  - id: main
+    label: "Doorphone"
+    capabilities:
+      - id: momentary
+        version: 1
+      - id: doorbell
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: DoorBell
+
+  - id: lobby
+    label: "Lobby"
+    capabilities:
+      - id: momentary
+        version: 1
+    categories:
+      - name: DoorBell
+
+metadata:
+  vid: "0097d2bf-4627-3e9c-a8f9-0bd522ba99a4"
+  mnmn: "SmartThingsCommunity"

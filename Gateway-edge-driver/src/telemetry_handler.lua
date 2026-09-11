@@ -406,6 +406,30 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_ota, cap_ostate.build({ value = build_str }))
   end
 
+  -- ═══════════════════════════════════════════════════════════════════════════
+  -- DOORPHONE CHILD DEVICE: 초인종 벨(호출) 수신 이벤트 전파
+  -- ═══════════════════════════════════════════════════════════════════════════
+  if data.doorphone then
+    local front_bell = data.doorphone.front_bell
+    local lobby_bell = data.doorphone.lobby_bell
+    if front_bell or lobby_bell then
+      log.info(string.format("🔔 [DOORPHONE EVENT] Doorbell Ringing detected! (Front: %s, Lobby: %s)",
+                             tostring(front_bell), tostring(lobby_bell)))
+      for _, dev in ipairs(driver:get_devices()) do
+        if dev.parent_assigned_child_key == "doorphone" then
+          local c_main = dev.profile.components["main"]
+          if c_main and capabilities.doorbell then
+            dev:emit_component_event(c_main, capabilities.doorbell.doorbell.state.ringing())
+            -- 5초 후 다시 idle로 원복
+            dev.thread:call_with_delay(5, function()
+              dev:emit_component_event(c_main, capabilities.doorbell.doorbell.state.idle())
+            end)
+          end
+        end
+      end
+    end
+  end
+
   log.info("📊 ═══════════════════════════════════════════════════════════════════════")
 end
 

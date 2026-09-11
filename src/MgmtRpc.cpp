@@ -448,7 +448,16 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
                        static_cast<unsigned>(i + 1), time_buf, e.reason, up_str);
     }
   }
-  out.append("]}}");
+  out.append("],");
+
+  // Doorphone State
+  bool f_bell = g_doorphone_state.front_bell.load(std::memory_order_relaxed);
+  bool l_bell = g_doorphone_state.lobby_bell.load(std::memory_order_relaxed);
+  uint32_t b_ms = g_doorphone_state.last_bell_ms.load(std::memory_order_relaxed);
+  out.appendFormat("\"doorphone\":{\"front_bell\":%s,\"lobby_bell\":%s,\"last_bell_ms\":%u}",
+                   f_bell ? "true" : "false", l_bell ? "true" : "false", static_cast<unsigned>(b_ms));
+
+  out.append("}}");
 }
 
 // ============================================================================
@@ -782,6 +791,72 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       }
     }
     const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid ch (1-4), baud (1200-921600), or format (8N1/8E1/8O1/8N2)\"}\n";
+    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+    return;
+  }
+
+  // 14. doorphone_action (SmartThings / RPC Doorphone 3-Step Sequence Controller)
+  if (strcasecmp(cmd, "doorphone_action") == 0) {
+    char action_buf[32] = {0};
+    findJsonStringValue(json_str, "action", action_buf, sizeof(action_buf));
+
+    bool is_open_front = (strcasecmp(action_buf, "open_front") == 0 || strcasecmp(action_buf, "open") == 0);
+    bool is_open_lobby = (strcasecmp(action_buf, "open_lobby") == 0);
+
+    if (is_open_front || is_open_lobby) {
+      uint8_t op_call = is_open_front ? 0xB9 : 0x5F;
+      uint8_t op_open = is_open_front ? 0xB4 : 0x61;
+      uint8_t op_end  = is_open_front ? 0xB8 : 0x60;
+
+      uint32_t packed_ops = (static_cast<uint32_t>(op_call)) |
+                            (static_cast<uint32_t>(op_open) << 8) |
+                            (static_cast<uint32_t>(op_end) << 16);
+
+      xTaskCreate([](void *param) {
+        uint32_t ops = reinterpret_cast<uintptr_t>(param);
+        uint8_t c_call = static_cast<uint8_t>(ops & 0xFF);
+        uint8_t c_open = static_cast<uint8_t>((ops >> 8) & 0xFF);
+        uint8_t c_end  = static_cast<uint8_t>((ops >> 16) & 0xFF);
+
+        auto send_dp = [](uint8_t op) {
+          StaticPacket pkt{4, 5};
+          pkt.data[0] = 0x7F;
+          pkt.data[1] = op;
+          pkt.data[2] = 0x00;
+          pkt.data[3] = 0x00;
+          pkt.data[4] = 0xEE;
+          if (g_ch4_passthrough_queue) {
+            xQueueSend(g_ch4_passthrough_queue, &pkt, 0);
+          }
+        };
+
+        // 1단계: 통화 시작
+        send_dp(c_call);
+        vTaskDelay(pdMS_TO_TICKS(350));
+
+        // 2단계: 문열림
+        send_dp(c_open);
+        vTaskDelay(pdMS_TO_TICKS(750));
+
+        // 3단계: 통화 종료
+        send_dp(c_end);
+
+        // 초인종 벨 플래그 리셋
+        g_doorphone_state.front_bell.store(false, std::memory_order_release);
+        g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
+
+        vTaskDelete(nullptr);
+      }, "DP_Seq", 2048, reinterpret_cast<void *>(static_cast<uintptr_t>(packed_ops)), 2, nullptr);
+
+      char ok_msg[128];
+      snprintf(ok_msg, sizeof(ok_msg),
+               "{\"res\":\"ok\",\"action\":\"%s\",\"msg\":\"Doorphone sequence triggered (Call -> Open -> End)\"}\n",
+               action_buf);
+      send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    const char *err_msg = "{\"res\":\"error\",\"msg\":\"Unknown doorphone action (Use open_front or open_lobby)\"}\n";
     send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
     return;
   }

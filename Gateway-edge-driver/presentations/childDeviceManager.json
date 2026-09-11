@@ -1,0 +1,60 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{action.value}}"
+      }
+    ],
+    "actions": []
+  },
+  "detailView": [
+    {
+      "label": "Child Devices",
+      "displayType": "list",
+      "list": {
+        "command": {
+          "name": "setAction",
+          "alternatives": [
+            {
+              "key": "idle",
+              "value": "Idle",
+              "type": "inactive"
+            },
+            {
+              "key": "add",
+              "value": "Add",
+              "type": "active"
+            },
+            {
+              "key": "remove",
+              "value": "Remove",
+              "type": "active"
+            }
+          ],
+          "argumentType": "string"
+        },
+        "state": {
+          "value": "action.value",
+          "valueType": "string",
+          "alternatives": [
+            {
+              "key": "idle",
+              "value": "Idle",
+              "type": "inactive"
+            },
+            {
+              "key": "add",
+              "value": "Add",
+              "type": "active"
+            },
+            {
+              "key": "remove",
+              "value": "Remove",
+              "type": "active"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

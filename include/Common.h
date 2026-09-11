@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.5.9";
+constexpr const char *FIRMWARE_VERSION = "v1.6.0";
 } // namespace Config
 
 namespace Config::Task {
@@ -545,7 +545,15 @@ struct FramingTracker {
             etx == candidate_etx.load(std::memory_order_relaxed));
   }
 };
+
+struct DoorphoneState {
+  std::atomic<bool> front_bell{false};
+  std::atomic<bool> lobby_bell{false};
+  std::atomic<uint32_t> last_bell_ms{0};
+};
 } // namespace Config::Doorphone
+
+extern Config::Doorphone::DoorphoneState g_doorphone_state;
 
 namespace Config::Devices {
 inline constexpr uint8_t DEV_HEAT_EXCHANGER = 0x2B; // 전열교환기 (ERV) ID

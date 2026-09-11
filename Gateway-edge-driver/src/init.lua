@@ -22,12 +22,30 @@ local function schedule_polling_timer(driver, device)
 end
 
 local function device_init(driver, device)
-  log.info("Initializing ESP32 Gateway Device: " .. tostring(device.label))
+  log.info("Initializing Device: " .. tostring(device.label) .. " (Type: " .. tostring(device.type) .. ")")
+
+  -- 자식 기기(도어폰)인 경우 초기 상태 설정
+  if device.parent_assigned_child_key == "doorphone" then
+    local comp_main = device.profile.components["main"]
+    if comp_main and capabilities.doorbell then
+      device:emit_component_event(comp_main, capabilities.doorbell.doorbell.state.idle())
+    end
+    return
+  end
+
   device:set_field("__state_cache", nil, { persist = true })
   device:try_update_metadata({ profile = "gateway-ultra" })
   if not device:get_field("ota_channel") then
     device:set_field("ota_channel", device.preferences.otaChannel or "main")
   end
+
+  -- childDeviceManager 초기 상태 idle 설정
+  local comp_main = device.profile.components["main"]
+  local cap_mgr = capabilities["digituniverse06711.childDeviceManager"]
+  if cap_mgr and comp_main then
+    device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
+  end
+
   schedule_polling_timer(driver, device)
   command_handlers.refresh_telemetry(driver, device)
 end
@@ -163,6 +181,12 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     [capabilities.switch.ID] = {
       [capabilities.switch.commands.on.NAME] = command_handlers.handle_switch_on,
       [capabilities.switch.commands.off.NAME] = command_handlers.handle_switch_off
+    },
+    ["digituniverse06711.childDeviceManager"] = {
+      ["setAction"] = command_handlers.handle_child_device_action
+    },
+    [capabilities.momentary.ID] = {
+      [capabilities.momentary.commands.push.NAME] = command_handlers.handle_momentary_push
     }
   }
 })
