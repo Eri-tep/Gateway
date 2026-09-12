@@ -74,6 +74,13 @@ struct SlotCoverage {
   bool isFullyCovered() const;
 };
 
+enum class ThermoOffTempBehavior : uint8_t {
+  UNKNOWN = 0,
+  AUTO_POWER_ON,    // 꺼진 상태에서 온도 변경 시 자동으로 전원이 켜짐
+  PASSIVE_MEMORY,   // 꺼진 상태로 온도가 메모리에만 저장됨
+  LOCKED_IGNORE     // 꺼진 상태에서는 조작 불가 (패킷 미발생)
+};
+
 // ============================================================================
 // GROUP CONTROL TEMPLATE (CONTROL BLUEPRINT)
 // ============================================================================
@@ -101,6 +108,7 @@ struct GroupControlTemplate {
   uint8_t away_fixed_temp{0xFF}; // 외출 시 고정되는 설정온도 (예: 10℃)
   bool away_has_dedicated_temp{false}; // 외출 시 특정 온도로 고정 여부
   bool temp_recall_verified{false};    // 켜기/외출해제 시 저장된 온도로 자동 복원 검증 완료
+  ThermoOffTempBehavior off_temp_behavior{ThermoOffTempBehavior::UNKNOWN};
 
   // 직전 단계 학습 원본 패킷 (CTL- / CTL+, ACK- / ACK+)
   uint8_t ctl_before_len{0};

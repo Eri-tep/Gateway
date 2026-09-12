@@ -749,6 +749,7 @@ void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool
   if (next_idx < WIZARD_TOTAL_STEPS) {
     s->wizard_step = next_idx + 1;
     s->wizard_dev_id = 0;
+    s->wizard_sub_phase = 0;
     s->wizard_step_start_ms = millis();
     s->last_activity_ms = millis();
 
@@ -764,7 +765,7 @@ void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool
 
     sendTelnetMsgf(s->sock, "\r\n[%s]\r\n", s_wizard_targets[next_idx].step_name);
     if (s_wizard_targets[next_idx].cls == DeviceClass::THERMOSTAT) {
-      sendTelnetMsgf(s->sock, ">> Please TURN ON, TURN OFF, and change Target Temp for '%s' on your wallpad now...\r\n",
+      sendTelnetMsgf(s->sock, ">> Please TURN ON '%s' on your wallpad now...\r\n",
                      s_wizard_targets[next_idx].name);
     } else if (s_wizard_targets[next_idx].cls == DeviceClass::VENT) {
       sendTelnetMsgf(s->sock, ">> Please TURN ON, TURN OFF, and change Fan Speed for '%s' on your wallpad now...\r\n",
@@ -797,6 +798,14 @@ void TelnetManager::handleWizardInput(TelnetSession *s, char c) {
     sendTelnetMsg(s->sock, ">> [ABORT] Learning wizard aborted by user.\r\n");
     s->wizard_step = 0;
   } else if (c == '\r' || c == '\n') {
+    uint8_t cur_idx = s->wizard_step - 1;
+    if (cur_idx < WIZARD_TOTAL_STEPS && s_wizard_targets[cur_idx].cls == DeviceClass::THERMOSTAT && s->wizard_sub_phase == 1) {
+      // 외출 모드 스킵 후 바로 전원 OFF 단계로 안내
+      s->wizard_sub_phase = 2;
+      sendTelnetMsg(s->sock, ">> [SKIP] Away mode skipped. Please now TURN OFF 'Thermo'...\r\n");
+      s->wizard_step_start_ms = millis();
+      return;
+    }
     handleWizardStepAdvance(s, true, false);
   }
 }
@@ -840,28 +849,45 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
         bool extra_done = true;
 
         if (tgt.cls == DeviceClass::THERMOSTAT) {
-          extra_done = grp->coverage.temp_set_seen || grp->coverage.away_mode_seen;
-        } else if (tgt.cls == DeviceClass::VENT) {
-          // 환기: 최소 1개 이상의 풍량 레벨(speed_slot)이 학습되었는지 확인
-          extra_done = grp->speed_slot.discovered && (grp->speed_slot.level_count >= 1);
-        }
-
-        if (!on_done || !off_done || !extra_done) {
+          // 4단계 순차 유도: [1] ON -> [2] Temp Change -> [3] Away (or skip) -> [4] OFF
           if (!on_done) {
             sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
                            dev_id, tgt.name, tgt.name);
-          } else if (!off_done) {
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",
-                           dev_id, tgt.name, tgt.name);
-          } else if (tgt.cls == DeviceClass::THERMOSTAT) {
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] DevID 0x%02X (%s) ON+OFF recorded! Please change Target Temperature (희망온도 조절) for '%s'...\r\n",
-                           dev_id, tgt.name, tgt.name);
-          } else if (tgt.cls == DeviceClass::VENT) {
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] DevID 0x%02X (%s) ON+OFF recorded! Please change Fan Speed (풍량 조절) for '%s'...\r\n",
-                           dev_id, tgt.name, tgt.name);
+            s.wizard_step_start_ms = millis();
+            continue;
           }
-          s.wizard_step_start_ms = millis(); // 타이머 리셋
-          continue; // 아직 미완료이므로 다음 단계로 전이하지 않음!
+          if (!grp->coverage.temp_set_seen) {
+            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please change Target Temperature (희망온도 조절) for '%s'...\r\n",
+                           dev_id, tgt.name, tgt.name);
+            s.wizard_step_start_ms = millis();
+            continue;
+          }
+          if (!grp->coverage.away_mode_seen && s.wizard_sub_phase == 0) {
+            s.wizard_sub_phase = 1;
+            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] Target Temp recorded! Please press 'Away (외출)' mode on wallpad (or press Enter to skip)...\r\n");
+            s.wizard_step_start_ms = millis();
+            continue;
+          }
+          if (!off_done) {
+            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] Please now TURN OFF '%s'...\r\n", tgt.name);
+            s.wizard_step_start_ms = millis();
+            continue;
+          }
+        } else {
+          if (!on_done || !off_done || !extra_done) {
+            if (!on_done) {
+              sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            } else if (!off_done) {
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            } else if (tgt.cls == DeviceClass::VENT) {
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] DevID 0x%02X (%s) ON+OFF recorded! Please change Fan Speed (풍량 조절) for '%s'...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            }
+            s.wizard_step_start_ms = millis(); // 타이머 리셋
+            continue; // 아직 미완료이므로 다음 단계로 전이하지 않음!
+          }
         }
       }
 

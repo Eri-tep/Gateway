@@ -1986,6 +1986,11 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       out.append("  [AWY] Away Temp     : None\r\n");
     }
     out.appendFormat("  [RCL] Temp Recall   : %s\r\n", grp->temp_recall_verified ? "Verified" : "Unverified");
+    const char *off_str = "Unknown";
+    if (grp->off_temp_behavior == ThermoOffTempBehavior::AUTO_POWER_ON) off_str = "Auto Power-ON";
+    else if (grp->off_temp_behavior == ThermoOffTempBehavior::PASSIVE_MEMORY) off_str = "Passive Memory";
+    else if (grp->off_temp_behavior == ThermoOffTempBehavior::LOCKED_IGNORE) off_str = "Locked / Ignore";
+    out.appendFormat("  [OFF] OFF-State Temp: %s\r\n", off_str);
   }
 
   const char *stat_str = "WAITING";

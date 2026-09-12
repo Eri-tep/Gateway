@@ -29,8 +29,8 @@ bool SlotCoverage::isFullyCovered() const {
     return call_seen || valve_close_seen;
 
   case DeviceClass::THERMOSTAT:
-    return (power_on_seen && power_off_seen && temp_set_seen && away_mode_seen &&
-            temp_while_off_seen && temp_while_away_seen);
+    // 필수 제어 슬롯(ON, OFF, 온도설정) 충족 시 제어 가능 상태로 수렴
+    return (power_on_seen && power_off_seen && temp_set_seen);
 
   case DeviceClass::VENT:
     return (power_on_seen && power_off_seen && speed_l1_seen);
@@ -608,17 +608,46 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         }
       }
     } else {
-      // 온도(SET_TEMP) 슬롯으로 독립 분리
+      // 1) 외출 모드 감지: 고정온도(<=15도 동파방지) 또는 모드 토큰
+      if (cmd_val <= 15 && cmd_val > 0) {
+        grp->away_has_dedicated_temp = true;
+        grp->away_fixed_temp = cmd_val;
+        grp->coverage.away_mode_seen = true;
+      } else if (cat_val == 0x43 || cat_val == 0x42) {
+        grp->coverage.away_mode_seen = true;
+      }
+
+      // 2) 전원이 꺼진 상태(power_off_seen)에서 온도 조작이 들어온 경우
+      if (grp->coverage.power_off_seen && !grp->coverage.temp_while_off_seen) {
+        grp->coverage.temp_while_off_seen = true;
+        if (grp->off_temp_behavior == ThermoOffTempBehavior::UNKNOWN) {
+          // CTL 또는 ACK에서 power_on_val이 동시에 관측되면 AUTO_POWER_ON, 아니면 PASSIVE_MEMORY
+          if (cmd_val == grp->power_slot.on_val) {
+            grp->off_temp_behavior = ThermoOffTempBehavior::AUTO_POWER_ON;
+          } else {
+            grp->off_temp_behavior = ThermoOffTempBehavior::PASSIVE_MEMORY;
+          }
+        }
+      }
+
+      // 3) 설정온도(SET_TEMP) 슬롯으로 독립 분리
       grp->temp_slot.discovered = true;
       grp->temp_slot.action_offset = act_off;
       if (cat_off != 0xFF) {
         grp->temp_slot.category_offset = cat_off;
         grp->temp_slot.category_val = cat_val;
       }
-      if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val) grp->temp_slot.min_val = cmd_val;
-      if (cmd_val > grp->temp_slot.max_val) grp->temp_slot.max_val = cmd_val;
-      grp->temp_slot.sample_count++;
-      grp->coverage.temp_set_seen = true;
+      if (cmd_val >= 16 && cmd_val <= 40) {
+        if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val) grp->temp_slot.min_val = cmd_val;
+        if (cmd_val > grp->temp_slot.max_val) grp->temp_slot.max_val = cmd_val;
+        grp->temp_slot.sample_count++;
+        grp->coverage.temp_set_seen = true;
+
+        // 직전 설정 온도가 기억/복원되는 패턴 감지
+        if (grp->coverage.away_mode_seen || grp->coverage.power_off_seen) {
+          grp->temp_recall_verified = true;
+        }
+      }
     }
   } else if (grp->coverage.dev_class == DeviceClass::VENT) {
     // 환기: 0x40(풍량/전원) vs 0x42(모드) 등 Context 기반 분리
@@ -635,21 +664,24 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       }
       grp->power_slot.sample_count++;
 
+      // 환기: 0x00은 대기/에러일 수 있으므로 0x01(미풍) 이상을 전원 ON으로 우선 채택
       if (!grp->coverage.power_on_seen) {
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-        if (!grp->speed_slot.discovered) {
-          grp->speed_slot.discovered = true;
-          grp->speed_slot.action_offset = act_off;
-          if (cat_off != 0xFF) {
-            grp->speed_slot.category_offset = cat_off;
-            grp->speed_slot.category_val = cat_val;
+        if (cmd_val > 0) {
+          grp->power_slot.on_val = cmd_val;
+          grp->coverage.power_on_seen = true;
+          if (!grp->speed_slot.discovered) {
+            grp->speed_slot.discovered = true;
+            grp->speed_slot.action_offset = act_off;
+            if (cat_off != 0xFF) {
+              grp->speed_slot.category_offset = cat_off;
+              grp->speed_slot.category_val = cat_val;
+            }
+            grp->speed_slot.level_tokens[0] = cmd_val;
+            grp->speed_slot.level_count = 1;
+            grp->speed_slot.min_val = 1;
+            grp->speed_slot.max_val = 1;
+            grp->coverage.speed_l1_seen = true;
           }
-          grp->speed_slot.level_tokens[0] = cmd_val;
-          grp->speed_slot.level_count = 1;
-          grp->speed_slot.min_val = 1;
-          grp->speed_slot.max_val = 1;
-          grp->coverage.speed_l1_seen = true;
         }
       } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val && (cmd_val == 0x00 || cmd_val == 0x02 || cmd_val == 0x04)) {
         grp->power_slot.off_val = cmd_val;
