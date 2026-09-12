@@ -584,6 +584,65 @@ void Ch1_BuildQueryPacket(StaticPacket &out, uint8_t dev_id, uint8_t sub1,
 }
 } // namespace PacketBuilder
 
+DeviceRouteRegistry g_route_registry;
+
+void DeviceRouteRegistry::recordRoute(uint8_t channel_id, int8_t slot_idx,
+                                      uint8_t dev_id, uint8_t sub1,
+                                      uint8_t sub2) {
+  CriticalSectionLocker lock(&_mux);
+  uint32_t now = millis();
+
+  for (size_t i = 0; i < _count; i++) {
+    if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
+        _entries[i].sub2 == sub2) {
+      _entries[i].endpoint.channel_id = channel_id;
+      _entries[i].endpoint.slot_idx = slot_idx;
+      _entries[i].endpoint.last_seen_ms = now;
+      return;
+    }
+  }
+
+  if (_count < MAX_ROUTES) {
+    _entries[_count].dev_id = dev_id;
+    _entries[_count].sub1 = sub1;
+    _entries[_count].sub2 = sub2;
+    _entries[_count].endpoint.channel_id = channel_id;
+    _entries[_count].endpoint.slot_idx = slot_idx;
+    _entries[_count].endpoint.last_seen_ms = now;
+    _count++;
+  }
+}
+
+bool DeviceRouteRegistry::lookupRoute(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                      RouteEndpoint &out_ep) const {
+  CriticalSectionLocker lock(&_mux);
+  for (size_t i = 0; i < _count; i++) {
+    if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
+        _entries[i].sub2 == sub2) {
+      out_ep = _entries[i].endpoint;
+      return true;
+    }
+  }
+  return false;
+}
+
+size_t DeviceRouteRegistry::getRoutes(DeviceRouteEntry *out_buf,
+                                      size_t max_count) const {
+  if (!out_buf || max_count == 0)
+    return 0;
+  CriticalSectionLocker lock(&_mux);
+  size_t copy_cnt = std::min(_count, max_count);
+  for (size_t i = 0; i < copy_cnt; i++) {
+    out_buf[i] = _entries[i];
+  }
+  return copy_cnt;
+}
+
+void DeviceRouteRegistry::clear() {
+  CriticalSectionLocker lock(&_mux);
+  _count = 0;
+}
+
 bool ControlDispatcher::dispatch(StaticPacket &req,
                                  StaticPacket &virtual_ack_out) {
   if (UNLIKELY(req.length < 5))
@@ -600,7 +659,23 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
   }
 
   if (parser->isControlPacket(frame)) {
-    // CH6(앱) / 월패드 제어 명령: 가상 응답 없이 실제 장치로 명령 전달
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+
+    RouteEndpoint ep{1, -1, 0};
+    bool route_known = false;
+    if (has_key) {
+      route_known = g_route_registry.lookupRoute(dev_id, sub1, sub2, ep);
+    }
+
+    // [동적 라우팅] 학습된 경로가 CH5(EW11)인 경우 해당 EW11 TCP 소켓으로 직접 송신
+    if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0) {
+      bool sent = Ew11_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
+      g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP, req);
+      return false;
+    }
+
+    // [기본 라우팅] CH1(물리 RS-485 버스)
     QueueHandle_t q = (req.channel_id == 6) ? g_ch1_vip_queue : g_ch1_control_queue;
     if (!Queue_EnqueueDropHead(q, req)) {
       return false;
@@ -860,6 +935,9 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
     g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
     g_device_repo.updateFromBus(ack);
+    if (dev_id != 0) {
+      g_route_registry.recordRoute(1, -1, dev_id, sub1, sub2);
+    }
     g_auto_probing_engine.feedControlPair(
         span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length),
         span<const uint8_t>(ack.data.data(), ack.length));
@@ -1054,6 +1132,7 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
                                          ack.data.data(), ack.length);
         g_device_repo.updateFromBus(ack);
         g_polling_targets.markVerified(poll_dev_id, poll_sub1, poll_sub2);
+        g_route_registry.recordRoute(1, -1, poll_dev_id, poll_sub1, poll_sub2);
         g_auto_probing_engine.feedOpcodePair(
             span<const uint8_t>(q_pkt.data.data(), q_pkt.length),
             span<const uint8_t>(ack.data.data(), ack.length));

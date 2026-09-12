@@ -762,6 +762,17 @@ static void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data, si
   g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
   g_telnet_tracer.trace(5, false, TraceType::RMT, pkt);
 
+  // [동적 라우팅 학습] 수신된 EW11 패킷에서 Device Key 추출 및 경로 학습
+  auto *parser = WallpadParserFactory::getActiveParser();
+  if (parser) {
+    span<const uint8_t> frame(pkt_data, pkt_len);
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    if (parser->extractDeviceKey(frame, dev_id, sub1, sub2)) {
+      int8_t s_idx = static_cast<int8_t>(slot - g_ew11_slots);
+      g_route_registry.recordRoute(5, s_idx, dev_id, sub1, sub2);
+    }
+  }
+
   // 엘리베이터 및 월패드 호환 패킷은 CH6(스마트싱스/허브 TCP 8899)으로 즉시 실시간 바이패스 브로드캐스트!
   if (slot->dev_type == Ew11DeviceType::WALLPAD_COMPATIBLE) {
     Ch6_SendAck_Direct(pkt);
@@ -1390,6 +1401,21 @@ bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
 
   Ew11_SaveConfig();
   return true;
+}
+
+bool Ew11_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  MutexLocker lock(g_ch5_mutex);
+  auto &slot = g_ew11_slots[slot_idx];
+  if (!slot.enabled || slot.sock < 0 || !slot.is_connected) return false;
+
+  int s = send(slot.sock, pkt.data.data(), pkt.length, MSG_DONTWAIT);
+  if (s == static_cast<int>(pkt.length)) {
+    slot.tx_pkts++;
+    g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  return false;
 }
 
 void Config_ResetDefaults() {

@@ -320,6 +320,57 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
   sendTelnetMsg(sock, "Usage: ew11 [list | set <slot> <ip> [port] [name] [enable] | enable <slot> | disable <slot>]\r\n");
 }
 
+void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
+  int sock = getSock(context);
+  int argc = embeddedCliGetTokenCount(args);
+
+  if (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "clear") == 0) {
+    g_route_registry.clear();
+    sendTelnetMsg(sock, "[OK] Dynamic device ingress routing table cleared.\r\n");
+    return;
+  }
+
+  static DeviceRouteEntry entries[DeviceRouteRegistry::MAX_ROUTES];
+  size_t count = g_route_registry.getRoutes(entries, DeviceRouteRegistry::MAX_ROUTES);
+
+  char buf[2048];
+  AppendBuf out{buf, sizeof(buf)};
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("                 DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)         \r\n");
+  out.append(Fmt::DIV80EQ);
+  out.appendFormat("%-22s %-25s %s\r\n", "Target [DevID:Sub1:Sub2]", "Egress Destination", "Last Seen");
+  out.append(Fmt::DIV80);
+
+  if (count == 0) {
+    out.append("  (No device routes learned yet. Waiting for bus/EW11 packets...)\r\n");
+  } else {
+    uint32_t now = millis();
+    for (size_t i = 0; i < count; i++) {
+      const auto &e = entries[i];
+      char tgt_str[24];
+      snprintf(tgt_str, sizeof(tgt_str), "[0x%02X:%02X:%02X]", e.dev_id, e.sub1, e.sub2);
+
+      char dst_str[32];
+      if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
+        snprintf(dst_str, sizeof(dst_str), "CH#5 Slot %d", e.endpoint.slot_idx);
+      } else {
+        snprintf(dst_str, sizeof(dst_str), "CH#%u", e.endpoint.channel_id);
+      }
+
+      char el_str[20];
+      Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str, sizeof(el_str));
+
+      out.appendFormat("  %-20s -> %-23s (%s ago)\r\n", tgt_str, dst_str, el_str);
+    }
+  }
+
+  out.append(Fmt::DIV80);
+  out.append("Usage: routes        - View learned device routes\r\n");
+  out.append("       routes clear  - Clear routing table cache\r\n\r\n");
+  sendTelnetMsgLen(sock, out.buf, out.offset);
+}
+
 } // namespace ConfigCli
 
 // ============================================================================
@@ -802,6 +853,7 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  ew11 [list]                     Show CH5 EW11 multi-client slot status\r\n");
   out.append("  ew11 set <slot> <ip> [port]     Configure EW11 slot IP & port (Saved to NVS)\r\n");
   out.append("  ew11 enable/disable <slot>      Enable or disable target EW11 client slot\r\n");
+  out.append("  routes [clear]                  Show dynamic device ingress routing table\r\n");
   out.append("  config                          View all runtime configuration parameters\r\n");
   out.append("  config set <key> <val>          Modify a configuration parameter (runtime)\r\n");
   out.append("  config reset                    Reset runtime configuration to system defaults\r\n");

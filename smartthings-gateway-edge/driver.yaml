@@ -1,5 +1,0 @@
-name: Universal Gateway Bridge
-packageKey: com.gateway.universal
-permissions:
-  - lan
-  - discovery

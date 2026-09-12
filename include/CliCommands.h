@@ -50,6 +50,7 @@ namespace ConfigCli {
 void cmdConfig(EmbeddedCli *cli, char *args, void *context);
 void cmdSave(EmbeddedCli *cli, char *args, void *context);
 void cmdEw11(EmbeddedCli *cli, char *args, void *context);
+void cmdRoutes(EmbeddedCli *cli, char *args, void *context);
 void printConfig(int sock);
 void setConfig(void *session_context, const char *key, const char *value);
 } // namespace ConfigCli

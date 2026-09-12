@@ -405,6 +405,7 @@ void TelnetManager::bindCommands(TelnetSession *session) {
       {"config", "View or modify runtime configuration [set|reset]", ConfigCli::cmdConfig},
       {"save", "Save current runtime configuration to NVS flash", ConfigCli::cmdSave},
       {"ew11", "CH5 EW11 multi-client hub config [list|set|enable|disable]", ConfigCli::cmdEw11},
+      {"routes", "Show dynamic device ingress routing table [clear]", ConfigCli::cmdRoutes},
       {"logview", "Persistent reboot history & crash logs [list|<1-20>|last|clear]", SystemCli::cmdLogView},
       {"coredump", "Show crash core dump summary or erase partition [clear]", SystemCli::cmdCoreDump},
       {"ota", "Dual-partition OTA & auto-rollback management [status|rollback|validate]", SystemCli::cmdOta},
