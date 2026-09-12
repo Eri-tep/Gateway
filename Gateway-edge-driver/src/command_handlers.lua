@@ -32,9 +32,41 @@ function CommandHandlers.handle_switch_on(driver, device, command)
   local comp = device.profile.components[comp_id]
   local ip, port = get_connection_info(device)
 
-  log.info(string.format("🔘 [CMD] Switch ON received on component: %s", comp_id))
+  log.info(string.format("🔘 [CMD] Switch ON received on component: %s (Device: %s)", comp_id, tostring(device.label)))
   if comp then
     device:emit_component_event(comp, capabilities.switch.switch.on())
+  end
+
+  -- 자식 기기(도어폰)의 문열림 스위치인 경우
+  if device.parent_assigned_child_key == "doorphone" then
+    local action = (comp_id == "lobby") and "open_lobby" or "open_front"
+    log.info(string.format("🚪 [DOORPHONE] Dispatching 3-step sequence RPC: %s", action))
+
+    -- 부모 게이트웨이 기기 IP/Port 찾기
+    local ip = "172.30.1.3"
+    local port = 8900
+    for _, d in ipairs(driver:get_devices()) do
+      if d.device_network_id == "esp32_wallpad_gateway_ctrl" then
+        ip = d.preferences.gatewayIp or ip
+        port = d.preferences.gatewayPort or port
+        break
+      end
+    end
+
+    local res, err = gateway_client.doorphone_action(ip, port, action)
+    if not res then
+      log.error("❌ [DOORPHONE] Doorphone action failed: " .. tostring(err))
+    else
+      log.info("✅ [DOORPHONE] Doorphone sequence successfully triggered via RPC!")
+    end
+
+    -- 1.5초 후 스위치 OFF 자동 원복
+    device.thread:call_with_delay(1.5, function()
+      if comp then
+        device:emit_component_event(comp, capabilities.switch.switch.off())
+      end
+    end)
+    return
   end
 
   if comp_id == "wallpad" then
@@ -241,18 +273,28 @@ end
 
 function CommandHandlers.handle_momentary_push(driver, device, command)
   local comp_id = command.component or "main"
+  local comp = device.profile.components[comp_id]
   log.info(string.format("🚪 [DOORPHONE] Door Open requested on component: %s", comp_id))
 
-  -- 부모(게이트웨이) 기기 찾기
-  local parent_device = device:get_parent_device() or device
-  local ip = parent_device.preferences.gatewayIp or "172.30.1.3"
-  local port = parent_device.preferences.gatewayPort or 8900
+  -- 부모(게이트웨이) 기기 찾기 (driver 내 LAN 메인 기기 검색)
+  local ip = "172.30.1.3"
+  local port = 8900
+
+  for _, d in ipairs(driver:get_devices()) do
+    if d.device_network_id == "esp32_wallpad_gateway_ctrl" then
+      ip = d.preferences.gatewayIp or ip
+      port = d.preferences.gatewayPort or port
+      break
+    end
+  end
 
   local action = (comp_id == "lobby") and "open_lobby" or "open_front"
   log.info(string.format("🚪 [DOORPHONE] Dispatching 3-step sequence RPC: %s to %s:%d", action, ip, port))
   local res, err = gateway_client.doorphone_action(ip, port, action)
   if not res then
     log.error("❌ [DOORPHONE] Doorphone action failed: " .. tostring(err))
+  else
+    log.info("✅ [DOORPHONE] Doorphone sequence successfully triggered via RPC!")
   end
 end
 

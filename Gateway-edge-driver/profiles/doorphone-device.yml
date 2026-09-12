@@ -1,11 +1,11 @@
 name: doorphone-device
 components:
   - id: main
-    label: "Doorphone"
+    label: "세대 도어"
     capabilities:
-      - id: momentary
+      - id: switch
         version: 1
-      - id: doorbell
+      - id: digituniverse06711.doorCallStatus
         version: 1
       - id: refresh
         version: 1
@@ -13,13 +13,15 @@ components:
       - name: DoorBell
 
   - id: lobby
-    label: "Lobby"
+    label: "로비 도어"
     capabilities:
-      - id: momentary
+      - id: switch
+        version: 1
+      - id: digituniverse06711.doorCallStatus
         version: 1
     categories:
       - name: DoorBell
 
 metadata:
-  vid: "0097d2bf-4627-3e9c-a8f9-0bd522ba99a4"
+  vid: "22990e62-b755-3cf9-a61c-018d0625e233"
   mnmn: "SmartThingsCommunity"

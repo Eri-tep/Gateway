@@ -1,0 +1,42 @@
+{
+  "mnmn": "SmartThingsCommunity",
+  "type": "profile",
+  "dashboard": {
+    "states": [
+      {
+        "component": "main",
+        "capability": "digituniverse06711.doorCallStatus",
+        "version": 1
+      }
+    ],
+    "actions": [
+      {
+        "component": "main",
+        "capability": "switch",
+        "version": 1
+      }
+    ]
+  },
+  "detailView": [
+    {
+      "component": "main",
+      "capability": "switch",
+      "version": 1
+    },
+    {
+      "component": "main",
+      "capability": "digituniverse06711.doorCallStatus",
+      "version": 1
+    },
+    {
+      "component": "lobby",
+      "capability": "switch",
+      "version": 1
+    },
+    {
+      "component": "lobby",
+      "capability": "digituniverse06711.doorCallStatus",
+      "version": 1
+    }
+  ]
+}

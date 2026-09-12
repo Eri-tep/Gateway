@@ -1,0 +1,23 @@
+tag: ko
+components:
+  main:
+    label: "기본"
+preferences:
+  wallpadIp:
+    title: "월패드 게이트웨이 IP"
+    description: "ESP32 RS-485 게이트웨이 IP 주소"
+  wallpadPort:
+    title: "월패드 게이트웨이 포트"
+    description: "ESP32 TCP 서버 포트"
+  txDelay:
+    title: "송신 딜레이 (ms)"
+    description: "연속 패킷 송신 간격"
+  elevatorIp:
+    title: "엘리베이터 EW11 IP"
+    description: "엘리베이터 전용 EW11 IP 주소 (미입력 시 비활성)"
+  elevatorPort:
+    title: "엘리베이터 EW11 포트"
+    description: "엘리베이터 TCP 포트"
+  myFloor:
+    title: "우리집 층수"
+    description: "엘리베이터 도착 알림 층수"

@@ -109,6 +109,11 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     end
   end
 
+  local cap_mgr = capabilities["digituniverse06711.childDeviceManager"]
+  if cap_mgr then
+    emit_event(device, comp_main, cap_mgr.action({ value = "idle" }))
+  end
+
   -- ═══════════════════════════════════════════════════════════════════════════
   -- CARD 2: Wallpad (월패드 프로토콜 & Auto-Probing 리셋)
   -- ═══════════════════════════════════════════════════════════════════════════
@@ -407,24 +412,26 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   end
 
   -- ═══════════════════════════════════════════════════════════════════════════
-  -- DOORPHONE CHILD DEVICE: 초인종 벨(호출) 수신 이벤트 전파
+  -- DOORPHONE CHILD DEVICE: 호출 감지 상태 업데이트 (세대 도어 & 로비 도어)
   -- ═══════════════════════════════════════════════════════════════════════════
   if data.doorphone then
     local front_bell = data.doorphone.front_bell
     local lobby_bell = data.doorphone.lobby_bell
-    if front_bell or lobby_bell then
-      log.info(string.format("🔔 [DOORPHONE EVENT] Doorbell Ringing detected! (Front: %s, Lobby: %s)",
-                             tostring(front_bell), tostring(lobby_bell)))
-      for _, dev in ipairs(driver:get_devices()) do
-        if dev.parent_assigned_child_key == "doorphone" then
-          local c_main = dev.profile.components["main"]
-          if c_main and capabilities.doorbell then
-            dev:emit_component_event(c_main, capabilities.doorbell.doorbell.state.ringing())
-            -- 5초 후 다시 idle로 원복
-            dev.thread:call_with_delay(5, function()
-              dev:emit_component_event(c_main, capabilities.doorbell.doorbell.state.idle())
-            end)
-          end
+    local cap_call = capabilities["digituniverse06711.doorCallStatus"]
+
+    for _, dev in ipairs(driver:get_devices()) do
+      if dev.parent_assigned_child_key == "doorphone" and cap_call then
+        local c_main = dev.profile.components["main"]
+        local c_lobby = dev.profile.components["lobby"]
+
+        if c_main then
+          local status_val = front_bell and "호출 중" or "대기"
+          dev:emit_component_event(c_main, cap_call.callStatus({ value = status_val }))
+        end
+
+        if c_lobby then
+          local status_val = lobby_bell and "호출 중" or "대기"
+          dev:emit_component_event(c_lobby, cap_call.callStatus({ value = status_val }))
         end
       end
     end

@@ -1396,14 +1396,20 @@ void Task_Ch4(void *pvParameters) {
 
     // RX: 도어폰 하드웨어에서 들어오는 바이트를 스트림 버퍼에 누적
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(g_config.doorphone_baud_rate);
+    bool is_burst_start = true;
     while (g_doorphone_serial.available() > 0) {
       uint8_t byte = static_cast<uint8_t>(g_doorphone_serial.read());
       uint32_t now = millis();
 
-      // 바이트 간 연속성 검증: 직전 바이트와의 간격이 보레이트 기준 허용치를 초과하면 비연속 노이즈 조각으로 판단하여 버퍼 초기화
-      if (buf_len > 0 && last_byte_ms > 0 &&
-          TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
-        buf_len = 0;
+      // 바이트 간 연속성 검증: 
+      // 이전 수신 완료 후 새 버스트가 들어오는 시점에 직전 바이트와의 간격이 16ms(ib_timeout)를 초과하면,
+      // 이전 미완성 조각은 불연속 노이즈로 판단하여 버퍼 초기화 후 새 버스트 수신
+      if (is_burst_start) {
+        if (buf_len > 0 && last_byte_ms > 0 &&
+            TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
+          buf_len = 0;
+        }
+        is_burst_start = false;
       }
 
       if (buf_len < sizeof(buf)) {

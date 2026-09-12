@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.6.1";
+constexpr const char *FIRMWARE_VERSION = "v1.6.2";
 } // namespace Config
 
 namespace Config::Task {
@@ -221,13 +221,14 @@ constexpr uint32_t WALLPAD_AUTO_IPG_MS = 20;
 // 판정)
 constexpr uint32_t DOORPHONE_IPG_MS = 25;
 // [CH4 도어폰] 보레이트 기반 바이트 간 최대 허용 연속 지연 타이머 동적 계산
-constexpr uint32_t DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS = 8;
+constexpr uint32_t DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS = 16;
 inline uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
   if (baud == 0)
     return DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS;
-  // 11비트(1바이트) 기준 약 2.5 ~ 3 문자 시간 계산: (28000 / baud)
-  uint32_t timeout = (28000UL + baud - 1) / baud;
-  return (timeout < 4) ? 4 : (timeout > 20 ? 20 : timeout);
+  // 3860 baud 기준 16ms 보장, 고속 보레이트(9600 등) 시 비례 축소 (최소 6ms,
+  // 최대 20ms)
+  uint32_t timeout = (60000UL + baud - 1) / baud;
+  return (timeout < 6) ? 6 : (timeout > 20 ? 20 : timeout);
 }
 // [CH5 도어폰 TCP] 세션 유지용 무조건 1시간 주기 하트비트 더미 패킷 주기 (1시간
 // = 3600초)

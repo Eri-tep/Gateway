@@ -26,9 +26,20 @@ local function device_init(driver, device)
 
   -- 자식 기기(도어폰)인 경우 초기 상태 설정
   if device.parent_assigned_child_key == "doorphone" then
+    local cap_call = capabilities["digituniverse06711.doorCallStatus"]
     local comp_main = device.profile.components["main"]
-    if comp_main and capabilities.doorbell then
-      device:emit_component_event(comp_main, capabilities.doorbell.doorbell.state.idle())
+    local comp_lobby = device.profile.components["lobby"]
+    if comp_main then
+      device:emit_component_event(comp_main, capabilities.switch.switch.off())
+      if cap_call then
+        device:emit_component_event(comp_main, cap_call.callStatus({ value = "대기" }))
+      end
+    end
+    if comp_lobby then
+      device:emit_component_event(comp_lobby, capabilities.switch.switch.off())
+      if cap_call then
+        device:emit_component_event(comp_lobby, cap_call.callStatus({ value = "대기" }))
+      end
     end
     return
   end
