@@ -58,6 +58,7 @@ struct SlotCoverage {
   // ── 복합 상태 슬롯 (THERMOSTAT 전용, 필수)
   bool temp_while_off_seen{false};   // 꺼진 상태 온도 변경 → 켜기+온도 복합 패턴
   bool temp_while_away_seen{false};  // 외출 모드 온도 변경 → 제조사별 상이한 응답 패턴
+  bool temp_recall_seen{false};      // 전원 OFF 후 Re-ON 시 직전 설정온도 복원 검증 완료
   // ── 환기 / 에어컨 풍량
   bool speed_l1_seen{false};
   bool speed_l2_seen{false};

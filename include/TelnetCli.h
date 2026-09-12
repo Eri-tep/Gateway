@@ -66,6 +66,7 @@ public:
     uint8_t wizard_step{0};          // 0: 비활성, 1~7: 각 기기 단계
     uint8_t wizard_dev_id{0};        // 현재 단계에 바인딩된 기기 ID (Fresh State 관리용)
     uint8_t wizard_sub_phase{0};     // 단계 내 세부 서브 시나리오 번호 (난방 외출/오프온도 등)
+    uint8_t wizard_last_prompt{0};    // 동일 단계/프롬프트 중복 출력 방지 상태값
     uint32_t wizard_step_start_ms{0}; // 현재 단계 시작 시각 (타임아웃 45s 검사용)
     uint32_t prev_learned_ms[8]{0};   // 기기별 이전 학습 시각 스냅샷
 
@@ -87,6 +88,7 @@ public:
       wizard_step = 0;
       wizard_dev_id = 0;
       wizard_sub_phase = 0;
+      wizard_last_prompt = 0;
       wizard_step_start_ms = 0;
       memset(prev_learned_ms, 0, sizeof(prev_learned_ms));
       cli.reset();

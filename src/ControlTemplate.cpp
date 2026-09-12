@@ -29,15 +29,16 @@ bool SlotCoverage::isFullyCovered() const {
     return call_seen || valve_close_seen;
 
   case DeviceClass::THERMOSTAT:
-    // 필수 제어 슬롯(ON, OFF, 온도설정) 충족 시 제어 가능 상태로 수렴
-    return (power_on_seen && power_off_seen && temp_set_seen);
+    // 필수 제어 슬롯(ON, OFF, 온도설정, 재가동 복원 검증) 100% 충족 시에만 완전 검증 수렴
+    return (power_on_seen && power_off_seen && temp_set_seen && temp_recall_seen);
 
   case DeviceClass::VENT:
-    return (power_on_seen && power_off_seen && speed_l1_seen);
+    // 전원 ON, OFF 뿐만 아니라 최소 2개 이상의 풍량 레벨(L1, L2) 관측 완료되어야 완전 검증 수렴
+    return (power_on_seen && power_off_seen && speed_l1_seen && speed_l2_seen);
 
   case DeviceClass::AIRCON:
     return (power_on_seen && power_off_seen && temp_set_seen &&
-            speed_l1_seen && speed_l2_seen && speed_l3_seen);
+            speed_l1_seen && speed_l2_seen);
 
   case DeviceClass::UNKNOWN:
   default:
@@ -604,13 +605,17 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
           grp->coverage.power_on_seen = true;
         }
       } else {
-        if (cmd_val == 0x04) {
-          grp->power_slot.off_val = cmd_val;
-          grp->coverage.power_off_seen = true;
-        } else if (cmd_val == 0x07 || cmd_val == 0x02 || cmd_val == 0x03) {
-          // 외출(Away) 모드 토큰으로 등록 (희망온도와 절대 혼동하지 않음!)
+        if (cmd_val == 0x07 || cmd_val == 0x02 || cmd_val == 0x03) {
+          // 외출(Away) 모드 토큰으로 등록 (전원 OFF나 희망온도와 절대 혼동하지 않음!)
           grp->away_mode_token = cmd_val;
           grp->coverage.away_mode_seen = true;
+        } else if (cmd_val == 0x04) {
+          grp->power_slot.off_val = cmd_val;
+          grp->coverage.power_off_seen = true;
+        } else if (grp->coverage.power_off_seen && cmd_val == grp->power_slot.on_val) {
+          // 전원 OFF 이후 다시 켜기(Re-ON) 감지 -> 직전 설정온도 복원(Recall) 성공 검증!
+          grp->temp_recall_verified = true;
+          grp->coverage.temp_recall_seen = true;
         } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val && cmd_val <= 0x0F) {
           // 기타 제조사 규격 OFF 토큰
           grp->power_slot.off_val = cmd_val;
@@ -643,11 +648,6 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         if (cmd_val > grp->temp_slot.max_val) grp->temp_slot.max_val = cmd_val;
         grp->temp_slot.sample_count++;
         grp->coverage.temp_set_seen = true;
-
-        // 직전 설정 온도가 기억/복원되는 패턴 감지
-        if (grp->coverage.away_mode_seen || grp->coverage.power_off_seen) {
-          grp->temp_recall_verified = true;
-        }
       }
     }
   } else if (grp->coverage.dev_class == DeviceClass::VENT) {
@@ -675,8 +675,8 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         grp->coverage.power_off_seen = true;
       }
 
-      // 풍량 슬롯(speed_slot) 등록
-      if (cmd_val > 0 && cmd_val != grp->power_slot.off_val) {
+      // 풍량 슬롯(speed_slot) 등록 (전원 끄기 명령 0x00/0x02/0x04 제외)
+      if (cmd_val > 0 && !grp->coverage.power_off_seen) {
         grp->speed_slot.discovered = true;
         grp->speed_slot.action_offset = act_off;
         if (cat_off != 0xFF) {
@@ -693,6 +693,7 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
           grp->speed_slot.min_val = 1;
           grp->speed_slot.max_val = grp->speed_slot.level_count;
         }
+        // 실제 관측된 고유 풍량 단계 수에 따라 마킹
         if (grp->speed_slot.level_count >= 1) grp->coverage.speed_l1_seen = true;
         if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
         if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;

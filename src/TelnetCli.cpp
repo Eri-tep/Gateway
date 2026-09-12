@@ -750,6 +750,7 @@ void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool
     s->wizard_step = next_idx + 1;
     s->wizard_dev_id = 0;
     s->wizard_sub_phase = 0;
+    s->wizard_last_prompt = 0;
     s->wizard_step_start_ms = millis();
     s->last_activity_ms = millis();
 
@@ -856,72 +857,97 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
         bool extra_done = true;
 
         if (tgt.cls == DeviceClass::THERMOSTAT) {
-          // 4단계 순차 유도: [1] ON -> [2] Temp Change -> [3] Away (or skip) -> [4] OFF
+          // 5단계 순차 유도: [1] ON -> [2] Temp Change -> [3] Away (or skip) -> [4] OFF -> [5] Re-ON (Recall Verification)
           if (!on_done) {
-            sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
-                           dev_id, tgt.name, tgt.name);
+            if (s.wizard_last_prompt != 1) {
+              s.wizard_last_prompt = 1;
+              sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            }
             s.wizard_step_start_ms = millis();
             continue;
           }
           if (!grp->coverage.temp_set_seen) {
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please change Target Temperature (희망온도 조절) for '%s'...\r\n",
-                           dev_id, tgt.name, tgt.name);
+            if (s.wizard_last_prompt != 2) {
+              s.wizard_last_prompt = 2;
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please change Target Temperature (희망온도 조절) for '%s'...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            }
             s.wizard_step_start_ms = millis();
             continue;
           }
           if (!grp->coverage.away_mode_seen && s.wizard_sub_phase == 0) {
-            s.wizard_sub_phase = 1;
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] Target Temp recorded! Please press 'Away (외출)' mode on wallpad (or press Enter to skip)...\r\n");
+            if (s.wizard_last_prompt != 3) {
+              s.wizard_last_prompt = 3;
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] Target Temp recorded! Please press 'Away (외출)' mode on wallpad (or press Enter to skip)...\r\n");
+            }
             s.wizard_step_start_ms = millis();
             continue;
           }
           if (!off_done) {
-            if (s.wizard_sub_phase < 2) {
+            if (s.wizard_last_prompt != 4) {
+              s.wizard_last_prompt = 4;
               s.wizard_sub_phase = 2;
               sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] Please now TURN OFF '%s'...\r\n", tgt.name);
-              s.wizard_step_start_ms = millis();
             }
+            s.wizard_step_start_ms = millis();
             continue;
           }
-          // [추가] 끄고 난 후 다시 켜서 직전 설정온도 복원(Recall) 검증!
-          if (!grp->temp_recall_verified && s.wizard_sub_phase < 3) {
-            s.wizard_sub_phase = 3;
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #4] DevID 0x%02X (%s) OFF recorded! Please TURN ON '%s' again to verify Target Temp Recall...\r\n",
-                           dev_id, tgt.name, tgt.name);
+          // [필수] 끄고 난 후 다시 켜서 직전 설정온도 복원(Recall) 검증!
+          if (!grp->temp_recall_verified) {
+            if (s.wizard_last_prompt != 5) {
+              s.wizard_last_prompt = 5;
+              s.wizard_sub_phase = 3;
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #4] DevID 0x%02X (%s) OFF recorded! Please TURN ON '%s' again to verify Target Temp Recall...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            }
             s.wizard_step_start_ms = millis();
             continue;
           }
         } else if (tgt.cls == DeviceClass::VENT) {
-          // 환기: 3단계 순차 유도 [1] ON -> [2] 풍량 조절 -> [3] OFF
+          // 환기: 3단계 순차 유도 [1] ON -> [2] 풍량 조절(최소 2단계 이상 관측) -> [3] OFF
           if (!on_done) {
-            sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
-                           dev_id, tgt.name, tgt.name);
+            if (s.wizard_last_prompt != 1) {
+              s.wizard_last_prompt = 1;
+              sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            }
             s.wizard_step_start_ms = millis();
             continue;
           }
+          // 사용자가 실제로 다른 풍량을 조작하여 고유 풍량 레벨이 2개 이상 나올 때까지 유지!
           if (grp->speed_slot.level_count < 2 && s.wizard_sub_phase == 0) {
-            s.wizard_sub_phase = 1;
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please change Fan Speed (풍량 조절 2단/3단) for '%s' (or press Enter to skip)...\r\n",
-                           dev_id, tgt.name, tgt.name);
+            if (s.wizard_last_prompt != 2) {
+              s.wizard_last_prompt = 2;
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please change Fan Speed (풍량 조절 2단/3단) for '%s' (or press Enter to skip)...\r\n",
+                             dev_id, tgt.name, tgt.name);
+            }
             s.wizard_step_start_ms = millis();
             continue;
           }
           if (!off_done) {
-            if (s.wizard_sub_phase < 2) {
+            if (s.wizard_last_prompt != 3) {
+              s.wizard_last_prompt = 3;
               s.wizard_sub_phase = 2;
               sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] Fan Speed recorded! Please now TURN OFF '%s'...\r\n", tgt.name);
-              s.wizard_step_start_ms = millis();
             }
+            s.wizard_step_start_ms = millis();
             continue;
           }
         } else {
           if (!on_done || !off_done) {
             if (!on_done) {
-              sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
-                             dev_id, tgt.name, tgt.name);
+              if (s.wizard_last_prompt != 1) {
+                s.wizard_last_prompt = 1;
+                sendTelnetMsgf(s.sock, "\r\n>> [WAITING] DevID 0x%02X (%s) detected. Please TURN ON '%s'...\r\n",
+                               dev_id, tgt.name, tgt.name);
+              }
             } else if (!off_done) {
-              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",
-                             dev_id, tgt.name, tgt.name);
+              if (s.wizard_last_prompt != 2) {
+                s.wizard_last_prompt = 2;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",
+                               dev_id, tgt.name, tgt.name);
+              }
             }
             s.wizard_step_start_ms = millis();
             continue;

@@ -1671,21 +1671,18 @@ void wallpadPrintControlTable(AppendBuf &out) {
           if (grp.coverage.valve_close_seen || grp.coverage.power_off_seen) c++;
           break;
         case DeviceClass::THERMOSTAT:
-          total_c = 6;
+          total_c = 4;
           if (grp.coverage.power_on_seen) c++;
           if (grp.coverage.power_off_seen) c++;
           if (grp.coverage.temp_set_seen) c++;
-          if (grp.coverage.away_mode_seen) c++;
-          if (grp.coverage.temp_while_off_seen) c++;
-          if (grp.coverage.temp_while_away_seen) c++;
+          if (grp.temp_recall_verified) c++;
           break;
         case DeviceClass::VENT:
-          total_c = 5;
+          total_c = 4;
           if (grp.coverage.power_on_seen) c++;
           if (grp.coverage.power_off_seen) c++;
           if (grp.coverage.speed_l1_seen) c++;
           if (grp.coverage.speed_l2_seen) c++;
-          if (grp.coverage.speed_l3_seen) c++;
           break;
         case DeviceClass::AIRCON:
           total_c = 7;
