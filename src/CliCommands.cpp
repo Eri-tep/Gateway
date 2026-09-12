@@ -1609,28 +1609,45 @@ void wallpadPrintControlTable(AppendBuf &out) {
 
       char mode_str[20]{"-"};
       if (grp.coverage.dev_class == DeviceClass::VENT) {
-        if (grp.mode_slot.discovered && grp.power_slot.discovered &&
-            grp.power_slot.category_val >= 0x20 && grp.mode_slot.category_val >= 0x20) {
-          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)",
-                   grp.power_slot.category_val, grp.mode_slot.category_val);
-        } else if (grp.power_slot.discovered && grp.power_slot.category_val >= 0x20) {
-          snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", grp.power_slot.category_val);
+        // 환기: 풍량 채널(0x40)과 모드 채널(0x42)
+        uint8_t spd_cat = grp.power_slot.category_val;
+        uint8_t mod_cat = grp.mode_slot.category_val;
+        if (spd_cat < 0x20 && grp.frame_len >= 6) spd_cat = grp.raw_template[5];
+        if (mod_cat < 0x20 && grp.last_ack_after_len >= 6 && grp.last_ack_after_raw[5] != spd_cat && grp.last_ack_after_raw[5] >= 0x20) {
+          mod_cat = grp.last_ack_after_raw[5];
+        }
+        if (grp.mode_slot.discovered && mod_cat >= 0x20 && spd_cat >= 0x20) {
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", spd_cat, mod_cat);
+        } else if (spd_cat >= 0x20) {
+          // 환기는 구조적으로 풍량+모드 2개 채널이 존재하므로 MULTI로 표시
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/42)", spd_cat);
         } else {
-          snprintf(mode_str, sizeof(mode_str), "SINGLE");
+          snprintf(mode_str, sizeof(mode_str), "MULTI");
         }
       } else if (grp.coverage.dev_class == DeviceClass::THERMOSTAT) {
-        if (grp.temp_slot.discovered && grp.power_slot.discovered &&
-            grp.temp_slot.category_val >= 0x20 && grp.power_slot.category_val >= 0x20) {
-          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)",
-                   grp.temp_slot.category_val, grp.power_slot.category_val);
-        } else if (grp.power_slot.discovered && grp.power_slot.category_val >= 0x20) {
-          snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", grp.power_slot.category_val);
+        // 난방: 희망온도 채널(0x45)과 전원 채널(0x46)
+        uint8_t tmp_cat = grp.temp_slot.category_val;
+        uint8_t pwr_cat = grp.power_slot.category_val;
+        if (tmp_cat < 0x20 && grp.frame_len >= 6) {
+          tmp_cat = (grp.raw_template[5] == 0x46) ? 0x45 : grp.raw_template[5];
+        }
+        if (pwr_cat < 0x20 && grp.frame_len >= 6) {
+          pwr_cat = (grp.raw_template[5] == 0x45) ? 0x46 : grp.raw_template[5];
+        }
+        if (tmp_cat >= 0x20 && pwr_cat >= 0x20 && tmp_cat != pwr_cat) {
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", tmp_cat, pwr_cat);
+        } else if (tmp_cat >= 0x20) {
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/46)", tmp_cat);
         } else {
-          snprintf(mode_str, sizeof(mode_str), "SINGLE");
+          snprintf(mode_str, sizeof(mode_str), "MULTI (45/46)");
         }
       } else if (grp.power_slot.discovered) {
-        if (grp.power_slot.category_offset != 0xFF && grp.power_slot.category_val >= 0x20) {
-          snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", grp.power_slot.category_val);
+        uint8_t cat = grp.power_slot.category_val;
+        if (cat < 0x20 && grp.frame_len >= 6 && grp.raw_template[5] >= 0x20) {
+          cat = grp.raw_template[5];
+        }
+        if (cat >= 0x20) {
+          snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", cat);
         } else {
           snprintf(mode_str, sizeof(mode_str), "SINGLE");
         }
