@@ -377,12 +377,10 @@ PacketStatistics g_pkt_stats;
 SystemMetricsTracker g_metrics;
 TaskWdtMonitor g_wdt_monitor;
 
-StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch4_to_tcp_queue_buf,
+StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf,
     g_ch1_vip_queue_buf, g_ch6_to_tcp_queue_buf;
 uint8_t g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t
-    g_ch4_to_tcp_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 uint8_t
     g_ch6_to_tcp_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
@@ -391,7 +389,7 @@ QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
 QueueSetHandle_t g_ch1_queue_set = nullptr;
 QueueHandle_t g_uart0_event_queue = nullptr, g_uart1_event_queue = nullptr,
               g_uart2_event_queue = nullptr;
-QueueHandle_t g_ch4_passthrough_queue = nullptr, g_ch4_to_tcp_queue = nullptr,
+QueueHandle_t g_ch4_passthrough_queue = nullptr,
               g_ch6_to_tcp_queue = nullptr;
 
 EventGroupHandle_t g_wifi_event_group = nullptr;
@@ -474,15 +472,7 @@ struct TcpFragSession {
 static TcpFragSession hub_sessions[Config::TCP::MAX_HUB_CLIENTS];
 SemaphoreHandle_t g_ch6_mutex = nullptr;
 
-struct DoorphoneSession {
-  int sock = -1;
-  uint8_t buffer[256];
-  size_t len = 0;
-  uint32_t last_tcp_cmd_ms = 0;
-  uint8_t last_tcp_cmd = 0;
-  uint32_t connected_at_ms = 0;
-};
-static DoorphoneSession doorphone_sessions[Config::TCP::MAX_DOORPHONE_CLIENTS];
+Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
 SemaphoreHandle_t g_ch5_mutex = nullptr;
 SemaphoreHandle_t g_ctrl_queue_mutex = nullptr;
 
@@ -539,8 +529,6 @@ static void Tcp_PollAndReceive(SessionType (&sessions)[N], SemaphoreHandle_t mux
   }
 }
 
-static TokenBucket s_ch5_bucket(Config::TCP::CH5_TOKEN_BURST,
-                                Config::TCP::CH5_TOKEN_REFILL_MS);
 static TokenBucket s_ch6_bucket(Config::TCP::CH6_TOKEN_BURST,
                                 Config::TCP::CH6_TOKEN_REFILL_MS);
 
@@ -764,80 +752,74 @@ void Ch6_Data(TcpFragSession *s, const uint8_t *data, size_t len) {
   }
 }
 
-void Ch5_Data(DoorphoneSession *s, const uint8_t *data, size_t len) {
-  if (!s || s->sock < 0 || !data || len == 0)
+static void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data, size_t pkt_len) {
+  if (!slot || !pkt_data || pkt_len == 0) return;
+
+  StaticPacket pkt{5, static_cast<uint8_t>(pkt_len)};
+  std::copy(pkt_data, pkt_data + pkt_len, pkt.data.begin());
+
+  slot->rx_pkts++;
+  g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+  g_telnet_tracer.trace(5, false, TraceType::RMT, pkt);
+
+  // 엘리베이터 및 월패드 호환 패킷은 CH6(스마트싱스/허브 TCP 8899)으로 즉시 실시간 바이패스 브로드캐스트!
+  if (slot->dev_type == Ew11DeviceType::WALLPAD_COMPATIBLE) {
+    Ch6_SendAck_Direct(pkt);
+  }
+}
+
+void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
+  if (!slot || slot->sock < 0 || !data || len == 0)
     return;
 
-  // 동적으로 학습 및 복원된 도어폰 프레이밍 값 사용 (기본 fallback: 0x7F, 0xEE, 5)
-  uint8_t stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-  uint8_t etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-  uint8_t pkt_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-  if (stx == 0) stx = Config::Doorphone::STX;
-  if (etx == 0) etx = Config::Doorphone::ETX;
-  if (pkt_len < 3 || pkt_len > 64) pkt_len = Config::Doorphone::PKT_LEN;
+  slot->last_rx_ms = millis();
 
-  if (s->len + len > sizeof(s->buffer)) {
-    size_t stx_pos = 0;
-    while (stx_pos < s->len && s->buffer[stx_pos] != stx) {
-      stx_pos++;
-    }
-    if (stx_pos == 0 && s->len > 0)
-      stx_pos = 1;
-    if (stx_pos < s->len) {
-      memmove(s->buffer, s->buffer + stx_pos, s->len - stx_pos);
-      s->len -= stx_pos;
-    } else {
-      s->len = 0;
-    }
-    if (s->len + len > sizeof(s->buffer)) {
-      s->len = 0;
-      close(s->sock);
-      s->sock = -1;
-      return;
-    }
+  // 슬롯 버퍼 오버플로우 방어
+  if (slot->rx_len + len > sizeof(slot->rx_buf)) {
+    slot->rx_len = 0;
   }
+  std::copy(data, data + len, slot->rx_buf + slot->rx_len);
+  slot->rx_len += len;
 
-  std::copy(data, data + len, s->buffer + s->len);
-  s->len += len;
-  size_t p = 0;
-
-  while (s->len - p >= pkt_len) {
-    if (s->buffer[p] != stx) {
-      p++;
-      continue;
+  // 장비 타입별 전용 파서 분기
+  if (slot->dev_type == Ew11DeviceType::WALLPAD_COMPATIBLE) {
+    // 1. 월패드/엘리베이터 호환 파서 (0xF7 ... 0xEE)
+    auto *parser = WallpadParserFactory::getActiveParser();
+    size_t p = 0;
+    while (p < slot->rx_len) {
+      if (slot->rx_buf[p] != PKT_STX) {
+        p++;
+        continue;
+      }
+      int len_res = parser ? parser->extractPacketLength(slot->rx_buf, slot->rx_len, p) : -1;
+      if (len_res == 0) {
+        break; // 불완전 패킷, 추가 바이트 대기
+      }
+      if (len_res < 0) {
+        p++;
+        continue;
+      }
+      uint8_t p_len = static_cast<uint8_t>(len_res);
+      span<const uint8_t> frame(&slot->rx_buf[p], p_len);
+      if (parser && parser->validatePacket(frame)) {
+        Ew11_ProcessPacket(slot, &slot->rx_buf[p], p_len);
+      } else {
+        slot->dropped_pkts++;
+        g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
+      }
+      p += p_len;
     }
-    if (s->buffer[p + pkt_len - 1] != etx) {
-      p++;
-      continue;
-    }
-
-    uint8_t cmd = s->buffer[p + 1];
-    if (!Config::Doorphone::isValidOpcode(cmd)) {
-      p++;
-      continue;
-    }
-
-    uint32_t now = millis();
-    if (!(cmd == s->last_tcp_cmd && (now - s->last_tcp_cmd_ms < Config::Timing::DOORPHONE_DEBOUNCE_MS))) {
-      s->last_tcp_cmd = cmd;
-      s->last_tcp_cmd_ms = now;
-      StaticPacket pkt{5, pkt_len};
-      std::copy(&s->buffer[p], &s->buffer[p + pkt_len],
-                pkt.data.begin());
-
-      g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
-      g_telnet_tracer.trace(5, false, TraceType::RMT, pkt);
-      if (g_ch4_passthrough_queue) {
-        xQueueSend(g_ch4_passthrough_queue, &pkt, 0);
+    if (p > 0) {
+      slot->rx_len -= p;
+      if (slot->rx_len > 0) {
+        memmove(slot->rx_buf, slot->rx_buf + p, slot->rx_len);
       }
     }
-    p += pkt_len;
-  }
-  if (p > 0) {
-    s->len -= p;
-    if (s->len > 0) {
-      memmove(s->buffer, s->buffer + p, s->len);
-    }
+  } else if (slot->dev_type == Ew11DeviceType::AIR_CONDITIONER) {
+    // 2. 에어컨 전용 파서 스켈레톤 (추후 에어컨 프로토콜 바이트 규격 맞춤 확장)
+    // 기본적으로 온전한 프레임 단위 처리 (STX/ETX 또는 고정/가변 헤더)
+    // 현재는 슬롯 버퍼 flush 처리
+    slot->rx_len = 0;
   }
 }
 
@@ -876,26 +858,6 @@ void Task_Network(void *pvParameters) {
       }
     }
 
-    door_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (door_server_fd >= 0) {
-      int opt = 1;
-      setsockopt(door_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-      int flags = fcntl(door_server_fd, F_GETFL, 0);
-      fcntl(door_server_fd, F_SETFL, flags | O_NONBLOCK);
-
-      struct sockaddr_in saddr;
-      memset(&saddr, 0, sizeof(saddr));
-      saddr.sin_family = AF_INET;
-      saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-      saddr.sin_port = htons(Config::TCP::DOORPHONE_PORT);
-      if (bind(door_server_fd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
-          listen(door_server_fd, Config::TCP::MAX_DOORPHONE_CLIENTS) < 0) {
-        ESP_LOGE("NET", "Failed to bind/listen doorphone server: errno %d", errno);
-        close(door_server_fd);
-        door_server_fd = -1;
-      }
-    }
-
     mgmt_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (mgmt_server_fd >= 0) {
       int opt = 1;
@@ -915,8 +877,11 @@ void Task_Network(void *pvParameters) {
         mgmt_server_fd = -1;
       }
     }
+
+    // ★ CH5 EW11 멀티 클라이언트 NVS 설정 로드 (Slot 0: Elevator, Slot 1~4: AC)
+    Ew11_LoadConfig();
   } else {
-    Serial.println(F("[RESCUE] CH5, CH6 & CH7 TCP server ports disabled in Rescue Mode. Dedicated to OTA & Telnet."));
+    Serial.println(F("[RESCUE] CH6 & CH7 TCP server ports disabled in Rescue Mode. Dedicated to OTA & Telnet."));
   }
 
   for (;;) {
@@ -996,7 +961,6 @@ void Task_Network(void *pvParameters) {
     };
 
     add_fd(hub_server_fd);
-    add_fd(door_server_fd);
     add_fd(mgmt_server_fd);
 
     {
@@ -1004,15 +968,6 @@ void Task_Network(void *pvParameters) {
       for (int i = 0; i < Config::TCP::MAX_HUB_CLIENTS; i++) {
         if (hub_sessions[i].sock >= 0) {
           add_fd(hub_sessions[i].sock);
-        }
-      }
-    }
-
-    {
-      MutexLocker lock(g_ch5_mutex);
-      for (int k = 0; k < Config::TCP::MAX_DOORPHONE_CLIENTS; k++) {
-        if (doorphone_sessions[k].sock >= 0) {
-          add_fd(doorphone_sessions[k].sock);
         }
       }
     }
@@ -1026,7 +981,51 @@ void Task_Network(void *pvParameters) {
       }
     }
 
-    struct timeval tv = {0, 10000}; // 10ms 커널 레벨 Event-Driven 블로킹 (소켓 이벤트 발생 시 0ms 즉각 반환, vTaskDelay 불필요)
+    // ★ CH5 EW11 클라이언트 소켓 감시 및 자동 재접속 (Auto-Reconnect)
+    if (WiFi.isConnected()) {
+      uint32_t now_ms = millis();
+      MutexLocker lock(g_ch5_mutex);
+      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        auto &slot = g_ew11_slots[s];
+        if (!slot.enabled || strlen(slot.target_ip) == 0) continue;
+
+        if (slot.sock < 0) {
+          // 3초 백오프 후 비동기 접속 시도
+          if (TimeUtils::isElapsed(slot.last_reconnect_ms, 3000)) {
+            slot.last_reconnect_ms = now_ms;
+            int new_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (new_sock >= 0) {
+              int flags = fcntl(new_sock, F_GETFL, 0);
+              fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
+              int nodelay = 1;
+              setsockopt(new_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+              struct sockaddr_in target_addr;
+              memset(&target_addr, 0, sizeof(target_addr));
+              target_addr.sin_family = AF_INET;
+              target_addr.sin_port = htons(slot.target_port);
+              inet_pton(AF_INET, slot.target_ip, &target_addr.sin_addr);
+
+              int res = connect(new_sock, reinterpret_cast<struct sockaddr *>(&target_addr), sizeof(target_addr));
+              if (res == 0 || (res < 0 && errno == EINPROGRESS)) {
+                slot.sock = new_sock;
+                slot.is_connected = (res == 0);
+                if (res == 0) {
+                  g_pkt_stats.ch5.connection_count.fetch_add(1, std::memory_order_relaxed);
+                  ESP_LOGI("EW11", "[CH5] Slot %d (%s) connected immediately to %s:%u", s, slot.name, slot.target_ip, slot.target_port);
+                }
+              } else {
+                close(new_sock);
+              }
+            }
+          }
+        } else {
+          add_fd(slot.sock);
+        }
+      }
+    }
+
+    struct timeval tv = {0, 10000}; // 10ms 커널 레벨 Event-Driven 블로킹 (소켓 이벤트 발생 시 0ms 즉각 반환)
     int act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
 
     if (act > 0) {
@@ -1036,14 +1035,6 @@ void Task_Network(void *pvParameters) {
                                 Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
                                 Config::TCP::DEFAULT_KEEPALIVE_CNT,
                                 g_pkt_stats.ch6);
-      }
-
-      if (door_server_fd >= 0 && FD_ISSET(door_server_fd, &readfds)) {
-        Tcp_AcceptAndAssignSlot(door_server_fd, doorphone_sessions, g_ch5_mutex,
-                                Config::TCP::CH5_KEEPALIVE_IDLE_SEC,
-                                Config::TCP::CH5_KEEPALIVE_INTVL_SEC,
-                                Config::TCP::CH5_KEEPALIVE_CNT,
-                                g_pkt_stats.ch5);
       }
 
       if (mgmt_server_fd >= 0 && FD_ISSET(mgmt_server_fd, &readfds)) {
@@ -1059,65 +1050,64 @@ void Task_Network(void *pvParameters) {
                            Ch6_Data(s, data, len);
                          });
 
-      Tcp_PollAndReceive(doorphone_sessions, g_ch5_mutex, readfds, errorfds,
-                         [](DoorphoneSession *s, const uint8_t *data, size_t len) {
-                           Ch5_Data(s, data, len);
-                         });
-
       Tcp_PollAndReceive(g_mgmt_sessions, g_mgmt_mutex, readfds, errorfds,
                          [](MgmtSession *s, const uint8_t *data, size_t len) {
                            Mgmt_Data(s, data, len);
                          });
+
+      // ★ CH5 EW11 클라이언트 소켓 수신 처리
+      {
+        MutexLocker lock(g_ch5_mutex);
+        for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+          auto &slot = g_ew11_slots[s];
+          if (slot.sock < 0) continue;
+
+          if (FD_ISSET(slot.sock, &errorfds)) {
+            close(slot.sock);
+            slot.sock = -1;
+            slot.is_connected = false;
+            slot.rx_len = 0;
+            continue;
+          }
+
+          if (FD_ISSET(slot.sock, &readfds)) {
+            if (!slot.is_connected) {
+              // EINPROGRESS 이후 최초 읽기 가능 -> 연결 성공 확정
+              int so_error = 0;
+              socklen_t len = sizeof(so_error);
+              getsockopt(slot.sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+              if (so_error == 0) {
+                slot.is_connected = true;
+                g_pkt_stats.ch5.connection_count.fetch_add(1, std::memory_order_relaxed);
+                ESP_LOGI("EW11", "[CH5] Slot %d (%s) connected to %s:%u", s, slot.name, slot.target_ip, slot.target_port);
+              } else {
+                close(slot.sock);
+                slot.sock = -1;
+                slot.is_connected = false;
+                slot.rx_len = 0;
+                continue;
+              }
+            }
+
+            uint8_t temp_buf[128];
+            int r = recv(slot.sock, temp_buf, sizeof(temp_buf), 0);
+            if (r > 0) {
+              Ew11_Data(&slot, temp_buf, r);
+            } else if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+              close(slot.sock);
+              slot.sock = -1;
+              slot.is_connected = false;
+              slot.rx_len = 0;
+            }
+          }
+        }
+      }
     }
 
     StaticPacket ch6_pkt;
     while (g_ch6_to_tcp_queue &&
            xQueueReceive(g_ch6_to_tcp_queue, &ch6_pkt, 0) == pdTRUE) {
       Ch6_SendAck_Direct(ch6_pkt);
-    }
-
-    StaticPacket pkt;
-    uint32_t now_ms = millis();
-
-    if (xQueueReceive(g_ch4_to_tcp_queue, &pkt, 0) == pdTRUE) {
-      last_ch5_activity_ms = now_ms;
-      static StaticPacket packets[Config::Queue::POOL_SIZE_CONTROL];
-      size_t num_packets = 0;
-      packets[num_packets++] = pkt;
-      while (num_packets < Config::Queue::POOL_SIZE_CONTROL &&
-             xQueueReceive(g_ch4_to_tcp_queue, &packets[num_packets], 0) == pdTRUE) {
-        num_packets++;
-      }
-
-      MutexLocker lock(g_ch5_mutex);
-      for (size_t i = 0; i < num_packets; i++) {
-        auto &current_pkt = packets[i];
-
-        if (!s_ch5_bucket.consume()) {
-          g_telnet_tracer.trace(5, false, TraceType::DRP, current_pkt);
-          g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-          continue;
-        }
-
-        bool pkt_sent = false;
-        for (int k = 0; k < Config::TCP::MAX_DOORPHONE_CLIENTS; k++) {
-          if (doorphone_sessions[k].sock >= 0) {
-            int sent = send(doorphone_sessions[k].sock, current_pkt.data.data(),
-                            current_pkt.length, MSG_DONTWAIT);
-            if (sent == static_cast<int>(current_pkt.length))
-              pkt_sent = true;
-          }
-        }
-
-        if (pkt_sent) {
-          g_telnet_tracer.trace(5, true, TraceType::RMT, current_pkt);
-          g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
-        } else {
-          s_ch5_bucket.restore();
-          g_telnet_tracer.trace(5, true, TraceType::DRP, current_pkt);
-          g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-        }
-      }
     }
 
     uint32_t now = millis();
@@ -1151,41 +1141,23 @@ void Task_Network(void *pvParameters) {
       g_pkt_stats.ch6.is_connected.store(
           Tcp_HasActiveSession(hub_sessions, g_ch6_mutex),
           std::memory_order_relaxed);
-      g_pkt_stats.ch5.is_connected.store(
-          Tcp_HasActiveSession(doorphone_sessions, g_ch5_mutex),
-          std::memory_order_relaxed);
+
+      // EW11 슬롯 중 하나라도 연결되어 있으면 CH5 연결 상태 true
+      bool any_ew11_conn = false;
+      {
+        MutexLocker lock(g_ch5_mutex);
+        for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+          if (g_ew11_slots[s].is_connected) {
+            any_ew11_conn = true;
+            break;
+          }
+        }
+      }
+      g_pkt_stats.ch5.is_connected.store(any_ew11_conn, std::memory_order_relaxed);
+
       g_pkt_stats.ch7.is_connected.store(
           Tcp_HasActiveSession(g_mgmt_sessions, g_mgmt_mutex),
           std::memory_order_relaxed);
-    }
-
-    // ★ CH5 도어폰 TCP 세션 유지용 무조건 1시간 주기 하트비트 더미 패킷 송신 (STX: 0xF7, ETX: 0xEE)
-    if (TimeUtils::isElapsed(t_dp_heartbeat, Config::Timing::DOORPHONE_HEARTBEAT_INTERVAL_MS)) {
-      t_dp_heartbeat = now;
-
-      uint8_t len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-      if (len < 3 || len > 64) len = Config::Doorphone::PKT_LEN;
-
-      StaticPacket dummy_pkt{5, len};
-      dummy_pkt.data.fill(0x00);
-      dummy_pkt.data[0] = PKT_STX;
-      dummy_pkt.data[len - 1] = PKT_ETX;
-
-      MutexLocker lock(g_ch5_mutex);
-      bool pkt_sent = false;
-      for (int k = 0; k < Config::TCP::MAX_DOORPHONE_CLIENTS; k++) {
-        if (doorphone_sessions[k].sock >= 0) {
-          int sent = send(doorphone_sessions[k].sock, dummy_pkt.data.data(),
-                          dummy_pkt.length, MSG_DONTWAIT);
-          if (sent == static_cast<int>(dummy_pkt.length))
-            pkt_sent = true;
-        }
-      }
-
-      if (pkt_sent) {
-        g_telnet_tracer.trace(5, true, TraceType::RMT, dummy_pkt);
-        g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
-      }
     }
   }
 }
@@ -1325,6 +1297,99 @@ void Config_Save() {
   p.putUChar("w_prof", snapshot.wallpad_profile);
 
   p.end();
+}
+
+void Ew11_LoadConfig() {
+  Preferences p;
+  p.begin("ew11-config", true);
+  MutexLocker lock(g_ch5_mutex);
+
+  // 기본값 설정
+  // Slot 0: Elevator 172.30.1.245:8899
+  g_ew11_slots[0].enabled = p.getBool("e0_en", true);
+  p.getString("e0_name", "Elevator").toCharArray(g_ew11_slots[0].name, sizeof(g_ew11_slots[0].name));
+  p.getString("e0_ip", "172.30.1.245").toCharArray(g_ew11_slots[0].target_ip, sizeof(g_ew11_slots[0].target_ip));
+  g_ew11_slots[0].target_port = p.getUShort("e0_port", 8899);
+  g_ew11_slots[0].dev_type = Ew11DeviceType::WALLPAD_COMPATIBLE;
+  g_ew11_slots[0].sock = -1;
+  g_ew11_slots[0].is_connected = false;
+  g_ew11_slots[0].rx_len = 0;
+
+  // Slot 1~4: AC 1~4
+  for (int i = 1; i < Config::TCP::MAX_EW11_SLOTS; i++) {
+    char k_en[8], k_nm[8], k_ip[8], k_pt[8], def_nm[16];
+    snprintf(k_en, sizeof(k_en), "e%d_en", i);
+    snprintf(k_nm, sizeof(k_nm), "e%d_name", i);
+    snprintf(k_ip, sizeof(k_ip), "e%d_ip", i);
+    snprintf(k_pt, sizeof(k_pt), "e%d_port", i);
+    snprintf(def_nm, sizeof(def_nm), "AC_%d", i);
+
+    g_ew11_slots[i].enabled = p.getBool(k_en, false);
+    p.getString(k_nm, def_nm).toCharArray(g_ew11_slots[i].name, sizeof(g_ew11_slots[i].name));
+    p.getString(k_ip, "").toCharArray(g_ew11_slots[i].target_ip, sizeof(g_ew11_slots[i].target_ip));
+    g_ew11_slots[i].target_port = p.getUShort(k_pt, 8899);
+    g_ew11_slots[i].dev_type = Ew11DeviceType::AIR_CONDITIONER;
+    g_ew11_slots[i].sock = -1;
+    g_ew11_slots[i].is_connected = false;
+    g_ew11_slots[i].rx_len = 0;
+  }
+  p.end();
+}
+
+void Ew11_SaveConfig() {
+  Preferences p;
+  p.begin("ew11-config", false);
+  MutexLocker lock(g_ch5_mutex);
+
+  for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; i++) {
+    char k_en[8], k_nm[8], k_ip[8], k_pt[8];
+    snprintf(k_en, sizeof(k_en), "e%d_en", i);
+    snprintf(k_nm, sizeof(k_nm), "e%d_name", i);
+    snprintf(k_ip, sizeof(k_ip), "e%d_ip", i);
+    snprintf(k_pt, sizeof(k_pt), "e%d_port", i);
+
+    p.putBool(k_en, g_ew11_slots[i].enabled);
+    p.putString(k_nm, g_ew11_slots[i].name);
+    p.putString(k_ip, g_ew11_slots[i].target_ip);
+    p.putUShort(k_pt, g_ew11_slots[i].target_port);
+  }
+  p.end();
+}
+
+bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port, const char *name) {
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+
+  MutexLocker lock(g_ch5_mutex);
+  auto &slot = g_ew11_slots[slot_idx];
+
+  bool reconnect_needed = false;
+  if (slot.enabled != enabled || strcmp(slot.target_ip, ip ? ip : "") != 0 || slot.target_port != port) {
+    reconnect_needed = true;
+  }
+
+  slot.enabled = enabled;
+  if (ip) {
+    strncpy(slot.target_ip, ip, sizeof(slot.target_ip) - 1);
+    slot.target_ip[sizeof(slot.target_ip) - 1] = '\0';
+  }
+  if (port > 0) {
+    slot.target_port = port;
+  }
+  if (name && strlen(name) > 0) {
+    strncpy(slot.name, name, sizeof(slot.name) - 1);
+    slot.name[sizeof(slot.name) - 1] = '\0';
+  }
+
+  if (reconnect_needed && slot.sock >= 0) {
+    close(slot.sock);
+    slot.sock = -1;
+    slot.is_connected = false;
+    slot.rx_len = 0;
+    slot.last_reconnect_ms = 0; // 즉시 재연결 유도
+  }
+
+  Ew11_SaveConfig();
+  return true;
 }
 
 void Config_ResetDefaults() {
@@ -1562,7 +1627,17 @@ void System_Restart(const char *reason) {
   g_telnet_manager.shutdownForReboot();
 
   Tcp_CloseAllSessions(hub_sessions, g_ch6_mutex);
-  Tcp_CloseAllSessions(doorphone_sessions, g_ch5_mutex);
+  {
+    MutexLocker lock(g_ch5_mutex);
+    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+      if (g_ew11_slots[s].sock >= 0) {
+        close(g_ew11_slots[s].sock);
+        g_ew11_slots[s].sock = -1;
+        g_ew11_slots[s].is_connected = false;
+        g_ew11_slots[s].rx_len = 0;
+      }
+    }
+  }
 
   uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(50));
   uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));
@@ -1691,7 +1766,6 @@ static void Boot_InitSyncPrimitives() {
   g_ch1_control_queue = init_q(&g_ch1_ctrl_queue_buf, g_ch1_ctrl_storage);
   g_ch1_vip_queue = init_q(&g_ch1_vip_queue_buf, g_ch1_vip_storage);
   g_ch4_passthrough_queue = init_q(&g_ch4_pass_queue_buf, g_ch4_pass_storage);
-  g_ch4_to_tcp_queue = init_q(&g_ch4_to_tcp_queue_buf, g_ch4_to_tcp_storage);
   g_ch6_to_tcp_queue = init_q(&g_ch6_to_tcp_queue_buf, g_ch6_to_tcp_storage);
 
   // CH1 Event-Driven 큐셋 생성 및 등록 (VIP: 8 + Control: 8 = 16)

@@ -1,0 +1,17 @@
+name: single-door-device
+components:
+  - id: main
+    label: "도어"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: motionSensor
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: DoorBell
+
+metadata:
+  vid: "c6d96e6c-0021-3ede-b5ad-de6f65803980"
+  mnmn: "SmartThingsCommunity"

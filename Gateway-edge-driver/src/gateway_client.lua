@@ -127,4 +127,55 @@ function GatewayClient.doorphone_action(ip, port, action)
   })
 end
 
+function GatewayClient.set_ew11(ip, port, slot, target_ip, target_port, name, enabled)
+  return GatewayClient.send_rpc(ip, port, {
+    cmd = "set_ew11",
+    slot = slot,
+    ip = target_ip,
+    port = target_port or 8899,
+    name = name,
+    enabled = (enabled == nil) and 1 or (enabled and 1 or 0)
+  })
+end
+
+--- CH7 (8900) 실시간 푸시 이벤트 리스너 (백그라운드 지속 소켓)
+function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
+  if not ip or not port then return end
+
+  local cosock = require "cosock"
+  cosock.spawn(function()
+    log.info(string.format("📡 [CH7 PUSH] Starting persistent event listener on %s:%d", ip, port))
+    while true do
+      local tcp, err = socket.tcp()
+      if tcp then
+        tcp:settimeout(nil) -- 블로킹 대기
+        local ok, conn_err = tcp:connect(ip, port)
+        if ok then
+          log.info(string.format("✅ [CH7 PUSH] Connected to Gateway %s:%d for push notifications", ip, port))
+          while true do
+            local line, recv_err = tcp:receive("*l")
+            if not line then
+              log.warn(string.format("⚠️ [CH7 PUSH] Connection lost (%s), reconnecting...", tostring(recv_err)))
+              break
+            end
+            if #line > 0 then
+              local s_ok, data = pcall(json.decode, line)
+              if s_ok and type(data) == "table" then
+                if data.event and on_event_cb then
+                  on_event_cb(driver, data)
+                end
+              end
+            end
+          end
+          tcp:close()
+        else
+          tcp:close()
+          log.warn(string.format("⚠️ [CH7 PUSH] Connect failed: %s, retrying in 5s...", tostring(conn_err)))
+        end
+      end
+      cosock.socket.sleep(5)
+    end
+  end, "ch7_push_listener")
+end
+
 return GatewayClient

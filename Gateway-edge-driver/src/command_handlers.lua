@@ -38,8 +38,9 @@ function CommandHandlers.handle_switch_on(driver, device, command)
   end
 
   -- 자식 기기(도어폰)의 문열림 스위치인 경우
-  if device.parent_assigned_child_key == "doorphone" then
-    local action = (comp_id == "lobby") and "open_lobby" or "open_front"
+  local p_key = device.parent_assigned_child_key
+  if p_key == "doorphone" or p_key == "doorphone_front" or p_key == "doorphone_lobby" then
+    local action = (p_key == "doorphone_lobby" or comp_id == "lobby") and "open_lobby" or "open_front"
     log.info(string.format("🚪 [DOORPHONE] Dispatching 3-step sequence RPC: %s", action))
 
     -- 부모 게이트웨이 기기 IP/Port 찾기
@@ -205,7 +206,8 @@ end
 -- Child Device Manager 드롭다운 액션 핸들러 (Add / Remove / Idle)
 -- ============================================================================
 
-local CHILD_DOORPHONE_ID = "esp32_gateway_doorphone_child"
+local CHILD_FRONT_KEY = "doorphone_front"
+local CHILD_LOBBY_KEY = "doorphone_lobby"
 
 function CommandHandlers.handle_child_device_action(driver, device, command)
   local action = (command.args and command.args.action) or "idle"
@@ -219,28 +221,48 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
   end
 
   if action == "add" then
-    local exists = false
+    local front_exists = false
+    local lobby_exists = false
+
     for _, dev in ipairs(driver:get_devices()) do
-      if dev.device_network_id == CHILD_DOORPHONE_ID then
-        exists = true
-        break
+      local p_key = dev.parent_assigned_child_key
+      if p_key == CHILD_FRONT_KEY or dev.label == "세대 도어 (현관)" then
+        front_exists = true
+      elseif p_key == CHILD_LOBBY_KEY or dev.label == "로비 도어 (공동현관)" then
+        lobby_exists = true
       end
     end
 
-    if not exists then
-      log.info("🚪 [CHILD] Creating Doorphone Child Device...")
+    if not front_exists then
+      log.info("🚪 [CHILD] Creating '세대 도어' Child Device...")
       local success, err = driver:try_create_device({
         type = "EDGE_CHILD",
-        label = "도어폰",
-        profile = "doorphone-device",
+        label = "세대 도어",
+        profile = "single-door-device",
         parent_device_id = device.id,
-        parent_assigned_child_key = "doorphone"
+        parent_assigned_child_key = CHILD_FRONT_KEY
       })
       if not success then
-        log.error("❌ [CHILD] Failed to create doorphone child device: " .. tostring(err))
+        log.error("❌ [CHILD] Failed to create front door child: " .. tostring(err))
       end
     else
-      log.info("ℹ️ [CHILD] Doorphone child device already exists")
+      log.info("ℹ️ [CHILD] Front door child device already exists")
+    end
+
+    if not lobby_exists then
+      log.info("🚪 [CHILD] Creating '로비 도어' Child Device...")
+      local success, err = driver:try_create_device({
+        type = "EDGE_CHILD",
+        label = "로비 도어",
+        profile = "single-door-device",
+        parent_device_id = device.id,
+        parent_assigned_child_key = CHILD_LOBBY_KEY
+      })
+      if not success then
+        log.error("❌ [CHILD] Failed to create lobby door child: " .. tostring(err))
+      end
+    else
+      log.info("ℹ️ [CHILD] Lobby door child device already exists")
     end
 
     -- 1.5초 후 자동으로 Idle 복귀
@@ -250,11 +272,17 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
       end
     end)
   elseif action == "remove" then
-    log.info("🗑️ [CHILD] Removing Doorphone Child Device...")
+    log.info("🗑️ [CHILD] Removing Doorphone Child Devices...")
     for _, dev in ipairs(driver:get_devices()) do
-      if dev.parent_assigned_child_key == "doorphone" or dev.device_network_id == CHILD_DOORPHONE_ID then
-        dev:try_delete()
-        log.info("✅ [CHILD] Doorphone child device deleted: " .. tostring(dev.label))
+      local p_key = dev.parent_assigned_child_key
+      if p_key == "doorphone" or p_key == CHILD_FRONT_KEY or p_key == CHILD_LOBBY_KEY or
+         dev.label == "도어폰" or dev.label == "세대 도어" or dev.label == "로비 도어" then
+        log.info("🗑️ [CHILD] Deleting device: " .. tostring(dev.label) .. " (ID: " .. tostring(dev.id) .. ")")
+        if driver.try_delete_device then
+          driver:try_delete_device(dev.id)
+        elseif dev.try_delete then
+          dev:try_delete()
+        end
       end
     end
 

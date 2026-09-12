@@ -213,20 +213,19 @@ void TelnetTracer::flushToClient() {
       } else if (entry.type == TraceType::ACK) { // TX to Wallpad / App
         processTx(s_wp_tracker[wp_idx]);
       }
-    } else if (entry.channel == 4 || entry.channel == 5) {
+    } else if (entry.channel == 4) {
       if (!entry.is_tx) {
         is_new_req = true;
         s_door_tracker.t_rx = entry.tv;
-        s_door_tracker.rx_channel = entry.channel;
+        s_door_tracker.rx_channel = 4;
         s_door_tracker.active = true;
       } else if (s_door_tracker.active) {
-        long d = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
-        // PASS-THRU는 다른 채널(TCP CH5 -> 하드웨어 CH4 또는 하드웨어 CH4 -> TCP CH5) 간 500ms 이내 중계일 때만 유효
-        if (entry.channel != s_door_tracker.rx_channel && d >= 0 && d <= 500) {
-          delay_ms = d;
-          delay_tag = "PASS-THRU";
-        }
         s_door_tracker.active = false;
+      }
+    } else if (entry.channel == 5) {
+      // EW11 TCP 클라이언트 수송신
+      if (!entry.is_tx) {
+        is_new_req = true;
       }
     } else if (entry.channel == 1) {
       if (entry.is_tx) {
@@ -405,6 +404,7 @@ void TelnetManager::bindCommands(TelnetSession *session) {
       {"ctl", "Device control blueprints & active learning [view|learn|status|q|reset]", WallpadCli::cmdCtl},
       {"config", "View or modify runtime configuration [set|reset]", ConfigCli::cmdConfig},
       {"save", "Save current runtime configuration to NVS flash", ConfigCli::cmdSave},
+      {"ew11", "CH5 EW11 multi-client hub config [list|set|enable|disable]", ConfigCli::cmdEw11},
       {"logview", "Persistent reboot history & crash logs [list|<1-20>|last|clear]", SystemCli::cmdLogView},
       {"coredump", "Show crash core dump summary or erase partition [clear]", SystemCli::cmdCoreDump},
       {"ota", "Dual-partition OTA & auto-rollback management [status|rollback|validate]", SystemCli::cmdOta},

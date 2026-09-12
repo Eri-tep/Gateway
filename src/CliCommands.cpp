@@ -219,6 +219,107 @@ void cmdSave(EmbeddedCli *cli, char *args, void *context) {
   sendTelnetMsg(sock, "[OK] Configuration successfully committed and saved to NVS flash!\r\n");
 }
 
+void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
+  int sock = getSock(context);
+  int argc = embeddedCliGetTokenCount(args);
+
+  if (argc == 0 || (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "list") == 0) ||
+      (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "status") == 0)) {
+    char buf[1024];
+    AppendBuf out{buf, sizeof(buf)};
+    out.append("\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("                  CH5 EW11 MULTI-CLIENT SLOTS (NVS Saved)                    \r\n");
+    out.append(Fmt::DIV80EQ);
+    out.appendFormat("%-5s %-12s %-8s %-16s %-6s %-13s %s\r\n",
+                     "Slot", "Name", "Type", "Target IP", "Port", "Status", "Packets(RX/TX)");
+    out.append(Fmt::DIV80);
+
+    {
+      MutexLocker lock(g_ch5_mutex);
+      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        auto &slot = g_ew11_slots[s];
+        const char *type_str = (slot.dev_type == Ew11DeviceType::WALLPAD_COMPATIBLE) ? "Elevator" : "Aircon";
+        const char *status_str = !slot.enabled ? "Disabled"
+                                 : !slot.is_connected ? "Disconnected"
+                                 : (slot.rx_pkts == 0) ? "Idle" : "Connected";
+        out.appendFormat("#%-4d %-12s %-8s %-16s %-6u %-13s %u / %u\r\n",
+                         s, slot.name, type_str,
+                         slot.target_ip[0] ? slot.target_ip : "-",
+                         slot.target_port, status_str,
+                         static_cast<unsigned>(slot.rx_pkts),
+                         static_cast<unsigned>(slot.tx_pkts));
+      }
+    }
+    out.append(Fmt::DIV80);
+    out.append("Usage: ew11 set <slot:0-4> <ip> [port:8899] [name] [enable:1/0]\r\n");
+    out.append("       ew11 enable <slot:0-4> | ew11 disable <slot:0-4>\r\n\r\n");
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+    return;
+  }
+
+  const char *sub = embeddedCliGetToken(args, 1);
+
+  if (strcasecmp(sub, "set") == 0) {
+    if (argc < 3) {
+      sendTelnetMsg(sock, "[ERROR] Usage: ew11 set <slot:0-4> <ip> [port:8899] [name] [enable:1/0]\r\n");
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+    const char *ip_str = embeddedCliGetToken(args, 3);
+    uint16_t port = 8899;
+    if (argc >= 4) {
+      int p_val = atoi(embeddedCliGetToken(args, 4));
+      if (p_val > 0 && p_val <= 65535) port = static_cast<uint16_t>(p_val);
+    }
+    const char *name_str = (argc >= 5) ? embeddedCliGetToken(args, 5) : nullptr;
+    bool enabled = true;
+    if (argc >= 6) {
+      enabled = (atoi(embeddedCliGetToken(args, 6)) != 0);
+    }
+
+    if (Ew11_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port, name_str)) {
+      sendTelnetMsgf(sock, "[OK] EW11 Slot #%d configured (%s -> %s:%u, enabled=%s) and saved to NVS flash!\r\n",
+                     slot, name_str ? name_str : "Slot", ip_str, port, enabled ? "true" : "false");
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Failed to configure EW11 slot.\r\n");
+    }
+    return;
+  }
+
+  if (strcasecmp(sub, "enable") == 0 || strcasecmp(sub, "disable") == 0) {
+    if (argc < 2) {
+      sendTelnetMsgf(sock, "[ERROR] Usage: ew11 %s <slot:0-4>\r\n", sub);
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+    bool enable = (strcasecmp(sub, "enable") == 0);
+    {
+      MutexLocker lock(g_ch5_mutex);
+      g_ew11_slots[slot].enabled = enable;
+      if (!enable && g_ew11_slots[slot].sock >= 0) {
+        close(g_ew11_slots[slot].sock);
+        g_ew11_slots[slot].sock = -1;
+        g_ew11_slots[slot].is_connected = false;
+        g_ew11_slots[slot].rx_len = 0;
+      }
+    }
+    Ew11_SaveConfig();
+    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n", slot, enable ? "ENABLED" : "DISABLED");
+    return;
+  }
+
+  sendTelnetMsg(sock, "Usage: ew11 [list | set <slot> <ip> [port] [name] [enable] | enable <slot> | disable <slot>]\r\n");
+}
+
 } // namespace ConfigCli
 
 // ============================================================================
@@ -698,6 +799,9 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  wifi scan                       Scan surrounding 2.4GHz Wi-Fi AP networks\r\n");
   out.append("  wifi connect <ssid> [password]  Connect to target Wi-Fi AP network\r\n");
   out.append("  wifi disconnect                 Disconnect current Wi-Fi station\r\n");
+  out.append("  ew11 [list]                     Show CH5 EW11 multi-client slot status\r\n");
+  out.append("  ew11 set <slot> <ip> [port]     Configure EW11 slot IP & port (Saved to NVS)\r\n");
+  out.append("  ew11 enable/disable <slot>      Enable or disable target EW11 client slot\r\n");
   out.append("  config                          View all runtime configuration parameters\r\n");
   out.append("  config set <key> <val>          Modify a configuration parameter (runtime)\r\n");
   out.append("  config reset                    Reset runtime configuration to system defaults\r\n");

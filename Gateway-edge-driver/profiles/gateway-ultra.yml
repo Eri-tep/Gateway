@@ -329,6 +329,112 @@ preferences:
         "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
       default: "8E1"
 
+  # --- CH5 EW11 Multi-Client Slots Configuration ---
+  - preferenceId: ew11ElevatorIp
+    name: ew11ElevatorIp
+    title: "CH5 EW11 Elevator IP"
+    description: "Target IP for Elevator EW11 (Default: 172.30.1.245)"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: "172.30.1.245"
+
+  - preferenceId: ew11ElevatorPort
+    name: ew11ElevatorPort
+    title: "CH5 EW11 Elevator Port"
+    description: "Target Port (Default: 8899)"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+
+  - preferenceId: ew11Ac1Ip
+    name: ew11Ac1Ip
+    title: "CH5 EW11 Aircon 1 IP"
+    description: "Target IP for Aircon 1 EW11"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+
+  - preferenceId: ew11Ac1Port
+    name: ew11Ac1Port
+    title: "CH5 EW11 Aircon 1 Port"
+    description: "Target Port (Default: 8899)"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+
+  - preferenceId: ew11Ac2Ip
+    name: ew11Ac2Ip
+    title: "CH5 EW11 Aircon 2 IP"
+    description: "Target IP for Aircon 2 EW11"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+
+  - preferenceId: ew11Ac2Port
+    name: ew11Ac2Port
+    title: "CH5 EW11 Aircon 2 Port"
+    description: "Target Port (Default: 8899)"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+
+  - preferenceId: ew11Ac3Ip
+    name: ew11Ac3Ip
+    title: "CH5 EW11 Aircon 3 IP"
+    description: "Target IP for Aircon 3 EW11"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+
+  - preferenceId: ew11Ac3Port
+    name: ew11Ac3Port
+    title: "CH5 EW11 Aircon 3 Port"
+    description: "Target Port (Default: 8899)"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+
+  - preferenceId: ew11Ac4Ip
+    name: ew11Ac4Ip
+    title: "CH5 EW11 Aircon 4 IP"
+    description: "Target IP for Aircon 4 EW11"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+
+  - preferenceId: ew11Ac4Port
+    name: ew11Ac4Port
+    title: "CH5 EW11 Aircon 4 Port"
+    description: "Target Port (Default: 8899)"
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 65535
+      default: 8899
+
 metadata:
   vid: "49ab1b3e-0d78-30e3-a20d-7df30bb4f651"
   mnmn: "SmartThingsCommunity"

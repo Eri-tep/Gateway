@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.6.6";
+constexpr const char *FIRMWARE_VERSION = "v1.6.7";
 } // namespace Config
 
 namespace Config::Task {
@@ -230,9 +230,6 @@ inline uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
   uint32_t timeout = (60000UL + baud - 1) / baud;
   return (timeout < 6) ? 6 : (timeout > 20 ? 20 : timeout);
 }
-// [CH5 도어폰 TCP] 세션 유지용 무조건 1시간 주기 하트비트 더미 패킷 주기 (1시간
-// = 3600초)
-constexpr uint32_t DOORPHONE_HEARTBEAT_INTERVAL_MS = 3600000;
 // [CH2 월패드] 가상 응답(Virtual ACK) 지연 (기본: 30ms)
 constexpr uint32_t CH2_CACHE_DELAY_MS = 30;
 // [CH3 월패드] 가상 응답(Virtual ACK) 지연 (기본: 240ms)
@@ -301,8 +298,6 @@ constexpr int RX_GPIO = 38;
 namespace Config::TCP {
 // [포트] Telnet CLI 접속 포트 (23)
 constexpr uint16_t TELNET_PORT = 23;
-// [포트] CH5 도어폰 TCP 서버 포트 (8898)
-constexpr uint16_t DOORPHONE_PORT = 8898;
 // [포트] CH6 월패드/허브 TCP 서버 포트 (8899)
 constexpr uint16_t HUB_PORT = 8899;
 // [포트] CH7 SmartThings & 관리 JSON-RPC TCP 서버 포트 (8900)
@@ -312,18 +307,15 @@ constexpr uint16_t MGMT_PORT = 8900;
 constexpr uint8_t MAX_TELNET_CLIENTS = 3;
 // [접속 제한] CH6 허브 TCP 동시 클라이언트 최대 수 (3대)
 constexpr uint8_t MAX_HUB_CLIENTS = 3;
-// [접속 제한] CH5 도어폰 TCP 동시 클라이언트 최대 수 (3대)
-constexpr uint8_t MAX_DOORPHONE_CLIENTS = 3;
 // [접속 제한] CH7 관리 TCP 동시 클라이언트 최대 수 (3대)
 constexpr uint8_t MAX_MGMT_CLIENTS = 3;
+
+// [CH5 EW11 멀티 TCP 클라이언트 슬롯 풀 (최대 5대: Slot 0: EV, Slot 1~4: AC)]
+constexpr uint8_t MAX_EW11_SLOTS = 5;
 
 // [소켓 버퍼] TCP SO_RCVBUF / SO_SNDBUF 크기 (4096B = 4KB)
 constexpr int SOCKET_BUFFER_SIZE = 4096;
 
-// [CH5 도어폰] 토큰 버킷 버스트 용량 (기본: 16개)
-constexpr uint32_t CH5_TOKEN_BURST = 16;
-// [CH5 도어폰] 토큰 리필 속도 (기본: 200ms)
-constexpr uint32_t CH5_TOKEN_REFILL_MS = 200;
 // [CH6 허브] 토큰 버킷 버스트 용량 (기본: 32개)
 constexpr uint32_t CH6_TOKEN_BURST = 32;
 // [CH6 허브] 토큰 리필 속도 (기본: 100ms)
@@ -336,13 +328,6 @@ constexpr uint32_t CLEANUP_INTERVAL_MS = 30000;
 // [보안] 인증 실패 클라이언트 차단 시간 (기본: 5초)
 constexpr uint32_t AUTH_FAIL_PENALTY_MS = 5000;
 
-// [CH5 Keepalive] 최초 아이들 (기본: 15초)
-constexpr uint32_t CH5_KEEPALIVE_IDLE_SEC = 15;
-// [CH5 Keepalive] 프로브 간격 (기본: 5초)
-constexpr uint32_t CH5_KEEPALIVE_INTVL_SEC = 5;
-// [CH5 Keepalive] 허용 횟수 (기본: 12회)
-constexpr uint32_t CH5_KEEPALIVE_CNT = 12;
-
 // [기본 Keepalive] 최초 아이들 (기본: 60초)
 constexpr uint32_t DEFAULT_KEEPALIVE_IDLE_SEC = 60;
 // [기본 Keepalive] 프로브 간격 (기본: 5초)
@@ -350,6 +335,30 @@ constexpr uint32_t DEFAULT_KEEPALIVE_INTVL_SEC = 5;
 // [기본 Keepalive] 허용 횟수 (기본: 3회)
 constexpr uint32_t DEFAULT_KEEPALIVE_CNT = 3;
 } // namespace Config::TCP
+
+enum class Ew11DeviceType : uint8_t {
+  WALLPAD_COMPATIBLE = 0, // 엘리베이터 (월패드 0xF7/0xEE 규격)
+  AIR_CONDITIONER = 1     // 에어컨 1~4대
+};
+
+struct Ew11ClientSlot {
+  bool enabled{false};
+  char name[16]{""};
+  char target_ip[16]{""};
+  uint16_t target_port{8899};
+  Ew11DeviceType dev_type{Ew11DeviceType::WALLPAD_COMPATIBLE};
+  int sock{-1};
+  bool is_connected{false};
+  uint32_t last_reconnect_ms{0};
+  uint8_t rx_buf[128];
+  size_t rx_len{0};
+  uint32_t last_rx_ms{0};
+  uint32_t rx_pkts{0};
+  uint32_t tx_pkts{0};
+  uint32_t dropped_pkts{0};
+};
+
+extern Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
 
 namespace Config::Serial {
 // [도어폰 Serial] 보레이트 (기본: 3860)
@@ -579,10 +588,9 @@ static_assert(Config::TCP::MAX_TELNET_CLIENTS > 0 &&
 static_assert(Config::TCP::MAX_HUB_CLIENTS > 0 &&
                   Config::TCP::MAX_HUB_CLIENTS <= 8,
               "Config error: TCP::MAX_HUB_CLIENTS must be between 1 and 8");
-static_assert(
-    Config::TCP::MAX_DOORPHONE_CLIENTS > 0 &&
-        Config::TCP::MAX_DOORPHONE_CLIENTS <= 8,
-    "Config error: TCP::MAX_DOORPHONE_CLIENTS must be between 1 and 8");
+static_assert(Config::TCP::MAX_EW11_SLOTS > 0 &&
+                  Config::TCP::MAX_EW11_SLOTS <= 8,
+              "Config error: TCP::MAX_EW11_SLOTS must be between 1 and 8");
 static_assert(Config::Queue::POOL_SIZE_CONTROL > 0,
               "Config error: Queue::POOL_SIZE_CONTROL must be > 0");
 static_assert(Config::Queue::UART_EVENT_QUEUE_SIZE > 0,
@@ -1367,8 +1375,7 @@ extern QueueHandle_t g_ch1_control_queue, g_ch1_vip_queue;
 extern QueueSetHandle_t g_ch1_queue_set;
 extern QueueHandle_t g_uart0_event_queue, g_uart1_event_queue,
     g_uart2_event_queue;
-extern QueueHandle_t g_ch4_passthrough_queue, g_ch4_to_tcp_queue,
-    g_ch6_to_tcp_queue;
+extern QueueHandle_t g_ch4_passthrough_queue, g_ch6_to_tcp_queue;
 extern SemaphoreHandle_t g_ch6_mutex;
 extern SemaphoreHandle_t g_ch5_mutex;
 extern SemaphoreHandle_t g_mgmt_mutex;
@@ -1469,6 +1476,11 @@ int8_t System_ReadTempC();
 void System_EnterRescueMode(const char *reason);
 void System_CheckOtaHealth();
 [[nodiscard]] bool System_IsOtaPendingVerify();
+
+void Ew11_LoadConfig();
+void Ew11_SaveConfig();
+bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                  const char *name = nullptr);
 
 extern std::atomic<bool> g_rescue_mode;
 extern bool g_rollback_detected;

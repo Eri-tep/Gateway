@@ -428,23 +428,36 @@ function TelemetryHandler.handle_doorphone_event(driver, event_data)
   if not event_data then return end
   local front_bell = event_data.front_bell
   local lobby_bell = event_data.lobby_bell
-  local cap_call = capabilities["digituniverse06711.doorCallStatus"]
+  local cap_motion = capabilities.motionSensor
 
   for _, dev in ipairs(driver:get_devices()) do
-    if dev.parent_assigned_child_key == "doorphone" and cap_call then
-      local c_main = dev.profile.components["main"]
+    local p_key = dev.parent_assigned_child_key
+    local c_main = dev.profile.components["main"]
+
+    -- 1. 신규 분리형 세대 도어 (doorphone_front)
+    if p_key == "doorphone_front" and cap_motion and c_main then
+      local motion_evt = front_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+      log.info(string.format("🚪 [DOORPHONE REALTIME] Front Door Motion -> %s", front_bell and "ACTIVE (호출 중)" or "INACTIVE (대기)"))
+      dev:emit_component_event(c_main, motion_evt)
+    end
+
+    -- 2. 신규 분리형 로비 도어 (doorphone_lobby)
+    if p_key == "doorphone_lobby" and cap_motion and c_main then
+      local motion_evt = lobby_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+      log.info(string.format("🚪 [DOORPHONE REALTIME] Lobby Door Motion -> %s", lobby_bell and "ACTIVE (호출 중)" or "INACTIVE (대기)"))
+      dev:emit_component_event(c_main, motion_evt)
+    end
+
+    -- 3. 레거시 통합 도어폰 (하위 호환)
+    if p_key == "doorphone" and cap_motion then
       local c_lobby = dev.profile.components["lobby"]
-
       if c_main then
-        local status_val = front_bell and "호출 중" or "대기"
-        log.info(string.format("🚪 [DOORPHONE REALTIME] Main Call Status -> %s", status_val))
-        dev:emit_component_event(c_main, cap_call.callStatus({ value = status_val, state_change = true }))
+        local motion_evt = front_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+        dev:emit_component_event(c_main, motion_evt)
       end
-
       if c_lobby then
-        local status_val = lobby_bell and "호출 중" or "대기"
-        log.info(string.format("🚪 [DOORPHONE REALTIME] Lobby Call Status -> %s", status_val))
-        dev:emit_component_event(c_lobby, cap_call.callStatus({ value = status_val, state_change = true }))
+        local motion_evt = lobby_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+        dev:emit_component_event(c_lobby, motion_evt)
       end
     end
   end

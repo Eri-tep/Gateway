@@ -5,7 +5,7 @@ components:
     capabilities:
       - id: switch
         version: 1
-      - id: digituniverse06711.doorCallStatus
+      - id: motionSensor
         version: 1
       - id: refresh
         version: 1
@@ -17,11 +17,11 @@ components:
     capabilities:
       - id: switch
         version: 1
-      - id: digituniverse06711.doorCallStatus
+      - id: motionSensor
         version: 1
     categories:
       - name: DoorBell
 
 metadata:
-  vid: "22990e62-b755-3cf9-a61c-018d0625e233"
+  vid: "6b742987-f85c-30bd-9e9b-ae06a88385b4"
   mnmn: "SmartThingsCommunity"

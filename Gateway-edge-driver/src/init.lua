@@ -2,6 +2,7 @@ local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local command_handlers = require "command_handlers"
 local gateway_client = require "gateway_client"
+local telemetry_handler = require "telemetry_handler"
 local log = require "log"
 
 local function schedule_polling_timer(driver, device)
@@ -24,21 +25,22 @@ end
 local function device_init(driver, device)
   log.info("Initializing Device: " .. tostring(device.label) .. " (Type: " .. tostring(device.type) .. ")")
 
-  -- 자식 기기(도어폰)인 경우 초기 상태 설정
-  if device.parent_assigned_child_key == "doorphone" then
-    local cap_call = capabilities["digituniverse06711.doorCallStatus"]
+  -- 자식 기기(도어폰 - 세대 도어 / 로비 도어 / 레거시)인 경우 초기 상태 설정
+  local p_key = device.parent_assigned_child_key
+  if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
+    local cap_motion = capabilities.motionSensor
     local comp_main = device.profile.components["main"]
-    local comp_lobby = device.profile.components["lobby"]
     if comp_main then
       device:emit_component_event(comp_main, capabilities.switch.switch.off())
-      if cap_call then
-        device:emit_component_event(comp_main, cap_call.callStatus({ value = "대기" }))
+      if cap_motion then
+        device:emit_component_event(comp_main, cap_motion.motion.inactive())
       end
     end
+    local comp_lobby = device.profile.components["lobby"]
     if comp_lobby then
       device:emit_component_event(comp_lobby, capabilities.switch.switch.off())
-      if cap_call then
-        device:emit_component_event(comp_lobby, cap_call.callStatus({ value = "대기" }))
+      if cap_motion then
+        device:emit_component_event(comp_lobby, cap_motion.motion.inactive())
       end
     end
     return
@@ -59,6 +61,18 @@ local function device_init(driver, device)
 
   schedule_polling_timer(driver, device)
   command_handlers.refresh_telemetry(driver, device)
+
+  -- CH7 실시간 푸시 이벤트 리스너 실행 (단 1회)
+  if not device:get_field("listener_started") then
+    device:set_field("listener_started", true)
+    local ip = device.preferences.gatewayIp or "172.30.1.3"
+    local port = tonumber(device.preferences.gatewayPort) or 8900
+    gateway_client.start_event_listener(driver, ip, port, function(d, event_data)
+      if event_data.event == "doorphone" then
+        telemetry_handler.handle_doorphone_event(d, event_data)
+      end
+    end)
+  end
 end
 
 local function device_added(driver, device)
@@ -140,6 +154,30 @@ local function device_info_changed(driver, device, event, args)
       local frame_val = new_frame or default_frame
       log.info(string.format("🔌 [UART] Applying CH%d Serial Config -> Baud: %d, Framing: %s", i, baud_val, frame_val))
       gateway_client.set_uart_config(ip, port, i, baud_val, frame_val)
+    end
+  end
+
+  -- 6. CH5 EW11 Multi-Client Slots (Slot 0: Elevator, Slot 1~4: AC 1~4)
+  local ew11_defs = {
+    { slot = 0, ip_key = "ew11ElevatorIp", port_key = "ew11ElevatorPort", def_ip = "172.30.1.245", def_port = 8899, name = "Elevator" },
+    { slot = 1, ip_key = "ew11Ac1Ip", port_key = "ew11Ac1Port", def_ip = "", def_port = 8899, name = "AC_1" },
+    { slot = 2, ip_key = "ew11Ac2Ip", port_key = "ew11Ac2Port", def_ip = "", def_port = 8899, name = "AC_2" },
+    { slot = 3, ip_key = "ew11Ac3Ip", port_key = "ew11Ac3Port", def_ip = "", def_port = 8899, name = "AC_3" },
+    { slot = 4, ip_key = "ew11Ac4Ip", port_key = "ew11Ac4Port", def_ip = "", def_port = 8899, name = "AC_4" },
+  }
+
+  for _, item in ipairs(ew11_defs) do
+    local new_ip = new_prefs[item.ip_key]
+    local new_pt = tonumber(new_prefs[item.port_key])
+    local old_ip = old_prefs[item.ip_key]
+    local old_pt = tonumber(old_prefs[item.port_key])
+
+    if (new_ip and old_ip ~= new_ip) or (new_pt and old_pt ~= new_pt) then
+      local target_ip = new_ip or item.def_ip
+      local target_port = new_pt or item.def_port
+      local enabled = (target_ip ~= nil and target_ip ~= "")
+      log.info(string.format("🌐 [EW11] Slot #%d (%s) Config -> %s:%d (enabled=%s)", item.slot, item.name, target_ip, target_port, tostring(enabled)))
+      gateway_client.set_ew11(ip, port, item.slot, target_ip, target_port, item.name, enabled)
     end
   end
 

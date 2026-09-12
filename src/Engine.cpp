@@ -266,20 +266,35 @@ void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt) {
                    "Status", "Conn", "RX Pkts", "TX Pkts", "Dropped", "Uncache");
   out.append(DIV80);
 
-  const TcpChanStats *t_st[] = {&pkt.ch5, &pkt.ch6};
-  const char *tn[] = {"CH#5_Hub#2", "CH#6_Hub#1"};
-  const uint16_t tp[] = {Config::TCP::DOORPHONE_PORT, Config::TCP::HUB_PORT};
-
-  for (int i = 0; i < 2; ++i) {
-    bool is_conn = t_st[i]->is_connected;
-    uint32_t rx = t_st[i]->rx_pkts;
-    uint32_t tx = t_st[i]->tx_pkts;
+  // CH6 Hub
+  {
+    bool is_conn = pkt.ch6.is_connected;
+    uint32_t rx = pkt.ch6.rx_pkts;
+    uint32_t tx = pkt.ch6.tx_pkts;
     const char *status_str = !is_conn               ? "Disconnected"
                              : (rx == 0 && tx == 0) ? "Idle"
                                                      : "Connected";
-    out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n", tn[i], tp[i], status_str,
-                     static_cast<unsigned>(t_st[i]->connection_count), static_cast<unsigned>(rx), static_cast<unsigned>(tx),
-                     static_cast<unsigned>(t_st[i]->dropped_pkts), static_cast<unsigned>(t_st[i]->uncached_pkts));
+    out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n", "CH#6_Hub", Config::TCP::HUB_PORT, status_str,
+                     static_cast<unsigned>(pkt.ch6.connection_count), static_cast<unsigned>(rx), static_cast<unsigned>(tx),
+                     static_cast<unsigned>(pkt.ch6.dropped_pkts), static_cast<unsigned>(pkt.ch6.dropped_pkts));
+  }
+
+  // CH5 EW11 Multi-Client Slots
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    auto &slot = g_ew11_slots[s];
+    if (!slot.enabled && strlen(slot.target_ip) == 0) continue;
+
+    char chan_name[16];
+    snprintf(chan_name, sizeof(chan_name), "CH#5_%s", slot.name);
+    const char *status_str = !slot.is_connected          ? "Disconnected"
+                             : (slot.rx_pkts == 0)        ? "Idle"
+                                                          : "Connected";
+    out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n",
+                     chan_name, slot.target_port, status_str,
+                     slot.is_connected ? 1u : 0u,
+                     static_cast<unsigned>(slot.rx_pkts),
+                     static_cast<unsigned>(slot.tx_pkts),
+                     static_cast<unsigned>(slot.dropped_pkts), 0u);
   }
 }
 
@@ -1526,7 +1541,6 @@ void Task_Ch4(void *pvParameters) {
               }
             }
 
-            xQueueSend(g_ch4_to_tcp_queue, &packet, 0);
             g_telnet_tracer.trace(4, false, TraceType::RMT, packet);
             g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);
           }
@@ -1593,7 +1607,6 @@ void Task_Ch4(void *pvParameters) {
           if (!is_debounce) {
             last_pkt = packet;
             last_pkt_ms = now;
-            xQueueSend(g_ch4_to_tcp_queue, &packet, 0);
             g_telnet_tracer.trace(4, false, TraceType::RMT, packet);
             g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);
           }

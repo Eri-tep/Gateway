@@ -861,6 +861,35 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
+  // 15. set_ew11 (CH5 EW11 Multi-Client Slot Configuration)
+  if (strcasecmp(cmd, "set_ew11") == 0) {
+    long slot = findJsonIntValue(json_str, "slot", -1);
+    long port = findJsonIntValue(json_str, "port", 0);
+    char ip[32] = {0};
+    char name[16] = {0};
+    findJsonStringValue(json_str, "ip", ip, sizeof(ip));
+    findJsonStringValue(json_str, "name", name, sizeof(name));
+
+    // enabled 여부 판별 (명시적 enabled 필드가 있거나, ip가 제공되면 true)
+    int en_val = findJsonIntValue(json_str, "enabled", -1);
+    bool enabled = (en_val == 1) || (en_val == -1 && strlen(ip) > 0);
+
+    if (slot >= 0 && slot < Config::TCP::MAX_EW11_SLOTS) {
+      uint16_t target_port = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : 8899;
+      if (Ew11_SetSlot(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr, target_port, name[0] ? name : nullptr)) {
+        char ok_msg[192];
+        snprintf(ok_msg, sizeof(ok_msg),
+                 "{\"res\":\"ok\",\"slot\":%ld,\"enabled\":%s,\"ip\":\"%s\",\"port\":%u,\"msg\":\"EW11 slot %ld updated & saved to NVS\"}\n",
+                 slot, enabled ? "true" : "false", ip, target_port, slot);
+        send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+        return;
+      }
+    }
+    const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid EW11 slot (0-4) or parameters\"}\n";
+    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+    return;
+  }
+
   // Unknown Command
   const char *unk_msg = "{\"res\":\"error\",\"msg\":\"Unknown command\"}\n";
   send(sock, unk_msg, strlen(unk_msg), MSG_DONTWAIT);

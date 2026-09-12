@@ -27,16 +27,6 @@
       "component": "main",
       "capability": "motionSensor",
       "version": 1
-    },
-    {
-      "component": "lobby",
-      "capability": "switch",
-      "version": 1
-    },
-    {
-      "component": "lobby",
-      "capability": "motionSensor",
-      "version": 1
     }
   ]
 }
