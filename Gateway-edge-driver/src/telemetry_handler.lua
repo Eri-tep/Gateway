@@ -415,29 +415,40 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   -- DOORPHONE CHILD DEVICE: 호출 감지 상태 업데이트 (세대 도어 & 로비 도어)
   -- ═══════════════════════════════════════════════════════════════════════════
   if data.doorphone then
-    local front_bell = data.doorphone.front_bell
-    local lobby_bell = data.doorphone.lobby_bell
-    local cap_call = capabilities["digituniverse06711.doorCallStatus"]
-
-    for _, dev in ipairs(driver:get_devices()) do
-      if dev.parent_assigned_child_key == "doorphone" and cap_call then
-        local c_main = dev.profile.components["main"]
-        local c_lobby = dev.profile.components["lobby"]
-
-        if c_main then
-          local status_val = front_bell and "호출 중" or "대기"
-          dev:emit_component_event(c_main, cap_call.callStatus({ value = status_val }))
-        end
-
-        if c_lobby then
-          local status_val = lobby_bell and "호출 중" or "대기"
-          dev:emit_component_event(c_lobby, cap_call.callStatus({ value = status_val }))
-        end
-      end
-    end
+    TelemetryHandler.handle_doorphone_event(driver, data.doorphone)
   end
 
   log.info("📊 ═══════════════════════════════════════════════════════════════════════")
 end
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 실시간 도어폰 이벤트 핸들러 (CH7 Server Push 즉시 처리)
+-- ═══════════════════════════════════════════════════════════════════════════
+function TelemetryHandler.handle_doorphone_event(driver, event_data)
+  if not event_data then return end
+  local front_bell = event_data.front_bell
+  local lobby_bell = event_data.lobby_bell
+  local cap_call = capabilities["digituniverse06711.doorCallStatus"]
+
+  for _, dev in ipairs(driver:get_devices()) do
+    if dev.parent_assigned_child_key == "doorphone" and cap_call then
+      local c_main = dev.profile.components["main"]
+      local c_lobby = dev.profile.components["lobby"]
+
+      if c_main then
+        local status_val = front_bell and "호출 중" or "대기"
+        log.info(string.format("🚪 [DOORPHONE REALTIME] Main Call Status -> %s", status_val))
+        dev:emit_component_event(c_main, cap_call.callStatus({ value = status_val, state_change = true }))
+      end
+
+      if c_lobby then
+        local status_val = lobby_bell and "호출 중" or "대기"
+        log.info(string.format("🚪 [DOORPHONE REALTIME] Lobby Call Status -> %s", status_val))
+        dev:emit_component_event(c_lobby, cap_call.callStatus({ value = status_val, state_change = true }))
+      end
+    end
+  end
+end
+
 return TelemetryHandler
+

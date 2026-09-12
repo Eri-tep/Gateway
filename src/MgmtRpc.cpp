@@ -901,3 +901,22 @@ void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
     p++;
   }
 }
+
+// ============================================================================
+// CH7 실시간 도어폰 이벤트 브로드캐스트 (Server Push)
+// ============================================================================
+void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) {
+  char buf[128];
+  int len = snprintf(buf, sizeof(buf),
+                     "{\"event\":\"doorphone\",\"front_bell\":%s,\"lobby_bell\":%s}\n",
+                     front_bell ? "true" : "false", lobby_bell ? "true" : "false");
+  if (len <= 0 || !g_mgmt_mutex) return;
+
+  MutexLocker lock(g_mgmt_mutex);
+  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+    if (g_mgmt_sessions[i].sock >= 0) {
+      send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
+      g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+}

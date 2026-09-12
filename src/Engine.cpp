@@ -1499,15 +1499,30 @@ void Task_Ch4(void *pvParameters) {
             last_pkt = packet;
             last_pkt_ms = now;
 
-            // 도어폰 초인종(벨) 수신 상태 감지
+            // 도어폰 초인종(벨) 및 호출 종료 상태 실시간 감지 & CH7 브로드캐스트
             if (packet.length >= 2) {
               uint8_t opcode = packet.data[1];
-              if (opcode == 0xB5) { // BELL_DOOR
+              bool state_changed = false;
+              if (opcode == 0xB5) { // BELL_DOOR (현관 벨 호출)
                 g_doorphone_state.front_bell.store(true, std::memory_order_release);
                 g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
-              } else if (opcode == 0x5A || opcode == 0x5F) { // BELL_LOBBY or CALL_LOBBY
+                state_changed = true;
+              } else if (opcode == 0xB6 || opcode == 0xB8) { // B6: 현관 무응답 종료, B8: 통화 종료
+                g_doorphone_state.front_bell.store(false, std::memory_order_release);
+                state_changed = true;
+              } else if (opcode == 0x5A || opcode == 0x5F) { // BELL_LOBBY or CALL_LOBBY (로비 벨/호출)
                 g_doorphone_state.lobby_bell.store(true, std::memory_order_release);
                 g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
+                state_changed = true;
+              } else if (opcode == 0x60) { // END_LOBBY (로비 통화 종료)
+                g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
+                state_changed = true;
+              }
+
+              if (state_changed) {
+                bool f = g_doorphone_state.front_bell.load(std::memory_order_relaxed);
+                bool l = g_doorphone_state.lobby_bell.load(std::memory_order_relaxed);
+                Mgmt_BroadcastDoorphoneEvent(f, l);
               }
             }
 
