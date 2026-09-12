@@ -1753,19 +1753,17 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                     (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
       bool is_env = (grp->temp_slot.discovered && grp->temp_slot.telemetry_offset == i);
 
-      // 1순위: 확정된 고정 프레임 골격 (ST, LN, GW, ID, OP, HD, S1, SB, CS, ET)
+      // 1순위: 확정된 고정 프레임 골격 (ST, LN, GW, ID, OP, S1, S2, CS, ET)
       const char *r = nullptr;
       if (i == 0) r = "ST";
       else if (i == len - 1) r = "ET";
       else if (i == len - 2) r = "CS";
       else if (ad.has_len_field && i == ad.len_offset) r = "LN";
-      else if (ad.is_swapped_addr && i == ad.gw_addr_offset) r = "GW";
-      else if (i == ad.dev_id_offset) r = "ID";
-      else if (ad.offsets_locked && !ad.is_swapped_addr && i == ad.sub1_offset) r = "GW";
-      else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
-      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "SB";
       else if (i == ad.opcode_offset) r = "OP";
-      else if (ad.offsets_locked && i < ad.payload_offset) r = "HD";
+      else if (i == ad.dev_id_offset) r = "ID";
+      else if (i == ad.gw_addr_offset) r = "GW";
+      else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
+      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "S2";
 
       // 2순위: 순수 페이로드 영역 (ad.payload_offset ~ 체크섬 직전)
       bool is_payload = (r == nullptr);
@@ -1907,6 +1905,9 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   out.append(Fmt::DIV80);
   out.append("Packet Diff Monitor (Learned Parameter Slots):\r\n");
 
+  if (ad.gw_addr_offset != 0xFF) {
+    out.appendFormat("  [GW]  Gateway Slot  : Byte #%u (Val: 0x%02X)\r\n", ad.gw_addr_offset, ad.gw_addr);
+  }
   if (grp->sub1_offset != 0xFF) {
     if (grp->ctl_sub1_override != 0xFF) {
       out.appendFormat("  [S1]  Sub1 Slot     : Byte #%u (Override: 0x%02X)\r\n", grp->sub1_offset, grp->ctl_sub1_override);
