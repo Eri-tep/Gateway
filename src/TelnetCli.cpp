@@ -150,8 +150,9 @@ void TelnetTracer::flushToClient() {
   static SessionTracker s_wp_tracker[3] = {};
   static struct {
     struct timeval t_rx;
+    uint8_t rx_channel;
     bool active;
-  } s_door_tracker = {{0, 0}, false};
+  } s_door_tracker = {{0, 0}, 0, false};
   static struct timeval s_last_pkt_tv = {0, 0};
 
   auto calc_delay_ms = [](const struct timeval &now,
@@ -216,10 +217,15 @@ void TelnetTracer::flushToClient() {
       if (!entry.is_tx) {
         is_new_req = true;
         s_door_tracker.t_rx = entry.tv;
+        s_door_tracker.rx_channel = entry.channel;
         s_door_tracker.active = true;
       } else if (s_door_tracker.active) {
-        delay_ms = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
-        delay_tag = "PASS-THRU";
+        long d = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
+        // PASS-THRU는 다른 채널(TCP CH5 -> 하드웨어 CH4 또는 하드웨어 CH4 -> TCP CH5) 간 500ms 이내 중계일 때만 유효
+        if (entry.channel != s_door_tracker.rx_channel && d >= 0 && d <= 500) {
+          delay_ms = d;
+          delay_tag = "PASS-THRU";
+        }
         s_door_tracker.active = false;
       }
     } else if (entry.channel == 1) {
