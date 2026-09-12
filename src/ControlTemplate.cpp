@@ -256,6 +256,17 @@ bool ControlTemplateRegistry::lockGroup(uint8_t dev_id, bool lock_all) {
   for (size_t i = 0; i < _group_count; ++i) {
     if (lock_all || _groups[i].dev_id == dev_id) {
       _groups[i].status = GroupControlTemplate::Status::LOCKED;
+      // [RAM 최적화] LOCKED 상태 진입 시 임시 차분 학습 버퍼 Zero-Clear
+      _groups[i].ctl_before_len = 0;
+      memset(_groups[i].ctl_before_raw, 0, sizeof(_groups[i].ctl_before_raw));
+      _groups[i].ctl_after_len = 0;
+      memset(_groups[i].ctl_after_raw, 0, sizeof(_groups[i].ctl_after_raw));
+      _groups[i].last_ctl_len = 0;
+      memset(_groups[i].last_ctl_raw, 0, sizeof(_groups[i].last_ctl_raw));
+      _groups[i].last_ack_before_len = 0;
+      memset(_groups[i].last_ack_before_raw, 0, sizeof(_groups[i].last_ack_before_raw));
+      _groups[i].last_ack_after_len = 0;
+      memset(_groups[i].last_ack_after_raw, 0, sizeof(_groups[i].last_ack_after_raw));
       modified = true;
       if (!lock_all) break;
     }
@@ -699,15 +710,29 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         }
       }
     } else {
-      // [희망온도 컨텍스트 (0x45 등)]
       // 전원이 꺼진 상태(power_off_seen)에서 온도 조작이 들어온 경우
-      if (grp->coverage.power_off_seen && !grp->coverage.temp_while_off_seen) {
+      if (grp->coverage.power_off_seen) {
         grp->coverage.temp_while_off_seen = true;
-        if (grp->off_temp_behavior == ThermoOffTempBehavior::UNKNOWN) {
-          if (cmd_val == grp->power_slot.on_val) {
-            grp->off_temp_behavior = ThermoOffTempBehavior::AUTO_POWER_ON;
-          } else {
-            grp->off_temp_behavior = ThermoOffTempBehavior::PASSIVE_MEMORY;
+        if (grp->off_temp_behavior == ThermoOffTempBehavior::UNKNOWN ||
+            grp->off_temp_behavior == ThermoOffTempBehavior::PASSIVE_MEMORY) {
+          if (has_before && grp->power_slot.action_offset != 0xFF &&
+              grp->power_slot.action_offset < ack_after.length) {
+            uint8_t current_pwr = ack_after.data[grp->power_slot.action_offset];
+            if (current_pwr == grp->power_slot.on_val) {
+              grp->off_temp_behavior = ThermoOffTempBehavior::AUTO_POWER_ON;
+              grp->off_temp_unchanged_count = 0;
+            } else if (current_pwr == grp->power_slot.off_val) {
+              // 전원은 여전히 OFF이나 온도가 갱신되었는지 확인
+              if (ack_diff_count > 0) {
+                grp->off_temp_behavior = ThermoOffTempBehavior::PASSIVE_MEMORY;
+                grp->off_temp_unchanged_count = 0;
+              } else {
+                grp->off_temp_unchanged_count++;
+                if (grp->off_temp_unchanged_count >= 3) {
+                  grp->off_temp_behavior = ThermoOffTempBehavior::LOCKED_IGNORE;
+                }
+              }
+            }
           }
         }
       }
@@ -868,6 +893,10 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
 
   // 액션 슬롯 주입 (오직 학습/발견된 슬롯만 주입)
   if (action == ControlActionType::POWER) {
+    // [SAFETY] 가스 밸브는 안전상 절대 열기(ON) 명령을 허용하지 않음 (단방향 닫기만 허용)
+    if (grp->coverage.dev_class == DeviceClass::GAS && value > 0) {
+      return false;
+    }
     if (!grp->power_slot.discovered) return false;
     if (grp->power_slot.category_offset < grp->frame_len) {
       out.data[grp->power_slot.category_offset] = grp->power_slot.category_val;
@@ -954,7 +983,10 @@ void ControlTemplateRegistry::saveToNvs() {
     if (has_item) {
       char key[16];
       snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(saved_idx));
-      prefs.putBytes(key, &temp, sizeof(GroupControlTemplate));
+      NvsEnvelope<GroupControlTemplate> env{};
+      env.payload = temp;
+      env.seal();
+      prefs.putBytes(key, &env, sizeof(env));
       saved_idx++;
     }
   }
@@ -968,7 +1000,7 @@ void ControlTemplateRegistry::loadFromNvs() {
   uint8_t cnt = prefs.getUChar("cnt", 0);
   if (cnt > MAX_GROUPS) cnt = MAX_GROUPS;
 
-  // 단일 템플릿(340B) 단위로 읽어서 레지스트리에 순차 적재 (스택 소모 최소화)
+  // 단일 템플릿 단위로 읽어서 레지스트리에 순차 적재 (스택 소모 최소화)
   taskENTER_CRITICAL(&_mux);
   _group_count = 0;
   for (size_t i = 0; i < MAX_GROUPS; ++i) {
@@ -980,26 +1012,38 @@ void ControlTemplateRegistry::loadFromNvs() {
     char key[16];
     snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
     GroupControlTemplate temp{};
-    if (prefs.getBytes(key, &temp, sizeof(GroupControlTemplate)) > 0) {
-      if (temp.dev_id != 0) {
-        taskENTER_CRITICAL(&_mux);
-        if (_group_count < MAX_GROUPS) {
-          // dev_id 오름차순 삽입 유지
-          size_t insert_idx = _group_count;
-          for (size_t j = 0; j < _group_count; ++j) {
-            if (_groups[j].dev_id > temp.dev_id) {
-              insert_idx = j;
-              break;
-            }
+    bool loaded = false;
+
+    // 1) NvsEnvelope 무결성 검증 로드 시도
+    NvsEnvelope<GroupControlTemplate> env{};
+    size_t rlen = prefs.getBytes(key, &env, sizeof(env));
+    if (rlen == sizeof(env) && env.verify()) {
+      temp = env.payload;
+      loaded = true;
+    } else if (rlen == sizeof(GroupControlTemplate)) {
+      // 2) 레거시 비-래핑 템플릿 하위 호환 로드
+      memcpy(&temp, &env, sizeof(GroupControlTemplate));
+      loaded = true;
+    }
+
+    if (loaded && temp.dev_id != 0) {
+      taskENTER_CRITICAL(&_mux);
+      if (_group_count < MAX_GROUPS) {
+        // dev_id 오름차순 삽입 유지
+        size_t insert_idx = _group_count;
+        for (size_t j = 0; j < _group_count; ++j) {
+          if (_groups[j].dev_id > temp.dev_id) {
+            insert_idx = j;
+            break;
           }
-          for (size_t j = _group_count; j > insert_idx; --j) {
-            _groups[j] = _groups[j - 1];
-          }
-          _groups[insert_idx] = temp;
-          _group_count++;
         }
-        taskEXIT_CRITICAL(&_mux);
+        for (size_t j = _group_count; j > insert_idx; --j) {
+          _groups[j] = _groups[j - 1];
+        }
+        _groups[insert_idx] = temp;
+        _group_count++;
       }
+      taskEXIT_CRITICAL(&_mux);
     }
   }
   prefs.end();

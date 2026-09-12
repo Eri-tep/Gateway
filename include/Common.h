@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.8.4";
+constexpr const char *FIRMWARE_VERSION = "v1.8.5";
 } // namespace Config
 
 namespace Config::Task {
@@ -336,30 +336,6 @@ constexpr uint32_t DEFAULT_KEEPALIVE_INTVL_SEC = 5;
 constexpr uint32_t DEFAULT_KEEPALIVE_CNT = 3;
 } // namespace Config::TCP
 
-enum class Ew11DeviceType : uint8_t {
-  WALLPAD_COMPATIBLE = 0, // 엘리베이터 (월패드 0xF7/0xEE 규격)
-  AIR_CONDITIONER = 1     // 에어컨 1~4대
-};
-
-struct Ew11ClientSlot {
-  bool enabled{false};
-  char name[16]{""};
-  char target_ip[16]{""};
-  uint16_t target_port{8899};
-  Ew11DeviceType dev_type{Ew11DeviceType::WALLPAD_COMPATIBLE};
-  int sock{-1};
-  bool is_connected{false};
-  uint32_t last_reconnect_ms{0};
-  uint8_t rx_buf[128];
-  size_t rx_len{0};
-  uint32_t last_rx_ms{0};
-  uint32_t rx_pkts{0};
-  uint32_t tx_pkts{0};
-  uint32_t dropped_pkts{0};
-};
-
-extern Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
-
 namespace Config::Serial {
 // [도어폰 Serial] 보레이트 (기본: 3860)
 constexpr uint32_t DEFAULT_DOORPHONE_BAUD = 3860;
@@ -432,17 +408,21 @@ struct FramingTracker {
     status.store(FramingStatus::WAITING, std::memory_order_relaxed);
   }
 
-  void clearNvs() noexcept {
+  void clearNvs(const char *nvs_ns = "dp_frame",
+                const char *tag = "DOORPHONE") noexcept {
     reset();
     Preferences prefs;
-    if (prefs.begin("dp_frame", false)) {
+    if (prefs.begin(nvs_ns, false)) {
       prefs.clear();
       prefs.end();
-      ::Serial.println(F("[DOORPHONE] Cleared framing NVS storage."));
+      ::Serial.printf("[%s] Cleared framing NVS storage (%s).\r\n", tag,
+                      nvs_ns);
     }
   }
 
-  void processFrame(uint8_t stx, uint8_t etx, uint8_t len = 0) noexcept {
+  void processFrame(uint8_t stx, uint8_t etx, uint8_t len = 0,
+                    const char *nvs_ns = "dp_frame",
+                    const char *tag = "DOORPHONE") noexcept {
     if (is_custom_fixed.load(std::memory_order_relaxed)) {
       // Custom 고정 락 모드: 노이즈나 외래 패킷으로 인한 상태 변경 불가 (영구
       // 락)
@@ -472,7 +452,7 @@ struct FramingTracker {
           consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
       if (m >= 3) {
         status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-        saveToNvs();
+        saveToNvs(nvs_ns, tag);
       } else {
         status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
       }
@@ -503,9 +483,10 @@ struct FramingTracker {
     }
   }
 
-  void restoreFromNvs() noexcept {
+  void restoreFromNvs(const char *nvs_ns = "dp_frame",
+                      const char *tag = "DOORPHONE") noexcept {
     Preferences prefs;
-    if (prefs.begin("dp_frame", true)) {
+    if (prefs.begin(nvs_ns, true)) {
       uint8_t s = prefs.getUChar("stx", 0);
       uint8_t e = prefs.getUChar("etx", 0);
       uint8_t l = prefs.getUChar("len", 0);
@@ -519,14 +500,15 @@ struct FramingTracker {
         consecutive_matches.store(3, std::memory_order_relaxed);
         is_custom_fixed.store(fixed, std::memory_order_relaxed);
         status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-        ::Serial.printf("[DOORPHONE] Restored framing from NVS: STX 0x%02X, "
+        ::Serial.printf("[%s] Restored framing from NVS (%s): STX 0x%02X, "
                         "ETX 0x%02X, Len %u%s\r\n",
-                        s, e, l, fixed ? " (FIXED)" : "");
+                        tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
       }
     }
   }
 
-  void saveToNvs() noexcept {
+  void saveToNvs(const char *nvs_ns = "dp_frame",
+                 const char *tag = "DOORPHONE") noexcept {
     uint8_t s = candidate_stx.load(std::memory_order_relaxed);
     uint8_t e = candidate_etx.load(std::memory_order_relaxed);
     uint8_t l = candidate_len.load(std::memory_order_relaxed);
@@ -534,16 +516,16 @@ struct FramingTracker {
     if (s == 0 || e == 0)
       return;
     Preferences prefs;
-    if (prefs.begin("dp_frame", false)) {
+    if (prefs.begin(nvs_ns, false)) {
       prefs.putUChar("stx", s);
       prefs.putUChar("etx", e);
       prefs.putUChar("len", l);
       prefs.putBool("locked", true);
       prefs.putBool("fixed", fixed);
       prefs.end();
-      ::Serial.printf("[DOORPHONE] Saved framing to NVS: STX 0x%02X, ETX "
+      ::Serial.printf("[%s] Saved framing to NVS (%s): STX 0x%02X, ETX "
                       "0x%02X, Len %u%s\r\n",
-                      s, e, l, fixed ? " (FIXED)" : "");
+                      tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
     }
   }
 
@@ -556,6 +538,52 @@ struct FramingTracker {
   }
 };
 
+struct DoorphoneProfile {
+  uint8_t match_stx; // 매칭 키: STX (0이면 무시)
+  uint8_t match_etx; // 매칭 키: ETX (0이면 무시)
+  uint8_t match_len; // 매칭 키: 길이 (0이면 가변 길이 허용)
+  const char *desc;  // 카탈로그 프로파일 명칭
+
+  // 3-Step 시퀀스 및 이벤트 시맨틱 바이트
+  uint8_t bell_front; // 현관 벨 호출 수신
+  uint8_t bell_lobby; // 로비 벨 호출 수신
+  uint8_t call_front; // 현관 통화 시작 송신
+  uint8_t call_lobby; // 로비 통화 시작 송신
+  uint8_t open_front; // 현관 문열림 송신
+  uint8_t open_lobby; // 로비 문열림 송신
+  uint8_t end_front;  // 현관 통화 종료 송신
+  uint8_t end_lobby;  // 로비 통화 종료 송신
+};
+
+inline const DoorphoneProfile s_doorphone_catalog[] = {
+    // #1: 현대통신 표준 도어폰 (0x7F .. 0xEE, 5바이트)
+    {0x7F, 0xEE, 5, "Hyundai HT Standard", 0xB5, 0x5A, 0xB9, 0x5F, 0xB4, 0x61,
+     0xB8, 0x60},
+    // #2: 코맥스 / 일반 STX-ETX 도어폰 (0x02 .. 0x03)
+    {0x02, 0x03, 0, "Commax / Generic STX-ETX", 0x10, 0x20, 0x11, 0x21, 0x12,
+     0x22, 0x13, 0x23},
+    // #3: 삼성 / 기타 도어폰 프로파일 (0xAA .. 0x55)
+    {0xAA, 0x55, 0, "Generic Vendor A", 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+     0x07, 0x08}};
+
+inline constexpr size_t DOORPHONE_CATALOG_COUNT =
+    sizeof(s_doorphone_catalog) / sizeof(s_doorphone_catalog[0]);
+
+inline const DoorphoneProfile *matchDoorphoneCatalog(uint8_t stx, uint8_t etx,
+                                                     uint8_t len) noexcept {
+  if (stx == 0 || etx == 0)
+    return nullptr;
+  for (size_t i = 0; i < DOORPHONE_CATALOG_COUNT; ++i) {
+    const auto &item = s_doorphone_catalog[i];
+    if (item.match_stx == stx && item.match_etx == etx) {
+      if (item.match_len == 0 || item.match_len == len) {
+        return &item;
+      }
+    }
+  }
+  return nullptr;
+}
+
 struct DoorphoneState {
   std::atomic<bool> front_bell{false};
   std::atomic<bool> lobby_bell{false};
@@ -564,6 +592,32 @@ struct DoorphoneState {
 } // namespace Config::Doorphone
 
 extern Config::Doorphone::DoorphoneState g_doorphone_state;
+
+enum class Ew11DeviceType : uint8_t {
+  WALLPAD_COMPATIBLE = 0, // 엘리베이터 (월패드 0xF7/0xEE 규격)
+  AIR_CONDITIONER = 1     // 에어컨 1~4대
+};
+
+struct Ew11ClientSlot {
+  bool enabled{false};
+  char name[16]{""};
+  char target_ip[16]{""};
+  uint16_t target_port{8899};
+  Ew11DeviceType dev_type{Ew11DeviceType::WALLPAD_COMPATIBLE};
+  Config::Doorphone::FramingTracker
+      tracker; // 슬롯별 독립 프레이밍 자율 학습기 (STX/ETX/길이 수렴)
+  int sock{-1};
+  bool is_connected{false};
+  uint32_t last_reconnect_ms{0};
+  uint8_t rx_buf[128];
+  size_t rx_len{0};
+  uint32_t last_rx_ms{0};
+  uint32_t rx_pkts{0};
+  uint32_t tx_pkts{0};
+  uint32_t dropped_pkts{0};
+};
+
+extern Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
 
 namespace Config::Devices {
 inline constexpr uint8_t DEV_HEAT_EXCHANGER = 0x2B; // 전열교환기 (ERV) ID

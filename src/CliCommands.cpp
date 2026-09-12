@@ -225,40 +225,101 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   if (argc == 0 || (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "list") == 0) ||
       (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "status") == 0)) {
-    char buf[1024];
+    char buf[1280];
     AppendBuf out{buf, sizeof(buf)};
     out.append("\r\n");
     out.append(Fmt::DIV80EQ);
-    out.append("                  CH5 EW11 MULTI-CLIENT SLOTS (NVS Saved)                    \r\n");
+    out.append("             CH5 EW11 CLIENT SLOTS & AUTONOMOUS FRAMING TRACKER               \r\n");
     out.append(Fmt::DIV80EQ);
-    out.appendFormat("%-5s %-12s %-8s %-16s %-6s %-13s %s\r\n",
-                     "Slot", "Name", "Type", "Target IP", "Port", "Status", "Packets(RX/TX)");
+    out.appendFormat("%-5s %-12s %-16s %-6s %-11s %-18s %s\r\n",
+                     "Slot", "Name", "Target IP", "Port", "Status", "Framing Profile", "Packets(RX/TX)");
     out.append(Fmt::DIV80);
 
     {
       MutexLocker lock(g_ch5_mutex);
       for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
         auto &slot = g_ew11_slots[s];
-        const char *type_str = (slot.dev_type == Ew11DeviceType::WALLPAD_COMPATIBLE) ? "Elevator" : "Aircon";
         const char *status_str = !slot.enabled ? "Disabled"
                                  : !slot.is_connected ? "Disconnected"
                                  : (slot.rx_pkts == 0) ? "Idle" : "Connected";
-        out.appendFormat("#%-4d %-12s %-8s %-16s %-6u %-13s %u / %u\r\n",
-                         s, slot.name, type_str,
+
+        char frame_str[32];
+        auto f_stat = slot.tracker.status.load(std::memory_order_relaxed);
+        uint8_t stx = slot.tracker.candidate_stx.load(std::memory_order_relaxed);
+        uint8_t etx = slot.tracker.candidate_etx.load(std::memory_order_relaxed);
+        uint8_t len = slot.tracker.candidate_len.load(std::memory_order_relaxed);
+        bool fixed = slot.tracker.is_custom_fixed.load(std::memory_order_relaxed);
+
+        if (f_stat == Config::Doorphone::FramingStatus::LOCKED) {
+          snprintf(frame_str, sizeof(frame_str), "%02X..%02X (%uB)%s",
+                   stx, etx, len, fixed ? "*" : "");
+        } else if (f_stat == Config::Doorphone::FramingStatus::LEARNING) {
+          snprintf(frame_str, sizeof(frame_str), "Learning(%02X..%02X)", stx, etx);
+        } else {
+          snprintf(frame_str, sizeof(frame_str), "Auto-Wait");
+        }
+
+        out.appendFormat("#%-4d %-12s %-16s %-6u %-11s %-18s %u / %u\r\n",
+                         s, slot.name,
                          slot.target_ip[0] ? slot.target_ip : "-",
-                         slot.target_port, status_str,
+                         slot.target_port, status_str, frame_str,
                          static_cast<unsigned>(slot.rx_pkts),
                          static_cast<unsigned>(slot.tx_pkts));
       }
     }
     out.append(Fmt::DIV80);
     out.append("Usage: ew11 set <slot:0-4> <ip> [port:8899] [name] [enable:1/0]\r\n");
-    out.append("       ew11 enable <slot:0-4> | ew11 disable <slot:0-4>\r\n\r\n");
+    out.append("       ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
+    out.append("       ew11 reset <slot:0-4> | ew11 enable <slot:0-4> | ew11 disable <slot:0-4>\r\n\r\n");
     sendTelnetMsgLen(sock, out.buf, out.offset);
     return;
   }
 
   const char *sub = embeddedCliGetToken(args, 1);
+
+  if (strcasecmp(sub, "frame") == 0) {
+    if (argc < 4) {
+      sendTelnetMsg(sock, "[ERROR] Usage: ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+    uint8_t stx = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 16));
+    uint8_t etx = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 4), nullptr, 16));
+    uint8_t len = 0;
+    if (argc >= 5) {
+      len = static_cast<uint8_t>(atoi(embeddedCliGetToken(args, 5)));
+    }
+    char ns[16], tag[16];
+    snprintf(ns, sizeof(ns), "e%d_frame", slot);
+    snprintf(tag, sizeof(tag), "EW11_#%d", slot);
+    g_ew11_slots[slot].tracker.setFixedLock(stx, etx, len);
+    g_ew11_slots[slot].tracker.saveToNvs(ns, tag);
+    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing permanently fixed to STX 0x%02X, ETX 0x%02X, Len %u.\r\n",
+                   slot, stx, etx, len);
+    return;
+  }
+
+  if (strcasecmp(sub, "reset") == 0) {
+    if (argc < 2) {
+      sendTelnetMsg(sock, "[ERROR] Usage: ew11 reset <slot:0-4>\r\n");
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+    char ns[16], tag[16];
+    snprintf(ns, sizeof(ns), "e%d_frame", slot);
+    snprintf(tag, sizeof(tag), "EW11_#%d", slot);
+    g_ew11_slots[slot].tracker.clearNvs(ns, tag);
+    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing tracker reset to autonomous auto-probing.\r\n", slot);
+    return;
+  }
 
   if (strcasecmp(sub, "set") == 0) {
     if (argc < 3) {
@@ -317,7 +378,7 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  sendTelnetMsg(sock, "Usage: ew11 [list | set <slot> <ip> [port] [name] [enable] | enable <slot> | disable <slot>]\r\n");
+  sendTelnetMsg(sock, "Usage: ew11 [list | set <slot> <ip> [port] [name] [enable] | frame <slot> <stx> <etx> [len] | reset <slot> | enable <slot> | disable <slot>]\r\n");
 }
 
 void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
@@ -832,13 +893,17 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
   out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
   out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
+  out.append("  wallpad simulate <hex...>       Inject raw hex packet into auto-probing engine\r\n");
   out.append(Fmt::DIV80);
   out.append(" [ CONTROL BLUEPRINT & LEARNING ]\r\n");
   out.append("  ctl [table|list]                Display learned control blueprint table\r\n");
-  out.append("  ctl view <id>                   Dump detailed packet blueprint & action slots\r\n");
+  out.append("  ctl <dev_id>                    Dump detailed packet blueprint & action slots (e.g. ctl 0x18)\r\n");
   out.append("  ctl learn [id|all]              Active probing session (all groups if omitted)\r\n");
+  out.append("  ctl lock [dev_id|all]           Lock blueprint(s) into immutable state\r\n");
+  out.append("  ctl unlock [dev_id|all]         Unlock blueprint(s) for continuous learning\r\n");
+  out.append("  ctl name <dev_id> <name>        Assign custom group name (e.g. ctl name 0x1B Gas)\r\n");
+  out.append("  ctl class <dev_id> <class>      Assign device class (light|outlet|vent|thermo|gas|ev)\r\n");
   out.append("  ctl status                      Show active probing real-time progress\r\n");
-  out.append("  ctl q                           Abort active probing & restore baseline\r\n");
   out.append("  ctl reset [id|all]              Reset blueprint(s) and wipe from NVS flash\r\n");
   out.append("  trace [on|off|ctl|ack|pol|...]  Live packet stream monitoring with filters\r\n");
   out.append("  q                               Shortcut to stop live tracing immediately\r\n");
@@ -850,8 +915,10 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  wifi scan                       Scan surrounding 2.4GHz Wi-Fi AP networks\r\n");
   out.append("  wifi connect <ssid> [password]  Connect to target Wi-Fi AP network\r\n");
   out.append("  wifi disconnect                 Disconnect current Wi-Fi station\r\n");
-  out.append("  ew11 [list]                     Show CH5 EW11 multi-client slot status\r\n");
+  out.append("  ew11 [list|status]              Show CH5 EW11 multi-client slots & framing status\r\n");
   out.append("  ew11 set <slot> <ip> [port]     Configure EW11 slot IP & port (Saved to NVS)\r\n");
+  out.append("  ew11 frame <slot> <stx> <etx>   Manually fix slot packet framing in NVS\r\n");
+  out.append("  ew11 reset <slot>               Reset slot framing tracker to autonomous auto-probing\r\n");
   out.append("  ew11 enable/disable <slot>      Enable or disable target EW11 client slot\r\n");
   out.append("  routes [clear]                  Show dynamic device ingress routing table\r\n");
   out.append("  config                          View all runtime configuration parameters\r\n");
@@ -1454,13 +1521,85 @@ void wallpadPrintStatus(AppendBuf &out) {
   char dp_debounce_buf[32];
   snprintf(dp_debounce_buf, sizeof(dp_debounce_buf), "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_DEBOUNCE_MS));
 
+  uint8_t cur_dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
+  uint8_t cur_dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
+  uint8_t cur_dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+  const Config::Doorphone::DoorphoneProfile *dp_prof =
+      Config::Doorphone::matchDoorphoneCatalog(cur_dp_stx, cur_dp_etx, cur_dp_len);
+
+  char dp_match_buf[48];
+  char dp_ops_f_buf[64];
+  char dp_ops_l_buf[64];
+  const char *dp_match_status = "[UNKNOWN]";
+
+  if (dp_prof) {
+    snprintf(dp_match_buf, sizeof(dp_match_buf), "%s", dp_prof->desc);
+    dp_match_status = "[BOUND]";
+    snprintf(dp_ops_f_buf, sizeof(dp_ops_f_buf), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+             dp_prof->bell_front, dp_prof->call_front, dp_prof->open_front, dp_prof->end_front);
+    snprintf(dp_ops_l_buf, sizeof(dp_ops_l_buf), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+             dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby, dp_prof->end_lobby);
+  } else {
+    snprintf(dp_match_buf, sizeof(dp_match_buf), "No Catalog Match");
+    snprintf(dp_ops_f_buf, sizeof(dp_ops_f_buf), "Bell:B5, Call:B9, Open:B4, End:B8 (Default)");
+    snprintf(dp_ops_l_buf, sizeof(dp_ops_l_buf), "Bell:5A, Call:5F, Open:61, End:60 (Default)");
+  }
+
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Doorphone (CH4)", "Framing", dp_frame_buf, dp_status_str);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Catalog Match", dp_match_buf, dp_match_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Opcodes(F)", dp_ops_f_buf, dp_prof ? "[ACTIVE]" : "[DEFAULT]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Opcodes(L)", dp_ops_l_buf, dp_prof ? "[ACTIVE]" : "[DEFAULT]");
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Baudrate", dp_baud_buf, "[CONFIG]");
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Time-gap", dp_ipg_buf, "[CONFIG]");
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Debounce", dp_debounce_buf, "[CONFIG]");
   out.append(Fmt::DIV80);
 
-  // 8. Runtime Sync & Telemetry
+  // 8. EW11 Streaming (CH5 Multi-Slot Framing)
+  {
+    MutexLocker lock(g_ch5_mutex);
+    bool first_ew11 = true;
+    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+      auto &slot = g_ew11_slots[s];
+      char slot_title[24];
+      snprintf(slot_title, sizeof(slot_title), "Slot #%d", s);
+
+      char slot_detail[48];
+      const char *slot_status_str = "[UNUSED]";
+
+      if (!slot.enabled) {
+        snprintf(slot_detail, sizeof(slot_detail), "Disabled");
+        slot_status_str = "[UNUSED]";
+      } else {
+        auto f_stat = slot.tracker.status.load(std::memory_order_relaxed);
+        uint8_t stx = slot.tracker.candidate_stx.load(std::memory_order_relaxed);
+        uint8_t etx = slot.tracker.candidate_etx.load(std::memory_order_relaxed);
+        uint8_t len = slot.tracker.candidate_len.load(std::memory_order_relaxed);
+        bool fixed = slot.tracker.is_custom_fixed.load(std::memory_order_relaxed);
+
+        const char *ip_str = slot.target_ip[0] ? slot.target_ip : "0.0.0.0";
+        if (f_stat == Config::Doorphone::FramingStatus::LOCKED) {
+          snprintf(slot_detail, sizeof(slot_detail), "%s:%u | %02X..%02X (%uB)%s",
+                   ip_str, slot.target_port, stx, etx, len, fixed ? "*" : "");
+          slot_status_str = "[LOCKED]";
+        } else if (f_stat == Config::Doorphone::FramingStatus::LEARNING) {
+          snprintf(slot_detail, sizeof(slot_detail), "%s:%u | %02X..%02X (Learning)",
+                   ip_str, slot.target_port, stx, etx);
+          slot_status_str = "[LEARNING]";
+        } else {
+          snprintf(slot_detail, sizeof(slot_detail), "%s:%u | Auto-Wait", ip_str, slot.target_port);
+          slot_status_str = "[WAITING]";
+        }
+      }
+
+      out.appendFormat("%-16s%-16s%-38s%10s\r\n",
+                       first_ew11 ? "EW11 (CH5)" : "",
+                       slot_title, slot_detail, slot_status_str);
+      first_ew11 = false;
+    }
+  }
+  out.append(Fmt::DIV80);
+
+  // 9. Runtime Sync & Telemetry
   char conv_buf[48];
   uint32_t conv_pct = active_targets ? (verified_targets * 100 / active_targets) : 0;
   snprintf(conv_buf, sizeof(conv_buf), "%u / %u Targets (%u%%)",
@@ -2237,7 +2376,28 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
     g_auto_probing_engine.reset();
     g_doorphone_tracker.clearNvs();
     g_probe_convergence_reset.store(true, std::memory_order_release);
-    sendTelnetMsg(sock, "[OK] Auto-probing engine & Doorphone framing reset. Re-analyzing RS-485 bus traffic...\r\n");
+  } else if (strcasecmp(sub, "simulate") == 0) {
+    if (argc < 2) {
+      sendTelnetMsg(sock, "[ERROR] Usage: wallpad simulate <hex_bytes...> (e.g. wallpad simulate F7 0E 01 19 01 40 11 01 00 B6 EE)\r\n");
+      return;
+    }
+    uint8_t sim_buf[64]{0};
+    size_t sim_len = 0;
+    for (int i = 2; i <= argc && sim_len < sizeof(sim_buf); ++i) {
+      const char *tok = embeddedCliGetToken(args, i);
+      if (!tok) break;
+      char *endp = nullptr;
+      unsigned long val = strtoul(tok, &endp, 16);
+      if (endp != tok) {
+        sim_buf[sim_len++] = static_cast<uint8_t>(val);
+      }
+    }
+    if (sim_len < 3) {
+      sendTelnetMsg(sock, "[ERROR] Simulated packet must be at least 3 bytes.\r\n");
+      return;
+    }
+    g_auto_probing_engine.feedFrame(span<const uint8_t>(sim_buf, sim_len));
+    sendTelnetMsgf(sock, "[OK] Fed %u simulated bytes into Auto-Probing Engine.\r\n", sim_len);
   } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
     s_cli_scratch_buf[0] = '\0';
     AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
@@ -2254,13 +2414,14 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
     out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
     out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
     out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
+    out.append("  wallpad simulate <hex...>       Inject raw hex packet into auto-probing engine\r\n");
     out.append(Fmt::DIV80EQ);
     out.append("Tip: Use 'ctl' for device control blueprints & learned slots.\r\n");
     out.append(Fmt::DIV80EQ);
     out.append("\r\n");
     sendTelnetMsgLen(sock, out.buf, out.offset);
   } else {
-    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset | help]\r\n");
+    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset | simulate <hex...> | help]\r\n");
   }
 }
 

@@ -773,10 +773,8 @@ static void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data, si
     }
   }
 
-  // 엘리베이터 및 월패드 호환 패킷은 CH6(스마트싱스/허브 TCP 8899)으로 즉시 실시간 바이패스 브로드캐스트!
-  if (slot->dev_type == Ew11DeviceType::WALLPAD_COMPATIBLE) {
-    Ch6_SendAck_Direct(pkt);
-  }
+  // 수신된 EW11 패킷은 CH6(스마트싱스/허브 TCP 8899)으로 즉시 실시간 바이패스 브로드캐스트!
+  Ch6_SendAck_Direct(pkt);
 }
 
 void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
@@ -792,45 +790,70 @@ void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
   std::copy(data, data + len, slot->rx_buf + slot->rx_len);
   slot->rx_len += len;
 
-  // 장비 타입별 전용 파서 분기
-  if (slot->dev_type == Ew11DeviceType::WALLPAD_COMPATIBLE) {
-    // 1. 월패드/엘리베이터 호환 파서 (0xF7 ... 0xEE)
-    auto *parser = WallpadParserFactory::getActiveParser();
-    size_t p = 0;
-    while (p < slot->rx_len) {
-      if (slot->rx_buf[p] != PKT_STX) {
-        p++;
+  int slot_idx = static_cast<int>(slot - g_ew11_slots);
+  char ns[16], tag[16];
+  snprintf(ns, sizeof(ns), "e%d_frame", slot_idx);
+  snprintf(tag, sizeof(tag), "EW11_#%d", slot_idx);
+
+  auto f_status = slot->tracker.status.load(std::memory_order_relaxed);
+  uint8_t c_stx = slot->tracker.candidate_stx.load(std::memory_order_relaxed);
+  uint8_t c_etx = slot->tracker.candidate_etx.load(std::memory_order_relaxed);
+  uint8_t c_len = slot->tracker.candidate_len.load(std::memory_order_relaxed);
+
+  // 기본값: 미학습/WAITING 상태면 월패드 표준(0xF7..0xEE) 시도
+  uint8_t target_stx = (c_stx != 0) ? c_stx : PKT_STX;
+  uint8_t target_etx = (c_etx != 0) ? c_etx : PKT_ETX;
+
+  size_t p = 0;
+  while (p < slot->rx_len) {
+    if (slot->rx_buf[p] != target_stx) {
+      // 프레임 시작 바이트 탐색 중
+      p++;
+      continue;
+    }
+
+    // 1) 고정 길이 후보가 학습된 경우
+    if (c_len >= 3 && (p + c_len) <= slot->rx_len) {
+      if (slot->rx_buf[p + c_len - 1] == target_etx) {
+        slot->tracker.processFrame(target_stx, target_etx, c_len, ns, tag);
+        Ew11_ProcessPacket(slot, &slot->rx_buf[p], c_len);
+        p += c_len;
         continue;
       }
-      int len_res = parser ? parser->extractPacketLength(slot->rx_buf, slot->rx_len, p) : -1;
-      if (len_res == 0) {
-        break; // 불완전 패킷, 추가 바이트 대기
+    }
+
+    // 2) ETX 기반 패킷 길이 탐색 (최대 64B)
+    size_t end_idx = 0;
+    bool found_frame = false;
+    for (size_t k = p + 2; k < slot->rx_len && (k - p) < 64; ++k) {
+      if (slot->rx_buf[k] == target_etx) {
+        end_idx = k;
+        found_frame = true;
+        break;
       }
-      if (len_res < 0) {
-        p++;
-        continue;
-      }
-      uint8_t p_len = static_cast<uint8_t>(len_res);
-      span<const uint8_t> frame(&slot->rx_buf[p], p_len);
-      if (parser && parser->validatePacket(frame)) {
-        Ew11_ProcessPacket(slot, &slot->rx_buf[p], p_len);
+    }
+
+    if (found_frame) {
+      uint8_t frame_len = static_cast<uint8_t>(end_idx - p + 1);
+      slot->tracker.processFrame(target_stx, target_etx, frame_len, ns, tag);
+      Ew11_ProcessPacket(slot, &slot->rx_buf[p], frame_len);
+      p += frame_len;
+    } else {
+      // 버퍼에 아직 수신 중인 미완성 패킷일 수 있음
+      if (slot->rx_len - p < 64) {
+        break; // 추가 바이트 대기
       } else {
-        slot->dropped_pkts++;
-        g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-      }
-      p += p_len;
-    }
-    if (p > 0) {
-      slot->rx_len -= p;
-      if (slot->rx_len > 0) {
-        memmove(slot->rx_buf, slot->rx_buf + p, slot->rx_len);
+        // 64B를 넘도록 ETX가 안 나오면 노이즈 스킵
+        p++;
       }
     }
-  } else if (slot->dev_type == Ew11DeviceType::AIR_CONDITIONER) {
-    // 2. 에어컨 전용 파서 스켈레톤 (추후 에어컨 프로토콜 바이트 규격 맞춤 확장)
-    // 기본적으로 온전한 프레임 단위 처리 (STX/ETX 또는 고정/가변 헤더)
-    // 현재는 슬롯 버퍼 flush 처리
-    slot->rx_len = 0;
+  }
+
+  if (p > 0) {
+    slot->rx_len -= p;
+    if (slot->rx_len > 0) {
+      memmove(slot->rx_buf, slot->rx_buf + p, slot->rx_len);
+    }
   }
 }
 
@@ -1343,6 +1366,12 @@ void Ew11_LoadConfig() {
     g_ew11_slots[i].sock = -1;
     g_ew11_slots[i].is_connected = false;
     g_ew11_slots[i].rx_len = 0;
+  }
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    char ns[16], tag[16];
+    snprintf(ns, sizeof(ns), "e%d_frame", s);
+    snprintf(tag, sizeof(tag), "EW11_#%d", s);
+    g_ew11_slots[s].tracker.restoreFromNvs(ns, tag);
   }
   p.end();
 }

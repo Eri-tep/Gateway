@@ -189,6 +189,17 @@ size_t PollingTargetRegistry::totalCount() const {
   return _count;
 }
 
+size_t PollingTargetRegistry::ackedCount() const {
+  CriticalSectionLocker lock(&_mux);
+  size_t acked = 0;
+  for (size_t i = 0; i < _count; ++i) {
+    if (_entries[i].is_active && _entries[i].raw_ack_len >= 4) {
+      acked++;
+    }
+  }
+  return acked;
+}
+
 bool PollingTargetRegistry::getEntry(size_t index, PollingTargetEntry &out) const {
   CriticalSectionLocker lock(&_mux);
   if (index >= _count)
@@ -637,6 +648,11 @@ bool AutoProbingEngine::isOffsetsLocked() const {
 }
 
 bool AutoProbingEngine::analyzeCacheMatrix() {
+  // [최적화 5.1] 최소 2개 이상의 ACK 응답이 캐시에 확보되지 않은 경우 매트릭스 계산 선행 차단
+  if (g_polling_targets.ackedCount() < 2 && g_device_repo.getOnlineCount() < 2) {
+    return false;
+  }
+
   struct PktPair {
     StaticPacket q;
     StaticPacket r;
@@ -1098,13 +1114,13 @@ void AutoProbingEngine::reset() {
 
 static const VendorProfileDescriptor s_default_profiles[ProfileRepository::MAX_PROFILES] = {
     // 0: Universal Auto-Probing
-    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
+    {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     // 1: User Slot 1
-    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
+    {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     // 2: User Slot 2
-    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
+    {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     // 3: User Slot 3
-    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 0, 0, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0}
+    {"Custom3", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0}
 };
 
 static VendorProfileDescriptor s_active_profiles[ProfileRepository::MAX_PROFILES];
@@ -1138,25 +1154,20 @@ void ProfileRepository::init() {
 
   {
     CriticalSectionLocker lock(&s_prof_mux);
-    if (!s_profiles_initialized) {
-      memcpy(s_active_profiles, loaded_profiles, sizeof(loaded_profiles));
-      s_profiles_initialized = true;
-    }
+    memcpy(s_active_profiles, loaded_profiles, sizeof(loaded_profiles));
+    s_profiles_initialized = true;
   }
-
-  g_auto_probing_engine.initFromNvs();
 }
 
 size_t ProfileRepository::getProfileCount() {
-  init();
   return MAX_PROFILES;
 }
 
 bool ProfileRepository::getProfile(size_t index, VendorProfileDescriptor &out) {
-  init();
-  CriticalSectionLocker lock(&s_prof_mux);
   if (index >= MAX_PROFILES)
     return false;
+  init();
+  CriticalSectionLocker lock(&s_prof_mux);
   out = s_active_profiles[index];
   return true;
 }
@@ -1176,9 +1187,12 @@ bool ProfileRepository::getProfileByKey(const char *key, VendorProfileDescriptor
 }
 
 bool ProfileRepository::getActiveProfile(VendorProfileDescriptor &out) {
-  init();
-  uint8_t idx = g_config.wallpad_profile;
-  return getProfile((idx < MAX_PROFILES) ? idx : 0, out);
+  uint8_t prof_idx = 0;
+  {
+    CriticalSectionLocker lock(&g_config_mux);
+    prof_idx = g_config.wallpad_profile;
+  }
+  return getProfile(prof_idx, out);
 }
 
 bool ProfileRepository::setActiveProfileIndex(size_t index) {
@@ -1190,18 +1204,6 @@ bool ProfileRepository::setActiveProfileIndex(size_t index) {
     g_config_dirty.store(true, std::memory_order_release);
   }
   Config_Save();
-
-  if (index != 0) {
-    VendorProfileDescriptor desc;
-    if (getProfile(index, desc) && desc.door_stx != 0 && desc.door_etx != 0) {
-      g_doorphone_tracker.setFixedLock(desc.door_stx, desc.door_etx, desc.door_len);
-      g_doorphone_tracker.saveToNvs();
-    }
-  } else {
-    // 0번(Auto): 도어폰도 자동 언락/적응형 학습 모드로 전환
-    g_doorphone_tracker.is_custom_fixed.store(false, std::memory_order_relaxed);
-    g_doorphone_tracker.saveToNvs();
-  }
   return true;
 }
 
@@ -1234,11 +1236,6 @@ bool ProfileRepository::saveCustomProfile(size_t index, const VendorProfileDescr
     env.seal();
     prefs.putBytes(pkey, &env, sizeof(env));
     prefs.end();
-  }
-
-  if (g_config.wallpad_profile == index && profile.door_stx != 0 && profile.door_etx != 0) {
-    g_doorphone_tracker.setFixedLock(profile.door_stx, profile.door_etx, profile.door_len);
-    g_doorphone_tracker.saveToNvs();
   }
   return true;
 }
@@ -1330,14 +1327,6 @@ bool ProfileRepository::saveCurrentAutoAs(const char *name, size_t &saved_idx) {
   new_prof.gw_addr_offset = ad.offsets_locked ? ad.gw_addr_offset : 2;
   new_prof.gw_addr = ad.offsets_locked ? ad.gw_addr : 0x01;
   new_prof.learned_query_len = (ad.offsets_locked && ad.learned_query_len >= 3) ? ad.learned_query_len : 11;
-
-  // 도어폰의 현재 학습된 프레이밍도 함께 프로파일에 저장
-  uint8_t dp_s = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-  uint8_t dp_e = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-  uint8_t dp_l = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-  new_prof.door_stx = (dp_s > 0) ? dp_s : 0x7F;
-  new_prof.door_etx = (dp_e > 0) ? dp_e : 0xEE;
-  new_prof.door_len = (dp_l >= 3) ? dp_l : 9;
 
   size_t target_slot = 1;
   bool found_match = false;

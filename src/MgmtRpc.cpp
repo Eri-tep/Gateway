@@ -804,27 +804,50 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     bool is_open_lobby = (strcasecmp(action_buf, "open_lobby") == 0);
 
     if (is_open_front || is_open_lobby) {
-      uint8_t op_call = is_open_front ? 0xB9 : 0x5F;
-      uint8_t op_open = is_open_front ? 0xB4 : 0x61;
-      uint8_t op_end  = is_open_front ? 0xB8 : 0x60;
+      uint8_t dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
+      uint8_t dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
+      uint8_t dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
 
-      uint32_t packed_ops = (static_cast<uint32_t>(op_call)) |
-                            (static_cast<uint32_t>(op_open) << 8) |
-                            (static_cast<uint32_t>(op_end) << 16);
+      if (dp_stx == 0) dp_stx = 0x7F;
+      if (dp_etx == 0) dp_etx = 0xEE;
+
+      const Config::Doorphone::DoorphoneProfile *dp_prof =
+          Config::Doorphone::matchDoorphoneCatalog(dp_stx, dp_etx, dp_len);
+
+      uint8_t op_call = is_open_front ? (dp_prof ? dp_prof->call_front : 0xB9)
+                                      : (dp_prof ? dp_prof->call_lobby : 0x5F);
+      uint8_t op_open = is_open_front ? (dp_prof ? dp_prof->open_front : 0xB4)
+                                      : (dp_prof ? dp_prof->open_lobby : 0x61);
+      uint8_t op_end  = is_open_front ? (dp_prof ? dp_prof->end_front  : 0xB8)
+                                      : (dp_prof ? dp_prof->end_lobby  : 0x60);
+
+      // Structure for task parameters
+      struct DpTaskArgs {
+        uint8_t c_stx;
+        uint8_t c_etx;
+        uint8_t c_call;
+        uint8_t c_open;
+        uint8_t c_end;
+      };
+
+      DpTaskArgs *args = new DpTaskArgs{dp_stx, dp_etx, op_call, op_open, op_end};
 
       xTaskCreate([](void *param) {
-        uint32_t ops = reinterpret_cast<uintptr_t>(param);
-        uint8_t c_call = static_cast<uint8_t>(ops & 0xFF);
-        uint8_t c_open = static_cast<uint8_t>((ops >> 8) & 0xFF);
-        uint8_t c_end  = static_cast<uint8_t>((ops >> 16) & 0xFF);
+        DpTaskArgs *a = reinterpret_cast<DpTaskArgs *>(param);
+        uint8_t c_call = a->c_call;
+        uint8_t c_open = a->c_open;
+        uint8_t c_end  = a->c_end;
+        uint8_t c_stx  = a->c_stx;
+        uint8_t c_etx  = a->c_etx;
+        delete a;
 
-        auto send_dp = [](uint8_t op) {
+        auto send_dp = [c_stx, c_etx](uint8_t op) {
           StaticPacket pkt{4, 5};
-          pkt.data[0] = 0x7F;
+          pkt.data[0] = c_stx;
           pkt.data[1] = op;
           pkt.data[2] = 0x00;
           pkt.data[3] = 0x00;
-          pkt.data[4] = 0xEE;
+          pkt.data[4] = c_etx;
           if (g_ch4_passthrough_queue) {
             xQueueSend(g_ch4_passthrough_queue, &pkt, 0);
           }
@@ -846,7 +869,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
         g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
 
         vTaskDelete(nullptr);
-      }, "DP_Seq", 2048, reinterpret_cast<void *>(static_cast<uintptr_t>(packed_ops)), 2, nullptr);
+      }, "DP_Seq", 2048, args, 2, nullptr);
 
       char ok_msg[128];
       snprintf(ok_msg, sizeof(ok_msg),

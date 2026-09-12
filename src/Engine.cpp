@@ -662,6 +662,39 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
     bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
 
+    // [보안 4.2] 외부/CH6 제어 패킷 유효 범위 검증 및 인젝션/가스열기 방어
+    if (has_key && dev_id != 0) {
+      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+      if (grp) {
+        // 1) 가스 밸브 열기 방어: GAS 장치에 대해 close 토큰이 아닌 값이 주입되면 차단
+        if (grp->coverage.dev_class == DeviceClass::GAS) {
+          if (grp->close_slot.discovered && grp->close_slot.action_offset < req.length) {
+            uint8_t val = req.data[grp->close_slot.action_offset];
+            if (val != grp->close_slot.off_val) {
+              g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
+              return false;
+            }
+          }
+        }
+        // 2) 난방 온도 범위 방어: 온도 슬롯 범위(5~35C) 초과 시 차단
+        if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->temp_slot.discovered &&
+            grp->temp_slot.action_offset < req.length) {
+          // 카테고리가 temp_slot에 해당하거나 category_offset이 일치할 때
+          bool is_temp = true;
+          if (grp->temp_slot.category_offset < req.length) {
+            is_temp = (req.data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
+          }
+          if (is_temp) {
+            uint8_t t_val = req.data[grp->temp_slot.action_offset];
+            if (t_val < 5 || t_val > 35) {
+              g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
+              return false;
+            }
+          }
+        }
+      }
+    }
+
     RouteEndpoint ep{1, -1, 0};
     bool route_known = false;
     if (has_key) {
@@ -1597,18 +1630,28 @@ void Task_Ch4(void *pvParameters) {
             if (packet.length >= 2) {
               uint8_t opcode = packet.data[1];
               bool state_changed = false;
-              if (opcode == 0xB5) { // BELL_DOOR (현관 벨 호출)
+              uint8_t pkt_stx = packet.data[0];
+              uint8_t pkt_etx = packet.data[packet.length - 1];
+              const Config::Doorphone::DoorphoneProfile *dp_prof =
+                  Config::Doorphone::matchDoorphoneCatalog(pkt_stx, pkt_etx, packet.length);
+
+              uint8_t bell_front = dp_prof ? dp_prof->bell_front : 0xB5;
+              uint8_t bell_lobby = dp_prof ? dp_prof->bell_lobby : 0x5A;
+              uint8_t end_front  = dp_prof ? dp_prof->end_front  : 0xB8;
+              uint8_t end_lobby  = dp_prof ? dp_prof->end_lobby  : 0x60;
+
+              if (opcode == bell_front) { // 현관 벨 호출
                 g_doorphone_state.front_bell.store(true, std::memory_order_release);
                 g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
                 state_changed = true;
-              } else if (opcode == 0xB6 || opcode == 0xB8) { // B6: 현관 무응답 종료, B8: 통화 종료
+              } else if (opcode == end_front || opcode == 0xB6) { // 현관 무응답/통화 종료
                 g_doorphone_state.front_bell.store(false, std::memory_order_release);
                 state_changed = true;
-              } else if (opcode == 0x5A || opcode == 0x5F) { // BELL_LOBBY or CALL_LOBBY (로비 벨/호출)
+              } else if (opcode == bell_lobby || opcode == 0x5F) { // 로비 벨/호출
                 g_doorphone_state.lobby_bell.store(true, std::memory_order_release);
                 g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
                 state_changed = true;
-              } else if (opcode == 0x60) { // END_LOBBY (로비 통화 종료)
+              } else if (opcode == end_lobby) { // 로비 통화 종료
                 g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
                 state_changed = true;
               }

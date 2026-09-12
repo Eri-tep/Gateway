@@ -112,6 +112,7 @@ struct GroupControlTemplate {
   bool away_has_dedicated_temp{false}; // 외출 시 특정 온도로 고정 여부
   bool temp_recall_verified{false};    // 켜기/외출해제 시 저장된 온도로 자동 복원 검증 완료
   ThermoOffTempBehavior off_temp_behavior{ThermoOffTempBehavior::UNKNOWN};
+  uint8_t off_temp_unchanged_count{0}; // 꺼진 상태 온도 조작 시 ACK 무반응 횟수 추적 (3회 이상 시 LOCKED_IGNORE)
 
   // 직전 단계 학습 원본 패킷 (CTL- / CTL+, ACK- / ACK+)
   uint8_t ctl_before_len{0};
