@@ -1590,7 +1590,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.append(Fmt::DIV80EQ);
   out.append("                    DEVICE GROUP CONTROL BLUEPRINT TABLE                     \r\n");
   out.append(Fmt::DIV80EQ);
-  out.append("DevID  Name     Class   Coverage  Power Slot      Param Slot      Status\r\n");
+  out.append("DevID  Name     Class   Coverage  Mode (Channel)  Param Slot      Status\r\n");
   out.append(Fmt::DIV80);
 
   // 캐시가 수렴되었으나 템플릿이 비어있다면 자동 합성 시도
@@ -1607,33 +1607,54 @@ void wallpadPrintControlTable(AppendBuf &out) {
       GroupControlTemplate grp;
       if (!g_control_registry.getGroupByIndex(i, grp) || grp.dev_id == 0) continue;
 
-      char pwr_str[20]{"-"};
-      if (grp.power_slot.discovered) {
-        snprintf(pwr_str, sizeof(pwr_str), "#%u (%02X/%02X)",
-                 grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
+      char mode_str[20]{"-"};
+      if (grp.coverage.dev_class == DeviceClass::VENT) {
+        if (grp.mode_slot.discovered && grp.power_slot.discovered) {
+          snprintf(mode_str, sizeof(mode_str), "BURST (%02X/%02X)",
+                   grp.power_slot.category_val, grp.mode_slot.category_val);
+        } else if (grp.power_slot.discovered) {
+          snprintf(mode_str, sizeof(mode_str), "BURST (%02X)", grp.power_slot.category_val);
+        } else {
+          snprintf(mode_str, sizeof(mode_str), "BURST");
+        }
+      } else if (grp.coverage.dev_class == DeviceClass::THERMOSTAT) {
+        if (grp.temp_slot.discovered && grp.power_slot.discovered) {
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)",
+                   grp.temp_slot.category_val, grp.power_slot.category_val);
+        } else if (grp.power_slot.discovered) {
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X)", grp.power_slot.category_val);
+        } else {
+          snprintf(mode_str, sizeof(mode_str), "MULTI");
+        }
+      } else if (grp.power_slot.discovered) {
+        if (grp.power_slot.category_offset != 0xFF && grp.power_slot.category_val != 0) {
+          snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", grp.power_slot.category_val);
+        } else {
+          snprintf(mode_str, sizeof(mode_str), "SINGLE");
+        }
       } else if (grp.frame_len > 0) {
-        snprintf(pwr_str, sizeof(pwr_str), "[SKELETON]");
+        snprintf(mode_str, sizeof(mode_str), "[SKELETON]");
       }
 
       char param_str[20]{"-"};
       if (grp.coverage.dev_class != DeviceClass::UNKNOWN) {
         if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
-          snprintf(param_str, sizeof(param_str), "T:#%u S:#%u",
-                   grp.temp_slot.action_offset, grp.speed_slot.action_offset);
+          snprintf(param_str, sizeof(param_str), "T:%uC S:L%u",
+                   grp.temp_slot.min_val, grp.speed_slot.level_count);
         } else if (grp.temp_slot.discovered) {
-          snprintf(param_str, sizeof(param_str), "T:#%u (%u~%uC)",
-                   grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
+          snprintf(param_str, sizeof(param_str), "T:%u~%uC",
+                   grp.temp_slot.min_val, grp.temp_slot.max_val);
         } else if (grp.speed_slot.discovered) {
           if (grp.speed_slot.level_count > 0) {
-            snprintf(param_str, sizeof(param_str), "S:#%u (L1~L%u)",
-                     grp.speed_slot.action_offset, grp.speed_slot.level_count);
+            snprintf(param_str, sizeof(param_str), "S:L1~L%u",
+                     grp.speed_slot.level_count);
           } else {
-            snprintf(param_str, sizeof(param_str), "S:#%u (%u~%u)",
-                     grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
+            snprintf(param_str, sizeof(param_str), "S:%u~%u",
+                     grp.speed_slot.min_val, grp.speed_slot.max_val);
           }
         } else if (grp.close_slot.discovered) {
-          snprintf(param_str, sizeof(param_str), "C:#%u (0x%02X)",
-                   grp.close_slot.action_offset, grp.close_slot.off_val);
+          snprintf(param_str, sizeof(param_str), "C:0x%02X",
+                   grp.close_slot.off_val);
         }
       }
 
@@ -1678,11 +1699,12 @@ void wallpadPrintControlTable(AppendBuf &out) {
           if (grp.temp_recall_verified) c++;
           break;
         case DeviceClass::VENT:
-          total_c = 4;
+          total_c = (grp.speed_slot.level_count >= 3 || grp.coverage.speed_l3_seen) ? 5 : 4;
           if (grp.coverage.power_on_seen) c++;
           if (grp.coverage.power_off_seen) c++;
           if (grp.coverage.speed_l1_seen) c++;
           if (grp.coverage.speed_l2_seen) c++;
+          if (total_c == 5 && grp.coverage.speed_l3_seen) c++;
           break;
         case DeviceClass::AIRCON:
           total_c = 7;
@@ -1709,10 +1731,10 @@ void wallpadPrintControlTable(AppendBuf &out) {
       }
 
       // 정확히 80컬럼 이내로 텍스트 정렬 (줄바꿈 원천 차단)
-      // DevID(6) Name(8) Class(7) Coverage(9) PowerSlot(15) ParamSlot(15) Status(10) -> 총 76글자
-      out.appendFormat("0x%02X   %-8s %-7s %-9s %-15s %-15s %s\r\n",
+      // DevID(6) Name(8) Class(7) Coverage(9) Mode(16) ParamSlot(15) Status(10) -> 총 75글자
+      out.appendFormat("0x%02X   %-8s %-7s %-9s %-16s %-15s %s\r\n",
                        grp.dev_id, grp.group_name, type_str, cov_str,
-                       pwr_str, param_str, stat_str);
+                       mode_str, param_str, stat_str);
     }
   }
   out.append(Fmt::DIV80EQ);
@@ -1847,31 +1869,25 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     out.appendFormat("  [6/6] Verified      : [%-4s]  Status Locked\r\n",
                      (grp->status == GroupControlTemplate::Status::VERIFIED) ? "DONE" : "WAIT");
   } else if (cov.dev_class == DeviceClass::VENT) {
-    out.appendFormat("  [1/5] Power ON      : [%-4s]  ON=0x%02X\r\n",
-                     cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
-    if (grp->speed_slot.level_count >= 1) {
-      out.appendFormat("  [2/5] Fan Speed L1  : [%-4s]  Token=0x%02X\r\n",
-                       cov.speed_l1_seen ? "DONE" : "WAIT", grp->speed_slot.level_tokens[0]);
-    } else {
-      out.appendFormat("  [2/5] Fan Speed L1  : [%-4s]  Token=WAIT\r\n",
-                       cov.speed_l1_seen ? "DONE" : "WAIT");
-    }
-    if (grp->speed_slot.level_count >= 2) {
-      out.appendFormat("  [3/5] Fan Speed L2  : [%-4s]  Token=0x%02X\r\n",
-                       cov.speed_l2_seen ? "DONE" : "WAIT", grp->speed_slot.level_tokens[1]);
-    } else {
-      out.appendFormat("  [3/5] Fan Speed L2  : [%-4s]  Token=WAIT\r\n",
-                       cov.speed_l2_seen ? "DONE" : "WAIT");
-    }
-    if (grp->speed_slot.level_count >= 3) {
+    uint8_t vent_total_steps = (grp->speed_slot.level_count >= 3 || cov.speed_l3_seen) ? 5 : 4;
+    out.appendFormat("  [1/%u] Power ON      : [%-4s]  ON=0x%02X\r\n",
+                     vent_total_steps, cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/%u] Fan Speed L1  : [%-4s]  Token=0x%02X\r\n",
+                     vent_total_steps, cov.speed_l1_seen ? "DONE" : "WAIT",
+                     (grp->speed_slot.level_count >= 1) ? grp->speed_slot.level_tokens[0] : 0);
+    out.appendFormat("  [3/%u] Fan Speed L2  : [%-4s]  Token=0x%02X\r\n",
+                     vent_total_steps, cov.speed_l2_seen ? "DONE" : "WAIT",
+                     (grp->speed_slot.level_count >= 2) ? grp->speed_slot.level_tokens[1] : 0);
+    if (vent_total_steps == 5) {
       out.appendFormat("  [4/5] Fan Speed L3  : [%-4s]  Token=0x%02X\r\n",
-                       cov.speed_l3_seen ? "DONE" : "WAIT", grp->speed_slot.level_tokens[2]);
+                       cov.speed_l3_seen ? "DONE" : "WAIT",
+                       (grp->speed_slot.level_count >= 3) ? grp->speed_slot.level_tokens[2] : 0);
+      out.appendFormat("  [5/5] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+                       cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
     } else {
-      out.appendFormat("  [4/5] Fan Speed L3  : [%-4s]  Token=WAIT\r\n",
-                       cov.speed_l3_seen ? "DONE" : "WAIT");
+      out.appendFormat("  [4/4] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+                       cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
     }
-    out.appendFormat("  [5/5] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
-                     cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
   } else if (cov.dev_class == DeviceClass::GAS) {
     out.appendFormat("  [1/2] Close Trigger : [%-4s]  Close=0x%02X\r\n",
                      (cov.valve_close_seen || cov.power_off_seen) ? "DONE" : "WAIT", grp->close_slot.off_val);

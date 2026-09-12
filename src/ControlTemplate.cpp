@@ -675,8 +675,10 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         grp->coverage.power_off_seen = true;
       }
 
-      // 풍량 슬롯(speed_slot) 등록 (전원 끄기 명령 0x00/0x02/0x04 제외)
-      if (cmd_val > 0 && !grp->coverage.power_off_seen) {
+      // 풍량 슬롯(speed_slot) 등록:
+      // 전원 끄기 명령(0x00 또는 off_val)이 아닌 모든 유효 풍량 토큰은 언제든지 지속 학습(Lifelong Learning)!
+      bool is_off_cmd = (cmd_val == 0x00 || (grp->coverage.power_off_seen && cmd_val == grp->power_slot.off_val));
+      if (cmd_val > 0 && !is_off_cmd) {
         grp->speed_slot.discovered = true;
         grp->speed_slot.action_offset = act_off;
         if (cat_off != 0xFF) {
