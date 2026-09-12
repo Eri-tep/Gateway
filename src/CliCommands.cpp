@@ -1590,7 +1590,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.append(Fmt::DIV80EQ);
   out.append("                    DEVICE GROUP CONTROL BLUEPRINT TABLE                     \r\n");
   out.append(Fmt::DIV80EQ);
-  out.append("DevID  Name     Class   Coverage  Mode (Channel)  Param Slot      Status\r\n");
+  out.append("DevID   Name     Class   Coverage  Mode (Channel)   Param Slot      Status\r\n");
   out.append(Fmt::DIV80);
 
   // 캐시가 수렴되었으나 템플릿이 비어있다면 자동 합성 시도
@@ -1609,38 +1609,23 @@ void wallpadPrintControlTable(AppendBuf &out) {
 
       char mode_str[20]{"-"};
       if (grp.coverage.dev_class == DeviceClass::VENT) {
-        // 환기: 풍량 채널(0x40)과 모드 채널(0x42)
-        uint8_t spd_cat = grp.power_slot.category_val;
-        uint8_t mod_cat = grp.mode_slot.category_val;
-        if (spd_cat < 0x20 && grp.frame_len >= 6) spd_cat = grp.raw_template[5];
-        if (mod_cat < 0x20 && grp.last_ack_after_len >= 6 && grp.last_ack_after_raw[5] != spd_cat && grp.last_ack_after_raw[5] >= 0x20) {
-          mod_cat = grp.last_ack_after_raw[5];
+        // 환기: 풍량 채널(0x40)과 운전모드 채널(0x42)
+        uint8_t spd_cat = (grp.power_slot.category_val >= 0x20) ? grp.power_slot.category_val : 0x40;
+        uint8_t mod_cat = (grp.mode_slot.category_val >= 0x20) ? grp.mode_slot.category_val : 0x42;
+        if (spd_cat == mod_cat) {
+          spd_cat = 0x40;
+          mod_cat = 0x42;
         }
-        if (grp.mode_slot.discovered && mod_cat >= 0x20 && spd_cat >= 0x20) {
-          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", spd_cat, mod_cat);
-        } else if (spd_cat >= 0x20) {
-          // 환기는 구조적으로 풍량+모드 2개 채널이 존재하므로 MULTI로 표시
-          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/42)", spd_cat);
-        } else {
-          snprintf(mode_str, sizeof(mode_str), "MULTI");
-        }
+        snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", spd_cat, mod_cat);
       } else if (grp.coverage.dev_class == DeviceClass::THERMOSTAT) {
         // 난방: 희망온도 채널(0x45)과 전원 채널(0x46)
-        uint8_t tmp_cat = grp.temp_slot.category_val;
-        uint8_t pwr_cat = grp.power_slot.category_val;
-        if (tmp_cat < 0x20 && grp.frame_len >= 6) {
-          tmp_cat = (grp.raw_template[5] == 0x46) ? 0x45 : grp.raw_template[5];
+        uint8_t tmp_cat = (grp.temp_slot.category_val >= 0x20) ? grp.temp_slot.category_val : 0x45;
+        uint8_t pwr_cat = (grp.power_slot.category_val >= 0x20) ? grp.power_slot.category_val : 0x46;
+        if (tmp_cat == pwr_cat) {
+          tmp_cat = 0x45;
+          pwr_cat = 0x46;
         }
-        if (pwr_cat < 0x20 && grp.frame_len >= 6) {
-          pwr_cat = (grp.raw_template[5] == 0x45) ? 0x46 : grp.raw_template[5];
-        }
-        if (tmp_cat >= 0x20 && pwr_cat >= 0x20 && tmp_cat != pwr_cat) {
-          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", tmp_cat, pwr_cat);
-        } else if (tmp_cat >= 0x20) {
-          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/46)", tmp_cat);
-        } else {
-          snprintf(mode_str, sizeof(mode_str), "MULTI (45/46)");
-        }
+        snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", tmp_cat, pwr_cat);
       } else if (grp.power_slot.discovered) {
         uint8_t cat = grp.power_slot.category_val;
         if (cat < 0x20 && grp.frame_len >= 6 && grp.raw_template[5] >= 0x20) {
@@ -1651,8 +1636,9 @@ void wallpadPrintControlTable(AppendBuf &out) {
         } else {
           snprintf(mode_str, sizeof(mode_str), "SINGLE");
         }
-      } else if (grp.frame_len > 0) {
-        snprintf(mode_str, sizeof(mode_str), "[SKELETON]");
+      } else {
+        // 미학습/골격 상태는 다른 열들과 일관되게 '-' 로 표기
+        snprintf(mode_str, sizeof(mode_str), "-");
       }
 
       char param_str[20]{"-"};
@@ -1751,9 +1737,10 @@ void wallpadPrintControlTable(AppendBuf &out) {
         snprintf(cov_str, sizeof(cov_str), "%d/%d", c, total_c);
       }
 
-      // 정확히 80컬럼 이내로 텍스트 정렬 (줄바꿈 원천 차단)
-      // DevID(6) Name(8) Class(7) Coverage(9) Mode(16) ParamSlot(15) Status(10) -> 총 75글자
-      out.appendFormat("0x%02X   %-8s %-7s %-9s %-16s %-15s %s\r\n",
+      // 수직 열 칼정렬:
+      // "DevID   Name     Class   Coverage  Mode (Channel)   Param Slot      Status"
+      // 0x18    Thermo   THERMO  4/4       MULTI (45/46)    T:5~35C         VERIFIED
+      out.appendFormat("0x%02X    %-8s %-7s %-9s %-16s %-15s %s\r\n",
                        grp.dev_id, grp.group_name, type_str, cov_str,
                        mode_str, param_str, stat_str);
     }
