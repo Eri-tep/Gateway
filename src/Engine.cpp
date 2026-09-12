@@ -658,31 +658,30 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
     return g_device_repo.copyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
   }
 
-  if (parser->isControlPacket(frame)) {
-    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+  // 상위에서 유입된 모든 비-쿼리 패킷은 대상 기기 인터페이스로 인젝션
+  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+  bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
 
-    RouteEndpoint ep{1, -1, 0};
-    bool route_known = false;
-    if (has_key) {
-      route_known = g_route_registry.lookupRoute(dev_id, sub1, sub2, ep);
-    }
+  RouteEndpoint ep{1, -1, 0};
+  bool route_known = false;
+  if (has_key) {
+    route_known = g_route_registry.lookupRoute(dev_id, sub1, sub2, ep);
+  }
 
-    // [동적 라우팅] 학습된 경로가 CH5(EW11)인 경우 해당 EW11 TCP 소켓으로 직접 송신
-    if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0) {
-      bool sent = Ew11_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
-      g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP, req);
-      return false;
-    }
-
-    // [기본 라우팅] CH1(물리 RS-485 버스)
-    QueueHandle_t q = (req.channel_id == 6) ? g_ch1_vip_queue : g_ch1_control_queue;
-    if (!Queue_EnqueueDropHead(q, req)) {
-      return false;
-    }
-    g_telnet_tracer.trace(1, true, TraceType::CTL, req);
+  // [동적 라우팅] 학습된 경로가 CH5(EW11)인 경우 해당 EW11 TCP 소켓으로 직접 인젝션 송신
+  if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0) {
+    bool sent = Ew11_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
+    g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP, req);
     return false;
   }
+
+  // [기본 라우팅] CH1(물리 RS-485 버스)
+  QueueHandle_t q = (req.channel_id == 6) ? g_ch1_vip_queue : g_ch1_control_queue;
+  if (!Queue_EnqueueDropHead(q, req)) {
+    return false;
+  }
+  g_telnet_tracer.trace(1, true, TraceType::CTL, req);
+  return false;
   return false;
 }
 

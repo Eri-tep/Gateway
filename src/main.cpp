@@ -737,7 +737,8 @@ void Ch6_Data(TcpFragSession *s, const uint8_t *data, size_t len) {
       } else {
         g_pkt_stats.ch6.uncached_pkts.fetch_add(1, std::memory_order_relaxed);
       }
-    } else if (parser->isControlPacket(frame)) {
+    } else {
+      // 상위(CH6)에서 유입된 모든 비-쿼리 프레임은 목적지 버스(CH5 EW11 또는 CH1)로 즉시 인젝션
       StaticPacket dummy{};
       g_control_dispatcher.dispatch(req, dummy);
     }

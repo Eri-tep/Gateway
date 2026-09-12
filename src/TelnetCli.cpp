@@ -153,6 +153,11 @@ void TelnetTracer::flushToClient() {
     uint8_t rx_channel;
     bool active;
   } s_door_tracker = {{0, 0}, 0, false};
+  static struct {
+    struct timeval t_rx;
+    uint8_t dev_id;
+    bool active;
+  } s_ew11_tracker = {{0, 0}, 0, false};
   static struct timeval s_last_pkt_tv = {0, 0};
 
   auto calc_delay_ms = [](const struct timeval &now,
@@ -211,21 +216,53 @@ void TelnetTracer::flushToClient() {
           delay_ms = -2;
         }
       } else if (entry.type == TraceType::ACK) { // TX to Wallpad / App
-        processTx(s_wp_tracker[wp_idx]);
+        // CH5에서 스니핑되어 CH6으로 패스스루된 패킷인지 확인
+        if (entry.channel == 6 && s_ew11_tracker.active && s_ew11_tracker.dev_id == dev_id) {
+          delay_ms = calc_delay_ms(entry.tv, s_ew11_tracker.t_rx);
+          delay_tag = "PASSTHRU";
+          s_ew11_tracker.active = false;
+        } else {
+          processTx(s_wp_tracker[wp_idx]);
+        }
       }
     } else if (entry.channel == 4) {
       if (!entry.is_tx) {
+        // [CH4 수신] 도어폰 버스 스니핑 유입
         is_new_req = true;
         s_door_tracker.t_rx = entry.tv;
         s_door_tracker.rx_channel = 4;
         s_door_tracker.active = true;
-      } else if (s_door_tracker.active) {
-        s_door_tracker.active = false;
+        delay_tag = "PASSTHRU";
+        delay_ms = -2;
+      } else {
+        // [CH4 송신] 상위 앱(CH7/RPC)에서 도어폰 버스로 인젝션 송신된 순간
+        if (s_door_tracker.active) {
+          delay_ms = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
+          delay_tag = "INJECT ";
+          s_door_tracker.active = false;
+        } else {
+          delay_tag = "INJECT ";
+          delay_ms = -2;
+        }
       }
     } else if (entry.channel == 5) {
       // EW11 TCP 클라이언트 수송신
       if (!entry.is_tx) {
+        // [CH5 수신] 마스터-슬레이브 버스 스니핑 유입 -> CH6 패스스루 지연시간 추적용 타임스탬프 기록
         is_new_req = true;
+        s_ew11_tracker.t_rx = entry.tv;
+        s_ew11_tracker.dev_id = dev_id;
+        s_ew11_tracker.active = true;
+      } else {
+        // [CH5 송신] 상위 앱(CH6) 명령이 CH5 버스로 인젝션된 순간 -> INJECT 지연시간 표시
+        for (auto &tr : s_wp_tracker) {
+          if (tr.active && tr.dev_id == dev_id) {
+            delay_ms = calc_delay_ms(entry.tv, tr.t_req_rx);
+            delay_tag = "INJECT ";
+            tr.active = false;
+            break;
+          }
+        }
       }
     } else if (entry.channel == 1) {
       if (entry.is_tx) {
