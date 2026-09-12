@@ -421,6 +421,12 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   // CTL 패킷 유효성 검증
   if (!validateFramePure(ctl, false)) return;
 
+  // [G-1 Feedback] 실제 관측된 제어 트랜잭션을 Engine 1(AutoProbingEngine)에 역주입하여 제어 Opcode 확정 가속
+  g_auto_probing_engine.feedControlPair(
+      span<const uint8_t>(ctl.data.data(), ctl.length),
+      span<const uint8_t>(ack_after.data.data(), ack_after.length)
+  );
+
   span<const uint8_t> ctl_span(ctl.data.data(), ctl.length);
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
   if (!parser->extractDeviceKey(ctl_span, dev_id, sub1, sub2)) return;

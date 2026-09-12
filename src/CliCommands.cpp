@@ -1251,10 +1251,10 @@ void wallpadPrintStatus(AppendBuf &out) {
   const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
   const char *cmd_status = (desc.control_seen && desc.ctrl_len_cnt > 0) ? "[LOCKED]" : "[WAITING]";
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "STX", stx_buf, len_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "LEN (Query)", q_val, len_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "LEN (Command)", cmd_val, cmd_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "LEN (Response)", ack_val, len_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "[ST] STX", stx_buf, len_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Query", q_val, len_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Command", cmd_val, cmd_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Response", ack_val, len_status);
   out.append(Fmt::DIV80);
 
   // 2. Addressing (Address Mode, Device Type, Sub-ID)
@@ -1301,7 +1301,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   char addr_mode_buf[48];
   if (desc.offsets_locked) {
     if (desc.is_swapped_addr) {
-      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Swapped (SA:Byte #%u <-> DA:Byte #%u)",
+      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Swapped (GW:Byte#%u <-> ID:Byte#%u)",
                desc.gw_addr_offset, desc.dev_id_offset);
     } else {
       snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Direct (Single Address)");
@@ -1338,12 +1338,12 @@ void wallpadPrintStatus(AppendBuf &out) {
   format_hex_list(sub1_ids, sub1_cnt, sub1_off_label, sub1_list_buf, sizeof(sub1_list_buf));
   format_hex_list(sub2_ids, sub2_cnt, sub2_off_label, sub2_list_buf, sizeof(sub2_list_buf));
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Addressing", "Address Mode", addr_mode_buf, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Addressing", "Addr Mode", addr_mode_buf, addr_status);
   if (desc.offsets_locked) {
-    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Gateway", gw_val_buf, addr_status);
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[GW] Master", gw_val_buf, addr_status);
   }
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Device Type", dev_list_buf, addr_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sub-ID", sub2_list_buf, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[ID] Device", dev_list_buf, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[S1] Sub Addr", sub2_list_buf, addr_status);
   out.append(Fmt::DIV80);
 
   // 3. Command (Opcode, Sub-Command)
@@ -1376,9 +1376,9 @@ void wallpadPrintStatus(AppendBuf &out) {
   }
   const char *seq_status = desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[UNUSED]") : "[WAITING]";
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "Opcode Offset", op_line_buf, opcode_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "[OP] Opcode", op_line_buf, opcode_status);
   out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sequence", seq_line_buf, seq_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sub-Command", sub1_list_buf, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[CX] Context", sub1_list_buf, addr_status);
   out.append(Fmt::DIV80);
 
   // 4. Payload (Data Range, Length Rule)
@@ -1392,8 +1392,8 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - 9] Byte : Est");
   }
   const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Payload", "Data Range", payload_range_buf, payload_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Data Length", payload_len_buf, payload_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Payload", "[PL] Data Range", payload_range_buf, payload_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[PL] Length", payload_len_buf, payload_status);
   out.append(Fmt::DIV80);
 
   // 5. Tail (Checksum, ETX)
@@ -1402,8 +1402,8 @@ void wallpadPrintStatus(AppendBuf &out) {
   char etx_line_buf[32];
   snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #[N-1] : %s", etx_buf);
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "Checksum :", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "[CS] Checksum", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[ET] ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
   out.append(Fmt::DIV80);
 
   // 6. Bus Physical (CH1/CH2/CH3 RS-485 Config)
