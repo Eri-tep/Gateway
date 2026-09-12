@@ -1590,7 +1590,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.append(Fmt::DIV80EQ);
   out.append("                    DEVICE GROUP CONTROL BLUEPRINT TABLE                     \r\n");
   out.append(Fmt::DIV80EQ);
-  out.append("DevID  Group Name  Capability  Coverage  Power Slot      Param Slot     Status\r\n");
+  out.append("DevID  Name     Class   Coverage  Power Slot      Param Slot      Status\r\n");
   out.append(Fmt::DIV80);
 
   // 캐시가 수렴되었으나 템플릿이 비어있다면 자동 합성 시도
@@ -1607,15 +1607,15 @@ void wallpadPrintControlTable(AppendBuf &out) {
       GroupControlTemplate grp;
       if (!g_control_registry.getGroupByIndex(i, grp) || grp.dev_id == 0) continue;
 
-      char pwr_str[24]{"-"};
+      char pwr_str[20]{"-"};
       if (grp.power_slot.discovered) {
-        snprintf(pwr_str, sizeof(pwr_str), "#%u (0x%02X/0x%02X)",
+        snprintf(pwr_str, sizeof(pwr_str), "#%u (%02X/%02X)",
                  grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
       } else if (grp.frame_len > 0) {
         snprintf(pwr_str, sizeof(pwr_str), "[SKELETON]");
       }
 
-      char param_str[24]{"-"};
+      char param_str[20]{"-"};
       if (grp.coverage.dev_class != DeviceClass::UNKNOWN) {
         if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
           snprintf(param_str, sizeof(param_str), "T:#%u S:#%u",
@@ -1624,8 +1624,13 @@ void wallpadPrintControlTable(AppendBuf &out) {
           snprintf(param_str, sizeof(param_str), "T:#%u (%u~%uC)",
                    grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
         } else if (grp.speed_slot.discovered) {
-          snprintf(param_str, sizeof(param_str), "S:#%u (%u~%u)",
-                   grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
+          if (grp.speed_slot.level_count > 0) {
+            snprintf(param_str, sizeof(param_str), "S:#%u (L1~L%u)",
+                     grp.speed_slot.action_offset, grp.speed_slot.level_count);
+          } else {
+            snprintf(param_str, sizeof(param_str), "S:#%u (%u~%u)",
+                     grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
+          }
         } else if (grp.close_slot.discovered) {
           snprintf(param_str, sizeof(param_str), "C:#%u (0x%02X)",
                    grp.close_slot.action_offset, grp.close_slot.off_val);
@@ -1648,7 +1653,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
       case DeviceClass::THERMOSTAT: type_str = "THERMO"; break;
       case DeviceClass::VENT:       type_str = "VENT"; break;
       case DeviceClass::AIRCON:     type_str = "AIRCON"; break;
-      case DeviceClass::MOMENTARY:  type_str = "MOMENTARY"; break;
+      case DeviceClass::MOMENTARY:  type_str = "MOMENT"; break;
       case DeviceClass::SWITCH:     type_str = "SWITCH"; break;
       case DeviceClass::UNKNOWN:
       default:
@@ -1706,7 +1711,9 @@ void wallpadPrintControlTable(AppendBuf &out) {
         snprintf(cov_str, sizeof(cov_str), "%d/%d", c, total_c);
       }
 
-      out.appendFormat("0x%02X   %-11s %-11s %-9s %-15s %-14s %s\r\n",
+      // 정확히 80컬럼 이내로 텍스트 정렬 (줄바꿈 원천 차단)
+      // DevID(6) Name(8) Class(7) Coverage(9) PowerSlot(15) ParamSlot(15) Status(10) -> 총 76글자
+      out.appendFormat("0x%02X   %-8s %-7s %-9s %-15s %-15s %s\r\n",
                        grp.dev_id, grp.group_name, type_str, cov_str,
                        pwr_str, param_str, stat_str);
     }
@@ -1761,9 +1768,9 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
       else if (ad.has_len_field && i == ad.len_offset) r = "LN";
       else if (i == ad.opcode_offset) r = "OP";
       else if (i == ad.dev_id_offset) r = "ID";
-      else if (i == ad.gw_addr_offset) r = "GW";
-      else if (i == grp->sub1_offset || (ad.offsets_locked && i == ad.sub1_offset)) r = "S1";
-      else if (i == grp->sub2_offset || (ad.offsets_locked && i == ad.sub2_offset)) r = "S2";
+      else if (ad.gw_addr_offset != 0xFF && i == ad.gw_addr_offset) r = "GW";
+      else if (grp->sub1_offset != 0xFF && i == grp->sub1_offset) r = "S1";
+      else if (grp->sub2_offset != 0xFF && i == grp->sub2_offset) r = "S2";
 
       // 2순위: 순수 페이로드 영역 (ad.payload_offset ~ 체크섬 직전)
       bool is_payload = (r == nullptr);
@@ -1776,10 +1783,10 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
 
       if (r != nullptr) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", r);
-      } else if (is_val) {
-        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[VL] ");
       } else if (is_ctx) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[CX] ");
+      } else if (is_val) {
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[VL] ");
       } else if (is_env) {
         r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[EN] ");
       } else if (is_changed) {
