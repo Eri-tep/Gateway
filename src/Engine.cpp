@@ -1395,32 +1395,32 @@ void Task_Ch4(void *pvParameters) {
     }
 
     // RX: 도어폰 하드웨어에서 들어오는 바이트를 스트림 버퍼에 누적
+    // 범용 버스트 수신: 패킷 전송 중 바이트 간 지연(최대 16ms)을 안전하게 버퍼링하기 위해
+    // 데이터 유입 시작 시 짧은 폴링으로 1프레임을 온전히 긁어모음
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(g_config.doorphone_baud_rate);
-    bool is_burst_start = true;
     while (g_doorphone_serial.available() > 0) {
       uint8_t byte = static_cast<uint8_t>(g_doorphone_serial.read());
       uint32_t now = millis();
 
-      // 바이트 간 연속성 검증: 
-      // 이전 수신 완료 후 새 버스트가 들어오는 시점에 직전 바이트와의 간격이 16ms(ib_timeout)를 초과하면,
-      // 이전 미완성 조각은 불연속 노이즈로 판단하여 버퍼 초기화 후 새 버스트 수신
-      if (is_burst_start) {
-        if (buf_len > 0 && last_byte_ms > 0 &&
-            TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
-          buf_len = 0;
-        }
-        is_burst_start = false;
+      // 연속성 검증: 새 버스트 유입 시 직전 미완성 조각이 16ms 이상 끊긴 과거 쓰레기라면 초기화
+      if (buf_len > 0 && last_byte_ms > 0 && TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
+        buf_len = 0;
       }
 
       if (buf_len < sizeof(buf)) {
         buf[buf_len++] = byte;
       } else {
-        // 버퍼 가득 참 → 앞 1바이트 버리고 시프트 (노이즈 회복)
         memmove(buf, buf + 1, buf_len - 1);
         buf_len--;
         buf[buf_len++] = byte;
       }
       last_byte_ms = now;
+
+      // 3860 bps 기준 다음 바이트 도착 대기 (1바이트 순수 비트 2.85ms + 월패드 연산 지연 수용: 최대 6ms 스핀)
+      uint32_t drain_start = millis();
+      while (g_doorphone_serial.available() == 0 && (millis() - drain_start < 6)) {
+        esp_rom_delay_us(100);
+      }
     }
 
     // [월패드급 슬라이딩 윈도우 스트림 파서]
@@ -1540,12 +1540,12 @@ void Task_Ch4(void *pvParameters) {
       }
     }
 
-    // 미학습/학습 초기 상태 인터패킷 갭(IPG) 감지 및 피딩
+    // 미학습/학습 초기 상태 인터패킷 갭(IPG) 감지 및 피딩 (침묵 25ms 도달 시)
     if (last_byte_ms > 0 &&
         TimeUtils::isElapsed(last_byte_ms, Config::Timing::DOORPHONE_IPG_MS)) {
 
       if (cur_status == Config::Doorphone::FramingStatus::LOCKED) {
-        // ★ LOCKED 상태: IPG 만료 시 스트림 파서가 정상 패킷을 처리하고 남긴 단순 꼬리 잔여 찌꺼기만 조용히 플러시
+        // ★ LOCKED 상태: 고정 규격(STX+길이+ETX)에 부합하지 못하고 남은 잔여 데이터는 온전한 패킷이 아닌 불완전 노이즈 조각이므로 완전 폐기
         buf_len = 0;
       } else {
         // ★ 미학습(WAITING/LEARNING) 상태: IPG로 패킷 프레임 수집 & 동적 학습
@@ -1584,17 +1584,19 @@ void Task_Ch4(void *pvParameters) {
       last_byte_ms = 0;
     }
 
-    // Event-Driven 블로킹: IPG 잔여 시간에 맞춘 정밀 커널 큐 대기 (최소 2ms 보장하여 IDLE/슬레이브 태스크 CPU 양보)
-    uint32_t wait_ms = 5;
+    // Event-Driven 블로킹: 
+    // 수신 중(buf_len > 0)일 때는 다음 바이트를 놓치지 않도록 1ms 초단기 대기
+    // 평상시(아이들)에는 CPU 점유율 0% 유지를 위해 5ms 대기
+    uint32_t wait_ms = (buf_len > 0) ? 1 : 5;
     if (last_byte_ms > 0) {
       uint32_t elapsed = millis() - last_byte_ms;
       if (elapsed < Config::Timing::DOORPHONE_IPG_MS) {
-        wait_ms = Config::Timing::DOORPHONE_IPG_MS - elapsed;
+        wait_ms = (buf_len > 0) ? 1 : (Config::Timing::DOORPHONE_IPG_MS - elapsed);
       } else {
-        wait_ms = 2;
+        wait_ms = 1;
       }
     }
-    wait_ms = std::max<uint32_t>(wait_ms, 2);
+    wait_ms = std::max<uint32_t>(wait_ms, 1);
 
     // TX 큐 블로킹 수신: wait_ms 동안 커널 레벨 Blocked 대기하므로 CPU 점유율 0% 유지
     if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
