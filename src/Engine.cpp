@@ -1348,8 +1348,8 @@ void Task_Ch4(void *pvParameters) {
   StaticPacket packet_to_tx;
 
   // 범용 인터패킷 갭(IPG) 기반 패킷화 엔진
-  // STX/ETX에 무관하게 어떤 제조사 도어폰이든 25ms 침묵을 1프레임 종료로 판정
-  static uint8_t buf[64] = {0};
+  // STX/ETX에 무관하게 어떤 제조사 도어폰이든 25ms 침묵을 1프레임 종료로 판정 (대형 30~64B 패킷 수용을 위해 128B 버퍼)
+  static uint8_t buf[128] = {0};
   static size_t buf_len = 0;
   static uint32_t last_byte_ms = 0;  // 마지막 수신 바이트 타임스탬프
   static StaticPacket last_tx_pkt{};
@@ -1398,6 +1398,8 @@ void Task_Ch4(void *pvParameters) {
     // 범용 버스트 수신: 패킷 전송 중 바이트 간 지연(최대 16ms)을 안전하게 버퍼링하기 위해
     // 데이터 유입 시작 시 짧은 폴링으로 1프레임을 온전히 긁어모음
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(g_config.doorphone_baud_rate);
+    // 3860 bps 기준 다음 바이트 도착 대기 (단일 바이트 최대 6ms, 연속 패킷 누적 최대 20ms 스핀으로 WDT 및 Core1 멀티태스킹 보호)
+    uint32_t burst_spin_total = 0;
     while (g_doorphone_serial.available() > 0) {
       uint8_t byte = static_cast<uint8_t>(g_doorphone_serial.read());
       uint32_t now = millis();
@@ -1416,10 +1418,12 @@ void Task_Ch4(void *pvParameters) {
       }
       last_byte_ms = now;
 
-      // 3860 bps 기준 다음 바이트 도착 대기 (1바이트 순수 비트 2.85ms + 월패드 연산 지연 수용: 최대 6ms 스핀)
-      uint32_t drain_start = millis();
-      while (g_doorphone_serial.available() == 0 && (millis() - drain_start < 6)) {
-        esp_rom_delay_us(100);
+      if (burst_spin_total < 20) {
+        uint32_t drain_start = millis();
+        while (g_doorphone_serial.available() == 0 && (millis() - drain_start < 6)) {
+          esp_rom_delay_us(100);
+        }
+        burst_spin_total += (millis() - drain_start);
       }
     }
 
@@ -1474,10 +1478,10 @@ void Task_Ch4(void *pvParameters) {
         }
 
         if (frame_found) {
-          // [순수 범용 에코 필터링] 직전 100ms 이내 송신 패킷과 100% 바이트 단위 일치 시 에코로 폐기
+          // [순수 범용 에코 필터링] 직전 250ms 이내 송신 패킷과 100% 바이트 단위 일치 시 에코로 폐기 (대형 30B 패킷 전송 시간 수용)
           if (last_tx_pkt.length == found_len &&
               memcmp(last_tx_pkt.data.data(), &buf[p], found_len) == 0 &&
-              last_tx_ms > 0 && !TimeUtils::isElapsed(last_tx_ms, 150)) {
+              last_tx_ms > 0 && !TimeUtils::isElapsed(last_tx_ms, 250)) {
             p += found_len;
             last_byte_ms = 0;
             continue;
