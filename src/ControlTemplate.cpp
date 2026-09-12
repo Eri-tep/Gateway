@@ -250,6 +250,44 @@ bool ControlTemplateRegistry::getGroupByIndex(size_t index, GroupControlTemplate
   return false;
 }
 
+bool ControlTemplateRegistry::lockGroup(uint8_t dev_id, bool lock_all) {
+  taskENTER_CRITICAL(&_mux);
+  bool modified = false;
+  for (size_t i = 0; i < _group_count; ++i) {
+    if (lock_all || _groups[i].dev_id == dev_id) {
+      _groups[i].status = GroupControlTemplate::Status::LOCKED;
+      modified = true;
+      if (!lock_all) break;
+    }
+  }
+  taskEXIT_CRITICAL(&_mux);
+  if (modified) {
+    saveToNvs();
+    return true;
+  }
+  return false;
+}
+
+bool ControlTemplateRegistry::unlockGroup(uint8_t dev_id, bool unlock_all) {
+  taskENTER_CRITICAL(&_mux);
+  bool modified = false;
+  for (size_t i = 0; i < _group_count; ++i) {
+    if (unlock_all || _groups[i].dev_id == dev_id) {
+      _groups[i].status = _groups[i].coverage.isFullyCovered()
+                            ? GroupControlTemplate::Status::VERIFIED
+                            : GroupControlTemplate::Status::CAPTURING;
+      modified = true;
+      if (!unlock_all) break;
+    }
+  }
+  taskEXIT_CRITICAL(&_mux);
+  if (modified) {
+    saveToNvs();
+    return true;
+  }
+  return false;
+}
+
 bool ControlTemplateRegistry::resetGroup(uint8_t dev_id) {
   if (dev_id == 0) {
     taskENTER_CRITICAL(&_mux);
@@ -411,6 +449,9 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   GroupControlTemplate *grp = registerOrTouch(dev_id);
   if (!grp) return;
 
+  // ★ LOCKED 상태인 기기는 사용자 승인 불변 잠금 상태이므로 외부 패킷에 의한 변형 차단!
+  if (grp->status == GroupControlTemplate::Status::LOCKED) return;
+
   taskENTER_CRITICAL(&_mux);
   // 이전 raw_template을 diff 비교용으로 보존한 뒤 새 패킷 복사
   uint8_t prev_raw[32]{0};
@@ -554,15 +595,32 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   }
 
   // 컨텍스트(서브명령) 바이트 위치 및 값 확정:
-  // 현대통신(0x40/0x42, 0x45/0x46), 코맥스, 삼성 등에서 SubCmd/Context 바이트를 추출
-  uint8_t frame_ctx_off = (grp->sub1_offset < ctl.length && grp->sub1_offset != act_off) 
-                            ? grp->sub1_offset 
-                            : ((ad.sub1_offset < ctl.length && ad.sub1_offset != act_off) ? ad.sub1_offset : 0xFF);
-  uint8_t frame_ctx_val = (frame_ctx_off != 0xFF) ? ctl.data[frame_ctx_off] : 0x00;
-
-  if (cat_off == 0xFF && frame_ctx_off != 0xFF) {
-    cat_off = frame_ctx_off;
-    cat_val = frame_ctx_val;
+  // 현대통신(0x40/0x42, 0x45/0x46) 등에서 Opcode2/SubCmd 위치(주소가 아닌 서브명령) 추출
+  // 주소 오프셋(sub1_offset, sub2_offset)은 장치 주소 번호이므로 절대 컨텍스트 채널로 오인하지 않음!
+  if (cat_off == 0xFF) {
+    // 1) 기존 학습된 슬롯에서 category_offset이 유효하면 재사용
+    if (grp->power_slot.category_offset != 0xFF && grp->power_slot.category_offset < ctl.length &&
+        grp->power_slot.category_offset != act_off) {
+      cat_off = grp->power_slot.category_offset;
+      cat_val = ctl.data[cat_off];
+    } else if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < ctl.length &&
+               grp->temp_slot.category_offset != act_off) {
+      cat_off = grp->temp_slot.category_offset;
+      cat_val = ctl.data[cat_off];
+    } else {
+      // 2) 패킷 헤더와 페이로드 경계에 있는 서브명령 바이트 탐색 (주소 오프셋 배제)
+      for (size_t k = start_idx; k < act_off && k < ctl.length - 2; ++k) {
+        if (k == grp->sub1_offset || k == grp->sub2_offset) continue;
+        if (ad.offsets_locked && (k == ad.sub1_offset || k == ad.sub2_offset)) continue;
+        if (isFixedFrameField(k)) continue;
+        // 서브명령 컨텍스트는 통상 0x10 이상의 커맨드 코드 (0x01, 0x02 같은 방 주소는 제외)
+        if (ctl.data[k] >= 0x20) {
+          cat_off = static_cast<uint8_t>(k);
+          cat_val = ctl.data[k];
+          break;
+        }
+      }
+    }
   }
 
   if (act_off == 0xFF || act_off >= end_idx) {

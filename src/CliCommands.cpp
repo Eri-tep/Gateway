@@ -1609,25 +1609,27 @@ void wallpadPrintControlTable(AppendBuf &out) {
 
       char mode_str[20]{"-"};
       if (grp.coverage.dev_class == DeviceClass::VENT) {
-        if (grp.mode_slot.discovered && grp.power_slot.discovered) {
-          snprintf(mode_str, sizeof(mode_str), "BURST (%02X/%02X)",
+        if (grp.mode_slot.discovered && grp.power_slot.discovered &&
+            grp.power_slot.category_val >= 0x20 && grp.mode_slot.category_val >= 0x20) {
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)",
                    grp.power_slot.category_val, grp.mode_slot.category_val);
-        } else if (grp.power_slot.discovered) {
-          snprintf(mode_str, sizeof(mode_str), "BURST (%02X)", grp.power_slot.category_val);
+        } else if (grp.power_slot.discovered && grp.power_slot.category_val >= 0x20) {
+          snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", grp.power_slot.category_val);
         } else {
-          snprintf(mode_str, sizeof(mode_str), "BURST");
+          snprintf(mode_str, sizeof(mode_str), "SINGLE");
         }
       } else if (grp.coverage.dev_class == DeviceClass::THERMOSTAT) {
-        if (grp.temp_slot.discovered && grp.power_slot.discovered) {
+        if (grp.temp_slot.discovered && grp.power_slot.discovered &&
+            grp.temp_slot.category_val >= 0x20 && grp.power_slot.category_val >= 0x20) {
           snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)",
                    grp.temp_slot.category_val, grp.power_slot.category_val);
-        } else if (grp.power_slot.discovered) {
-          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X)", grp.power_slot.category_val);
+        } else if (grp.power_slot.discovered && grp.power_slot.category_val >= 0x20) {
+          snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", grp.power_slot.category_val);
         } else {
-          snprintf(mode_str, sizeof(mode_str), "MULTI");
+          snprintf(mode_str, sizeof(mode_str), "SINGLE");
         }
       } else if (grp.power_slot.discovered) {
-        if (grp.power_slot.category_offset != 0xFF && grp.power_slot.category_val != 0) {
+        if (grp.power_slot.category_offset != 0xFF && grp.power_slot.category_val >= 0x20) {
           snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", grp.power_slot.category_val);
         } else {
           snprintf(mode_str, sizeof(mode_str), "SINGLE");
@@ -1667,6 +1669,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
       case GroupControlTemplate::Status::PARTIAL: stat_str = "PARTIAL"; break;
       case GroupControlTemplate::Status::VERIFIED: stat_str = "VERIFIED"; break;
       case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
+      case GroupControlTemplate::Status::LOCKED: stat_str = "LOCKED"; break;
       }
 
       const char *type_str = "-";
@@ -2017,6 +2020,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   case GroupControlTemplate::Status::PARTIAL: stat_str = "PARTIAL"; break;
   case GroupControlTemplate::Status::VERIFIED: stat_str = "VERIFIED"; break;
   case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
+  case GroupControlTemplate::Status::LOCKED: stat_str = "LOCKED"; break;
   }
 
   out.append(Fmt::DIV80);
@@ -2351,6 +2355,42 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
     } else {
       sendTelnetMsg(sock, "[ERROR] Usage: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
     }
+  } else if (strcasecmp(sub, "lock") == 0) {
+    bool lock_all = (argc < 2 || strcasecmp(embeddedCliGetToken(args, 2), "all") == 0);
+    uint8_t dev_id = 0;
+    if (!lock_all) {
+      dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+    }
+    if (lock_all) {
+      g_control_registry.lockGroup(0, true);
+      sendTelnetMsg(sock, "[OK] All device control blueprints have been LOCKED (immutable).\r\n");
+    } else if (dev_id != 0) {
+      if (g_control_registry.lockGroup(dev_id, false)) {
+        sendTelnetMsgf(sock, "[OK] DevID 0x%02X control blueprint has been LOCKED (immutable).\r\n", dev_id);
+      } else {
+        sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl lock [dev_id | all]\r\n");
+    }
+  } else if (strcasecmp(sub, "unlock") == 0) {
+    bool unlock_all = (argc < 2 || strcasecmp(embeddedCliGetToken(args, 2), "all") == 0);
+    uint8_t dev_id = 0;
+    if (!unlock_all) {
+      dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+    }
+    if (unlock_all) {
+      g_control_registry.unlockGroup(0, true);
+      sendTelnetMsg(sock, "[OK] All device control blueprints have been UNLOCKED.\r\n");
+    } else if (dev_id != 0) {
+      if (g_control_registry.unlockGroup(dev_id, false)) {
+        sendTelnetMsgf(sock, "[OK] DevID 0x%02X control blueprint has been UNLOCKED.\r\n", dev_id);
+      } else {
+        sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl unlock [dev_id | all]\r\n");
+    }
   } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
     s_cli_scratch_buf[0] = '\0';
     AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
@@ -2363,6 +2403,8 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
     out.append("  ctl                             Display learned control blueprint table\r\n");
     out.append("  ctl learn                       Run step-by-step interactive learning wizard\r\n");
     out.append("  ctl <dev_id>                    Inspect packet blueprint, roadmap & slots (e.g. ctl 0x18)\r\n");
+    out.append("  ctl lock [dev_id|all]           Lock blueprint(s) into immutable state\r\n");
+    out.append("  ctl unlock [dev_id|all]         Unlock blueprint(s) for learning\r\n");
     out.append("  ctl name <dev_id> <name>        Set custom group name (e.g. Gas, Elevator)\r\n");
     out.append("  ctl status                      Show passive learning engine & blueprint status\r\n");
     out.append("  ctl reset [dev_id]              Reset blueprint(s) and wipe from NVS flash\r\n");
@@ -2379,7 +2421,7 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       wallpadPrintControlDetail(out, dev_id);
       sendTelnetMsgLen(sock, out.buf, out.offset);
     } else {
-      sendTelnetMsg(sock, "Usage: ctl [<dev_id> | name <id> <name> | status | reset [id] | help]\r\n");
+      sendTelnetMsg(sock, "Usage: ctl [<dev_id> | lock [id|all] | unlock [id|all] | name <id> <name> | reset [id] | help]\r\n");
     }
   }
 }

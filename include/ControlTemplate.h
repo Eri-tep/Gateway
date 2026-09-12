@@ -132,7 +132,8 @@ struct GroupControlTemplate {
     CAPTURING,     // 제어 패킷 관측 시작
     PARTIAL,       // ACK_before 없어 골격만 부분 학습
     PROBING,       // 능동 검증(Active Probing) 진행 중
-    VERIFIED       // 슬롯 완전 검증 완료 (LOCKED)
+    VERIFIED,      // 슬롯 완전 검증 완료
+    LOCKED         // 사용자 수동 잠금 (패킷 유입에 의한 변형 절대 불가, NVS 영구 보존)
   } status{Status::EMPTY};
 
   uint32_t last_learned_ms{0};   // 마지막 학습 시각
@@ -163,6 +164,8 @@ public:
   bool resetGroup(uint8_t dev_id);
   bool setGroupName(uint8_t dev_id, const char *name);
   bool setGroupClass(uint8_t dev_id, DeviceClass cls, const char *name = nullptr);
+  bool lockGroup(uint8_t dev_id, bool lock_all = false);
+  bool unlockGroup(uint8_t dev_id, bool unlock_all = false);
 
   // 순수 이벤트 구동형 삼각 차분 분석 (Triplet Differential Sniffer)
   void onControlTransaction(const StaticPacket &ctl,
