@@ -100,6 +100,7 @@ struct GroupControlTemplate {
   ActionSlot power_slot;         // 전원 제어 슬롯
   ActionSlot temp_slot;          // 온도 제어 슬롯 (난방)
   ActionSlot speed_slot;         // 풍량 제어 슬롯 (환기)
+  ActionSlot mode_slot;          // 운전 모드 슬롯 (환기 자연환기 0x42, 에어컨 냉방/제습 등)
   ActionSlot close_slot;         // 닫기 제어 슬롯 (가스)
   
   SlotCoverage coverage;         // 슬롯 완전성 매트릭스

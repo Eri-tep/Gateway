@@ -1974,6 +1974,11 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     }
   }
 
+  if (grp->mode_slot.discovered) {
+    out.appendFormat("  [MD]  Mode Slot     : Byte #%u | Token: 0x%02X | Ctx: 0x%02X\r\n",
+                     grp->mode_slot.action_offset, grp->mode_slot.on_val, grp->mode_slot.category_val);
+  }
+
   if (grp->close_slot.discovered) {
     out.appendFormat("  [VL]  Close Slot    : Byte #%u | CloseToken: 0x%02X | Samples: %u\r\n",
                      grp->close_slot.action_offset, grp->close_slot.off_val, grp->close_slot.sample_count);

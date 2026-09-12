@@ -651,56 +651,44 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       }
     }
   } else if (grp->coverage.dev_class == DeviceClass::VENT) {
-    // 환기: 0x40(풍량/전원) vs 0x42(모드) 등 Context 기반 분리
-    bool is_power_or_speed = (cat_off == 0xFF) || 
-                             (!grp->power_slot.discovered) || 
-                             (cat_off != 0xFF && grp->power_slot.category_offset == cat_off && grp->power_slot.category_val == cat_val);
-
-    if (is_power_or_speed) {
+    // 환기 2중 구조 엄격 분리:
+    // 0x40: 전원 ON/OFF 및 풍량 제어 (Speed)
+    // 0x42: 운전 모드 제어 (Mode - 일반환기/자연환기 등)
+    if (cat_val == 0x40 || (cat_off == 0xFF && cmd_val <= 0x03)) {
+      // [0x40 풍량 / 전원 컨텍스트]
       grp->power_slot.discovered = true;
       grp->power_slot.action_offset = act_off;
       if (cat_off != 0xFF) {
         grp->power_slot.category_offset = cat_off;
-        grp->power_slot.category_val = cat_val;
+        grp->power_slot.category_val = 0x40;
       }
       grp->power_slot.sample_count++;
 
-      // 환기: 0x00은 대기/에러일 수 있으므로 0x01(미풍) 이상을 전원 ON으로 우선 채택
+      // 전원 ON 토큰 (0x01 미풍 이상)
       if (!grp->coverage.power_on_seen) {
         if (cmd_val > 0) {
           grp->power_slot.on_val = cmd_val;
           grp->coverage.power_on_seen = true;
-          if (!grp->speed_slot.discovered) {
-            grp->speed_slot.discovered = true;
-            grp->speed_slot.action_offset = act_off;
-            if (cat_off != 0xFF) {
-              grp->speed_slot.category_offset = cat_off;
-              grp->speed_slot.category_val = cat_val;
-            }
-            grp->speed_slot.level_tokens[0] = cmd_val;
-            grp->speed_slot.level_count = 1;
-            grp->speed_slot.min_val = 1;
-            grp->speed_slot.max_val = 1;
-            grp->coverage.speed_l1_seen = true;
-          }
         }
-      } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val && (cmd_val == 0x00 || cmd_val == 0x02 || cmd_val == 0x04)) {
+      } else if (!grp->coverage.power_off_seen && (cmd_val == 0x02 || cmd_val == 0x00 || cmd_val == 0x04)) {
         grp->power_slot.off_val = cmd_val;
         grp->coverage.power_off_seen = true;
-      } else {
-        // 풍량 단계 등록
+      }
+
+      // 풍량 슬롯(speed_slot) 등록
+      if (cmd_val > 0 && cmd_val != grp->power_slot.off_val) {
         grp->speed_slot.discovered = true;
         grp->speed_slot.action_offset = act_off;
         if (cat_off != 0xFF) {
           grp->speed_slot.category_offset = cat_off;
-          grp->speed_slot.category_val = cat_val;
+          grp->speed_slot.category_val = 0x40;
         }
         grp->speed_slot.sample_count++;
         bool exists = false;
         for (uint8_t k = 0; k < grp->speed_slot.level_count; ++k) {
           if (grp->speed_slot.level_tokens[k] == cmd_val) { exists = true; break; }
         }
-        if (!exists && grp->speed_slot.level_count < 4 && cmd_val != grp->power_slot.off_val) {
+        if (!exists && grp->speed_slot.level_count < 4) {
           grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
           grp->speed_slot.min_val = 1;
           grp->speed_slot.max_val = grp->speed_slot.level_count;
@@ -709,9 +697,15 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
         if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
       }
-    } else {
-      // 0x42 등 부가 모드 Context: away_mode 또는 특수 모드로 추적
-      grp->coverage.away_mode_seen = true;
+    } else if (cat_val == 0x42) {
+      // [0x42 운전 모드 컨텍스트 - 풍량/전원 슬롯과 완전 격리!]
+      grp->mode_slot.discovered = true;
+      grp->mode_slot.action_offset = act_off;
+      grp->mode_slot.category_offset = cat_off;
+      grp->mode_slot.category_val = 0x42;
+      grp->mode_slot.sample_count++;
+      grp->mode_slot.on_val = cmd_val;
+      grp->coverage.away_mode_seen = true; // 모드 패킷 수신 완료 마킹
     }
   } else {
     // SWITCH (조명, 콘센트 등 ON/OFF 기기 공통)

@@ -876,7 +876,18 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
             continue;
           }
           if (!off_done) {
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] Please now TURN OFF '%s'...\r\n", tgt.name);
+            if (s.wizard_sub_phase < 2) {
+              s.wizard_sub_phase = 2;
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] Please now TURN OFF '%s'...\r\n", tgt.name);
+              s.wizard_step_start_ms = millis();
+            }
+            continue;
+          }
+          // [추가] 끄고 난 후 다시 켜서 직전 설정온도 복원(Recall) 검증!
+          if (!grp->temp_recall_verified && s.wizard_sub_phase < 3) {
+            s.wizard_sub_phase = 3;
+            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #4] DevID 0x%02X (%s) OFF recorded! Please TURN ON '%s' again to verify Target Temp Recall...\r\n",
+                           dev_id, tgt.name, tgt.name);
             s.wizard_step_start_ms = millis();
             continue;
           }
@@ -889,14 +900,18 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
             continue;
           }
           if (grp->speed_slot.level_count < 2 && s.wizard_sub_phase == 0) {
+            s.wizard_sub_phase = 1;
             sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please change Fan Speed (풍량 조절 2단/3단) for '%s' (or press Enter to skip)...\r\n",
                            dev_id, tgt.name, tgt.name);
             s.wizard_step_start_ms = millis();
             continue;
           }
           if (!off_done) {
-            sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] Fan Speed recorded! Please now TURN OFF '%s'...\r\n", tgt.name);
-            s.wizard_step_start_ms = millis();
+            if (s.wizard_sub_phase < 2) {
+              s.wizard_sub_phase = 2;
+              sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] Fan Speed recorded! Please now TURN OFF '%s'...\r\n", tgt.name);
+              s.wizard_step_start_ms = millis();
+            }
             continue;
           }
         } else {
