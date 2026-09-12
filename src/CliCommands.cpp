@@ -1638,12 +1638,13 @@ void wallpadPrintControlTable(AppendBuf &out) {
 
       char param_str[20]{"-"};
       if (grp.coverage.dev_class != DeviceClass::UNKNOWN) {
-        if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
-          snprintf(param_str, sizeof(param_str), "T:%uC S:L%u",
-                   grp.temp_slot.min_val, grp.speed_slot.level_count);
+        if (grp.coverage.dev_class == DeviceClass::THERMOSTAT && grp.temp_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "T:5~35C");
+        } else if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "T:5~35C S:L%u",
+                   grp.speed_slot.level_count);
         } else if (grp.temp_slot.discovered) {
-          snprintf(param_str, sizeof(param_str), "T:%u~%uC",
-                   grp.temp_slot.min_val, grp.temp_slot.max_val);
+          snprintf(param_str, sizeof(param_str), "T:5~35C");
         } else if (grp.speed_slot.discovered) {
           if (grp.speed_slot.level_count > 0) {
             snprintf(param_str, sizeof(param_str), "S:L1~L%u",
@@ -1855,19 +1856,14 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   const auto &cov = grp->coverage;
 
   if (cov.dev_class == DeviceClass::THERMOSTAT) {
-    out.appendFormat("  [1/6] Power ON      : [%-4s]  ON=0x%02X\r\n",
+    out.appendFormat("  [1/4] Power ON      : [%-4s]  ON=0x%02X\r\n",
                      cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
-    out.appendFormat("  [2/6] Temp Base     : [%-4s]  Target=%u C\r\n",
-                     cov.temp_set_seen ? "DONE" : "WAIT", grp->temp_slot.min_val);
-    out.appendFormat("  [3/6] Temp Range    : [%-4s]  Range=%u~%u C (Samples: %u)\r\n",
-                     (grp->temp_slot.sample_count >= 2) ? "DONE" : "WAIT",
-                     grp->temp_slot.min_val, grp->temp_slot.max_val, grp->temp_slot.sample_count);
-    out.appendFormat("  [4/6] Away Mode     : [%-4s]  CTX / Mode token\r\n",
-                     cov.away_mode_seen ? "DONE" : "WAIT");
-    out.appendFormat("  [5/6] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+    out.appendFormat("  [2/4] Target Temp   : [%-4s]  Slot=#%u (5~35C Standard)\r\n",
+                     cov.temp_set_seen ? "DONE" : "WAIT", grp->temp_slot.action_offset);
+    out.appendFormat("  [3/4] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
                      cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
-    out.appendFormat("  [6/6] Verified      : [%-4s]  Status Locked\r\n",
-                     (grp->status == GroupControlTemplate::Status::VERIFIED) ? "DONE" : "WAIT");
+    out.appendFormat("  [4/4] Recall Verify : [%-4s]  Re-ON Temp Restored\r\n",
+                     grp->temp_recall_verified ? "DONE" : "WAIT");
   } else if (cov.dev_class == DeviceClass::VENT) {
     uint8_t vent_total_steps = (grp->speed_slot.level_count >= 3 || cov.speed_l3_seen) ? 5 : 4;
     out.appendFormat("  [1/%u] Power ON      : [%-4s]  ON=0x%02X\r\n",

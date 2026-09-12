@@ -553,6 +553,18 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     }
   }
 
+  // 컨텍스트(서브명령) 바이트 위치 및 값 확정:
+  // 현대통신(0x40/0x42, 0x45/0x46), 코맥스, 삼성 등에서 SubCmd/Context 바이트를 추출
+  uint8_t frame_ctx_off = (grp->sub1_offset < ctl.length && grp->sub1_offset != act_off) 
+                            ? grp->sub1_offset 
+                            : ((ad.sub1_offset < ctl.length && ad.sub1_offset != act_off) ? ad.sub1_offset : 0xFF);
+  uint8_t frame_ctx_val = (frame_ctx_off != 0xFF) ? ctl.data[frame_ctx_off] : 0x00;
+
+  if (cat_off == 0xFF && frame_ctx_off != 0xFF) {
+    cat_off = frame_ctx_off;
+    cat_val = frame_ctx_val;
+  }
+
   if (act_off == 0xFF || act_off >= end_idx) {
     act_off = static_cast<uint8_t>(start_idx);
     cmd_val = ctl.data[act_off];
@@ -651,20 +663,22 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       }
     }
   } else if (grp->coverage.dev_class == DeviceClass::VENT) {
-    // 환기 2중 구조 엄격 분리:
-    // 0x40: 전원 ON/OFF 및 풍량 제어 (Speed)
-    // 0x42: 운전 모드 제어 (Mode - 일반환기/자연환기 등)
-    if (cat_val == 0x40 || (cat_off == 0xFF && cmd_val <= 0x03)) {
-      // [0x40 풍량 / 전원 컨텍스트]
+    // 환기 2중 구조 동적 분리:
+    // [풍량/전원 컨텍스트]: cmd_val이 풍량 레벨(1~3) 또는 전원 제어
+    // [운전 모드 컨텍스트]: 자연환기/일반환기 등 모드 제어
+    bool is_mode_packet = (cat_val == 0x42 || (grp->mode_slot.discovered && cat_val == grp->mode_slot.category_val));
+
+    if (!is_mode_packet) {
+      // [풍량 / 전원 컨텍스트 (0x40 등)]
       grp->power_slot.discovered = true;
       grp->power_slot.action_offset = act_off;
       if (cat_off != 0xFF) {
         grp->power_slot.category_offset = cat_off;
-        grp->power_slot.category_val = 0x40;
+        grp->power_slot.category_val = (cat_val > 0) ? cat_val : 0x40;
       }
       grp->power_slot.sample_count++;
 
-      // 전원 ON 토큰 (0x01 미풍 이상)
+      // 전원 ON 토큰 (0x01 이상)
       if (!grp->coverage.power_on_seen) {
         if (cmd_val > 0) {
           grp->power_slot.on_val = cmd_val;
@@ -676,14 +690,14 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       }
 
       // 풍량 슬롯(speed_slot) 등록:
-      // 전원 끄기 명령(0x00 또는 off_val)이 아닌 모든 유효 풍량 토큰은 언제든지 지속 학습(Lifelong Learning)!
+      // 전원 끄기 명령(0x00 또는 off_val)이 아닌 모든 유효 풍량 토큰은 상시 지속 학습(Lifelong Learning)!
       bool is_off_cmd = (cmd_val == 0x00 || (grp->coverage.power_off_seen && cmd_val == grp->power_slot.off_val));
       if (cmd_val > 0 && !is_off_cmd) {
         grp->speed_slot.discovered = true;
         grp->speed_slot.action_offset = act_off;
         if (cat_off != 0xFF) {
           grp->speed_slot.category_offset = cat_off;
-          grp->speed_slot.category_val = 0x40;
+          grp->speed_slot.category_val = (cat_val > 0) ? cat_val : 0x40;
         }
         grp->speed_slot.sample_count++;
         bool exists = false;
@@ -700,12 +714,14 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         if (grp->speed_slot.level_count >= 2) grp->coverage.speed_l2_seen = true;
         if (grp->speed_slot.level_count >= 3) grp->coverage.speed_l3_seen = true;
       }
-    } else if (cat_val == 0x42) {
-      // [0x42 운전 모드 컨텍스트 - 풍량/전원 슬롯과 완전 격리!]
+    } else {
+      // [운전 모드 컨텍스트 (0x42 등) - 풍량/전원 슬롯과 완전 격리!]
       grp->mode_slot.discovered = true;
       grp->mode_slot.action_offset = act_off;
-      grp->mode_slot.category_offset = cat_off;
-      grp->mode_slot.category_val = 0x42;
+      if (cat_off != 0xFF) {
+        grp->mode_slot.category_offset = cat_off;
+        grp->mode_slot.category_val = (cat_val > 0) ? cat_val : 0x42;
+      }
       grp->mode_slot.sample_count++;
       grp->mode_slot.on_val = cmd_val;
       grp->coverage.away_mode_seen = true; // 모드 패킷 수신 완료 마킹
@@ -801,9 +817,8 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
       out.data[grp->temp_slot.category_offset] = grp->temp_slot.category_val;
     }
     if (grp->temp_slot.action_offset < grp->frame_len) {
-      uint8_t min_t = (grp->temp_slot.min_val > 0) ? grp->temp_slot.min_val : 15;
-      uint8_t max_t = (grp->temp_slot.max_val > 0) ? grp->temp_slot.max_val : 30;
-      uint8_t t_val = static_cast<uint8_t>(constrain(value, min_t, max_t));
+      // 주거 난방의 보편적 물리 온도 범위(5℃~35℃)로 안전 제어
+      uint8_t t_val = static_cast<uint8_t>(constrain(value, 5, 35));
       out.data[grp->temp_slot.action_offset] = t_val;
     }
   } else if (action == ControlActionType::FAN_SPEED) {
