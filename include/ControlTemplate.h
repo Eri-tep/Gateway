@@ -106,6 +106,7 @@ struct GroupControlTemplate {
   uint8_t volatile_mask[32]{0};  // 콘센트 텔레메트리 마스킹 비트맵
   uint8_t away_temp_behavior{0}; // 0: 미정, 1: 해제+온도 복합, 2: 외출유지 예약, 3: 무시
   uint8_t away_fixed_temp{0xFF}; // 외출 시 고정되는 설정온도 (예: 10℃)
+  uint8_t away_mode_token{0xFF}; // 외출 시 전원/모드 바이트에 실리는 코드 (예: 0x07, 0x02)
   bool away_has_dedicated_temp{false}; // 외출 시 특정 온도로 고정 여부
   bool temp_recall_verified{false};    // 켜기/외출해제 시 저장된 온도로 자동 복원 검증 완료
   ThermoOffTempBehavior off_temp_behavior{ThermoOffTempBehavior::UNKNOWN};

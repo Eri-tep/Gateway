@@ -1982,8 +1982,10 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   if (cov.dev_class == DeviceClass::THERMOSTAT) {
     if (grp->away_has_dedicated_temp) {
       out.appendFormat("  [AWY] Away Temp     : %u C\r\n", grp->away_fixed_temp);
+    } else if (grp->away_mode_token != 0xFF) {
+      out.appendFormat("  [AWY] Away Token    : 0x%02X\r\n", grp->away_mode_token);
     } else {
-      out.append("  [AWY] Away Temp     : None\r\n");
+      out.append("  [AWY] Away Mode     : None\r\n");
     }
     out.appendFormat("  [RCL] Temp Recall   : %s\r\n", grp->temp_recall_verified ? "Verified" : "Unverified");
     const char *off_str = "Unknown";

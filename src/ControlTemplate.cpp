@@ -450,6 +450,7 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     grp->sub2_offset = ad.sub2_offset;
   } else {
     for (size_t i = 0; i < ctl.length - 2; ++i) {
+      if (ad.gw_addr_offset != 0xFF && i == ad.gw_addr_offset) continue;
       if (ctl.data[i] == sub1 && grp->sub1_offset == 0xFF) grp->sub1_offset = i;
       if (ctl.data[i] == sub2 && grp->sub2_offset == 0xFF) grp->sub2_offset = i;
     }
@@ -582,14 +583,13 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     grp->coverage.valve_close_seen = true;
     grp->coverage.power_off_seen = true;
   } else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
-    // Context(cat_val) 또는 명령어 종류에 따른 슬롯 격리
-    // 1) cat_off가 유효하고 기존 power_slot.category_val과 다른 새로운 cat_val이 들어오면 온도 슬롯(temp_slot)으로 직행
-    // 2) 또는 power_on_seen/power_off_seen이 완료된 후의 변경값은 온도 슬롯으로 격리
-    bool is_power_ctx = (cat_off == 0xFF) || 
-                        (!grp->power_slot.discovered) || 
-                        (cat_off != 0xFF && grp->power_slot.category_offset == cat_off && grp->power_slot.category_val == cat_val);
+    // Context(cat_val) 엄격 격리:
+    // cat_val == 0x46 (또는 power_slot.category_val과 일치): 전원 및 모드(ON, OFF, AWAY)
+    // cat_val == 0x45 (또는 temp_slot.category_val): 희망온도 (SET_TEMP)
+    bool is_temp_ctx = (cat_off != 0xFF && cat_val == 0x45) || (cmd_val >= 16 && cmd_val <= 40 && cat_val != 0x46);
 
-    if (is_power_ctx && (!grp->coverage.power_on_seen || !grp->coverage.power_off_seen)) {
+    if (!is_temp_ctx) {
+      // [전원 / 모드 컨텍스트 (0x46 등)]
       grp->power_slot.discovered = true;
       grp->power_slot.action_offset = act_off;
       if (cat_off != 0xFF) {
@@ -599,29 +599,30 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       grp->power_slot.sample_count++;
 
       if (!grp->coverage.power_on_seen) {
-        grp->power_slot.on_val = cmd_val;
-        grp->coverage.power_on_seen = true;
-      } else if (!grp->coverage.power_off_seen) {
-        if (cmd_val != grp->power_slot.on_val) {
+        if (cmd_val == 0x01) {
+          grp->power_slot.on_val = cmd_val;
+          grp->coverage.power_on_seen = true;
+        }
+      } else {
+        if (cmd_val == 0x04) {
+          grp->power_slot.off_val = cmd_val;
+          grp->coverage.power_off_seen = true;
+        } else if (cmd_val == 0x07 || cmd_val == 0x02 || cmd_val == 0x03) {
+          // 외출(Away) 모드 토큰으로 등록 (희망온도와 절대 혼동하지 않음!)
+          grp->away_mode_token = cmd_val;
+          grp->coverage.away_mode_seen = true;
+        } else if (!grp->coverage.power_off_seen && cmd_val != grp->power_slot.on_val && cmd_val <= 0x0F) {
+          // 기타 제조사 규격 OFF 토큰
           grp->power_slot.off_val = cmd_val;
           grp->coverage.power_off_seen = true;
         }
       }
     } else {
-      // 1) 외출 모드 감지: 고정온도(<=15도 동파방지) 또는 모드 토큰
-      if (cmd_val <= 15 && cmd_val > 0) {
-        grp->away_has_dedicated_temp = true;
-        grp->away_fixed_temp = cmd_val;
-        grp->coverage.away_mode_seen = true;
-      } else if (cat_val == 0x43 || cat_val == 0x42) {
-        grp->coverage.away_mode_seen = true;
-      }
-
-      // 2) 전원이 꺼진 상태(power_off_seen)에서 온도 조작이 들어온 경우
+      // [희망온도 컨텍스트 (0x45 등)]
+      // 전원이 꺼진 상태(power_off_seen)에서 온도 조작이 들어온 경우
       if (grp->coverage.power_off_seen && !grp->coverage.temp_while_off_seen) {
         grp->coverage.temp_while_off_seen = true;
         if (grp->off_temp_behavior == ThermoOffTempBehavior::UNKNOWN) {
-          // CTL 또는 ACK에서 power_on_val이 동시에 관측되면 AUTO_POWER_ON, 아니면 PASSIVE_MEMORY
           if (cmd_val == grp->power_slot.on_val) {
             grp->off_temp_behavior = ThermoOffTempBehavior::AUTO_POWER_ON;
           } else {
@@ -630,14 +631,14 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         }
       }
 
-      // 3) 설정온도(SET_TEMP) 슬롯으로 독립 분리
+      // 설정온도(SET_TEMP) 슬롯으로 독립 분리
       grp->temp_slot.discovered = true;
       grp->temp_slot.action_offset = act_off;
       if (cat_off != 0xFF) {
         grp->temp_slot.category_offset = cat_off;
         grp->temp_slot.category_val = cat_val;
       }
-      if (cmd_val >= 16 && cmd_val <= 40) {
+      if (cmd_val >= 14 && cmd_val <= 40) {
         if (grp->temp_slot.min_val == 0 || cmd_val < grp->temp_slot.min_val) grp->temp_slot.min_val = cmd_val;
         if (cmd_val > grp->temp_slot.max_val) grp->temp_slot.max_val = cmd_val;
         grp->temp_slot.sample_count++;
