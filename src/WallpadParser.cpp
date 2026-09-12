@@ -1157,6 +1157,8 @@ void ProfileRepository::init() {
     memcpy(s_active_profiles, loaded_profiles, sizeof(loaded_profiles));
     s_profiles_initialized = true;
   }
+
+  g_auto_probing_engine.initFromNvs();
 }
 
 size_t ProfileRepository::getProfileCount() {
@@ -1327,6 +1329,10 @@ bool ProfileRepository::saveCurrentAutoAs(const char *name, size_t &saved_idx) {
   new_prof.gw_addr_offset = ad.offsets_locked ? ad.gw_addr_offset : 2;
   new_prof.gw_addr = ad.offsets_locked ? ad.gw_addr : 0x01;
   new_prof.learned_query_len = (ad.offsets_locked && ad.learned_query_len >= 3) ? ad.learned_query_len : 11;
+  new_prof.len_offset = ad.offsets_locked ? ad.len_offset : 0xFF;
+  new_prof.has_len_field = (ad.offsets_locked && ad.has_len_field) ? 1 : 0;
+  new_prof.seq_offset = ad.offsets_locked ? ad.seq_offset : 0xFF;
+  new_prof.ack_flag_offset = ad.offsets_locked ? ad.ack_flag_offset : 0xFF;
 
   size_t target_slot = 1;
   bool found_match = false;

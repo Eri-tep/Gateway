@@ -676,14 +676,15 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
             }
           }
         }
-        // 2) 난방 온도 범위 방어: 온도 슬롯 범위(5~35C) 초과 시 차단
+        // 2) 난방 온도 범위 방어: 희망온도(SET_TEMP) 카테고리 패킷일 때만 온도 유효 범위(5~35C) 검증
         if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->temp_slot.discovered &&
             grp->temp_slot.action_offset < req.length) {
-          // 카테고리가 temp_slot에 해당하거나 category_offset이 일치할 때
-          bool is_temp = true;
-          if (grp->temp_slot.category_offset < req.length) {
+          bool is_temp = false;
+          // 카테고리 슬롯이 학습되어 있다면 temp_slot의 카테고리 값과 일치할 때만 온도 패킷으로 판정
+          if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < req.length) {
             is_temp = (req.data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
           }
+
           if (is_temp) {
             uint8_t t_val = req.data[grp->temp_slot.action_offset];
             if (t_val < 5 || t_val > 35) {

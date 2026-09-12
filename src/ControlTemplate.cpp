@@ -524,7 +524,9 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
   // 5. 무사전지식 Full-Spectrum 차분 분석 (Full Differential Scan)
   // 고정 프레임 필드(STX, LEN, DevID, OP, CS, ETX) 및 주소(SUB1, SUB2)를 엄격히 분리
   // --------------------------------------------------------------------------
-  size_t start_idx = (ad.offsets_locked && ad.payload_offset > 0) ? ad.payload_offset : 1;
+  size_t start_idx = (ad.offsets_locked && ad.payload_offset > 0) 
+                       ? ad.payload_offset 
+                       : std::max({(size_t)1, (size_t)ad.opcode_offset + 1, (size_t)ad.dev_id_offset + 1});
   size_t end_idx = (ctl.length >= 2) ? (ctl.length - 2) : ctl.length;
 
   auto isFixedFrameField = [&](size_t idx) -> bool {
