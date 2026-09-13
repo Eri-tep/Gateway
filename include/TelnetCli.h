@@ -2,6 +2,7 @@
 
 #include "Common.h"
 #include "CliCommands.h"
+#include "ControlTemplate.h"
 
 // ============================================================================
 // SECTION 1: TELNET PROTOCOL & IAC ENUMS
@@ -62,13 +63,41 @@ public:
     char txBuf[256];
     size_t txLen = 0;
 
-    // 대화형 학습 마법사 (ctl learn) 논블로킹 상태 머신
+    // 대화형 학습 마법사 (ctl learn) 명시적 유한 상태 머신 (FSM)
+    enum class ThermoPhase : uint8_t {
+      WAIT_ON = 0,      // [1] 전원 ON 대기
+      WAIT_OFF,         // [2] 전원 OFF 대기 (power_offset 확정)
+      WAIT_RE_ON,       // [3] 온도 조작용 재인가 대기
+      WAIT_TEMP,        // [4] 희망온도 변경 대기 (TT/AT 확정)
+      WAIT_AWAY,        // [5] 외출 모드 대기 (Away 토큰 분리 or Enter 스킵)
+      WAIT_RECALL,      // [6] 복원 검증용 재인가 대기 (Recall 확인)
+      VERIFIED          // 완료
+    };
+
+    enum class VentPhase : uint8_t {
+      WAIT_ON = 0,      // [1] 전원 ON 대기
+      WAIT_OFF,         // [2] 전원 OFF 대기 (power_offset 확정)
+      WAIT_RE_ON,       // [3] 풍량 조작용 재인가 대기
+      WAIT_SPEED,       // [4] 풍량 단계 조절 대기 (FS 확정 or Enter 스킵)
+      VERIFIED          // 완료
+    };
+
+    enum class SwitchPhase : uint8_t {
+      WAIT_ON = 0,      // [1] 전원 ON 대기
+      WAIT_OFF,         // [2] 전원 OFF 대기
+      VERIFIED          // 완료
+    };
+
     uint8_t wizard_step{0};          // 0: 비활성, 1~7: 각 기기 단계
     uint8_t wizard_dev_id{0};        // 현재 단계에 바인딩된 기기 ID (Fresh State 관리용)
-    uint8_t wizard_sub_phase{0};     // 단계 내 세부 서브 시나리오 번호 (난방 외출/오프온도 등)
+    uint8_t wizard_sub_phase{0};     // 단계 내 세부 서브 시나리오 번호 (하위호환용 유지)
     uint8_t wizard_last_prompt{0};    // 동일 단계/프롬프트 중복 출력 방지 상태값
     uint32_t wizard_step_start_ms{0}; // 현재 단계 시작 시각 (타임아웃 45s 검사용)
     uint32_t prev_learned_ms[8]{0};   // 기기별 이전 학습 시각 스냅샷
+
+    ThermoPhase thermo_phase{ThermoPhase::WAIT_ON};
+    VentPhase   vent_phase{VentPhase::WAIT_ON};
+    SwitchPhase switch_phase{SwitchPhase::WAIT_ON};
 
     void reset() {
       if (sock >= 0) {
@@ -91,6 +120,9 @@ public:
       wizard_last_prompt = 0;
       wizard_step_start_ms = 0;
       memset(prev_learned_ms, 0, sizeof(prev_learned_ms));
+      thermo_phase = ThermoPhase::WAIT_ON;
+      vent_phase = VentPhase::WAIT_ON;
+      switch_phase = SwitchPhase::WAIT_ON;
       cli.reset();
     }
   };
@@ -160,6 +192,10 @@ public:
   void notifyControlTransaction(uint8_t dev_id);
   void handleWizardStepAdvance(TelnetSession *s, bool skipped, bool match);
   void handleWizardInput(TelnetSession *s, char c);
+
+  // 위저드가 현재 어떤 목적의 조작을 기다리고 있는지 hint를 반환 (읽기 전용, 락 없음)
+  // Engine.cpp에서 onControlTransaction() 호출 직전에 조회하여 hint 전달용.
+  AckSlotHint peekWizardHint(uint8_t dev_id) const noexcept;
 };
 
 // ============================================================================

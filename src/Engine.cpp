@@ -976,7 +976,9 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
         span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length),
         span<const uint8_t>(ack.data.data(), ack.length));
     if (!parser || !parser->isQueryPacket(span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length))) {
-      g_control_registry.onControlTransaction(ctrlPacket, ack_before, ack);
+      // 위저드가 현재 어떤 조작을 기다리는지 semantic hint를 먼저 읽은 후 전달
+      AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
+      g_control_registry.onControlTransaction(ctrlPacket, ack_before, ack, hint);
       if (dev_id != 0) {
         g_telnet_manager.notifyControlTransaction(dev_id);
       }

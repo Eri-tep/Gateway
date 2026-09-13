@@ -8,6 +8,19 @@
 #include "WallpadParser.h"
 
 // ============================================================================
+// ACK SLOT HINT (Wizard Semantic Hint)
+// 위저드가 현재 단계의 의미를 onControlTransaction()에 전달하는 타입.
+// 어떤 제조사/기기도 가정하지 않음 — 순수 의미론적 분류.
+// ============================================================================
+
+enum class AckSlotHint : uint8_t {
+  NONE  = 0,   // 일반 패시브 스니핑 (위저드 밖, 기존 추론 로직 유지)
+  POWER,       // 전원 ON / OFF / Away — power_offset 탐색 우선
+  TEMP,        // 희망온도 변경 — target_temp_offset 탐색 우선
+  SPEED,       // 풍량 변경 — fan_speed_offset 탐색 우선
+};
+
+// ============================================================================
 // CONTROL ACTION TYPES & SLOTS
 // ============================================================================
 
@@ -56,10 +69,12 @@ struct SlotCoverage {
   bool temp_set_seen{false};
   bool away_mode_seen{false};
   // ── 복합 상태 슬롯 (THERMOSTAT 전용, 필수)
+  bool temp_ready_on{false};         // 전원 OFF 후 온도 조작을 위해 다시 켠 상태
   bool temp_while_off_seen{false};   // 꺼진 상태 온도 변경 → 켜기+온도 복합 패턴
   bool temp_while_away_seen{false};  // 외출 모드 온도 변경 → 제조사별 상이한 응답 패턴
   bool temp_recall_seen{false};      // 전원 OFF 후 Re-ON 시 직전 설정온도 복원 검증 완료
   // ── 환기 / 에어컨 풍량
+  bool speed_ready_on{false};        // 전원 OFF 후 풍량 조작을 위해 다시 켠 상태
   bool speed_l1_seen{false};
   bool speed_l2_seen{false};
   bool speed_l3_seen{false};
@@ -85,6 +100,26 @@ enum class ThermoOffTempBehavior : uint8_t {
 // ============================================================================
 // GROUP CONTROL TEMPLATE (CONTROL BLUEPRINT)
 // ============================================================================
+
+struct PacketSnapshot {
+  uint8_t len{0};
+  uint8_t raw[32]{0};
+};
+
+struct AckStateSlots {
+  bool discovered{false};
+  uint8_t power_offset{0xFF};        // ACK 내 전원/가동 상태 위치 [AS]
+  uint8_t target_temp_offset{0xFF};  // ACK 내 설정 희망온도 위치 [TT]
+  uint8_t current_temp_offset{0xFF}; // ACK 내 현재 환경온도 위치 [AT]
+  uint8_t fan_speed_offset{0xFF};    // ACK 내 풍량 상태 위치 [FS]
+  uint8_t valve_state_offset{0xFF};  // ACK 내 밸브 차단 상태 위치 [VS]
+  uint8_t sample_count{0};
+  // ★ 교차 트랜잭션 변화 마스크 (Cross-Transaction Change Mask)
+  // POWER hint 트랜잭션에서 변한 ACK 바이트 위치를 비트맵으로 기록.
+  // TEMP/SPEED hint 탐색 시, 이 마스크에 등록된 위치(전원 종속 바이트)를 제외하면
+  // 어떤 제조사에서도 에코/전원 바이트를 사전지식 없이 자동 배제할 수 있다.
+  uint32_t power_changed_mask{0};    // bit N = ACK Byte #N이 POWER 트랜잭션에서 변함
+};
 
 struct GroupControlTemplate {
   uint8_t dev_id{0x00};          // 기기 그룹 코드 (예: 0x19 조명, 0x18 난방 등)
@@ -114,7 +149,15 @@ struct GroupControlTemplate {
   ThermoOffTempBehavior off_temp_behavior{ThermoOffTempBehavior::UNKNOWN};
   uint8_t off_temp_unchanged_count{0}; // 꺼진 상태 온도 조작 시 ACK 무반응 횟수 추적 (3회 이상 시 LOCKED_IGNORE)
 
-  // 직전 단계 학습 원본 패킷 (CTL- / CTL+, ACK- / ACK+)
+  // 3-단계 순환 트랜잭션 캡처 버퍼 (시간순: [0] T-2, [1] T-1, [2] T_current)
+  PacketSnapshot ctl_hist[3];
+  PacketSnapshot ack_hist[3];
+  uint8_t hist_count{0};
+
+  // ACK 전용 자율 발견 상태 슬롯
+  AckStateSlots ack_slots;
+
+  // 레거시 호환 단일/쌍 버퍼
   uint8_t ctl_before_len{0};
   uint8_t ctl_before_raw[32]{0};
   uint8_t ctl_after_len{0};
@@ -169,9 +212,11 @@ public:
   bool unlockGroup(uint8_t dev_id, bool unlock_all = false);
 
   // 순수 이벤트 구동형 삼각 차분 분석 (Triplet Differential Sniffer)
+  // hint: 위저드가 알고 있는 이번 트랜잭션의 의미론적 목적 (POWER/TEMP/SPEED/NONE)
   void onControlTransaction(const StaticPacket &ctl,
                             const StaticPacket &ack_before,
-                            const StaticPacket &ack_after);
+                            const StaticPacket &ack_after,
+                            AckSlotHint hint = AckSlotHint::NONE);
 
   // 제어 패킷 조립 (스마트싱스 및 외부 연동 공용)
   bool buildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,

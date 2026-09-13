@@ -390,9 +390,16 @@ void AutoProbingEngine::initFromNvs() {
       _desc.dev_id_offset = prof.dev_id_offset;
       _desc.sub1_offset = prof.sub1_offset;
       _desc.sub2_offset = prof.sub2_offset;
-      _desc.is_swapped_addr = (prof.is_swapped_addr != 0);
-      _desc.gw_addr_offset = (prof.gw_addr_offset > 0) ? prof.gw_addr_offset : 2;
-      _desc.gw_addr = (prof.gw_addr != 0) ? prof.gw_addr : 0x01;
+      // ★ Direct 모드 NVS 오프셋 셀프 힐링 (Byte #2는 항상 Master/GW 고정 주소)
+      if (!_desc.is_swapped_addr) {
+        if (_desc.gw_addr_offset == _desc.dev_id_offset || _desc.gw_addr_offset != 2) {
+          _desc.gw_addr_offset = 2;
+          _desc.gw_addr = (prof.gw_addr != 0) ? prof.gw_addr : 0x01;
+        }
+        if (_desc.sub1_offset == 2 && _desc.sub2_offset > 2) {
+          _desc.sub1_offset = _desc.sub2_offset;
+        }
+      }
       _desc.learned_query_len = (prof.learned_query_len >= 3) ? prof.learned_query_len : 11;
       _desc.len_offset = prof.len_offset;
       _desc.has_len_field = (prof.has_len_field != 0);
@@ -845,10 +852,11 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
       std::set<uint8_t> vals;
       for (size_t m = 0; m < N; ++m) vals.insert(pairs[m].q.data[k]);
       if (vals.size() == 1) {
-        sub_cmd_idx = ik;
-        break;
-      }
-      if (promoted_dev_idx >= 0) {
+        // 단일 고정값(예: 0x01)은 장치 고유 주소가 아니라 Master/GW 주소임
+        if (master_gw_idx < 0) {
+          master_gw_idx = ik;
+        }
+      } else if (promoted_dev_idx >= 0) {
         std::map<uint8_t, uint8_t> dep_map;
         bool pure_func = true;
         for (size_t m = 0; m < N; ++m) {
@@ -1004,6 +1012,8 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     }
     if (sub_cmd_idx >= 0) {
       _desc.sub1_offset = static_cast<uint8_t>(sub_cmd_idx);
+    } else if (sub_id_idx >= 0) {
+      _desc.sub1_offset = static_cast<uint8_t>(sub_id_idx);
     }
     if (sub_id_idx >= 0) {
       _desc.sub2_offset = static_cast<uint8_t>(sub_id_idx);
@@ -1015,7 +1025,10 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     _desc.ack_flag_offset = (ack_flag_idx >= 0) ? static_cast<uint8_t>(ack_flag_idx) : 0xFF;
 
     _desc.is_swapped_addr = (swap_i >= 0);
-    if (swap_i >= 0 && master_gw_idx >= 0 && promoted_dev_idx >= 0) {
+    if (master_gw_idx >= 0) {
+      _desc.gw_addr_offset = static_cast<uint8_t>(master_gw_idx);
+      _desc.gw_addr = pairs[0].q.data[master_gw_idx];
+    } else if (swap_i >= 0 && master_gw_idx >= 0 && promoted_dev_idx >= 0) {
       _desc.gw_addr_offset = static_cast<uint8_t>(master_gw_idx);
       _desc.gw_addr = pairs[0].q.data[master_gw_idx];
     } else if (!_desc.is_swapped_addr && dev_type_idx >= 0) {
