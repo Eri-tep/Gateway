@@ -995,6 +995,24 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
         }
       }
 
+      // ★ [FSM 완전 격리 방어벽]
+      // 대상 기기가 최종 검증 완료(VERIFIED) 상태에 도달하지 않았다면,
+      // 어떠한 연속 패킷이나 미완료 트랜잭션이라도 아래의 MATCH DETECTED로 빠져나가지 않고 다음 입력을 대기!
+      bool is_verified = false;
+      if (tgt.cls == DeviceClass::THERMOSTAT) {
+        is_verified = (s.thermo_phase == TelnetSession::ThermoPhase::VERIFIED);
+      } else if (tgt.cls == DeviceClass::VENT) {
+        is_verified = (s.vent_phase == TelnetSession::VentPhase::VERIFIED);
+      } else if (need_dual_action) {
+        is_verified = (s.switch_phase == TelnetSession::SwitchPhase::VERIFIED);
+      } else {
+        is_verified = true; // MOMENTARY 등 단발성 기기
+      }
+
+      if (!is_verified) {
+        continue;
+      }
+
       sendTelnetMsgf(s.sock, "\r\n>> [MATCH DETECTED!] DevID 0x%02X matched to '%s'!\r\n",
                      dev_id, tgt.name);
 

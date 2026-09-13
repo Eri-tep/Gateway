@@ -357,18 +357,14 @@ static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1, uint8_t sub2) no
 }
 
 static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  // [의도적 설계] 온도조절기 0x18/sub1=0x45: 전원-ON 직후 버스에서 0x45가 관측되나
-  // 실제 상태 조회 sub1=0x46과 동일 장치이므로 0x46으로 정규화 (DevRepo 중복 방지)
-  if (dev_id == Config::Devices::DEV_THERMOSTAT && sub1 == 0x45)
-    return 0x46;
-  // [의도적 설계] 전열교환기 0x2B: 제어 응답(sub1=0x42)과 상태 조회(sub1=0x40)가
-  // 같은 물리 장치를 가리키므로 DevRepo에서 동일 키로 관리.
-  // CH6 ACK 변환(0x42→0x40)과 짝을 이루며, 스마트싱스가 단일 장치로 인식하도록 설계.
-  // ※ 이 함수는 extractDeviceKey()가 이미 오프셋을 해석한 후 dev_id/sub1을 받으므로
-  //    하드코딩된 오프셋과 무관하게 올바르게 동작함.
-  if (dev_id == Config::Devices::DEV_HEAT_EXCHANGER &&
-      sub1 == Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK) {
-    return Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
+  // [무사전지식 / 제로 하드코딩]
+  // 청사진(ControlTemplate)에 등록된 다중 채널(Multi-Context) 관계 조회:
+  // 보조 제어 채널(temp 또는 speed 등)이 들어오면 기본 전원/상태 채널(power_slot.category_val)로 자동 단일화
+  const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+  if (grp && grp->power_slot.category_val != 0 && grp->power_slot.category_val != 0xFF) {
+    if (sub1 == grp->temp_slot.category_val || sub1 == grp->speed_slot.category_val) {
+      return grp->power_slot.category_val;
+    }
   }
   return sub1;
 }
@@ -995,13 +991,18 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
                                  ? ad.gw_addr_offset : (ad.offsets_locked ? ad.dev_id_offset : 3);
       uint8_t ack_sub1_off = ad.offsets_locked ? ad.sub1_offset : 5;
 
-      if (ack_dev_off < ch6_ack.length && ack_sub1_off < ch6_ack.length &&
-          ch6_ack.data[ack_dev_off] == Config::Devices::DEV_HEAT_EXCHANGER &&
-          ch6_ack.data[ack_sub1_off] == Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK) {
-        ch6_ack.data[ack_sub1_off] = Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
-
-        ch6_ack.data[ch6_ack.length - 2] =
-            PacketCodec::calculateChecksum(ch6_ack.data.data(), ch6_ack.length);
+      if (ack_dev_off < ch6_ack.length && ack_sub1_off < ch6_ack.length) {
+        uint8_t ack_dev_id = ch6_ack.data[ack_dev_off];
+        const GroupControlTemplate *grp = g_control_registry.findGroup(ack_dev_id);
+        if (grp && grp->power_slot.category_val != 0 && grp->power_slot.category_val != 0xFF) {
+          uint8_t cur_sub1 = ch6_ack.data[ack_sub1_off];
+          // 보조 제어 채널(speed 또는 temp)로 ACK가 온 경우 스마트싱스 상태 조회를 위해 기본 채널로 정규화
+          if (cur_sub1 == grp->speed_slot.category_val || cur_sub1 == grp->temp_slot.category_val) {
+            ch6_ack.data[ack_sub1_off] = grp->power_slot.category_val;
+            ch6_ack.data[ch6_ack.length - 2] =
+                PacketCodec::calculateChecksum(ch6_ack.data.data(), ch6_ack.length);
+          }
+        }
       }
     }
 

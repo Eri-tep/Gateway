@@ -790,8 +790,22 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
         }
       }
     } else {
-      // 전원이 꺼진 상태(power_off_seen)에서 온도 조작이 들어온 경우
-      if (grp->coverage.power_off_seen) {
+      // 조작 직전(has_before) 실제로 전원이 꺼진 상태(off_val)였는지 확인
+      bool was_actually_off = false;
+      if (has_before && grp->power_slot.off_val != 0xFF) {
+        if (grp->ack_slots.power_offset != 0xFF && grp->ack_slots.power_offset < ack_before.length) {
+          was_actually_off = (ack_before.data[grp->ack_slots.power_offset] == grp->power_slot.off_val);
+        } else {
+          for (size_t k = start_idx; k < ack_before.length - 2; ++k) {
+            if (!isFixedAckField(k) && ack_before.data[k] == grp->power_slot.off_val) {
+              was_actually_off = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (was_actually_off) {
         grp->coverage.temp_while_off_seen = true;
         if (grp->off_temp_behavior == ThermoOffTempBehavior::UNKNOWN ||
             grp->off_temp_behavior == ThermoOffTempBehavior::PASSIVE_MEMORY) {
