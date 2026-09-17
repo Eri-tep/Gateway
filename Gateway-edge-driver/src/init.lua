@@ -92,7 +92,7 @@ local function device_init(driver, device)
 
     -- 3. Vent 초기화 (약풍/중풍/강풍 드롭다운 지원 모드 설정)
     local cap_vent = capabilities["digituniverse06711.ventmode"]
-    if cap_vent then
+    if cap_vent and device:supports_capability_by_id(cap_vent.ID) then
       device:emit_event(cap_vent.ventMode("low"))
     end
     if device:supports_capability_by_id(capabilities.airConditionerFanMode.ID) then
@@ -158,6 +158,12 @@ end
 
 local function device_info_changed(driver, device, event, args)
   log.info("Device preferences updated")
+  local p_key = device.parent_assigned_child_key or ""
+  if p_key ~= "" then
+    -- 자식 기기는 게이트웨이 환경설정(RPC/텔레메트리/UART) 대상이 아니므로 즉시 반환
+    return
+  end
+
   local old_prefs = (args and args.old_st_store and args.old_st_store.preferences) or {}
   local new_prefs = device.preferences or {}
 

@@ -75,11 +75,12 @@ public:
     };
 
     enum class VentPhase : uint8_t {
-      WAIT_ON = 0,      // [1] 전원 ON 대기
-      WAIT_OFF,         // [2] 전원 OFF 대기 (power_offset 확정)
-      WAIT_RE_ON,       // [3] 풍량 조작용 재인가 대기
-      WAIT_SPEED,       // [4] 풍량 단계 조절 대기 (FS 확정 or Enter 스킵)
-      VERIFIED          // 완료
+      WAIT_ON = 0,        // [1] 전원 ON (약풍 1단) 대기
+      WAIT_OFF,           // [2] 전원 OFF 대기 (power_offset 확정)
+      WAIT_RE_ON,         // [3] 풍량 조작용 재인가 대기
+      WAIT_SPEED_MID,     // [4] 중풍 (2단) 조절 대기
+      WAIT_SPEED_HIGH,    // [5] 강풍 (3단) 조절 대기
+      VERIFIED            // 완료
     };
 
     enum class SwitchPhase : uint8_t {

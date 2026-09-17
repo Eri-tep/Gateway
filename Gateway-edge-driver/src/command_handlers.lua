@@ -541,20 +541,18 @@ end
 function CommandHandlers.handle_child_set_heating_setpoint(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
-  local temp = tonumber(command.args.heatingSetpoint) or 22
+  -- SmartThings 표준 capability는 command.args.setpoint 또는 command.args.heatingSetpoint 로 전달됨
+  local raw_temp = (command.args and (command.args.setpoint or command.args.heatingSetpoint))
+  if not raw_temp and command.positional_args and #command.positional_args > 0 then
+    raw_temp = command.positional_args[1]
+  end
+  local temp = math.floor((tonumber(raw_temp) or 22) + 0.5)
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🔥 [CHILD CMD] %s SetTemp -> %dC (DevID 0x%02X %d-%d)", device.label, temp, d_id, s1, s2))
 
   local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = temp, unit = "C" })
   sp_evt.state_change = true
   device:emit_event(sp_evt)
-
-  -- [핵심] 현재 온도 센서 부재 시 설정 온도로 상시 대체 동기화
-  if capabilities.temperatureMeasurement then
-    local cur_evt = capabilities.temperatureMeasurement.temperature({ value = temp, unit = "C" })
-    cur_evt.state_change = true
-    device:emit_event(cur_evt)
-  end
 
   device:set_field("last_thermo_temp", temp, { persist = true })
   gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)

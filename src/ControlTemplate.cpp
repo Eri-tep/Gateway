@@ -1083,6 +1083,8 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
       }
       if (!exists && grp->speed_slot.level_count < 4) {
         grp->speed_slot.level_tokens[grp->speed_slot.level_count++] = cmd_val;
+        // 오름차순 정렬하여 인덱스와 세기 단계(L1 < L2 < L3)를 항상 일치 유지
+        std::sort(grp->speed_slot.level_tokens, grp->speed_slot.level_tokens + grp->speed_slot.level_count);
         grp->speed_slot.min_val = 1;
         grp->speed_slot.max_val = grp->speed_slot.level_count;
       }

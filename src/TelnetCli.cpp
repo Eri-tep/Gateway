@@ -843,23 +843,28 @@ void TelnetManager::handleWizardInput(TelnetSession *s, char c) {
       s->wizard_step_start_ms = millis();
       return;
     }
-    if (cur_idx < WIZARD_TOTAL_STEPS && s_wizard_targets[cur_idx].cls == DeviceClass::VENT &&
-        s->vent_phase == TelnetSession::VentPhase::WAIT_SPEED) {
-      // [B. 풍량 조작 스킵 시 원자적 검증 및 안전 격하]
-      // speed_slot이 불완전한 상태에서 VERIFIED로 올라가지 않도록 speed_slot을 미탐색 상태로 초기화하고,
-      // 풍량 기능 없이 단일 전원 스위치(ON/OFF)로만 안전하게 한정
-      GroupControlTemplate *v_grp = g_control_registry.findGroup(s->wizard_dev_id);
-      if (v_grp) {
-        v_grp->speed_slot = ActionSlot{};
-        v_grp->speed_slot.discovered = false;
-        v_grp->coverage.speed_l1_seen = false;
-        v_grp->coverage.speed_l2_seen = false;
-        v_grp->coverage.speed_l3_seen = false;
+    if (cur_idx < WIZARD_TOTAL_STEPS && s_wizard_targets[cur_idx].cls == DeviceClass::VENT) {
+      if (s->vent_phase == TelnetSession::VentPhase::WAIT_SPEED_MID) {
+        // 중풍 스킵 시 단일 전원 스위치로 격하
+        GroupControlTemplate *v_grp = g_control_registry.findGroup(s->wizard_dev_id);
+        if (v_grp) {
+          v_grp->speed_slot = ActionSlot{};
+          v_grp->speed_slot.discovered = false;
+          v_grp->coverage.speed_l1_seen = false;
+          v_grp->coverage.speed_l2_seen = false;
+          v_grp->coverage.speed_l3_seen = false;
+        }
+        s->vent_phase = TelnetSession::VentPhase::VERIFIED;
+        sendTelnetMsg(s->sock, ">> [SKIP] Fan speed adjustment skipped. Configured as Simple Power Switch.\r\n");
+        handleWizardStepAdvance(s, false, true);
+        return;
+      } else if (s->vent_phase == TelnetSession::VentPhase::WAIT_SPEED_HIGH) {
+        // 강풍 스킵 시 현재까지 학습된 풍량(약풍/중풍 2단)으로 마무리 검증
+        s->vent_phase = TelnetSession::VentPhase::VERIFIED;
+        sendTelnetMsg(s->sock, ">> [SKIP] High speed learning skipped. Configured with 2 Fan Speed levels.\r\n");
+        handleWizardStepAdvance(s, false, true);
+        return;
       }
-      s->vent_phase = TelnetSession::VentPhase::VERIFIED;
-      sendTelnetMsg(s->sock, ">> [SKIP] Fan speed adjustment skipped. Configured as Simple Power Switch.\r\n");
-      handleWizardStepAdvance(s, false, true);
-      return;
     }
     handleWizardStepAdvance(s, true, false);
   }
@@ -1028,17 +1033,28 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
 
             case TelnetSession::VentPhase::WAIT_RE_ON:
               if (grp->coverage.speed_ready_on || (grp->last_ctl_len > grp->power_slot.action_offset && grp->last_ctl_raw[grp->power_slot.action_offset] == grp->power_slot.on_val)) {
-                s.vent_phase = TelnetSession::VentPhase::WAIT_SPEED;
+                s.vent_phase = TelnetSession::VentPhase::WAIT_SPEED_MID;
                 s.wizard_action_cooldown_until_ms = millis() + 300;
-                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] '%s' is ON. Please change Fan Speed (풍량 조절 2단/3단) for '%s' (or press Enter to skip)...\r\n",
-                               tgt.name, tgt.name);
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] '%s' is ON. Please set Fan Speed to MEDIUM (중풍) on your wallpad (or press Enter to skip)...\r\n",
+                               tgt.name);
                 s.wizard_step_start_ms = millis();
                 continue;
               }
               break;
 
-            case TelnetSession::VentPhase::WAIT_SPEED:
-              if (grp->speed_slot.level_count >= 2) {
+            case TelnetSession::VentPhase::WAIT_SPEED_MID:
+              if (grp->speed_slot.level_count >= 2 || grp->coverage.speed_l2_seen) {
+                s.vent_phase = TelnetSession::VentPhase::WAIT_SPEED_HIGH;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #4] Fan Speed MEDIUM (중풍=0x%02X) recorded! Please now set Fan Speed to HIGH (강풍) (or press Enter to complete)...\r\n",
+                               (grp->speed_slot.level_count >= 2) ? grp->speed_slot.level_tokens[1] : 0x03);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::VentPhase::WAIT_SPEED_HIGH:
+              if (grp->speed_slot.level_count >= 3 || grp->coverage.speed_l3_seen) {
                 s.vent_phase = TelnetSession::VentPhase::VERIFIED;
               } else {
                 continue;
@@ -1428,7 +1444,8 @@ AckSlotHint TelnetManager::peekWizardHint(uint8_t dev_id) const noexcept {
       AckSlotHint::POWER, // WAIT_ON
       AckSlotHint::POWER, // WAIT_OFF
       AckSlotHint::POWER, // WAIT_RE_ON
-      AckSlotHint::SPEED, // WAIT_SPEED (오직 4단계에서만 SPEED 슬롯 탐색)
+      AckSlotHint::SPEED, // WAIT_SPEED_MID (중풍 조절 대기)
+      AckSlotHint::SPEED, // WAIT_SPEED_HIGH (강풍 조절 대기)
       AckSlotHint::NONE   // VERIFIED
   };
 
