@@ -109,6 +109,11 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     end
   end
 
+  local cap_mgr = capabilities["digituniverse06711.childDeviceManager"]
+  if cap_mgr then
+    emit_event(device, comp_main, cap_mgr.action({ value = "idle" }))
+  end
+
   -- ═══════════════════════════════════════════════════════════════════════════
   -- CARD 2: Wallpad (월패드 프로토콜 & Auto-Probing 리셋)
   -- ═══════════════════════════════════════════════════════════════════════════
@@ -268,8 +273,18 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     ch4_str = string.format("%s (InV %d)", ch4_str, ch4_inv)
   end
 
-  register_ticker(device, comp_diag, capabilities["digituniverse06711.channel"], "channel", "channel",
-                  { ch1_str, ch2_str, ch3_str, ch4_str })
+  local ch_items = { ch1_str, ch2_str, ch3_str, ch4_str }
+  local ch5 = channels.ch5
+  if ch5 then
+    local ch5_str = string.format("CH5: T %s / R %s", fmt_num(ch5.tx), fmt_num(ch5.rx))
+    local ch5_drp = tonumber(ch5.dropped or ch5.dropped_pkts) or 0
+    if ch5_drp > 0 then
+      ch5_str = string.format("%s (Drp %d)", ch5_str, ch5_drp)
+    end
+    table.insert(ch_items, ch5_str)
+  end
+
+  register_ticker(device, comp_diag, capabilities["digituniverse06711.channel"], "channel", "channel", ch_items)
 
   -- ═══════════════════════════════════════════════════════════════════════════
   -- CARD 4: Logs (진단 로그 & 코어 덤프 순회)
@@ -406,7 +421,57 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_ota, cap_ostate.build({ value = build_str }))
   end
 
+  -- ═══════════════════════════════════════════════════════════════════════════
+  -- DOORPHONE CHILD DEVICE: 호출 감지 상태 업데이트 (세대 도어 & 로비 도어)
+  -- ═══════════════════════════════════════════════════════════════════════════
+  if data.doorphone then
+    TelemetryHandler.handle_doorphone_event(driver, data.doorphone)
+  end
+
   log.info("📊 ═══════════════════════════════════════════════════════════════════════")
 end
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 실시간 도어폰 이벤트 핸들러 (CH7 Server Push 즉시 처리)
+-- ═══════════════════════════════════════════════════════════════════════════
+function TelemetryHandler.handle_doorphone_event(driver, event_data)
+  if not event_data then return end
+  local front_bell = event_data.front_bell
+  local lobby_bell = event_data.lobby_bell
+  local cap_motion = capabilities.motionSensor
+
+  for _, dev in ipairs(driver:get_devices()) do
+    local p_key = dev.parent_assigned_child_key
+    local c_main = dev.profile.components["main"]
+
+    -- 1. 신규 분리형 세대 도어 (doorphone_front)
+    if p_key == "doorphone_front" and cap_motion and c_main then
+      local motion_evt = front_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+      log.info(string.format("🚪 [DOORPHONE REALTIME] Front Door Motion -> %s", front_bell and "ACTIVE (호출 중)" or "INACTIVE (대기)"))
+      dev:emit_component_event(c_main, motion_evt)
+    end
+
+    -- 2. 신규 분리형 로비 도어 (doorphone_lobby)
+    if p_key == "doorphone_lobby" and cap_motion and c_main then
+      local motion_evt = lobby_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+      log.info(string.format("🚪 [DOORPHONE REALTIME] Lobby Door Motion -> %s", lobby_bell and "ACTIVE (호출 중)" or "INACTIVE (대기)"))
+      dev:emit_component_event(c_main, motion_evt)
+    end
+
+    -- 3. 레거시 통합 도어폰 (하위 호환)
+    if p_key == "doorphone" and cap_motion then
+      local c_lobby = dev.profile.components["lobby"]
+      if c_main then
+        local motion_evt = front_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+        dev:emit_component_event(c_main, motion_evt)
+      end
+      if c_lobby then
+        local motion_evt = lobby_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
+        dev:emit_component_event(c_lobby, motion_evt)
+      end
+    end
+  end
+end
+
 return TelemetryHandler
+

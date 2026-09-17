@@ -5,6 +5,8 @@ components:
     capabilities:
       - id: digituniverse06711.activeDevice
         version: 1
+      - id: digituniverse06711.childDeviceManager
+        version: 1
       - id: refresh
         version: 1
     categories:
@@ -328,6 +330,6 @@ preferences:
       default: "8E1"
 
 metadata:
-  vid: "f5c3e339-bdd1-380a-8793-08f219776202"
+  vid: "49ab1b3e-0d78-30e3-a20d-7df30bb4f651"
   mnmn: "SmartThingsCommunity"
 

@@ -49,3 +49,4 @@ void Mgmt_Init();
 void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len);
 void Mgmt_SerializeTelemetry(AppendBuf &out);
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str);
+void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell);

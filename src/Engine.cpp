@@ -2,6 +2,7 @@
 #include "MgmtRpc.h"
 #include "TelnetCli.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_timer.h"
 #include <stdarg.h>
 
@@ -265,20 +266,17 @@ void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt) {
                    "Status", "Conn", "RX Pkts", "TX Pkts", "Dropped", "Uncache");
   out.append(DIV80);
 
-  const TcpChanStats *t_st[] = {&pkt.ch5, &pkt.ch6};
-  const char *tn[] = {"CH#5_Hub#2", "CH#6_Hub#1"};
-  const uint16_t tp[] = {Config::TCP::DOORPHONE_PORT, Config::TCP::HUB_PORT};
-
-  for (int i = 0; i < 2; ++i) {
-    bool is_conn = t_st[i]->is_connected;
-    uint32_t rx = t_st[i]->rx_pkts;
-    uint32_t tx = t_st[i]->tx_pkts;
+  // CH6 Hub
+  {
+    bool is_conn = pkt.ch6.is_connected;
+    uint32_t rx = pkt.ch6.rx_pkts;
+    uint32_t tx = pkt.ch6.tx_pkts;
     const char *status_str = !is_conn               ? "Disconnected"
                              : (rx == 0 && tx == 0) ? "Idle"
                                                      : "Connected";
-    out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n", tn[i], tp[i], status_str,
-                     static_cast<unsigned>(t_st[i]->connection_count), static_cast<unsigned>(rx), static_cast<unsigned>(tx),
-                     static_cast<unsigned>(t_st[i]->dropped_pkts), static_cast<unsigned>(t_st[i]->uncached_pkts));
+    out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n", "CH#6_Hub", Config::TCP::HUB_PORT, status_str,
+                     static_cast<unsigned>(pkt.ch6.connection_count), static_cast<unsigned>(rx), static_cast<unsigned>(tx),
+                     static_cast<unsigned>(pkt.ch6.dropped_pkts), static_cast<unsigned>(pkt.ch6.uncached_pkts));
   }
 }
 
@@ -298,6 +296,26 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
     out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", rs_n[i], static_cast<unsigned>(rx),
                      static_cast<unsigned>(rs_st[i]->tx_pkts), r_str, static_cast<unsigned>(rs_st[i]->invalid_frames),
                      static_cast<unsigned>(rs_st[i]->timeouts), static_cast<unsigned>(rs_st[i]->uncached_pkts));
+  }
+
+  // CH5 EW11 TCP Clients (Slot 0: 8898, Slot 1~4: 8891~8894)
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    auto &slot = g_ew11_slots[s];
+    if (!slot.enabled && strlen(slot.target_ip) == 0 && slot.target_port == 0) continue;
+
+    char chan_name[16];
+    snprintf(chan_name, sizeof(chan_name), "CH#5_%u", slot.target_port ? slot.target_port : Config::TCP::EW11_SLOT_PORTS[s]);
+
+    uint32_t drp = slot.dropped_pkts;
+    char drp_str[24];
+    snprintf(drp_str, sizeof(drp_str), "%u", static_cast<unsigned>(drp));
+
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n",
+                     chan_name,
+                     static_cast<unsigned>(slot.rx_pkts),
+                     static_cast<unsigned>(slot.tx_pkts),
+                     drp > 0 ? drp_str : "0 (0.00%)",
+                     0u, 0u, 0u);
   }
 }
 
@@ -341,11 +359,14 @@ static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1, uint8_t sub2) no
 }
 
 static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  if (dev_id == Config::Devices::DEV_THERMOSTAT && sub1 == 0x45)
-    return 0x46;
-  if (dev_id == Config::Devices::DEV_HEAT_EXCHANGER &&
-      sub1 == Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK) {
-    return Config::Devices::SUB_HEAT_EXCHANGER_QUERY;
+  // [무사전지식 / 제로 하드코딩]
+  // 청사진(ControlTemplate)에 등록된 다중 채널(Multi-Context) 관계 조회:
+  // 보조 제어 채널(temp 또는 speed 등)이 들어오면 기본 전원/상태 채널(power_slot.category_val)로 자동 단일화
+  const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+  if (grp && grp->power_slot.category_val != 0 && grp->power_slot.category_val != 0xFF) {
+    if (sub1 == grp->temp_slot.category_val || sub1 == grp->speed_slot.category_val) {
+      return grp->power_slot.category_val;
+    }
   }
   return sub1;
 }
@@ -485,13 +506,17 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
   if (UNLIKELY(ack.length < 5))
     return;
   auto *parser = WallpadParserFactory::getActiveParser();
+  if (!parser)
+    return;
+
+  // ★ ACK 패킷만 DevRepo에 등록 - 쿼리(0x01)/제어(0x02)가 섞여서
+  // 오프셋 LEARNING 중에 23개 장치가 46개로 2배 등록되는 버그 수정
+  if (!parser->isAckPacket(span<const uint8_t>(ack.data.data(), ack.length)))
+    return;
+
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  if (!parser || !parser->extractDeviceKey(span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1, sub2)) {
-    if (ack.length >= 7) {
-      dev_id = ack.data[3];
-      sub1 = ack.data[5];
-      sub2 = ack.data[6];
-    }
+  if (!parser->extractDeviceKey(span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1, sub2)) {
+    return;
   }
 
   MutexLocker lock(_cache_mutex);
@@ -557,6 +582,65 @@ void Ch1_BuildQueryPacket(StaticPacket &out, uint8_t dev_id, uint8_t sub1,
 }
 } // namespace PacketBuilder
 
+DeviceRouteRegistry g_route_registry;
+
+void DeviceRouteRegistry::recordRoute(uint8_t channel_id, int8_t slot_idx,
+                                      uint8_t dev_id, uint8_t sub1,
+                                      uint8_t sub2) {
+  CriticalSectionLocker lock(&_mux);
+  uint32_t now = millis();
+
+  for (size_t i = 0; i < _count; i++) {
+    if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
+        _entries[i].sub2 == sub2) {
+      _entries[i].endpoint.channel_id = channel_id;
+      _entries[i].endpoint.slot_idx = slot_idx;
+      _entries[i].endpoint.last_seen_ms = now;
+      return;
+    }
+  }
+
+  if (_count < MAX_ROUTES) {
+    _entries[_count].dev_id = dev_id;
+    _entries[_count].sub1 = sub1;
+    _entries[_count].sub2 = sub2;
+    _entries[_count].endpoint.channel_id = channel_id;
+    _entries[_count].endpoint.slot_idx = slot_idx;
+    _entries[_count].endpoint.last_seen_ms = now;
+    _count++;
+  }
+}
+
+bool DeviceRouteRegistry::lookupRoute(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                      RouteEndpoint &out_ep) const {
+  CriticalSectionLocker lock(&_mux);
+  for (size_t i = 0; i < _count; i++) {
+    if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
+        _entries[i].sub2 == sub2) {
+      out_ep = _entries[i].endpoint;
+      return true;
+    }
+  }
+  return false;
+}
+
+size_t DeviceRouteRegistry::getRoutes(DeviceRouteEntry *out_buf,
+                                      size_t max_count) const {
+  if (!out_buf || max_count == 0)
+    return 0;
+  CriticalSectionLocker lock(&_mux);
+  size_t copy_cnt = std::min(_count, max_count);
+  for (size_t i = 0; i < copy_cnt; i++) {
+    out_buf[i] = _entries[i];
+  }
+  return copy_cnt;
+}
+
+void DeviceRouteRegistry::clear() {
+  CriticalSectionLocker lock(&_mux);
+  _count = 0;
+}
+
 bool ControlDispatcher::dispatch(StaticPacket &req,
                                  StaticPacket &virtual_ack_out) {
   if (UNLIKELY(req.length < 5))
@@ -567,19 +651,68 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
     virtual_ack_out.channel_id = req.channel_id;
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
     if (!parser->extractDeviceKey(frame, dev_id, sub1, sub2)) {
-      if (req.length >= 7) {
-        dev_id = req.data[3];
-        sub1 = req.data[5];
-        sub2 = req.data[6];
-      } else {
-        return false;
-      }
+      return false;
     }
     return g_device_repo.copyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
   }
 
   if (parser->isControlPacket(frame)) {
-    // CH6(앱) / 월패드 제어 명령: 가상 응답 없이 실제 장치로 명령 전달
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+
+    // [보안 4.2] 외부/CH6 제어 패킷 유효 범위 검증 및 인젝션/가스열기 방어
+    if (has_key && dev_id != 0) {
+      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+      if (grp) {
+        // 1) 가스 밸브 열기 방어: GAS 장치에 대해 close 토큰이 아닌 값이 주입되면 차단
+        if (grp->coverage.dev_class == DeviceClass::GAS) {
+          if (grp->close_slot.discovered && grp->close_slot.action_offset < req.length) {
+            uint8_t val = req.data[grp->close_slot.action_offset];
+            if (val != grp->close_slot.off_val) {
+              g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
+              return false;
+            }
+          }
+        }
+        // 2) 난방 온도 범위 방어: 희망온도(SET_TEMP) 카테고리 패킷일 때만 온도 유효 범위(5~35C) 검증
+        if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->temp_slot.discovered &&
+            grp->temp_slot.action_offset < req.length) {
+          bool is_temp = false;
+          // 카테고리 슬롯이 학습되어 있다면 temp_slot의 카테고리 값과 일치할 때만 온도 패킷으로 판정
+          if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < req.length) {
+            is_temp = (req.data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
+          }
+
+          if (is_temp) {
+            uint8_t t_val = req.data[grp->temp_slot.action_offset];
+            if (t_val < 5 || t_val > 35) {
+              g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
+              return false;
+            }
+          }
+        }
+      }
+    }
+
+    RouteEndpoint ep{1, -1, 0};
+    bool route_known = false;
+    if (has_key) {
+      route_known = g_route_registry.lookupRoute(dev_id, sub1, sub2, ep);
+    }
+
+    // [동적 라우팅] 학습된 경로가 CH5(EW11)인 경우 해당 EW11 TCP 소켓으로 직접 인젝션 송신
+    if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0 && ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+      auto &sl = g_ew11_slots[ep.slot_idx];
+      sl.last_ctrl_len = static_cast<uint8_t>(std::min<size_t>(req.length, sizeof(sl.last_ctrl_data)));
+      memcpy(sl.last_ctrl_data, req.data.data(), sl.last_ctrl_len);
+      sl.last_ctrl_tx_ms = millis();
+
+      bool sent = Ew11_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
+      g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP, req);
+      return false;
+    }
+
+    // [기본 라우팅] CH1(물리 RS-485 버스)
     QueueHandle_t q = (req.channel_id == 6) ? g_ch1_vip_queue : g_ch1_control_queue;
     if (!Queue_EnqueueDropHead(q, req)) {
       return false;
@@ -625,6 +758,7 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
   uint8_t temp[64], stream[128];
   size_t stream_len = 0;
   uint32_t start_ms = millis();
+  uint32_t last_rx_ms = 0;
   auto *parser = WallpadParserFactory::getActiveParser();
   QueueHandle_t evt_q = Uart_GetEventQueue(u_num);
 
@@ -635,57 +769,77 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
     // 1. 남아있는 스트림 버퍼에서 즉시 유효 패킷 파싱 시도
     if (stream_len >= 3) {
-      uint8_t stx = parser ? parser->getStx() : PKT_STX;
-      size_t idx = 0;
-      while (idx < stream_len) {
-        if (stream[idx] != stx) {
-          idx++;
-          continue;
+      if (parser && parser->isAutoMode() && !parser->isLocked()) {
+        // [Auto Mode Initial Learning: Silence (IPG) Framing]
+        if (last_rx_ms > 0 && TimeUtils::isElapsed(last_rx_ms, Config::Timing::WALLPAD_AUTO_IPG_MS)) {
+          g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
+
+          if (echo_match && echo_match->length == stream_len &&
+              memcmp(echo_match->data.data(), stream, stream_len) == 0) {
+            stream_len = 0;
+            last_rx_ms = 0;
+            continue;
+          }
+
+          out.length = static_cast<uint8_t>(stream_len);
+          memcpy(out.data.data(), stream, stream_len);
+          stream_len = 0;
+          last_rx_ms = 0;
+          return UartRxStatus::SUCCESS;
+        }
+      } else {
+        uint8_t stx = parser ? parser->getStx() : PKT_STX;
+        size_t idx = 0;
+        while (idx < stream_len) {
+          if (stream[idx] != stx) {
+            idx++;
+            continue;
+          }
+
+          int len_res = parser ? parser->extractPacketLength(stream, stream_len, idx) : -1;
+          if (len_res == 0) {
+            // 불완전 패킷 (추가 바이트 대기 필요)
+            break;
+          }
+          if (len_res < 0) {
+            // 프레이밍 불일치/헤더 오류 → 다음 바이트로 이동
+            idx++;
+            continue;
+          }
+
+          uint8_t pkt_len = static_cast<uint8_t>(len_res);
+          uint8_t *pkt = &stream[idx];
+          span<const uint8_t> pkt_span(pkt, pkt_len);
+          if (!parser->validatePacket(pkt_span)) {
+            uint8_t ch = (u_num == UART_NUM_0) ? 1 : (u_num == UART_NUM_1) ? 2 : 3;
+            StaticPacket drp_pkt{ch, pkt_len};
+            memcpy(drp_pkt.data.data(), pkt, pkt_len);
+            g_telnet_tracer.trace(ch, false, TraceType::DRP, drp_pkt);
+            idx++;
+            continue;
+          }
+
+          // [순수 범용 에코 필터링] 송신 패킷과 100% 동일한 바이트인 경우 스킵
+          if (echo_match && echo_match->length == pkt_len &&
+              memcmp(echo_match->data.data(), pkt, pkt_len) == 0) {
+            idx += pkt_len;
+            continue;
+          }
+
+          out.length = pkt_len;
+          memcpy(out.data.data(), pkt, pkt_len);
+          size_t consumed = idx + pkt_len;
+          if (consumed < stream_len)
+            memmove(stream, stream + consumed, stream_len - consumed);
+          stream_len = (consumed < stream_len) ? (stream_len - consumed) : 0;
+          return UartRxStatus::SUCCESS;
         }
 
-        int len_res = parser ? parser->extractPacketLength(stream, stream_len, idx) : -1;
-        if (len_res == 0) {
-          // 불완전 패킷 (추가 바이트 대기 필요)
-          break;
+        if (idx > 0) {
+          if (idx < stream_len)
+            memmove(stream, stream + idx, stream_len - idx);
+          stream_len = (idx < stream_len) ? (stream_len - idx) : 0;
         }
-        if (len_res < 0) {
-          // 프레이밍 불일치/헤더 오류 → 다음 바이트로 이동
-          idx++;
-          continue;
-        }
-
-        uint8_t pkt_len = static_cast<uint8_t>(len_res);
-        uint8_t *pkt = &stream[idx];
-        span<const uint8_t> pkt_span(pkt, pkt_len);
-        if (!parser->validatePacket(pkt_span)) {
-          uint8_t ch = (u_num == UART_NUM_0) ? 1 : (u_num == UART_NUM_1) ? 2 : 3;
-          StaticPacket drp_pkt{ch, pkt_len};
-          memcpy(drp_pkt.data.data(), pkt, pkt_len);
-          g_telnet_tracer.trace(ch, false, TraceType::DRP, drp_pkt);
-          idx++;
-          continue;
-        }
-
-        // [순수 범용 에코 필터링] 송신 패킷과 100% 동일한 바이트인 경우 스킵
-        if (echo_match && echo_match->length == pkt_len &&
-            memcmp(echo_match->data.data(), pkt, pkt_len) == 0) {
-          idx += pkt_len;
-          continue;
-        }
-
-        out.length = pkt_len;
-        memcpy(out.data.data(), pkt, pkt_len);
-        size_t consumed = idx + pkt_len;
-        if (consumed < stream_len)
-          memmove(stream, stream + consumed, stream_len - consumed);
-        stream_len = (consumed < stream_len) ? (stream_len - consumed) : 0;
-        return UartRxStatus::SUCCESS;
-      }
-
-      if (idx > 0) {
-        if (idx < stream_len)
-          memmove(stream, stream + idx, stream_len - idx);
-        stream_len = (idx < stream_len) ? (stream_len - idx) : 0;
       }
     }
 
@@ -720,6 +874,7 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
               memcpy(stream + stream_len, temp, copy_len);
               stream_len += copy_len;
               received_new_bytes = true;
+              last_rx_ms = millis();
             }
           }
         } else if (evt.type == UART_FIFO_OVF || evt.type == UART_BUFFER_FULL) {
@@ -752,15 +907,43 @@ static UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
           size_t copy_len = std::min(static_cast<size_t>(rx), sizeof(stream) - stream_len);
           memcpy(stream + stream_len, temp, copy_len);
           stream_len += copy_len;
+          last_rx_ms = millis();
         }
       }
     }
   }
+
+  // 타임아웃 발생 시에도 Auto 모드 미잠금 상태에서 유효 바이트가 있으면 프레임 처리
+  if (stream_len >= 3 && parser && parser->isAutoMode() && !parser->isLocked()) {
+    g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
+    if (!(echo_match && echo_match->length == stream_len &&
+          memcmp(echo_match->data.data(), stream, stream_len) == 0)) {
+      out.length = static_cast<uint8_t>(stream_len);
+      memcpy(out.data.data(), stream, stream_len);
+      return UartRxStatus::SUCCESS;
+    }
+  }
+
   return UartRxStatus::TIMEOUT;
 }
 
 // [2] 제어 패킷 전송 및 투명 중계
 static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
+  StaticPacket ack_before{};
+  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+  auto *parser = WallpadParserFactory::getActiveParser();
+  if (parser) {
+    span<const uint8_t> ctl_span(ctrlPacket.data.data(), ctrlPacket.length);
+    if (parser->extractDeviceKey(ctl_span, dev_id, sub1, sub2)) {
+      const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
+      if (cached && cached->last_ack_len > 0) {
+        ack_before.channel_id = 1;
+        ack_before.length = cached->last_ack_len;
+        std::copy(cached->last_ack_data.begin(), cached->last_ack_data.begin() + cached->last_ack_len, ack_before.data.begin());
+      }
+    }
+  }
+
   Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
 
   {
@@ -789,25 +972,44 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
     g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
     g_device_repo.updateFromBus(ack);
+    if (dev_id != 0) {
+      g_route_registry.recordRoute(1, -1, dev_id, sub1, sub2);
+    }
     g_auto_probing_engine.feedControlPair(
         span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length),
         span<const uint8_t>(ack.data.data(), ack.length));
+    if (!parser || !parser->isQueryPacket(span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length))) {
+      // 위저드가 현재 어떤 조작을 기다리는지 semantic hint를 먼저 읽은 후 전달
+      AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
+      g_control_registry.onControlTransaction(ctrlPacket, ack_before, ack, hint);
+      if (dev_id != 0) {
+        g_telnet_manager.notifyControlTransaction(dev_id);
+      }
+    }
     ack.channel_id = ctrlPacket.channel_id;
 
-    // ★ [추가] 스마트싱스/앱(CH6) 전송용 주소 변환 (0x42 -> 0x40 및 Checksum
-    // 재계산)
+    // ★ [추가] 스마트싱스/앱(CH6) 전송용 주소 변환 (0x42 -> 0x40 및 Checksum 재계산)
+    // 오프셋 학습 완료 시 동적 오프셋 사용, 미완료 시 기본값(3,5) fallback
     StaticPacket ch6_ack = ack;
     if (ch6_ack.length >= 7 && ch6_ack.data[0] == 0xF7) {
-      if (ch6_ack.data[3] == Config::Devices::DEV_HEAT_EXCHANGER &&
-          ch6_ack.data[5] ==
-              Config::Devices::SUB_HEAT_EXCHANGER_CTRL_ACK) { // 전열교환기 제어
-                                                              // 응답 패킷
-        ch6_ack.data[5] =
-            Config::Devices::SUB_HEAT_EXCHANGER_QUERY; // 스마트싱스가 인지하는
-                                                       // 대표 주소(0x40)로 변경
+      auto ad = g_auto_probing_engine.getDescriptor();
+      // ACK DevType 위치: swap 구조일 때 gw_addr_offset, 아닐 때 dev_id_offset
+      uint8_t ack_dev_off  = (ad.offsets_locked && ad.is_swapped_addr)
+                                 ? ad.gw_addr_offset : (ad.offsets_locked ? ad.dev_id_offset : 3);
+      uint8_t ack_sub1_off = ad.offsets_locked ? ad.sub1_offset : 5;
 
-        ch6_ack.data[ch6_ack.length - 2] =
-            PacketCodec::calculateChecksum(ch6_ack.data.data(), ch6_ack.length);
+      if (ack_dev_off < ch6_ack.length && ack_sub1_off < ch6_ack.length) {
+        uint8_t ack_dev_id = ch6_ack.data[ack_dev_off];
+        const GroupControlTemplate *grp = g_control_registry.findGroup(ack_dev_id);
+        if (grp && grp->power_slot.category_val != 0 && grp->power_slot.category_val != 0xFF) {
+          uint8_t cur_sub1 = ch6_ack.data[ack_sub1_off];
+          // 보조 제어 채널(speed 또는 temp)로 ACK가 온 경우 스마트싱스 상태 조회를 위해 기본 채널로 정규화
+          if (cur_sub1 == grp->speed_slot.category_val || cur_sub1 == grp->temp_slot.category_val) {
+            ch6_ack.data[ack_sub1_off] = grp->power_slot.category_val;
+            ch6_ack.data[ch6_ack.length - 2] =
+                PacketCodec::calculateChecksum(ch6_ack.data.data(), ch6_ack.length);
+          }
+        }
       }
     }
 
@@ -860,9 +1062,16 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
     for (size_t i = 0; i < active_cnt; i++) {
       size_t idx = (current_dev_idx + i) % active_cnt;
       const auto &tgt = s_active_targets[idx];
+      
+      // ★ CH5 (EW11 소켓 기기)로 라우팅 학습된 기기는 CH1 RS-485 버스로 폴링하지 않음!
+      RouteEndpoint ep;
+      if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) && ep.channel_id == 5) {
+        continue;
+      }
+
       const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
 
-      if (!cached_dev || cached_dev->last_updated_ms == 0) {
+      if (tgt.raw_ack_len == 0 || !cached_dev || cached_dev->last_updated_ms == 0) {
         poll_dev_id = tgt.dev_id;
         poll_sub1 = tgt.sub1;
         poll_sub2 = tgt.sub2;
@@ -880,6 +1089,13 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
       for (size_t i = 0; i < active_cnt; i++) {
         size_t idx = (current_dev_idx + i) % active_cnt;
         const auto &tgt = s_active_targets[idx];
+
+        // ★ CH5 (EW11 소켓 기기)로 라우팅 학습된 기기는 CH1 RS-485 버스로 폴링하지 않음!
+        RouteEndpoint ep;
+        if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) && ep.channel_id == 5) {
+          continue;
+        }
+
         const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
 
         if (cached_dev && cached_dev->is_online) {
@@ -901,6 +1117,13 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
       for (size_t i = 0; i < active_cnt; i++) {
         size_t idx = (current_dev_idx + i) % active_cnt;
         const auto &tgt = s_active_targets[idx];
+
+        // ★ CH5 (EW11 소켓 기기)로 라우팅 학습된 기기는 CH1 RS-485 버스로 폴링하지 않음!
+        RouteEndpoint ep;
+        if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) && ep.channel_id == 5) {
+          continue;
+        }
+
         const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
         if (cached_dev && TimeUtils::isElapsed(cached_dev->last_stale_poll_ms, Config::Timing::CH1_STALE_POLL_INTERVAL_MS)) {
           poll_dev_id = tgt.dev_id;
@@ -928,12 +1151,16 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
       current_dev_idx = (idx + 1) % dev_cnt;
       if (dev && (dev->is_online || dev->last_updated_ms == 0 ||
                   TimeUtils::isElapsed(dev->last_stale_poll_ms, Config::Timing::CH1_STALE_POLL_INTERVAL_MS))) {
-        poll_dev_id = dev->dev_id;
-        poll_sub1 = dev->sub1;
-        poll_sub2 = dev->sub2;
-        if (!dev->is_online)
-          g_device_repo.setLastStalePollMsByIndex(idx, now);
-        target_selected = true;
+        // ★ CH5로 라우팅 학습된 기기는 폴백에서도 제외
+        RouteEndpoint ep;
+        if (!g_route_registry.lookupRoute(dev->dev_id, dev->sub1, dev->sub2, ep) || ep.channel_id != 5) {
+          poll_dev_id = dev->dev_id;
+          poll_sub1 = dev->sub1;
+          poll_sub2 = dev->sub2;
+          if (!dev->is_online)
+            g_device_repo.setLastStalePollMsByIndex(idx, now);
+          target_selected = true;
+        }
       }
     }
   }
@@ -970,8 +1197,11 @@ static void Ch1_PollNext(size_t &current_dev_idx) {
         g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
         g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
         ack.channel_id = 1;
+        g_polling_targets.updateResponse(q_pkt.data.data(), q_pkt.length,
+                                         ack.data.data(), ack.length);
         g_device_repo.updateFromBus(ack);
         g_polling_targets.markVerified(poll_dev_id, poll_sub1, poll_sub2);
+        g_route_registry.recordRoute(1, -1, poll_dev_id, poll_sub1, poll_sub2);
         g_auto_probing_engine.feedOpcodePair(
             span<const uint8_t>(q_pkt.data.data(), q_pkt.length),
             span<const uint8_t>(ack.data.data(), ack.length));
@@ -1045,6 +1275,19 @@ void Task_Ch1(void *pvParameters) {
       }
     }
 
+    // ★ wallpad reset 신호 처리: s_convergence_done을 리셋하여 재수렴·재락 허용
+    if (g_probe_convergence_reset.load(std::memory_order_acquire)) {
+      g_probe_convergence_reset.store(false, std::memory_order_release);
+      s_convergence_done = false;
+      s_stable_start_ms = 0;
+      s_last_active_tgts = 0;
+      g_initial_caching_complete.store(false, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
+      }
+      g_telnet_tracer.trace("[AUTO PROBE] Convergence state reset. Re-learning bus offsets...\r\n");
+    }
+
     // 2차 캐싱 100% 수렴 완료 판정
     if (!s_convergence_done) {
       size_t active_tgts = g_polling_targets.activeCount();
@@ -1056,7 +1299,13 @@ void Task_Ch1(void *pvParameters) {
         s_stable_start_ms = millis();
       }
 
-      if (active_tgts > 0 && online_devs >= active_tgts) {
+      bool is_all_online = (online_devs >= active_tgts);
+      auto *parser = WallpadParserFactory::getActiveParser();
+      if (parser && parser->isAutoMode() && !g_auto_probing_engine.isOffsetsLocked()) {
+        is_all_online = (g_polling_targets.verifiedCount() >= active_tgts);
+      }
+
+      if (active_tgts > 0 && is_all_online) {
         if (s_stable_start_ms == 0) {
           s_stable_start_ms = millis();
         } else if (TimeUtils::isElapsed(s_stable_start_ms, Config::Timing::CACHE_CONVERGENCE_STABLE_MS)) { // 1.5초간 신규 기기 증가 멈춤 & 전원 온라인 확인 시 최종 수렴!
@@ -1065,6 +1314,11 @@ void Task_Ch1(void *pvParameters) {
           if (g_system_event_group) {
             xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
           }
+          if (parser && parser->isAutoMode() && !g_auto_probing_engine.isOffsetsLocked()) {
+            MutexLocker u0_lock(g_uart0_mutex, pdMS_TO_TICKS(100));
+            Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
+            g_auto_probing_engine.analyzeCacheMatrix();
+          }
           // ★ 2차 캐싱 100% 수렴 완료! 초기 웜업 노이즈(Uncache, 웜업 제어/폴링 수) 일괄 리셋
           g_pkt_stats.resetAll();
           g_polling_targets.resetHits();
@@ -1072,6 +1326,8 @@ void Task_Ch1(void *pvParameters) {
           g_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
           g_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
           g_telnet_tracer.trace("[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). Runtime metrics synchronized.\r\n");
+          g_control_registry.synthesizeFromConvergedCache();
+          g_telnet_tracer.trace("[CTL] Control template synthesis triggered.\r\n");
         }
       } else {
         s_stable_start_ms = 0;
@@ -1225,10 +1481,9 @@ void Task_Ch2Ch3(void *pvParameters) {
 
       if (is_query) {
         uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-        if (parser->extractDeviceKey(frame, dev_id, sub1, sub2)) {
-          g_polling_targets.registerOrTouch(cfg->channel_id, dev_id, sub1, sub2,
-                                            req.data.data(), req.length);
-        }
+        parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+        g_polling_targets.registerOrTouch(cfg->channel_id, dev_id, sub1, sub2,
+                                          req.data.data(), req.length);
         StaticPacket virtual_ack;
         if (g_control_dispatcher.dispatch(req, virtual_ack)) {
           uint32_t delay_ms = (cfg->channel_id == 2)
@@ -1256,8 +1511,8 @@ void Task_Ch4(void *pvParameters) {
   StaticPacket packet_to_tx;
 
   // 범용 인터패킷 갭(IPG) 기반 패킷화 엔진
-  // STX/ETX에 무관하게 어떤 제조사 도어폰이든 25ms 침묵을 1프레임 종료로 판정
-  static uint8_t buf[64] = {0};
+  // STX/ETX에 무관하게 어떤 제조사 도어폰이든 25ms 침묵을 1프레임 종료로 판정 (대형 30~64B 패킷 수용을 위해 128B 버퍼)
+  static uint8_t buf[128] = {0};
   static size_t buf_len = 0;
   static uint32_t last_byte_ms = 0;  // 마지막 수신 바이트 타임스탬프
   static StaticPacket last_tx_pkt{};
@@ -1303,26 +1558,36 @@ void Task_Ch4(void *pvParameters) {
     }
 
     // RX: 도어폰 하드웨어에서 들어오는 바이트를 스트림 버퍼에 누적
+    // 범용 버스트 수신: 패킷 전송 중 바이트 간 지연(최대 16ms)을 안전하게 버퍼링하기 위해
+    // 데이터 유입 시작 시 짧은 폴링으로 1프레임을 온전히 긁어모음
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(g_config.doorphone_baud_rate);
+    // 3860 bps 기준 다음 바이트 도착 대기 (단일 바이트 최대 6ms, 연속 패킷 누적 최대 20ms 스핀으로 WDT 및 Core1 멀티태스킹 보호)
+    uint32_t burst_spin_total = 0;
     while (g_doorphone_serial.available() > 0) {
       uint8_t byte = static_cast<uint8_t>(g_doorphone_serial.read());
       uint32_t now = millis();
 
-      // 바이트 간 연속성 검증: 직전 바이트와의 간격이 보레이트 기준 허용치를 초과하면 비연속 노이즈 조각으로 판단하여 버퍼 초기화
-      if (buf_len > 0 && last_byte_ms > 0 &&
-          TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
+      // 연속성 검증: 새 버스트 유입 시 직전 미완성 조각이 16ms 이상 끊긴 과거 쓰레기라면 초기화
+      if (buf_len > 0 && last_byte_ms > 0 && TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
         buf_len = 0;
       }
 
       if (buf_len < sizeof(buf)) {
         buf[buf_len++] = byte;
       } else {
-        // 버퍼 가득 참 → 앞 1바이트 버리고 시프트 (노이즈 회복)
         memmove(buf, buf + 1, buf_len - 1);
         buf_len--;
         buf[buf_len++] = byte;
       }
       last_byte_ms = now;
+
+      if (burst_spin_total < 20) {
+        uint32_t drain_start = millis();
+        while (g_doorphone_serial.available() == 0 && (millis() - drain_start < 6)) {
+          esp_rom_delay_us(100);
+        }
+        burst_spin_total += (millis() - drain_start);
+      }
     }
 
     // [월패드급 슬라이딩 윈도우 스트림 파서]
@@ -1376,10 +1641,10 @@ void Task_Ch4(void *pvParameters) {
         }
 
         if (frame_found) {
-          // [순수 범용 에코 필터링] 직전 100ms 이내 송신 패킷과 100% 바이트 단위 일치 시 에코로 폐기
+          // [순수 범용 에코 필터링] 직전 250ms 이내 송신 패킷과 100% 바이트 단위 일치 시 에코로 폐기 (대형 30B 패킷 전송 시간 수용)
           if (last_tx_pkt.length == found_len &&
               memcmp(last_tx_pkt.data.data(), &buf[p], found_len) == 0 &&
-              last_tx_ms > 0 && !TimeUtils::isElapsed(last_tx_ms, 150)) {
+              last_tx_ms > 0 && !TimeUtils::isElapsed(last_tx_ms, 250)) {
             p += found_len;
             last_byte_ms = 0;
             continue;
@@ -1396,7 +1661,44 @@ void Task_Ch4(void *pvParameters) {
           if (!is_debounce) {
             last_pkt = packet;
             last_pkt_ms = now;
-            xQueueSend(g_ch4_to_tcp_queue, &packet, 0);
+
+            // 도어폰 초인종(벨) 및 호출 종료 상태 실시간 감지 & CH7 브로드캐스트
+            if (packet.length >= 2) {
+              uint8_t opcode = packet.data[1];
+              bool state_changed = false;
+              uint8_t pkt_stx = packet.data[0];
+              uint8_t pkt_etx = packet.data[packet.length - 1];
+              const Config::Doorphone::DoorphoneProfile *dp_prof =
+                  Config::Doorphone::matchDoorphoneCatalog(pkt_stx, pkt_etx, packet.length);
+
+              uint8_t bell_front = dp_prof ? dp_prof->bell_front : 0xB5;
+              uint8_t bell_lobby = dp_prof ? dp_prof->bell_lobby : 0x5A;
+              uint8_t end_front  = dp_prof ? dp_prof->end_front  : 0xB8;
+              uint8_t end_lobby  = dp_prof ? dp_prof->end_lobby  : 0x60;
+
+              if (opcode == bell_front) { // 현관 벨 호출
+                g_doorphone_state.front_bell.store(true, std::memory_order_release);
+                g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
+                state_changed = true;
+              } else if (opcode == end_front || opcode == 0xB6) { // 현관 무응답/통화 종료
+                g_doorphone_state.front_bell.store(false, std::memory_order_release);
+                state_changed = true;
+              } else if (opcode == bell_lobby || opcode == 0x5F) { // 로비 벨/호출
+                g_doorphone_state.lobby_bell.store(true, std::memory_order_release);
+                g_doorphone_state.last_bell_ms.store(now, std::memory_order_release);
+                state_changed = true;
+              } else if (opcode == end_lobby) { // 로비 통화 종료
+                g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
+                state_changed = true;
+              }
+
+              if (state_changed) {
+                bool f = g_doorphone_state.front_bell.load(std::memory_order_relaxed);
+                bool l = g_doorphone_state.lobby_bell.load(std::memory_order_relaxed);
+                Mgmt_BroadcastDoorphoneEvent(f, l);
+              }
+            }
+
             g_telnet_tracer.trace(4, false, TraceType::RMT, packet);
             g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);
           }
@@ -1429,12 +1731,12 @@ void Task_Ch4(void *pvParameters) {
       }
     }
 
-    // 미학습/학습 초기 상태 인터패킷 갭(IPG) 감지 및 피딩
+    // 미학습/학습 초기 상태 인터패킷 갭(IPG) 감지 및 피딩 (침묵 25ms 도달 시)
     if (last_byte_ms > 0 &&
         TimeUtils::isElapsed(last_byte_ms, Config::Timing::DOORPHONE_IPG_MS)) {
 
       if (cur_status == Config::Doorphone::FramingStatus::LOCKED) {
-        // ★ LOCKED 상태: IPG 만료 시 스트림 파서가 정상 패킷을 처리하고 남긴 단순 꼬리 잔여 찌꺼기만 조용히 플러시
+        // ★ LOCKED 상태: 고정 규격(STX+길이+ETX)에 부합하지 못하고 남은 잔여 데이터는 온전한 패킷이 아닌 불완전 노이즈 조각이므로 완전 폐기
         buf_len = 0;
       } else {
         // ★ 미학습(WAITING/LEARNING) 상태: IPG로 패킷 프레임 수집 & 동적 학습
@@ -1463,7 +1765,6 @@ void Task_Ch4(void *pvParameters) {
           if (!is_debounce) {
             last_pkt = packet;
             last_pkt_ms = now;
-            xQueueSend(g_ch4_to_tcp_queue, &packet, 0);
             g_telnet_tracer.trace(4, false, TraceType::RMT, packet);
             g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);
           }
@@ -1473,17 +1774,19 @@ void Task_Ch4(void *pvParameters) {
       last_byte_ms = 0;
     }
 
-    // Event-Driven 블로킹: IPG 잔여 시간에 맞춘 정밀 커널 큐 대기 (최소 2ms 보장하여 IDLE/슬레이브 태스크 CPU 양보)
-    uint32_t wait_ms = 5;
+    // Event-Driven 블로킹: 
+    // 수신 중(buf_len > 0)일 때는 다음 바이트를 놓치지 않도록 1ms 초단기 대기
+    // 평상시(아이들)에는 CPU 점유율 0% 유지를 위해 5ms 대기
+    uint32_t wait_ms = (buf_len > 0) ? 1 : 5;
     if (last_byte_ms > 0) {
       uint32_t elapsed = millis() - last_byte_ms;
       if (elapsed < Config::Timing::DOORPHONE_IPG_MS) {
-        wait_ms = Config::Timing::DOORPHONE_IPG_MS - elapsed;
+        wait_ms = (buf_len > 0) ? 1 : (Config::Timing::DOORPHONE_IPG_MS - elapsed);
       } else {
-        wait_ms = 2;
+        wait_ms = 1;
       }
     }
-    wait_ms = std::max<uint32_t>(wait_ms, 2);
+    wait_ms = std::max<uint32_t>(wait_ms, 1);
 
     // TX 큐 블로킹 수신: wait_ms 동안 커널 레벨 Blocked 대기하므로 CPU 점유율 0% 유지
     if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {

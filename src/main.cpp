@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ControlTemplate.h"
 #include "ESP.h"
 #include "MgmtRpc.h"
 #include "TelnetCli.h"
@@ -21,6 +22,9 @@ constexpr uint32_t RTC_MAGIC_WDT = 0x57445431;
 RTC_NOINIT_ATTR uint32_t rtc_rescue_magic;
 RTC_NOINIT_ATTR uint32_t rtc_crash_counter;
 constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343; // 'RESC'
+
+RTC_NOINIT_ATTR uint32_t rtc_clean_restart_magic;
+constexpr uint32_t RTC_MAGIC_CLEAN_RESTART = 0x5AA55AA5;
 
 RTC_NOINIT_ATTR RtcWarmCache rtc_warm_cache;
 
@@ -91,8 +95,15 @@ static const char *s_pending_reboot_reason = nullptr;
 void System_LogResetReason() {
   esp_reset_reason_t reason = esp_reset_reason();
 
-  if (reason == ESP_RST_SW)
+  if (reason == ESP_RST_SW) {
+    if (rtc_clean_restart_magic == RTC_MAGIC_CLEAN_RESTART) {
+      rtc_clean_restart_magic = 0;
+      return;
+    }
+    s_pending_reboot_reason = "Software Reset (esp_restart)";
     return;
+  }
+  rtc_clean_restart_magic = 0;
 
   const char *reason_str = nullptr;
   switch (reason) {
@@ -163,7 +174,8 @@ bool System_IsOtaPendingVerify() {
     return false;
   esp_ota_img_states_t ota_state;
   if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
-    return (ota_state == ESP_OTA_IMG_PENDING_VERIFY || ota_state == ESP_OTA_IMG_NEW);
+    return (ota_state == ESP_OTA_IMG_PENDING_VERIFY ||
+            ota_state == ESP_OTA_IMG_NEW);
   }
   return false;
 }
@@ -173,7 +185,8 @@ void System_CheckOtaHealth() {
     return;
   }
   if (WiFi.status() == WL_CONNECTED &&
-      TimeUtils::isElapsed(g_boot_start_ms, Config::Timing::OTA_VALIDATION_PERIOD_MS)) {
+      TimeUtils::isElapsed(g_boot_start_ms,
+                           Config::Timing::OTA_VALIDATION_PERIOD_MS)) {
     s_ota_validated.store(true, std::memory_order_release);
     rtc_crash_counter = 0;
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -183,8 +196,10 @@ void System_CheckOtaHealth() {
           ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
         esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
         if (err == ESP_OK) {
-          Serial.println(F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
-          g_telnet_tracer.trace("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
+          Serial.println(
+              F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
+          g_telnet_tracer.trace(
+              "[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
         } else {
           Serial.printf("[OTA] Failed to mark app valid: 0x%x\r\n", err);
         }
@@ -196,7 +211,8 @@ void System_CheckOtaHealth() {
 void System_EnterRescueMode(const char *reason) {
   g_rescue_mode.store(true, std::memory_order_release);
   Serial.println(F("\r\n========================================"));
-  Serial.printf("  🚨 RESCUE SAFE MODE ACTIVATED: %s\r\n", reason ? reason : "Unknown");
+  Serial.printf("  🚨 RESCUE SAFE MODE ACTIVATED: %s\r\n",
+                reason ? reason : "Unknown");
   Serial.println(F("========================================"));
 
   WiFi.mode(WIFI_AP_STA);
@@ -209,9 +225,11 @@ void System_EnterRescueMode(const char *reason) {
   esp_wifi_set_max_tx_power(78);
 
   Serial.printf("[RESCUE] SoftAP 'Sweet_Home_Rescue' started: %s (IP: %s)\r\n",
-                ap_ok ? "SUCCESS" : "FAILED", WiFi.softAPIP().toString().c_str());
+                ap_ok ? "SUCCESS" : "FAILED",
+                WiFi.softAPIP().toString().c_str());
 
-  // STA (기존 홈 공유기 172.30.1.3) 접속도 함께 유지하여 공유기망에서도 복구 가능하도록 지원
+  // STA (기존 홈 공유기 172.30.1.3) 접속도 함께 유지하여 공유기망에서도 복구
+  // 가능하도록 지원
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
   wifi_config_t w_conf;
@@ -242,7 +260,7 @@ void System_EnterRescueMode(const char *reason) {
       xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
     }
     vTaskDelay(pdMS_TO_TICKS(200));
-    esp_restart();
+    System_Restart("OTA Firmware Update");
   });
   ArduinoOTA.onError([](ota_error_t error) {
     g_ota_in_progress.store(false, std::memory_order_release);
@@ -266,11 +284,13 @@ std::atomic<uint32_t> g_warm_cache_dirty_ms{0};
 void WarmCache_SaveToRtc() {
   memset(&rtc_warm_cache, 0, sizeof(rtc_warm_cache));
   rtc_warm_cache.magic = RTC_MAGIC_WARM_CACHE;
-  rtc_warm_cache.count = static_cast<uint8_t>(g_polling_targets.getWarmCacheEntries(
-      rtc_warm_cache.entries, PollingTargetRegistry::MAX_TARGETS));
+  rtc_warm_cache.count =
+      static_cast<uint8_t>(g_polling_targets.getWarmCacheEntries(
+          rtc_warm_cache.entries, PollingTargetRegistry::MAX_TARGETS));
   if (rtc_warm_cache.count > 0) {
-    rtc_warm_cache.crc32 = FastCrc32(reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
-                                    sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
+    rtc_warm_cache.crc32 =
+        FastCrc32(reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
+                  sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
   }
 }
 
@@ -296,18 +316,21 @@ void WarmCache_RestoreOnBoot() {
   esp_reset_reason_t reason = esp_reset_reason();
 
   // 1. Try RTC Fast SRAM (Available across soft reboots, WDT, OTA)
-  if (reason != ESP_RST_POWERON && rtc_warm_cache.magic == RTC_MAGIC_WARM_CACHE &&
-      rtc_warm_cache.count > 0 && rtc_warm_cache.count <= PollingTargetRegistry::MAX_TARGETS) {
-    uint32_t computed_crc = FastCrc32(
-        reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
-        sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
+  if (reason != ESP_RST_POWERON &&
+      rtc_warm_cache.magic == RTC_MAGIC_WARM_CACHE &&
+      rtc_warm_cache.count > 0 &&
+      rtc_warm_cache.count <= PollingTargetRegistry::MAX_TARGETS) {
+    uint32_t computed_crc =
+        FastCrc32(reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
+                  sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
     if (computed_crc == rtc_warm_cache.crc32) {
       g_polling_targets.loadFromWarmCache(rtc_warm_cache.entries,
-                                         rtc_warm_cache.count, now);
+                                          rtc_warm_cache.count, now);
       g_warm_cache_loaded = true;
       g_warm_cache_source = 1;
       g_warm_cache_restored_count = rtc_warm_cache.count;
-      Serial.printf("[WARM CACHE] Restored %u targets from RTC Fast SRAM (0ms delay)!\r\n",
+      Serial.printf("[WARM CACHE] Restored %u targets from RTC Fast SRAM (0ms "
+                    "delay)!\r\n",
                     rtc_warm_cache.count);
       return;
     }
@@ -319,20 +342,22 @@ void WarmCache_RestoreOnBoot() {
     if (p.isKey("wc_data")) {
       static NvsEnvelope<RtcWarmCache> env;
       size_t len = p.getBytesLength("wc_data");
-      if (len == sizeof(env) && p.getBytes("wc_data", &env, sizeof(env)) == sizeof(env)) {
+      if (len == sizeof(env) &&
+          p.getBytes("wc_data", &env, sizeof(env)) == sizeof(env)) {
         if (env.verify() && env.payload.count > 0 &&
             env.payload.count <= PollingTargetRegistry::MAX_TARGETS) {
-          uint32_t computed_crc = FastCrc32(
-              reinterpret_cast<const uint8_t *>(env.payload.entries),
-              sizeof(RtcWarmCacheEntry) * env.payload.count);
+          uint32_t computed_crc =
+              FastCrc32(reinterpret_cast<const uint8_t *>(env.payload.entries),
+                        sizeof(RtcWarmCacheEntry) * env.payload.count);
           if (computed_crc == env.payload.crc32) {
             g_polling_targets.loadFromWarmCache(env.payload.entries,
-                                               env.payload.count, now);
+                                                env.payload.count, now);
             g_warm_cache_loaded = true;
             g_warm_cache_source = 2;
             g_warm_cache_restored_count = env.payload.count;
-            Serial.printf("[WARM CACHE] Restored %u targets from NVS Flash snapshot!\r\n",
-                          env.payload.count);
+            Serial.printf(
+                "[WARM CACHE] Restored %u targets from NVS Flash snapshot!\r\n",
+                env.payload.count);
             p.end();
             return;
           }
@@ -346,14 +371,16 @@ void WarmCache_RestoreOnBoot() {
   g_warm_cache_loaded = false;
   g_warm_cache_source = 0;
   g_warm_cache_restored_count = 0;
-  Serial.println(F("[WARM CACHE] Cold start initialized (No prior cache found)."));
+  Serial.println(
+      F("[WARM CACHE] Cold start initialized (No prior cache found)."));
 }
 
 void WarmCache_CheckNvsDebounce() {
   if (g_warm_cache_dirty.load(std::memory_order_acquire)) {
     uint32_t dirty_ms = g_warm_cache_dirty_ms.load(std::memory_order_relaxed);
     if (dirty_ms > 0 &&
-        TimeUtils::isElapsed(dirty_ms, Config::Timing::WARM_CACHE_NVS_DEBOUNCE_MS)) {
+        TimeUtils::isElapsed(dirty_ms,
+                             Config::Timing::WARM_CACHE_NVS_DEBOUNCE_MS)) {
       WarmCache_SaveToRtc();
       WarmCache_SaveToNvs();
     }
@@ -366,28 +393,28 @@ PacketStatistics g_pkt_stats;
 SystemMetricsTracker g_metrics;
 TaskWdtMonitor g_wdt_monitor;
 
-StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch4_to_tcp_queue_buf,
-    g_ch1_vip_queue_buf, g_ch6_to_tcp_queue_buf;
-uint8_t g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf,
+    g_ch6_to_tcp_queue_buf;
 uint8_t
-    g_ch4_to_tcp_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+    g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 uint8_t
-    g_ch6_to_tcp_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+    g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+uint8_t
+    g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+uint8_t g_ch6_to_tcp_storage[Config::Queue::POOL_SIZE_CONTROL *
+                             sizeof(StaticPacket)];
 
 QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
 QueueSetHandle_t g_ch1_queue_set = nullptr;
 QueueHandle_t g_uart0_event_queue = nullptr, g_uart1_event_queue = nullptr,
               g_uart2_event_queue = nullptr;
-QueueHandle_t g_ch4_passthrough_queue = nullptr, g_ch4_to_tcp_queue = nullptr,
-              g_ch6_to_tcp_queue = nullptr;
+QueueHandle_t g_ch4_passthrough_queue = nullptr, g_ch6_to_tcp_queue = nullptr;
 
 EventGroupHandle_t g_wifi_event_group = nullptr;
 EventGroupHandle_t g_system_event_group = nullptr;
-static constexpr EventBits_t WIFI_BIT_CONNECTED    = BIT0;
+static constexpr EventBits_t WIFI_BIT_CONNECTED = BIT0;
 static constexpr EventBits_t WIFI_BIT_DISCONNECTED = BIT1;
-static constexpr EventBits_t WIFI_BIT_GOT_IP       = BIT2;
+static constexpr EventBits_t WIFI_BIT_GOT_IP = BIT2;
 
 static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
@@ -425,15 +452,13 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     Serial.println(F("[WIFI EVENT] SoftAP Stopped"));
     break;
   case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
-    Serial.printf("[WIFI EVENT] AP Station Connected! MAC: "
-                  "%02X:%02X:%02X:%02X:%02X:%02X, AID: %d\r\n",
-                  info.wifi_ap_staconnected.mac[0],
-                  info.wifi_ap_staconnected.mac[1],
-                  info.wifi_ap_staconnected.mac[2],
-                  info.wifi_ap_staconnected.mac[3],
-                  info.wifi_ap_staconnected.mac[4],
-                  info.wifi_ap_staconnected.mac[5],
-                  info.wifi_ap_staconnected.aid);
+    Serial.printf(
+        "[WIFI EVENT] AP Station Connected! MAC: "
+        "%02X:%02X:%02X:%02X:%02X:%02X, AID: %d\r\n",
+        info.wifi_ap_staconnected.mac[0], info.wifi_ap_staconnected.mac[1],
+        info.wifi_ap_staconnected.mac[2], info.wifi_ap_staconnected.mac[3],
+        info.wifi_ap_staconnected.mac[4], info.wifi_ap_staconnected.mac[5],
+        info.wifi_ap_staconnected.aid);
     break;
   case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
     Serial.printf("[WIFI EVENT] AP Station Disconnected! MAC: "
@@ -463,20 +488,13 @@ struct TcpFragSession {
 static TcpFragSession hub_sessions[Config::TCP::MAX_HUB_CLIENTS];
 SemaphoreHandle_t g_ch6_mutex = nullptr;
 
-struct DoorphoneSession {
-  int sock = -1;
-  uint8_t buffer[256];
-  size_t len = 0;
-  uint32_t last_tcp_cmd_ms = 0;
-  uint8_t last_tcp_cmd = 0;
-  uint32_t connected_at_ms = 0;
-};
-static DoorphoneSession doorphone_sessions[Config::TCP::MAX_DOORPHONE_CLIENTS];
+Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
 SemaphoreHandle_t g_ch5_mutex = nullptr;
 SemaphoreHandle_t g_ctrl_queue_mutex = nullptr;
 
 template <typename SessionType, size_t N>
-static void Tcp_CloseAllSessions(SessionType (&sessions)[N], SemaphoreHandle_t mux) noexcept {
+static void Tcp_CloseAllSessions(SessionType (&sessions)[N],
+                                 SemaphoreHandle_t mux) noexcept {
   MutexLocker lock(mux);
   for (size_t i = 0; i < N; i++) {
     if (sessions[i].sock >= 0) {
@@ -488,7 +506,8 @@ static void Tcp_CloseAllSessions(SessionType (&sessions)[N], SemaphoreHandle_t m
 }
 
 template <typename SessionType, size_t N>
-[[nodiscard]] static bool Tcp_HasActiveSession(SessionType (&sessions)[N], SemaphoreHandle_t mux) noexcept {
+[[nodiscard]] static bool Tcp_HasActiveSession(SessionType (&sessions)[N],
+                                               SemaphoreHandle_t mux) noexcept {
   MutexLocker lock(mux);
   for (size_t i = 0; i < N; i++) {
     if (sessions[i].sock >= 0)
@@ -498,9 +517,9 @@ template <typename SessionType, size_t N>
 }
 
 template <typename SessionType, size_t N, typename DataHandler>
-static void Tcp_PollAndReceive(SessionType (&sessions)[N], SemaphoreHandle_t mux,
-                              fd_set &readfds, fd_set &errorfds,
-                              DataHandler handler) {
+static void Tcp_PollAndReceive(SessionType (&sessions)[N],
+                               SemaphoreHandle_t mux, fd_set &readfds,
+                               fd_set &errorfds, DataHandler handler) {
   MutexLocker lock(mux);
   for (size_t i = 0; i < N; i++) {
     int s = sessions[i].sock;
@@ -528,13 +547,12 @@ static void Tcp_PollAndReceive(SessionType (&sessions)[N], SemaphoreHandle_t mux
   }
 }
 
-static TokenBucket s_ch5_bucket(Config::TCP::CH5_TOKEN_BURST,
-                                Config::TCP::CH5_TOKEN_REFILL_MS);
 static TokenBucket s_ch6_bucket(Config::TCP::CH6_TOKEN_BURST,
                                 Config::TCP::CH6_TOKEN_REFILL_MS);
 
-StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf, g_task_core1_slave2_buf,
-    g_task_core1_ch4_buf, g_task_core0_net_buf, g_telnet_task_buf;
+StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
+    g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,
+    g_telnet_task_buf;
 StackType_t stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
     stackCore1Slave[Config::Task::STACK_SIZE_CORE1],
     stackCore1Slave2[Config::Task::STACK_SIZE_CORE1],
@@ -552,8 +570,9 @@ SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
 Ch1StateMetrics g_ch1_state_metrics;
 portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> g_config_dirty{false}, g_ota_in_progress{false},
-    g_initial_caching_complete{false};
+    g_initial_caching_complete{false}, g_probe_convergence_reset{false};
 WifiFallbackGuard g_wifi_guard;
+Config::Doorphone::DoorphoneState g_doorphone_state{};
 
 static void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
   if (sock < 0)
@@ -566,16 +585,14 @@ static void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
 }
 
 template <typename SessionType, size_t N>
-static int Tcp_AcceptAndAssignSlot(int server_fd,
-                                   SessionType (&sessions)[N],
-                                   SemaphoreHandle_t mux,
-                                   int keepalive_idle,
-                                   int keepalive_intvl,
-                                   int keepalive_cnt,
+static int Tcp_AcceptAndAssignSlot(int server_fd, SessionType (&sessions)[N],
+                                   SemaphoreHandle_t mux, int keepalive_idle,
+                                   int keepalive_intvl, int keepalive_cnt,
                                    TcpSocketStats &stat) {
   struct sockaddr_in caddr;
   socklen_t clen = sizeof(caddr);
-  int new_sock = accept(server_fd, reinterpret_cast<struct sockaddr *>(&caddr), &clen);
+  int new_sock =
+      accept(server_fd, reinterpret_cast<struct sockaddr *>(&caddr), &clen);
   if (new_sock < 0)
     return -1;
 
@@ -622,6 +639,71 @@ static int Tcp_AcceptAndAssignSlot(int server_fd,
   sessions[slot].connected_at_ms = millis();
   stat.is_connected.store(true, std::memory_order_relaxed);
   stat.connection_count.fetch_add(1, std::memory_order_relaxed);
+  return new_sock;
+}
+
+static int Ew11_AcceptClient(int slot_idx, int server_fd) {
+  if (slot_idx < 0 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || server_fd < 0)
+    return -1;
+
+  struct sockaddr_in caddr;
+  socklen_t clen = sizeof(caddr);
+  int new_sock =
+      accept(server_fd, reinterpret_cast<struct sockaddr *>(&caddr), &clen);
+  if (new_sock < 0)
+    return -1;
+
+  const uint8_t *b = reinterpret_cast<const uint8_t *>(&caddr.sin_addr.s_addr);
+  IPAddress remote_ip(b[0], b[1], b[2], b[3]);
+  if (!Tcp_IsAllowedIP(remote_ip)) {
+    close(new_sock);
+    return -1;
+  }
+
+  char client_ip_str[16];
+  snprintf(client_ip_str, sizeof(client_ip_str), "%u.%u.%u.%u", b[0], b[1], b[2],
+           b[3]);
+
+  MutexLocker lock(g_ch5_mutex);
+  auto &slot = g_ew11_slots[slot_idx];
+
+  // 1) 특정 허용 IP가 지정되어 있는 경우 일치 여부 검사 (미지정이거나 비어있으면 모든 사설 IP 허용)
+  if (slot.target_ip[0] != '\0' && strcmp(slot.target_ip, client_ip_str) != 0) {
+    ESP_LOGW("EW11", "[CH5] Client IP mismatch for Slot %d (%s): got %s, expected %s",
+             slot_idx, slot.name, client_ip_str, slot.target_ip);
+    close(new_sock);
+    return -1;
+  }
+
+  int flags = fcntl(new_sock, F_GETFL, 0);
+  fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
+  int nodelay = 1;
+  setsockopt(new_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+  int sockbuf = Config::TCP::SOCKET_BUFFER_SIZE;
+  setsockopt(new_sock, SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
+  setsockopt(new_sock, SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
+  Tcp_EnableKeepalive(new_sock, Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
+                      Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
+                      Config::TCP::DEFAULT_KEEPALIVE_CNT);
+
+  // 기존 연결이 열려있다면 안전하게 닫고 새 연결로 교체
+  if (slot.sock >= 0) {
+    close(slot.sock);
+  }
+  slot.sock = new_sock;
+  slot.is_connected = true;
+  slot.rx_len = 0;
+  slot.last_rx_ms = millis();
+  // IP 필터가 비어있던 경우 접속된 EW11 IP 자동 등록
+  if (slot.target_ip[0] == '\0') {
+    strncpy(slot.target_ip, client_ip_str, sizeof(slot.target_ip) - 1);
+    slot.target_ip[sizeof(slot.target_ip) - 1] = '\0';
+  }
+
+  g_pkt_stats.ch5.is_connected.store(true, std::memory_order_relaxed);
+  g_pkt_stats.ch5.connection_count.fetch_add(1, std::memory_order_relaxed);
+  ESP_LOGI("EW11", "[CH5] Accepted EW11 client %s on port %u -> Slot %d (%s)",
+           client_ip_str, slot.target_port, slot_idx, slot.name);
   return new_sock;
 }
 
@@ -723,13 +805,14 @@ void Ch6_Data(TcpFragSession *s, const uint8_t *data, size_t len) {
     std::copy(&s->buffer[p], &s->buffer[p + p_len], req.data.begin());
 
     bool is_query = parser->isQueryPacket(frame);
-    g_telnet_tracer.trace(6, false, is_query ? TraceType::QRY : TraceType::CTL, req);
+    g_telnet_tracer.trace(6, false, is_query ? TraceType::QRY : TraceType::CTL,
+                          req);
 
     if (is_query) {
       uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
       if (parser->extractDeviceKey(frame, dev_id, sub1, sub2)) {
-        g_polling_targets.registerOrTouch(6, dev_id, sub1, sub2, req.data.data(),
-                                          req.length);
+        g_polling_targets.registerOrTouch(6, dev_id, sub1, sub2,
+                                          req.data.data(), req.length);
       }
       StaticPacket v_ack{};
       if (g_control_dispatcher.dispatch(req, v_ack)) {
@@ -752,79 +835,234 @@ void Ch6_Data(TcpFragSession *s, const uint8_t *data, size_t len) {
   }
 }
 
-void Ch5_Data(DoorphoneSession *s, const uint8_t *data, size_t len) {
-  if (!s || s->sock < 0 || !data || len == 0)
+static void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data,
+                               size_t pkt_len) {
+  if (!slot || !pkt_data || pkt_len == 0)
     return;
 
-  // 동적으로 학습 및 복원된 도어폰 프레이밍 값 사용 (기본 fallback: 0x7F, 0xEE, 5)
-  uint8_t stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-  uint8_t etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-  uint8_t pkt_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-  if (stx == 0) stx = Config::Doorphone::STX;
-  if (etx == 0) etx = Config::Doorphone::ETX;
-  if (pkt_len < 3 || pkt_len > 64) pkt_len = Config::Doorphone::PKT_LEN;
+  StaticPacket pkt{5, static_cast<uint8_t>(pkt_len)};
+  std::copy(pkt_data, pkt_data + pkt_len, pkt.data.begin());
 
-  if (s->len + len > sizeof(s->buffer)) {
-    size_t stx_pos = 0;
-    while (stx_pos < s->len && s->buffer[stx_pos] != stx) {
-      stx_pos++;
-    }
-    if (stx_pos == 0 && s->len > 0)
-      stx_pos = 1;
-    if (stx_pos < s->len) {
-      memmove(s->buffer, s->buffer + stx_pos, s->len - stx_pos);
-      s->len -= stx_pos;
-    } else {
-      s->len = 0;
-    }
-    if (s->len + len > sizeof(s->buffer)) {
-      s->len = 0;
-      close(s->sock);
-      s->sock = -1;
-      return;
-    }
-  }
+  slot->rx_pkts++;
+  g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+  g_telnet_tracer.trace(5, false, TraceType::RMT, pkt);
 
-  std::copy(data, data + len, s->buffer + s->len);
-  s->len += len;
-  size_t p = 0;
+  // [동적 라우팅 학습 및 1차/2차 캐시 페어링 & 위저드 파이프라인]
+  auto *parser = WallpadParserFactory::getActiveParser();
+  if (parser) {
+    span<const uint8_t> frame(pkt_data, pkt_len);
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    if (parser->extractDeviceKey(frame, dev_id, sub1, sub2) && dev_id != 0 &&
+        dev_id != parser->getStx() && dev_id != parser->getEtx() &&
+        dev_id != 0xFF) {
+      int8_t s_idx = static_cast<int8_t>(slot - g_ew11_slots);
+      g_route_registry.recordRoute(5, s_idx, dev_id, sub1, sub2);
 
-  while (s->len - p >= pkt_len) {
-    if (s->buffer[p] != stx) {
-      p++;
-      continue;
-    }
-    if (s->buffer[p + pkt_len - 1] != etx) {
-      p++;
-      continue;
-    }
+      // ★ [CH5 소켓 0: 월패드 서브기기 1차/2차 캐시 엔진]
+      if (s_idx == 0) {
+        bool is_query = parser->isQueryPacket(frame);
+        bool is_ack = parser->isAckPacket(frame);
 
-    uint8_t cmd = s->buffer[p + 1];
-    if (!Config::Doorphone::isValidOpcode(cmd)) {
-      p++;
-      continue;
-    }
+        if (is_query) {
+          // 1차 캐시 등록 및 갱신 (위저드로 절대 보내지 않음!)
+          g_polling_targets.registerOrTouch(5, dev_id, sub1, sub2, pkt_data,
+                                            pkt_len);
+          slot->last_query_len = static_cast<uint8_t>(
+              std::min<size_t>(pkt_len, sizeof(slot->last_query_data)));
+          memcpy(slot->last_query_data, pkt_data, slot->last_query_len);
+        } else if (is_ack) {
+          // 2차 캐시 페어링 및 디바이스 레포지토리 최신화
+          if (slot->last_query_len > 0) {
+            g_polling_targets.updateResponse(
+                slot->last_query_data, slot->last_query_len, pkt_data, pkt_len);
+            g_polling_targets.markVerified(dev_id, sub1, sub2);
+          }
 
-    uint32_t now = millis();
-    if (!(cmd == s->last_tcp_cmd && (now - s->last_tcp_cmd_ms < Config::Timing::DOORPHONE_DEBOUNCE_MS))) {
-      s->last_tcp_cmd = cmd;
-      s->last_tcp_cmd_ms = now;
-      StaticPacket pkt{5, pkt_len};
-      std::copy(&s->buffer[p], &s->buffer[p + pkt_len],
-                pkt.data.begin());
+          // ★ [CH5/EW11 제어 트랜잭션 수렴] 방금 전송된 제어 명령(last_ctrl)에
+          // 대한 ACK 응답인 경우 학습기에 주입!
+          if (slot->last_ctrl_len > 0 &&
+              millis() - slot->last_ctrl_tx_ms < 2000) {
+            StaticPacket ctrl_pkt{5, slot->last_ctrl_len};
+            memcpy(ctrl_pkt.data.data(), slot->last_ctrl_data,
+                   slot->last_ctrl_len);
 
-      g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
-      g_telnet_tracer.trace(5, false, TraceType::RMT, pkt);
-      if (g_ch4_passthrough_queue) {
-        xQueueSend(g_ch4_passthrough_queue, &pkt, 0);
+            uint8_t c_dev = 0, c_s1 = 0, c_s2 = 0;
+            if (parser->extractDeviceKey(
+                    span<const uint8_t>(ctrl_pkt.data.data(), ctrl_pkt.length),
+                    c_dev, c_s1, c_s2) &&
+                c_dev == dev_id) {
+              StaticPacket ack_before{};
+              const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
+              if (cached && cached->last_ack_len > 0) {
+                ack_before.channel_id = 5;
+                ack_before.length = cached->last_ack_len;
+                std::copy(cached->last_ack_data.begin(),
+                          cached->last_ack_data.begin() + cached->last_ack_len,
+                          ack_before.data.begin());
+              }
+              AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
+              g_control_registry.onControlTransaction(ctrl_pkt, ack_before, pkt,
+                                                      hint);
+              g_telnet_manager.notifyControlTransaction(dev_id);
+              slot->last_ctrl_len = 0; // 1회 트랜잭션 소비 완료
+            }
+          }
+
+          g_device_repo.updateFromBus(pkt);
+        } else {
+          // ★ QRY도 ACK도 아닌 실제 제어(CTL) 또는 돌발 이벤트 순간에만 위저드
+          // 학습기로 전달!
+          AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
+          StaticPacket dummy_before{};
+          g_control_registry.onControlTransaction(pkt, dummy_before, pkt, hint);
+          g_telnet_manager.notifyControlTransaction(dev_id);
+        }
+      } else {
+        // 슬롯 1~4: 향후 에어컨 등 전용 프로토콜
+        AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
+        StaticPacket dummy_before{};
+        g_control_registry.onControlTransaction(pkt, dummy_before, pkt, hint);
+        g_telnet_manager.notifyControlTransaction(dev_id);
       }
     }
-    p += pkt_len;
   }
+
+  // 수신된 EW11 패킷은 CH6(스마트싱스/허브 TCP 8899)으로 즉시 실시간 바이패스
+  // 브로드캐스트!
+  Ch6_SendAck_Direct(pkt);
+}
+
+void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
+  if (!slot || slot->sock < 0 || !data || len == 0)
+    return;
+
+  slot->last_rx_ms = millis();
+
+  // 슬롯 버퍼 오버플로우 방어
+  if (slot->rx_len + len > sizeof(slot->rx_buf)) {
+    slot->rx_len = 0;
+  }
+  std::copy(data, data + len, slot->rx_buf + slot->rx_len);
+  slot->rx_len += len;
+
+  int slot_idx = static_cast<int>(slot - g_ew11_slots);
+
+  // ★ [소켓 0: 월패드 서브기기 통신] 채널 1, 2, 3, 6과 100% 동일한 공통 파서 및
+  // 무결성 검증 파이프라인
+  if (slot_idx == 0) {
+    auto *parser = WallpadParserFactory::getActiveParser();
+    uint8_t stx = parser ? parser->getStx() : PKT_STX;
+
+    size_t p = 0;
+    size_t loop_count = 0;
+    while (p < slot->rx_len && ++loop_count < 256) {
+      if (slot->rx_buf[p] != stx) {
+        p++;
+        continue;
+      }
+
+      int len_res =
+          parser ? parser->extractPacketLength(slot->rx_buf, slot->rx_len, p)
+                 : -1;
+      if (len_res == 0) {
+        // 미완성 패킷 (추가 데이터 수신 대기)
+        break;
+      }
+      if (len_res < 0) {
+        // 헤더 규격 불일치/노이즈
+        p++;
+        continue;
+      }
+
+      uint8_t p_len = static_cast<uint8_t>(len_res);
+      if (p_len == 0) {
+        p++;
+        continue;
+      }
+
+      span<const uint8_t> frame(&slot->rx_buf[p], p_len);
+      if (!parser->validatePacket(frame)) {
+        StaticPacket drp_pkt{5, p_len};
+        std::copy(&slot->rx_buf[p], &slot->rx_buf[p + p_len],
+                  drp_pkt.data.begin());
+        g_telnet_tracer.trace(5, false, TraceType::DRP, drp_pkt);
+        g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
+        p += p_len;
+        continue;
+      }
+
+      Ew11_ProcessPacket(slot, &slot->rx_buf[p], p_len);
+      p += p_len;
+    }
+
+    if (p > 0) {
+      slot->rx_len -= p;
+      if (slot->rx_len > 0) {
+        memmove(slot->rx_buf, slot->rx_buf + p, slot->rx_len);
+      }
+    }
+    return;
+  }
+
+  // ★ [소켓 1~4: 향후 에어컨 등 이종 프로토콜 전용 트래커]
+  char ns[16], tag[16];
+  snprintf(ns, sizeof(ns), "e%d_frame", slot_idx);
+  snprintf(tag, sizeof(tag), "EW11_#%d", slot_idx);
+
+  auto f_status = slot->tracker.status.load(std::memory_order_relaxed);
+  uint8_t c_stx = slot->tracker.candidate_stx.load(std::memory_order_relaxed);
+  uint8_t c_etx = slot->tracker.candidate_etx.load(std::memory_order_relaxed);
+  uint8_t c_len = slot->tracker.candidate_len.load(std::memory_order_relaxed);
+
+  uint8_t target_stx = (c_stx != 0) ? c_stx : PKT_STX;
+  uint8_t target_etx = (c_etx != 0) ? c_etx : PKT_ETX;
+
+  size_t p = 0;
+  while (p < slot->rx_len) {
+    if (slot->rx_buf[p] != target_stx) {
+      p++;
+      continue;
+    }
+
+    // 1) 고정 길이 후보가 학습된 경우
+    if (c_len >= 3 && (p + c_len) <= slot->rx_len) {
+      if (slot->rx_buf[p + c_len - 1] == target_etx) {
+        slot->tracker.processFrame(target_stx, target_etx, c_len, ns, tag);
+        Ew11_ProcessPacket(slot, &slot->rx_buf[p], c_len);
+        p += c_len;
+        continue;
+      }
+    }
+
+    // 2) ETX 기반 패킷 길이 탐색 (최대 64B)
+    size_t end_idx = 0;
+    bool found_frame = false;
+    for (size_t k = p + 2; k < slot->rx_len && (k - p) < 64; ++k) {
+      if (slot->rx_buf[k] == target_etx) {
+        end_idx = k;
+        found_frame = true;
+        break;
+      }
+    }
+
+    if (found_frame) {
+      uint8_t frame_len = static_cast<uint8_t>(end_idx - p + 1);
+      slot->tracker.processFrame(target_stx, target_etx, frame_len, ns, tag);
+      Ew11_ProcessPacket(slot, &slot->rx_buf[p], frame_len);
+      p += frame_len;
+    } else {
+      if (slot->rx_len - p < 64) {
+        break;
+      } else {
+        p++;
+      }
+    }
+  }
+
   if (p > 0) {
-    s->len -= p;
-    if (s->len > 0) {
-      memmove(s->buffer, s->buffer + p, s->len);
+    slot->rx_len -= p;
+    if (slot->rx_len > 0) {
+      memmove(slot->rx_buf, slot->rx_buf + p, slot->rx_len);
     }
   }
 }
@@ -842,6 +1080,10 @@ void Task_Network(void *pvParameters) {
   int hub_server_fd = -1;
   int door_server_fd = -1;
   int mgmt_server_fd = -1;
+  int ew11_server_fds[Config::TCP::MAX_EW11_SLOTS];
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    ew11_server_fds[s] = -1;
+  }
 
   if (!g_rescue_mode.load(std::memory_order_relaxed)) {
     hub_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -856,31 +1098,12 @@ void Task_Network(void *pvParameters) {
       saddr.sin_family = AF_INET;
       saddr.sin_addr.s_addr = htonl(INADDR_ANY);
       saddr.sin_port = htons(Config::TCP::HUB_PORT);
-      if (bind(hub_server_fd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
+      if (bind(hub_server_fd, reinterpret_cast<struct sockaddr *>(&saddr),
+               sizeof(saddr)) < 0 ||
           listen(hub_server_fd, Config::TCP::MAX_HUB_CLIENTS) < 0) {
         ESP_LOGE("NET", "Failed to bind/listen hub server: errno %d", errno);
         close(hub_server_fd);
         hub_server_fd = -1;
-      }
-    }
-
-    door_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (door_server_fd >= 0) {
-      int opt = 1;
-      setsockopt(door_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-      int flags = fcntl(door_server_fd, F_GETFL, 0);
-      fcntl(door_server_fd, F_SETFL, flags | O_NONBLOCK);
-
-      struct sockaddr_in saddr;
-      memset(&saddr, 0, sizeof(saddr));
-      saddr.sin_family = AF_INET;
-      saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-      saddr.sin_port = htons(Config::TCP::DOORPHONE_PORT);
-      if (bind(door_server_fd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
-          listen(door_server_fd, Config::TCP::MAX_DOORPHONE_CLIENTS) < 0) {
-        ESP_LOGE("NET", "Failed to bind/listen doorphone server: errno %d", errno);
-        close(door_server_fd);
-        door_server_fd = -1;
       }
     }
 
@@ -896,25 +1119,64 @@ void Task_Network(void *pvParameters) {
       saddr.sin_family = AF_INET;
       saddr.sin_addr.s_addr = htonl(INADDR_ANY);
       saddr.sin_port = htons(Config::TCP::MGMT_PORT);
-      if (bind(mgmt_server_fd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
+      if (bind(mgmt_server_fd, reinterpret_cast<struct sockaddr *>(&saddr),
+               sizeof(saddr)) < 0 ||
           listen(mgmt_server_fd, Config::TCP::MAX_MGMT_CLIENTS) < 0) {
-        ESP_LOGE("NET", "Failed to bind/listen mgmt server (8900): errno %d", errno);
+        ESP_LOGE("NET", "Failed to bind/listen mgmt server (8900): errno %d",
+                 errno);
         close(mgmt_server_fd);
         mgmt_server_fd = -1;
       }
     }
+
+    // ★ CH5 EW11 멀티 클라이언트 NVS 설정 로드 (Slot 0: Elevator, Slot 1~4: AC)
+    Ew11_LoadConfig();
+
+    // ★ CH5 EW11 슬롯별 전용 리스너 서버 소켓 바인딩 및 리슨 (Slot 0: 8898, Slot 1~4: 8891~8894)
+    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+      uint16_t listen_port = g_ew11_slots[s].target_port;
+      if (listen_port == 0) {
+        listen_port = Config::TCP::EW11_SLOT_PORTS[s];
+        g_ew11_slots[s].target_port = listen_port;
+      }
+
+      int sfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (sfd >= 0) {
+        int opt = 1;
+        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        int flags = fcntl(sfd, F_GETFL, 0);
+        fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
+
+        struct sockaddr_in saddr;
+        memset(&saddr, 0, sizeof(saddr));
+        saddr.sin_family = AF_INET;
+        saddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        saddr.sin_port = htons(listen_port);
+        if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
+            listen(sfd, 1) < 0) {
+          ESP_LOGE("NET", "Failed to bind/listen EW11 Slot #%d server (%u): errno %d",
+                   s, listen_port, errno);
+          close(sfd);
+          ew11_server_fds[s] = -1;
+        } else {
+          ew11_server_fds[s] = sfd;
+          ESP_LOGI("NET", "★ CH5 EW11 Slot #%d (%s) listening on port %u",
+                   s, g_ew11_slots[s].name, listen_port);
+        }
+      }
+    }
   } else {
-    Serial.println(F("[RESCUE] CH5, CH6 & CH7 TCP server ports disabled in Rescue Mode. Dedicated to OTA & Telnet."));
+    Serial.println(F("[RESCUE] CH6 & CH7 TCP server ports disabled in Rescue "
+                     "Mode. Dedicated to OTA & Telnet."));
   }
 
   for (;;) {
+    esp_task_wdt_reset();
     g_wdt_monitor.feed(4);
     ArduinoOTA.handle();
     if (g_ota_in_progress.load(std::memory_order_relaxed)) {
-      for (int i = 0; i < 4; i++) {
-        ArduinoOTA.handle();
-      }
-      vTaskDelay(1);
+      ArduinoOTA.handle();
+      vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
 
@@ -929,13 +1191,17 @@ void Task_Network(void *pvParameters) {
         if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
           g_wifi_guard.testing.store(false, std::memory_order_release);
           Config_Save();
-          Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved to NVS.\r\n", g_config.wifi_ssid);
+          Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved "
+                        "to NVS.\r\n",
+                        g_config.wifi_ssid);
         }
-        if (WiFi.getMode() == WIFI_MODE_APSTA || WiFi.getMode() == WIFI_MODE_AP) {
+        if (WiFi.getMode() == WIFI_MODE_APSTA ||
+            WiFi.getMode() == WIFI_MODE_AP) {
           WiFi.softAPdisconnect(true);
           WiFi.mode(WIFI_STA);
           WiFi.setSleep(false);
-          Serial.println(F("[WIFI] Event: GOT_IP! Fallback SoftAP disabled, restored STA mode."));
+          Serial.println(F("[WIFI] Event: GOT_IP! Fallback SoftAP disabled, "
+                           "restored STA mode."));
         }
         configTime(0, 0, "pool.ntp.org", "asia.pool.ntp.org");
         setenv("TZ", "KST-9", 1);
@@ -945,10 +1211,13 @@ void Task_Network(void *pvParameters) {
       if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
         if (TimeUtils::isElapsed(g_wifi_guard.start_ms, 15000)) {
           g_wifi_guard.testing.store(false, std::memory_order_release);
-          Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed to connect within 15s! Reverting to '%s'...\r\n",
+          Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed to connect within 15s! "
+                        "Reverting to '%s'...\r\n",
                         g_config.wifi_ssid, g_wifi_guard.prev_ssid);
-          strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid, sizeof(g_config.wifi_ssid) - 1);
-          strncpy(g_config.wifi_password, g_wifi_guard.prev_pass, sizeof(g_config.wifi_password) - 1);
+          strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid,
+                  sizeof(g_config.wifi_ssid) - 1);
+          strncpy(g_config.wifi_password, g_wifi_guard.prev_pass,
+                  sizeof(g_config.wifi_password) - 1);
           WiFi.disconnect(false);
           vTaskDelay(pdMS_TO_TICKS(100));
           WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
@@ -956,25 +1225,30 @@ void Task_Network(void *pvParameters) {
       }
 
       if (bits & WIFI_BIT_DISCONNECTED) {
-        if (TimeUtils::isElapsed(s_last_sta_retry_ms, Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS)) {
+        if (TimeUtils::isElapsed(
+                s_last_sta_retry_ms,
+                Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS)) {
           s_last_sta_retry_ms = millis();
-          Serial.println(F("[WIFI] Event: DISCONNECTED. Background STA reconnection attempt..."));
+          Serial.println(F("[WIFI] Event: DISCONNECTED. Background STA "
+                           "reconnection attempt..."));
           esp_wifi_connect();
         }
       }
     }
 
-    if (s_pending_reboot_reason && millis() > Config::Timing::POST_BOOT_LOG_DELAY_MS) {
+    if (s_pending_reboot_reason &&
+        millis() > Config::Timing::POST_BOOT_LOG_DELAY_MS) {
       LogManager::writeRebootLog(s_pending_reboot_reason);
       s_pending_reboot_reason = nullptr;
     }
 
-    fd_set readfds, errorfds;
+    fd_set readfds, writefds, errorfds;
     FD_ZERO(&readfds);
+    FD_ZERO(&writefds);
     FD_ZERO(&errorfds);
     int max_fd = -1;
 
-    auto add_fd = [&](int fd) {
+    auto add_read_fd = [&](int fd) {
       if (fd >= 0) {
         FD_SET(fd, &readfds);
         FD_SET(fd, &errorfds);
@@ -983,24 +1257,19 @@ void Task_Network(void *pvParameters) {
       }
     };
 
-    add_fd(hub_server_fd);
-    add_fd(door_server_fd);
-    add_fd(mgmt_server_fd);
+    add_read_fd(hub_server_fd);
+    add_read_fd(mgmt_server_fd);
+    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+      if (ew11_server_fds[s] >= 0) {
+        add_read_fd(ew11_server_fds[s]);
+      }
+    }
 
     {
       MutexLocker lock(g_ch6_mutex);
       for (int i = 0; i < Config::TCP::MAX_HUB_CLIENTS; i++) {
         if (hub_sessions[i].sock >= 0) {
-          add_fd(hub_sessions[i].sock);
-        }
-      }
-    }
-
-    {
-      MutexLocker lock(g_ch5_mutex);
-      for (int k = 0; k < Config::TCP::MAX_DOORPHONE_CLIENTS; k++) {
-        if (doorphone_sessions[k].sock >= 0) {
-          add_fd(doorphone_sessions[k].sock);
+          add_read_fd(hub_sessions[i].sock);
         }
       }
     }
@@ -1009,13 +1278,24 @@ void Task_Network(void *pvParameters) {
       MutexLocker lock(g_mgmt_mutex);
       for (int m = 0; m < Config::TCP::MAX_MGMT_CLIENTS; m++) {
         if (g_mgmt_sessions[m].sock >= 0) {
-          add_fd(g_mgmt_sessions[m].sock);
+          add_read_fd(g_mgmt_sessions[m].sock);
         }
       }
     }
 
-    struct timeval tv = {0, 15000}; // 15ms 커널 레벨 Event-Driven 블로킹 (vTaskDelay 불필요)
-    int act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
+    // ★ CH5 EW11 연결된 클라이언트 소켓들을 select() 감시에 등록
+    {
+      MutexLocker lock(g_ch5_mutex);
+      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        if (g_ew11_slots[s].sock >= 0) {
+          add_read_fd(g_ew11_slots[s].sock);
+        }
+      }
+    }
+
+    struct timeval tv = {0, 10000}; // 10ms 커널 레벨 Event-Driven 블로킹 (소켓
+                                    // 이벤트 발생 시 0ms 즉각 반환)
+    int act = select(max_fd + 1, &readfds, &writefds, &errorfds, &tv);
 
     if (act > 0) {
       if (hub_server_fd >= 0 && FD_ISSET(hub_server_fd, &readfds)) {
@@ -1026,14 +1306,6 @@ void Task_Network(void *pvParameters) {
                                 g_pkt_stats.ch6);
       }
 
-      if (door_server_fd >= 0 && FD_ISSET(door_server_fd, &readfds)) {
-        Tcp_AcceptAndAssignSlot(door_server_fd, doorphone_sessions, g_ch5_mutex,
-                                Config::TCP::CH5_KEEPALIVE_IDLE_SEC,
-                                Config::TCP::CH5_KEEPALIVE_INTVL_SEC,
-                                Config::TCP::CH5_KEEPALIVE_CNT,
-                                g_pkt_stats.ch5);
-      }
-
       if (mgmt_server_fd >= 0 && FD_ISSET(mgmt_server_fd, &readfds)) {
         Tcp_AcceptAndAssignSlot(mgmt_server_fd, g_mgmt_sessions, g_mgmt_mutex,
                                 Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
@@ -1042,70 +1314,63 @@ void Task_Network(void *pvParameters) {
                                 g_pkt_stats.ch7);
       }
 
-      Tcp_PollAndReceive(hub_sessions, g_ch6_mutex, readfds, errorfds,
-                         [](TcpFragSession *s, const uint8_t *data, size_t len) {
-                           Ch6_Data(s, data, len);
-                         });
+      // ★ [CH5] EW11 슬롯별 전용 포트로 접속한 TCP 클라이언트 accept (Slot 0: 8898, Slot 1~4: 8891~8894)
+      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        if (ew11_server_fds[s] >= 0 && FD_ISSET(ew11_server_fds[s], &readfds)) {
+          Ew11_AcceptClient(s, ew11_server_fds[s]);
+        }
+      }
 
-      Tcp_PollAndReceive(doorphone_sessions, g_ch5_mutex, readfds, errorfds,
-                         [](DoorphoneSession *s, const uint8_t *data, size_t len) {
-                           Ch5_Data(s, data, len);
-                         });
+      Tcp_PollAndReceive(hub_sessions, g_ch6_mutex, readfds, errorfds,
+                         [](TcpFragSession *s, const uint8_t *data,
+                            size_t len) { Ch6_Data(s, data, len); });
 
       Tcp_PollAndReceive(g_mgmt_sessions, g_mgmt_mutex, readfds, errorfds,
                          [](MgmtSession *s, const uint8_t *data, size_t len) {
                            Mgmt_Data(s, data, len);
                          });
+
+      // ★ CH5 EW11 클라이언트 소켓 상태 및 수신 처리
+      {
+        MutexLocker lock(g_ch5_mutex);
+        for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+          auto &slot = g_ew11_slots[s];
+          if (slot.sock < 0)
+            continue;
+
+          // 1. 에러 감지 시 소켓 정리
+          if (FD_ISSET(slot.sock, &errorfds)) {
+            close(slot.sock);
+            slot.sock = -1;
+            slot.is_connected = false;
+            slot.rx_len = 0;
+            ESP_LOGW("EW11", "[CH5] Slot %d (%s) socket error detected. Closed.", s, slot.name);
+            continue;
+          }
+
+          // 2. 수신 데이터(readfds) 처리
+          if (FD_ISSET(slot.sock, &readfds)) {
+            uint8_t temp_buf[1024];
+            int r = recv(slot.sock, temp_buf, sizeof(temp_buf), 0);
+            if (r > 0) {
+              Ew11_Data(&slot, temp_buf, r);
+            } else if (r == 0 ||
+                       (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+              close(slot.sock);
+              slot.sock = -1;
+              slot.is_connected = false;
+              slot.rx_len = 0;
+              ESP_LOGI("EW11", "[CH5] Slot %d (%s) disconnected by peer.", s, slot.name);
+            }
+          }
+        }
+      }
     }
 
     StaticPacket ch6_pkt;
     while (g_ch6_to_tcp_queue &&
            xQueueReceive(g_ch6_to_tcp_queue, &ch6_pkt, 0) == pdTRUE) {
       Ch6_SendAck_Direct(ch6_pkt);
-    }
-
-    StaticPacket pkt;
-    uint32_t now_ms = millis();
-
-    if (xQueueReceive(g_ch4_to_tcp_queue, &pkt, 0) == pdTRUE) {
-      last_ch5_activity_ms = now_ms;
-      static StaticPacket packets[Config::Queue::POOL_SIZE_CONTROL];
-      size_t num_packets = 0;
-      packets[num_packets++] = pkt;
-      while (num_packets < Config::Queue::POOL_SIZE_CONTROL &&
-             xQueueReceive(g_ch4_to_tcp_queue, &packets[num_packets], 0) == pdTRUE) {
-        num_packets++;
-      }
-
-      MutexLocker lock(g_ch5_mutex);
-      for (size_t i = 0; i < num_packets; i++) {
-        auto &current_pkt = packets[i];
-
-        if (!s_ch5_bucket.consume()) {
-          g_telnet_tracer.trace(5, false, TraceType::DRP, current_pkt);
-          g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-          continue;
-        }
-
-        bool pkt_sent = false;
-        for (int k = 0; k < Config::TCP::MAX_DOORPHONE_CLIENTS; k++) {
-          if (doorphone_sessions[k].sock >= 0) {
-            int sent = send(doorphone_sessions[k].sock, current_pkt.data.data(),
-                            current_pkt.length, MSG_DONTWAIT);
-            if (sent == static_cast<int>(current_pkt.length))
-              pkt_sent = true;
-          }
-        }
-
-        if (pkt_sent) {
-          g_telnet_tracer.trace(5, true, TraceType::RMT, current_pkt);
-          g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
-        } else {
-          s_ch5_bucket.restore();
-          g_telnet_tracer.trace(5, true, TraceType::DRP, current_pkt);
-          g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-        }
-      }
     }
 
     uint32_t now = millis();
@@ -1139,41 +1404,24 @@ void Task_Network(void *pvParameters) {
       g_pkt_stats.ch6.is_connected.store(
           Tcp_HasActiveSession(hub_sessions, g_ch6_mutex),
           std::memory_order_relaxed);
-      g_pkt_stats.ch5.is_connected.store(
-          Tcp_HasActiveSession(doorphone_sessions, g_ch5_mutex),
-          std::memory_order_relaxed);
+
+      // EW11 슬롯 중 하나라도 연결되어 있으면 CH5 연결 상태 true
+      bool any_ew11_conn = false;
+      {
+        MutexLocker lock(g_ch5_mutex);
+        for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+          if (g_ew11_slots[s].is_connected) {
+            any_ew11_conn = true;
+            break;
+          }
+        }
+      }
+      g_pkt_stats.ch5.is_connected.store(any_ew11_conn,
+                                         std::memory_order_relaxed);
+
       g_pkt_stats.ch7.is_connected.store(
           Tcp_HasActiveSession(g_mgmt_sessions, g_mgmt_mutex),
           std::memory_order_relaxed);
-    }
-
-    // ★ CH5 도어폰 TCP 세션 유지용 무조건 1시간 주기 하트비트 더미 패킷 송신 (STX: 0xF7, ETX: 0xEE)
-    if (TimeUtils::isElapsed(t_dp_heartbeat, Config::Timing::DOORPHONE_HEARTBEAT_INTERVAL_MS)) {
-      t_dp_heartbeat = now;
-
-      uint8_t len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-      if (len < 3 || len > 64) len = Config::Doorphone::PKT_LEN;
-
-      StaticPacket dummy_pkt{5, len};
-      dummy_pkt.data.fill(0x00);
-      dummy_pkt.data[0] = PKT_STX;
-      dummy_pkt.data[len - 1] = PKT_ETX;
-
-      MutexLocker lock(g_ch5_mutex);
-      bool pkt_sent = false;
-      for (int k = 0; k < Config::TCP::MAX_DOORPHONE_CLIENTS; k++) {
-        if (doorphone_sessions[k].sock >= 0) {
-          int sent = send(doorphone_sessions[k].sock, dummy_pkt.data.data(),
-                          dummy_pkt.length, MSG_DONTWAIT);
-          if (sent == static_cast<int>(dummy_pkt.length))
-            pkt_sent = true;
-        }
-      }
-
-      if (pkt_sent) {
-        g_telnet_tracer.trace(5, true, TraceType::RMT, dummy_pkt);
-        g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
-      }
     }
   }
 }
@@ -1315,6 +1563,137 @@ void Config_Save() {
   p.end();
 }
 
+void Ew11_LoadConfig() {
+  Preferences p;
+  p.begin("ew11-config", true);
+  MutexLocker lock(g_ch5_mutex);
+
+  // 기본값 설정
+  // Slot 0: Elevator (기본 포트: 8898)
+  g_ew11_slots[0].enabled = p.getBool("e0_en", true);
+  p.getString("e0_name", "Elevator")
+      .toCharArray(g_ew11_slots[0].name, sizeof(g_ew11_slots[0].name));
+  p.getString("e0_ip", "172.30.1.245")
+      .toCharArray(g_ew11_slots[0].target_ip,
+                   sizeof(g_ew11_slots[0].target_ip));
+  uint16_t p0 = p.getUShort("e0_port", 8898);
+  if (p0 == 0 || p0 == 8899) p0 = 8898; // 기존 구버전 기본값 마이그레이션
+  g_ew11_slots[0].target_port = p0;
+  g_ew11_slots[0].dev_type = Ew11DeviceType::WALLPAD_COMPATIBLE;
+  g_ew11_slots[0].sock = -1;
+  g_ew11_slots[0].is_connected = false;
+  g_ew11_slots[0].rx_len = 0;
+
+  // Slot 1~4: AC 1~4 (기본 포트: 8891~8894)
+  for (int i = 1; i < Config::TCP::MAX_EW11_SLOTS; i++) {
+    char k_en[8], k_nm[8], k_ip[8], k_pt[8], def_nm[16];
+    snprintf(k_en, sizeof(k_en), "e%d_en", i);
+    snprintf(k_nm, sizeof(k_nm), "e%d_name", i);
+    snprintf(k_ip, sizeof(k_ip), "e%d_ip", i);
+    snprintf(k_pt, sizeof(k_pt), "e%d_port", i);
+    snprintf(def_nm, sizeof(def_nm), "AC_%d", i);
+
+    g_ew11_slots[i].enabled = p.getBool(k_en, false);
+    p.getString(k_nm, def_nm)
+        .toCharArray(g_ew11_slots[i].name, sizeof(g_ew11_slots[i].name));
+    p.getString(k_ip, "").toCharArray(g_ew11_slots[i].target_ip,
+                                      sizeof(g_ew11_slots[i].target_ip));
+    uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[i]; // 8891, 8892, 8893, 8894
+    uint16_t pi = p.getUShort(k_pt, def_slot_port);
+    if (pi == 0 || pi == 8899) pi = def_slot_port; // 기존 구버전 기본값 마이그레이션
+    g_ew11_slots[i].target_port = pi;
+    g_ew11_slots[i].dev_type = Ew11DeviceType::AIR_CONDITIONER;
+    g_ew11_slots[i].sock = -1;
+    g_ew11_slots[i].is_connected = false;
+    g_ew11_slots[i].rx_len = 0;
+  }
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    char ns[16], tag[16];
+    snprintf(ns, sizeof(ns), "e%d_frame", s);
+    snprintf(tag, sizeof(tag), "EW11_#%d", s);
+    g_ew11_slots[s].tracker.restoreFromNvs(ns, tag);
+  }
+  p.end();
+}
+
+void Ew11_SaveConfig() {
+  Preferences p;
+  p.begin("ew11-config", false);
+  MutexLocker lock(g_ch5_mutex);
+
+  for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; i++) {
+    char k_en[8], k_nm[8], k_ip[8], k_pt[8];
+    snprintf(k_en, sizeof(k_en), "e%d_en", i);
+    snprintf(k_nm, sizeof(k_nm), "e%d_name", i);
+    snprintf(k_ip, sizeof(k_ip), "e%d_ip", i);
+    snprintf(k_pt, sizeof(k_pt), "e%d_port", i);
+
+    p.putBool(k_en, g_ew11_slots[i].enabled);
+    p.putString(k_nm, g_ew11_slots[i].name);
+    p.putString(k_ip, g_ew11_slots[i].target_ip);
+    p.putUShort(k_pt, g_ew11_slots[i].target_port);
+  }
+  p.end();
+}
+
+bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                  const char *name) {
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
+
+  MutexLocker lock(g_ch5_mutex);
+  auto &slot = g_ew11_slots[slot_idx];
+
+  bool reconnect_needed = false;
+  if (slot.enabled != enabled || strcmp(slot.target_ip, ip ? ip : "") != 0 ||
+      slot.target_port != port) {
+    reconnect_needed = true;
+  }
+
+  slot.enabled = enabled;
+  if (ip) {
+    strncpy(slot.target_ip, ip, sizeof(slot.target_ip) - 1);
+    slot.target_ip[sizeof(slot.target_ip) - 1] = '\0';
+  } else {
+    slot.target_ip[0] = '\0';
+  }
+  if (port > 0) {
+    slot.target_port = port;
+  }
+  if (name && strlen(name) > 0) {
+    strncpy(slot.name, name, sizeof(slot.name) - 1);
+    slot.name[sizeof(slot.name) - 1] = '\0';
+  }
+
+  if (reconnect_needed && slot.sock >= 0) {
+    close(slot.sock);
+    slot.sock = -1;
+    slot.is_connected = false;
+    slot.rx_len = 0;
+    slot.last_reconnect_ms = 0; // 즉시 재연결 유도
+  }
+
+  Ew11_SaveConfig();
+  return true;
+}
+
+bool Ew11_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
+  MutexLocker lock(g_ch5_mutex);
+  auto &slot = g_ew11_slots[slot_idx];
+  if (!slot.enabled || slot.sock < 0 || !slot.is_connected)
+    return false;
+
+  int s = send(slot.sock, pkt.data.data(), pkt.length, MSG_DONTWAIT);
+  if (s == static_cast<int>(pkt.length)) {
+    slot.tx_pkts++;
+    g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  return false;
+}
+
 void Config_ResetDefaults() {
   CriticalSectionLocker lock(&g_config_mux);
   g_config = RuntimeConfig{};
@@ -1367,12 +1746,30 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   hw.temp_24h_avg = s24.count ? s24.temp_avg : hw.temp_cur;
   hw.temp_24h_peak = s24.count ? s24.temp_peak : hw.temp_cur;
 
-  st.ch1_stack = g_ch1_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch1_task_handle)) : 0;
-  st.ch2_stack = g_ch2_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch2_task_handle)) : 0;
-  st.ch3_stack = g_ch3_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch3_task_handle)) : 0;
-  st.ch4_stack = g_ch4_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch4_task_handle)) : 0;
-  st.net_stack = g_network_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_network_task_handle)) : 0;
-  st.telnet_stack = g_telnet_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_telnet_task_handle)) : 0;
+  st.ch1_stack = g_ch1_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch1_task_handle))
+                     : 0;
+  st.ch2_stack = g_ch2_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch2_task_handle))
+                     : 0;
+  st.ch3_stack = g_ch3_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch3_task_handle))
+                     : 0;
+  st.ch4_stack = g_ch4_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch4_task_handle))
+                     : 0;
+  st.net_stack = g_network_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_network_task_handle))
+                     : 0;
+  st.telnet_stack = g_telnet_task_handle
+                        ? static_cast<uint16_t>(
+                              uxTaskGetStackHighWaterMark(g_telnet_task_handle))
+                        : 0;
 
   pkt.ch1 = g_pkt_stats.ch1;
   pkt.ch2 = g_pkt_stats.ch2;
@@ -1474,9 +1871,11 @@ void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
   if (!getLogEntry(idx, e)) {
     size_t c = getLogCount();
     if (c == 0) {
-      snprintf(buf, max_len, "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
+      snprintf(buf, max_len,
+               "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
     } else {
-      snprintf(buf, max_len, "\r\n[LOGVIEW] Invalid log index #%u (Available: 1 ~ %u)\r\n",
+      snprintf(buf, max_len,
+               "\r\n[LOGVIEW] Invalid log index #%u (Available: 1 ~ %u)\r\n",
                static_cast<unsigned>(idx + 1), static_cast<unsigned>(c));
     }
     return;
@@ -1550,7 +1949,17 @@ void System_Restart(const char *reason) {
   g_telnet_manager.shutdownForReboot();
 
   Tcp_CloseAllSessions(hub_sessions, g_ch6_mutex);
-  Tcp_CloseAllSessions(doorphone_sessions, g_ch5_mutex);
+  {
+    MutexLocker lock(g_ch5_mutex);
+    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+      if (g_ew11_slots[s].sock >= 0) {
+        close(g_ew11_slots[s].sock);
+        g_ew11_slots[s].sock = -1;
+        g_ew11_slots[s].is_connected = false;
+        g_ew11_slots[s].rx_len = 0;
+      }
+    }
+  }
 
   uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(50));
   uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));
@@ -1559,6 +1968,7 @@ void System_Restart(const char *reason) {
   WarmCache_SaveToRtc();
   WarmCache_SaveToNvs();
 
+  rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
   vTaskDelay(pdMS_TO_TICKS(150));
   esp_restart();
 }
@@ -1587,7 +1997,8 @@ static void Boot_CheckCrashLoop() {
   g_metrics.init();
 
   Serial.println(F("\r\n========================================"));
-  Serial.printf("  GATEWAY BRIDGE %s BOOT INITIALIZATION\r\n", Config::FIRMWARE_VERSION);
+  Serial.printf("  GATEWAY BRIDGE %s BOOT INITIALIZATION\r\n",
+                Config::FIRMWARE_VERSION);
   Serial.println(F("========================================"));
   if (s_pending_reboot_reason) {
     Serial.printf("[BOOT] Last Reset Reason: %s\r\n", s_pending_reboot_reason);
@@ -1597,37 +2008,42 @@ static void Boot_CheckCrashLoop() {
   const esp_partition_t *next_p = esp_ota_get_next_update_partition(nullptr);
   esp_ota_img_states_t next_state = ESP_OTA_IMG_UNDEFINED;
   if (next_p && esp_ota_get_state_partition(next_p, &next_state) == ESP_OK) {
-    if (next_state == ESP_OTA_IMG_INVALID || next_state == ESP_OTA_IMG_ABORTED) {
+    if (next_state == ESP_OTA_IMG_INVALID ||
+        next_state == ESP_OTA_IMG_ABORTED) {
       g_rollback_detected = true;
       const esp_partition_t *run_p = esp_ota_get_running_partition();
-      Serial.printf("[BOOT] ★ AUTO-ROLLBACK ACTIVE: Rolled back from failed '%s' to stable '%s'!\r\n",
+      Serial.printf("[BOOT] ★ AUTO-ROLLBACK ACTIVE: Rolled back from failed "
+                    "'%s' to stable '%s'!\r\n",
                     next_p->label, run_p ? run_p->label : "app0");
     }
   }
 
-  // [RTC 크래시 감지] 실제 비정상 크래시/워치독만 정밀 추적 (정상 SW 리부팅/전원 인가는 제외)
+  // [RTC 크래시 감지] 실제 비정상 크래시/워치독만 정밀 추적 (정상 SW
+  // 리부팅/전원 인가는 제외)
   esp_reset_reason_t reset_reason = esp_reset_reason();
-  bool is_abnormal_crash = (reset_reason == ESP_RST_PANIC || 
-                            reset_reason == ESP_RST_TASK_WDT || 
-                            reset_reason == ESP_RST_INT_WDT || 
-                            reset_reason == ESP_RST_WDT || 
-                            reset_reason == ESP_RST_BROWNOUT);
+  bool is_abnormal_crash =
+      (reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_TASK_WDT ||
+       reset_reason == ESP_RST_INT_WDT || reset_reason == ESP_RST_WDT ||
+       reset_reason == ESP_RST_BROWNOUT);
 
   if (rtc_rescue_magic != RTC_MAGIC_RESCUE || !is_abnormal_crash) {
     rtc_rescue_magic = RTC_MAGIC_RESCUE;
     rtc_crash_counter = 0;
   } else {
     rtc_crash_counter++;
-    Serial.printf("[BOOT] Consecutive crash count: %u (Reason: %d)\r\n", rtc_crash_counter, reset_reason);
+    Serial.printf("[BOOT] Consecutive crash count: %u (Reason: %d)\r\n",
+                  rtc_crash_counter, reset_reason);
   }
 
-  // [하드웨어 버튼 비상 복구] AtomS3 화면 물리 버튼 (GPIO 41)을 2.5초간 누르면 강제 복구 모드
+  // [하드웨어 버튼 비상 복구] AtomS3 화면 물리 버튼 (GPIO 41)을 2.5초간 누르면
+  // 강제 복구 모드
   pinMode(Config::GPIO::BTN_PIN, INPUT_PULLUP);
   if (digitalRead(Config::GPIO::BTN_PIN) == LOW) {
     Serial.println(F("[BOOT] Front button pressed, checking 2.5s hold..."));
     uint32_t press_start = millis();
     bool held = true;
-    while (!TimeUtils::isElapsed(press_start, Config::Timing::RESCUE_BUTTON_HOLD_MS)) {
+    while (!TimeUtils::isElapsed(press_start,
+                                 Config::Timing::RESCUE_BUTTON_HOLD_MS)) {
       if (digitalRead(Config::GPIO::BTN_PIN) != LOW) {
         held = false;
         break;
@@ -1635,33 +2051,41 @@ static void Boot_CheckCrashLoop() {
       vTaskDelay(pdMS_TO_TICKS(50));
     }
     if (held) {
-      Serial.println(F("[SAFE BOOT] ★ Front Button Held (2.5s) -> Forcing Rescue Safe Mode!"));
+      Serial.println(F("[SAFE BOOT] ★ Front Button Held (2.5s) -> Forcing "
+                       "Rescue Safe Mode!"));
       System_EnterRescueMode("Hardware Button Override");
     }
   }
 
   // [크래시 루프 방어 & 자동 롤백] 연속 3회 이상 부팅 실패 감지 시
-  if (!g_rescue_mode.load(std::memory_order_relaxed) && rtc_crash_counter >= 3) {
+  if (!g_rescue_mode.load(std::memory_order_relaxed) &&
+      rtc_crash_counter >= 3) {
     const esp_partition_t *run_p = esp_ota_get_running_partition();
     const esp_partition_t *next_p = esp_ota_get_next_update_partition(nullptr);
 
     // 1단계: 상대 파티션(이전 정상 펌웨어)이 존재하면 즉시 롤백 시도
     if (run_p && next_p && strcmp(run_p->label, next_p->label) != 0) {
-      Serial.printf("[RESCUE] ★ Crash Loop detected (%u crashes)! Rolling back from '%s' to '%s'...\r\n",
+      Serial.printf("[RESCUE] ★ Crash Loop detected (%u crashes)! Rolling back "
+                    "from '%s' to '%s'...\r\n",
                     rtc_crash_counter, run_p->label, next_p->label);
       rtc_crash_counter = 0; // 롤백 시도 시 카운터 리셋
       esp_err_t err = esp_ota_set_boot_partition(next_p);
       if (err == ESP_OK) {
-        Serial.println(F("[RESCUE] Boot partition switched successfully. Rebooting into previous firmware..."));
+        Serial.println(F("[RESCUE] Boot partition switched successfully. "
+                         "Rebooting into previous firmware..."));
         vTaskDelay(pdMS_TO_TICKS(200));
         esp_restart();
       } else {
-        Serial.printf("[RESCUE] esp_ota_set_boot_partition failed (err=0x%x). Fallback to Rescue Safe Mode...\r\n", err);
+        Serial.printf("[RESCUE] esp_ota_set_boot_partition failed (err=0x%x). "
+                      "Fallback to Rescue Safe Mode...\r\n",
+                      err);
       }
     }
 
     // 2단계: 상대 파티션이 없거나 롤백 실패 시 Rescue Safe Mode 진입
-    Serial.printf("[RESCUE] ★ Crash Loop detected (%u crashes)! Forcing Rescue Safe Mode...\r\n", rtc_crash_counter);
+    Serial.printf("[RESCUE] ★ Crash Loop detected (%u crashes)! Forcing Rescue "
+                  "Safe Mode...\r\n",
+                  rtc_crash_counter);
     System_EnterRescueMode("Consecutive Crash Loop (>=3)");
   }
 }
@@ -1678,7 +2102,6 @@ static void Boot_InitSyncPrimitives() {
   g_ch1_control_queue = init_q(&g_ch1_ctrl_queue_buf, g_ch1_ctrl_storage);
   g_ch1_vip_queue = init_q(&g_ch1_vip_queue_buf, g_ch1_vip_storage);
   g_ch4_passthrough_queue = init_q(&g_ch4_pass_queue_buf, g_ch4_pass_storage);
-  g_ch4_to_tcp_queue = init_q(&g_ch4_to_tcp_queue_buf, g_ch4_to_tcp_storage);
   g_ch6_to_tcp_queue = init_q(&g_ch6_to_tcp_queue_buf, g_ch6_to_tcp_storage);
 
   // CH1 Event-Driven 큐셋 생성 및 등록 (VIP: 8 + Control: 8 = 16)
@@ -1727,14 +2150,13 @@ static void Boot_InitHardwareAndDevices() {
   auto init_uart = [&](uart_port_t port, int tx, int rx, uint32_t baud,
                        uint8_t dbits, uint8_t parity, uint8_t stopbits,
                        QueueHandle_t *q) {
-    uart_config_t cfg = {
-        .baud_rate = static_cast<int>(baud),
-        .data_bits = to_uart_databits(dbits),
-        .parity = to_uart_parity(parity),
-        .stop_bits = to_uart_stopbits(stopbits),
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 0,
-        .source_clk = UART_SCLK_APB};
+    uart_config_t cfg = {.baud_rate = static_cast<int>(baud),
+                         .data_bits = to_uart_databits(dbits),
+                         .parity = to_uart_parity(parity),
+                         .stop_bits = to_uart_stopbits(stopbits),
+                         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+                         .rx_flow_ctrl_thresh = 0,
+                         .source_clk = UART_SCLK_APB};
     uart_param_config(port, &cfg);
     uart_set_pin(port, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     uart_driver_install(port, Config::Packet::UART_HW_RX_BUF_SIZE, 0,
@@ -1742,7 +2164,8 @@ static void Boot_InitHardwareAndDevices() {
   };
 
   init_uart(UART_NUM_0, 2, 1, g_config.uart_baud_rate, g_config.uart_data_bits,
-            g_config.uart_parity, g_config.uart_stop_bits, &g_uart0_event_queue);
+            g_config.uart_parity, g_config.uart_stop_bits,
+            &g_uart0_event_queue);
   init_uart(UART_NUM_1, 6, 5, g_config.ch2_baud_rate, g_config.ch2_data_bits,
             g_config.ch2_parity, g_config.ch2_stop_bits, &g_uart1_event_queue);
   init_uart(UART_NUM_2, 8, 7, g_config.ch3_baud_rate, g_config.ch3_data_bits,
@@ -1759,8 +2182,10 @@ static void Boot_InitHardwareAndDevices() {
 
 bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format) {
   uint8_t db = 8, pr = 0, sb = 1;
-  if (!parseFramingStr(format, db, pr, sb)) return false;
-  if (baud < 1200 || baud > 921600) return false;
+  if (!parseFramingStr(format, db, pr, sb))
+    return false;
+  if (baud < 1200 || baud > 921600)
+    return false;
 
   auto to_uart_parity = [](uint8_t p) -> uart_parity_t {
     return (p == 1)   ? UART_PARITY_EVEN
@@ -1801,7 +2226,9 @@ bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format) {
 
   // 런타임 하드웨어 즉시 적용
   if (ch >= 1 && ch <= 3) {
-    uart_port_t port = (ch == 1) ? UART_NUM_0 : (ch == 2) ? UART_NUM_1 : UART_NUM_2;
+    uart_port_t port = (ch == 1)   ? UART_NUM_0
+                       : (ch == 2) ? UART_NUM_1
+                                   : UART_NUM_2;
     uart_set_baudrate(port, baud);
     uart_set_word_length(port, (db == 7) ? UART_DATA_7_BITS : UART_DATA_8_BITS);
     uart_set_parity(port, to_uart_parity(pr));
@@ -1826,13 +2253,14 @@ static void Boot_InitWifiAndOta() {
     WiFi.setAutoReconnect(true);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     wifi_config_t w_conf;
     memset(&w_conf, 0, sizeof(w_conf));
     strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), g_config.wifi_ssid,
             sizeof(w_conf.sta.ssid) - 1);
-    strncpy(reinterpret_cast<char *>(w_conf.sta.password), g_config.wifi_password,
-            sizeof(w_conf.sta.password) - 1);
+    strncpy(reinterpret_cast<char *>(w_conf.sta.password),
+            g_config.wifi_password, sizeof(w_conf.sta.password) - 1);
     w_conf.sta.scan_method = WIFI_FAST_SCAN;
     w_conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     w_conf.sta.pmf_cfg.capable = true;
@@ -1844,7 +2272,8 @@ static void Boot_InitWifiAndOta() {
 
     uint32_t t_start = millis();
     uint32_t max_wait =
-        (g_config.wifi_connect_timeout_s ? g_config.wifi_connect_timeout_s : 30) *
+        (g_config.wifi_connect_timeout_s ? g_config.wifi_connect_timeout_s
+                                         : 30) *
         1000;
     bool connected = false;
 
@@ -1871,10 +2300,10 @@ static void Boot_InitWifiAndOta() {
 
       WiFi.setSleep(false);
       esp_wifi_set_max_tx_power(78);
-      Serial.printf(
-          "[WIFI] STA connect failed. Fallback SoftAP '%s' started: %s (IP: %s)\r\n",
-          g_config.ap_ssid, ap_ok ? "SUCCESS" : "FAILED",
-          WiFi.softAPIP().toString().c_str());
+      Serial.printf("[WIFI] STA connect failed. Fallback SoftAP '%s' started: "
+                    "%s (IP: %s)\r\n",
+                    g_config.ap_ssid, ap_ok ? "SUCCESS" : "FAILED",
+                    WiFi.softAPIP().toString().c_str());
     }
 
     ArduinoOTA.setHostname("gateway-bridge");
@@ -1891,7 +2320,7 @@ static void Boot_InitWifiAndOta() {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
       }
       vTaskDelay(pdMS_TO_TICKS(200));
-      esp_restart();
+      System_Restart("OTA Firmware Update");
     });
     ArduinoOTA.onError([](ota_error_t error) {
       g_ota_in_progress.store(false, std::memory_order_release);
@@ -1923,25 +2352,28 @@ static void Boot_StartTasks() {
   };
 
   if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    g_ch1_task_handle = cr_task(Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1,
-                                nullptr, 13, stackCore1Ch1, &g_task_core1_ch1_buf);
+    g_ch1_task_handle =
+        cr_task(Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1, nullptr,
+                13, stackCore1Ch1, &g_task_core1_ch1_buf);
     g_ch2_task_handle =
         cr_task(Task_Ch2Ch3, "CH#2_WP#1", Config::Task::STACK_SIZE_CORE1,
                 &ch2_config, 10, stackCore1Slave, &g_task_core1_slave_buf);
     g_ch3_task_handle =
         cr_task(Task_Ch2Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_CORE1,
                 &ch3_config, 10, stackCore1Slave2, &g_task_core1_slave2_buf);
-    g_ch4_task_handle = cr_task(Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4,
-                                nullptr, 11, stackCore1Ch4, &g_task_core1_ch4_buf);
+    g_ch4_task_handle =
+        cr_task(Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,
+                11, stackCore1Ch4, &g_task_core1_ch4_buf);
   } else {
-    Serial.println(F("[RESCUE] RS-485 Tasks bypassed. Only Network & Telnet tasks active."));
+    Serial.println(F(
+        "[RESCUE] RS-485 Tasks bypassed. Only Network & Telnet tasks active."));
   }
   g_network_task_handle =
-      cr_task(Task_Network, "Network", Config::Task::STACK_SIZE_CORE0, nullptr, 12,
-              stackCore0Net, &g_task_core0_net_buf);
+      cr_task(Task_Network, "Network", Config::Task::STACK_SIZE_CORE0, nullptr,
+              12, stackCore0Net, &g_task_core0_net_buf);
   g_telnet_task_handle =
-      cr_task(Task_Telnet, "Telnet_CLI", Config::Task::STACK_SIZE_TELNET, nullptr,
-              10, telnetTaskStack, &g_telnet_task_buf);
+      cr_task(Task_Telnet, "Telnet_CLI", Config::Task::STACK_SIZE_TELNET,
+              nullptr, 10, telnetTaskStack, &g_telnet_task_buf);
 }
 
 void setup() {
@@ -1953,6 +2385,7 @@ void setup() {
                 g_config.ap_ssid);
   WarmCache_RestoreOnBoot();
   g_doorphone_tracker.restoreFromNvs();
+  g_control_registry.init();
   Mgmt_Init();
   Boot_InitHardwareAndDevices();
   Boot_InitWifiAndOta();

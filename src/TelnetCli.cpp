@@ -1,6 +1,7 @@
 #include "TelnetCli.h"
 #include "CliCommands.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_ota_ops.h"
 #include "esp_task_wdt.h"
 #include <cstdarg>
@@ -33,11 +34,16 @@ bool TelnetTracer::passesFilter(uint8_t channel, TraceType type,
     return (channel == target);
 
   if (mode == TraceType::DEVID) {
-    uint8_t pkt_dev_id = 0;
-    if (pkt.length >= 4 && pkt.data[0] == PKT_STX)
-      pkt_dev_id = pkt.data[3];
-    else if (pkt.length == 5 && pkt.data[0] == 0x7F)
-      pkt_dev_id = pkt.data[1];
+    uint8_t pkt_dev_id = 0, dummy_s1 = 0, dummy_s2 = 0;
+    if (pkt.length >= 5 && pkt.data[0] == PKT_STX) {
+      auto *parser = WallpadParserFactory::getActiveParser();
+      if (parser) {
+        span<const uint8_t> frame(pkt.data.data(), pkt.length);
+        parser->extractDeviceKey(frame, pkt_dev_id, dummy_s1, dummy_s2);
+      }
+    } else if (pkt.length == 5 && pkt.data[0] == 0x7F) {
+      pkt_dev_id = pkt.data[1];  // 도어폰 패킷 (별도 프로토콜)
+    }
     return (pkt_dev_id == target);
   }
 
@@ -144,8 +150,14 @@ void TelnetTracer::flushToClient() {
   static SessionTracker s_wp_tracker[3] = {};
   static struct {
     struct timeval t_rx;
+    uint8_t rx_channel;
     bool active;
-  } s_door_tracker = {{0, 0}, false};
+  } s_door_tracker = {{0, 0}, 0, false};
+  static struct {
+    struct timeval t_rx;
+    uint8_t dev_id;
+    bool active;
+  } s_ew11_tracker = {{0, 0}, 0, false};
   static struct timeval s_last_pkt_tv = {0, 0};
 
   auto calc_delay_ms = [](const struct timeval &now,
@@ -159,12 +171,15 @@ void TelnetTracer::flushToClient() {
 
   for (size_t i = 0; i < batch_count; ++i) {
     TracePacketEntry &entry = local_batch[i];
-    uint8_t dev_id =
-        (entry.len >= 4 && entry.data[0] == PKT_STX) ? entry.data[3] : 0;
-    uint8_t sub1 =
-        (entry.len >= 6 && entry.data[0] == PKT_STX) ? entry.data[5] : 0;
-    uint8_t sub2 =
-        (entry.len >= 7 && entry.data[0] == PKT_STX) ? entry.data[6] : 0;
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    // ★ 고정 오프셋(data[3]/data[5]/data[6]) 대신 parser 동적 추출 사용
+    if (entry.len >= 5 && entry.data[0] == PKT_STX) {
+      auto *parser = WallpadParserFactory::getActiveParser();
+      if (parser) {
+        span<const uint8_t> frame(entry.data.data(), entry.len);
+        parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+      }
+    }
 
     long delay_ms = -1;
     bool is_new_req = false;
@@ -201,17 +216,53 @@ void TelnetTracer::flushToClient() {
           delay_ms = -2;
         }
       } else if (entry.type == TraceType::ACK) { // TX to Wallpad / App
-        processTx(s_wp_tracker[wp_idx]);
+        // CH5에서 스니핑되어 CH6으로 패스스루된 패킷인지 확인
+        if (entry.channel == 6 && s_ew11_tracker.active && s_ew11_tracker.dev_id == dev_id) {
+          delay_ms = calc_delay_ms(entry.tv, s_ew11_tracker.t_rx);
+          delay_tag = "PASSTHRU";
+          s_ew11_tracker.active = false;
+        } else {
+          processTx(s_wp_tracker[wp_idx]);
+        }
       }
-    } else if (entry.channel == 4 || entry.channel == 5) {
+    } else if (entry.channel == 4) {
       if (!entry.is_tx) {
+        // [CH4 수신] 도어폰 버스 스니핑 유입
         is_new_req = true;
         s_door_tracker.t_rx = entry.tv;
+        s_door_tracker.rx_channel = 4;
         s_door_tracker.active = true;
-      } else if (s_door_tracker.active) {
-        delay_ms = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
-        delay_tag = "PASS-THRU";
-        s_door_tracker.active = false;
+        delay_tag = "PASSTHRU";
+        delay_ms = -2;
+      } else {
+        // [CH4 송신] 상위 앱(CH7/RPC)에서 도어폰 버스로 인젝션 송신된 순간
+        if (s_door_tracker.active) {
+          delay_ms = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
+          delay_tag = "INJECT ";
+          s_door_tracker.active = false;
+        } else {
+          delay_tag = "INJECT ";
+          delay_ms = -2;
+        }
+      }
+    } else if (entry.channel == 5) {
+      // EW11 TCP 클라이언트 수송신
+      if (!entry.is_tx) {
+        // [CH5 수신] 마스터-슬레이브 버스 스니핑 유입 -> CH6 패스스루 지연시간 추적용 타임스탬프 기록
+        is_new_req = true;
+        s_ew11_tracker.t_rx = entry.tv;
+        s_ew11_tracker.dev_id = dev_id;
+        s_ew11_tracker.active = true;
+      } else {
+        // [CH5 송신] 상위 앱(CH6) 명령이 CH5 버스로 인젝션된 순간 -> INJECT 지연시간 표시
+        for (auto &tr : s_wp_tracker) {
+          if (tr.active && tr.dev_id == dev_id) {
+            delay_ms = calc_delay_ms(entry.tv, tr.t_req_rx);
+            delay_tag = "INJECT ";
+            tr.active = false;
+            break;
+          }
+        }
       }
     } else if (entry.channel == 1) {
       if (entry.is_tx) {
@@ -387,8 +438,11 @@ void TelnetManager::bindCommands(TelnetSession *session) {
       {"wifi", "Manage WiFi STA connection [status|scan|connect|disconnect]", WifiCli::cmdWifi},
       {"trace", "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]", WallpadCli::cmdTrace},
       {"wallpad", "Wallpad protocol & auto-probing [status|list|set|save|delete|auto|reset]", WallpadCli::cmdWallpad},
+      {"ctl", "Device control blueprints & active learning [view|learn|status|q|reset]", WallpadCli::cmdCtl},
       {"config", "View or modify runtime configuration [set|reset]", ConfigCli::cmdConfig},
       {"save", "Save current runtime configuration to NVS flash", ConfigCli::cmdSave},
+      {"ew11", "CH5 EW11 multi-client hub config [list|set|enable|disable]", ConfigCli::cmdEw11},
+      {"routes", "Show dynamic device ingress routing table [clear]", ConfigCli::cmdRoutes},
       {"logview", "Persistent reboot history & crash logs [list|<1-20>|last|clear]", SystemCli::cmdLogView},
       {"coredump", "Show crash core dump summary or erase partition [clear]", SystemCli::cmdCoreDump},
       {"ota", "Dual-partition OTA & auto-rollback management [status|rollback|validate]", SystemCli::cmdOta},
@@ -453,6 +507,9 @@ void TelnetManager::onClientData(TelnetSession *session, const char *data,
       } else if (isprint(c) && session->pwLen < sizeof(session->pwBuffer) - 1) {
         session->pwBuffer[session->pwLen++] = c;
       }
+    } else if (session->wizard_step > 0) {
+      // 대화형 학습 마법사 동작 중에는 전용 키 핸들러로 전달 (q: 취소, Enter: 다음 스킵)
+      handleWizardInput(session, (char)c);
     } else if (session->cli) {
       embeddedCliReceiveChar(session->cli.get(), (char)c);
     }
@@ -650,6 +707,450 @@ void TelnetManager::cmdExit(EmbeddedCli *cli, char *args, void *context) {
   }
 }
 
+// ============================================================================
+// INTERACTIVE CONTROL LEARNING WIZARD (NON-BLOCKING EVENT-DRIVEN FSM)
+// ============================================================================
+
+struct WizardTargetDef {
+  DeviceClass cls;
+  const char *name;
+  const char *step_name;
+};
+
+static const WizardTargetDef s_wizard_targets[] = {
+    {DeviceClass::SWITCH, "Light", "Step 1: Light (조명)"},
+    {DeviceClass::SWITCH, "Outlet", "Step 2: Outlet (콘센트/대기전력)"},
+    {DeviceClass::VENT, "Vent", "Step 3: Ventilation (전열교환기/환기)"},
+    {DeviceClass::THERMOSTAT, "Thermo", "Step 4: Thermostat (난방/온도조절기)"},
+    {DeviceClass::GAS, "Gas", "Step 5: Gas Valve (가스밸브)"},
+    {DeviceClass::AIRCON, "Aircon", "Step 6: Air Conditioner (시스템 에어컨)"},
+    {DeviceClass::MOMENTARY, "Elevator", "Step 7: Elevator (엘리베이터 호출)"},
+};
+static constexpr uint8_t WIZARD_TOTAL_STEPS = sizeof(s_wizard_targets) / sizeof(s_wizard_targets[0]);
+
+// 정적 BSS 스크래치 버퍼 (스택 오버플로우 방지 및 재진입 안전: _cli_mutex 보호 하에 사용)
+static char s_wizard_scratch_buf[4096];
+
+void TelnetManager::handleWizardStepAdvance(TelnetSession *s, bool skipped, bool match) {
+  if (!s || s->sock < 0 || s->wizard_step == 0) return;
+
+  uint8_t cur_idx = s->wizard_step - 1; // 0-based
+  if (cur_idx >= WIZARD_TOTAL_STEPS) {
+    s->wizard_step = 0;
+    return;
+  }
+
+  if (skipped && !match) {
+    sendTelnetMsgf(s->sock, ">> [SKIP] No traffic detected for '%s'. Skipping to next...\r\n",
+                   s_wizard_targets[cur_idx].name);
+  }
+
+  if (match && s->wizard_dev_id != 0) {
+    if (s->wizard_learned_count < 8) {
+      s->wizard_learned_devs[s->wizard_learned_count++] = s->wizard_dev_id;
+    }
+  }
+  // 스텝 전이 시 이전 기기의 잔여 버스트 패킷이 다음 스텝을 오염시키지 않도록 1.5초 쿨다운 설정
+  s->wizard_step_cooldown_until_ms = millis() + 1500;
+
+  uint8_t next_idx = cur_idx + 1;
+  if (next_idx < WIZARD_TOTAL_STEPS) {
+    s->wizard_step = next_idx + 1;
+    s->wizard_dev_id = 0;
+    s->wizard_sub_phase = 0;
+    s->wizard_last_prompt = 0;
+    s->thermo_phase = TelnetSession::ThermoPhase::WAIT_ON;
+    s->vent_phase = TelnetSession::VentPhase::WAIT_ON;
+    s->switch_phase = TelnetSession::SwitchPhase::WAIT_ON;
+    s->wizard_step_start_ms = millis();
+    s->last_activity_ms = millis();
+
+    // 다음 단계 기기들의 마지막 학습 시각 스냅샷 갱신
+    size_t count = g_control_registry.getGroupCount();
+    size_t valid_cnt = 0;
+    for (size_t i = 0; i < count && valid_cnt < ControlTemplateRegistry::MAX_GROUPS; ++i) {
+      GroupControlTemplate grp;
+      if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
+        s->prev_learned_ms[valid_cnt++] = grp.last_learned_ms;
+      }
+    }
+
+    sendTelnetMsgf(s->sock, "\r\n[%s]\r\n", s_wizard_targets[next_idx].step_name);
+    if (s_wizard_targets[next_idx].cls == DeviceClass::THERMOSTAT) {
+      sendTelnetMsgf(s->sock, ">> Please TURN ON '%s' on your wallpad now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    } else if (s_wizard_targets[next_idx].cls == DeviceClass::VENT) {
+      sendTelnetMsgf(s->sock, ">> Please TURN ON '%s' on your wallpad now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    } else if (s_wizard_targets[next_idx].cls == DeviceClass::GAS) {
+      sendTelnetMsgf(s->sock, ">> Please CLOSE (차단) '%s' valve on your wallpad now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    } else if (s_wizard_targets[next_idx].cls == DeviceClass::MOMENTARY) {
+      sendTelnetMsgf(s->sock, ">> Please operate '%s' on your wallpad or wall switch now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    } else {
+      sendTelnetMsgf(s->sock, ">> Please TURN ON and TURN OFF '%s' on your wallpad/switch now...\r\n",
+                     s_wizard_targets[next_idx].name);
+    }
+    sendTelnetMsg(s->sock, ">> (Waiting for packet transaction... 45s timeout | Enter: Skip | 'q': Abort)\r\n");
+  } else {
+    // 모든 위저드 목표 완료!
+    s->wizard_step = 0;
+    s->wizard_dev_id = 0;
+    s->wizard_sub_phase = 0;
+    s->wizard_last_prompt = 0;
+    sendTelnetMsg(s->sock, "\r\n================================================================================\r\n");
+    sendTelnetMsg(s->sock, "             LEARNING WIZARD COMPLETE - UPDATED BLUEPRINT TABLE                \r\n");
+    sendTelnetMsg(s->sock, "================================================================================\r\n\r\n");
+    s_wizard_scratch_buf[0] = '\0';
+    AppendBuf out{s_wizard_scratch_buf, sizeof(s_wizard_scratch_buf)};
+    WallpadCli::wallpadPrintControlTable(out);
+    sendTelnetMsgLen(s->sock, out.buf, out.offset);
+  }
+}
+
+void TelnetManager::handleWizardInput(TelnetSession *s, char c) {
+  if (!s || s->sock < 0 || s->wizard_step == 0) return;
+
+  if (c == 'q' || c == 'Q') {
+    sendTelnetMsg(s->sock, ">> [ABORT] Learning wizard aborted by user.\r\n");
+    // abort 시 현재 진행 중인 기기(wizard_dev_id)의 coverage/슬롯 리셋
+    // → 반쯤 학습된 상태로 남아 버스 패킷에 의해 VERIFIED로 오전환되는 것을 방지
+    if (s->wizard_dev_id != 0) {
+      GroupControlTemplate *live = g_control_registry.findGroup(s->wizard_dev_id);
+      if (live && live->status != GroupControlTemplate::Status::LOCKED) {
+        DeviceClass cur_cls = live->coverage.dev_class;
+        live->coverage = SlotCoverage{};
+        live->coverage.dev_class = cur_cls;
+        live->power_slot = ActionSlot{};
+        live->speed_slot = ActionSlot{};
+        live->temp_slot = ActionSlot{};
+        live->close_slot = ActionSlot{};
+        live->mode_slot = ActionSlot{};
+        live->ack_slots = AckStateSlots{};
+        live->status = GroupControlTemplate::Status::CAPTURING;
+      }
+    }
+    s->wizard_step = 0;
+  } else if (c == '\r' || c == '\n') {
+    uint8_t cur_idx = s->wizard_step - 1;
+    if (cur_idx < WIZARD_TOTAL_STEPS && s_wizard_targets[cur_idx].cls == DeviceClass::THERMOSTAT &&
+        s->thermo_phase == TelnetSession::ThermoPhase::WAIT_AWAY) {
+      // 외출 모드 스킵 후 바로 복원 검증 단계(Re-ON)로 안내
+      s->thermo_phase = TelnetSession::ThermoPhase::WAIT_RECALL;
+      s->wizard_sub_phase = 1;
+      sendTelnetMsg(s->sock, ">> [SKIP] Away mode skipped. Please TURN ON 'Thermo' again to verify Target Temp Recall...\r\n");
+      s->wizard_step_start_ms = millis();
+      return;
+    }
+    if (cur_idx < WIZARD_TOTAL_STEPS && s_wizard_targets[cur_idx].cls == DeviceClass::VENT &&
+        s->vent_phase == TelnetSession::VentPhase::WAIT_SPEED) {
+      // [B. 풍량 조작 스킵 시 원자적 검증 및 안전 격하]
+      // speed_slot이 불완전한 상태에서 VERIFIED로 올라가지 않도록 speed_slot을 미탐색 상태로 초기화하고,
+      // 풍량 기능 없이 단일 전원 스위치(ON/OFF)로만 안전하게 한정
+      GroupControlTemplate *v_grp = g_control_registry.findGroup(s->wizard_dev_id);
+      if (v_grp) {
+        v_grp->speed_slot = ActionSlot{};
+        v_grp->speed_slot.discovered = false;
+        v_grp->coverage.speed_l1_seen = false;
+        v_grp->coverage.speed_l2_seen = false;
+        v_grp->coverage.speed_l3_seen = false;
+      }
+      s->vent_phase = TelnetSession::VentPhase::VERIFIED;
+      sendTelnetMsg(s->sock, ">> [SKIP] Fan speed adjustment skipped. Configured as Simple Power Switch.\r\n");
+      handleWizardStepAdvance(s, false, true);
+      return;
+    }
+    handleWizardStepAdvance(s, true, false);
+  }
+}
+
+void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
+  if (dev_id == 0 || dev_id == 0xFF) return;
+
+  // 동적 프로토콜 파서의 STX/ETX 프레임 경계 바이트 필터링 (하드코딩 배제)
+  auto *parser = WallpadParserFactory::getActiveParser();
+  if (parser) {
+    if (dev_id == parser->getStx() || dev_id == parser->getEtx()) return;
+  }
+
+  MutexLocker cliLock(_cli_mutex);
+  for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
+    TelnetSession &s = _sessions[i];
+    if (s.sock >= 0 && s.wizard_step >= 1 && s.wizard_step <= WIZARD_TOTAL_STEPS) {
+      uint8_t cur_idx = s.wizard_step - 1;
+      const auto &tgt = s_wizard_targets[cur_idx];
+
+      // 스텝 전환 직후 이전 기기의 잔여 버스트 패킷 무시 (쿨다운)
+      if (s.wizard_step_cooldown_until_ms > 0 && millis() < s.wizard_step_cooldown_until_ms) {
+        continue;
+      }
+
+      // 조작 액션(ON -> OFF 등) 전환 직후 동일 조작의 잔여 버스트 패킷 무시 (쿨다운)
+      if (s.wizard_action_cooldown_until_ms > 0 && millis() < s.wizard_action_cooldown_until_ms) {
+        continue;
+      }
+
+      // 현재 단계에서 한 기기(wizard_dev_id)가 학습을 시작했다면 다른 기기 패킷은 혼선 방지를 위해 무시
+      if (s.wizard_dev_id != 0 && s.wizard_dev_id != dev_id) {
+        continue;
+      }
+
+      // ★ [원칙: 오로지 LOCKED 기기만 보호, VERIFIED는 언제든 덮어쓰기 허용]
+      // 아직 이번 단계의 대상 기기가 지정되지 않은 상태(wizard_dev_id == 0)에서만 검사
+      if (s.wizard_dev_id == 0) {
+        // 1) 이번 위저드 세션에서 이미 앞선 스텝(예: Step 1 Light)에서 완료된 기기는 다른 스텝에서 중복 캡처 방지!
+        bool already_learned_in_session = false;
+        for (uint8_t l = 0; l < s.wizard_learned_count; ++l) {
+          if (s.wizard_learned_devs[l] == dev_id) {
+            already_learned_in_session = true;
+            break;
+          }
+        }
+        if (already_learned_in_session) {
+          continue;
+        }
+
+        // 2) LOCKED 기기 보호
+        const GroupControlTemplate *existing = g_control_registry.findGroup(dev_id);
+        if (existing && existing->status == GroupControlTemplate::Status::LOCKED) {
+          // LOCKED 기기는 MOMENTARY 단계가 아닌 한 다른 스텝에서 가로채지 못하도록 보호
+          if (tgt.cls != DeviceClass::MOMENTARY) {
+            continue;
+          }
+        }
+      }
+
+      // 현재 단계에 처음으로 매칭되는 기기라면 ID 바인딩 및 클래스 활성화
+      if (s.wizard_dev_id == 0) {
+        s.wizard_dev_id = dev_id;
+        g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
+      }
+
+      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+      bool need_dual_action = (tgt.cls != DeviceClass::MOMENTARY && tgt.cls != DeviceClass::GAS);
+
+      if (need_dual_action && grp) {
+        bool on_done  = grp->coverage.power_on_seen;
+        bool off_done = grp->coverage.power_off_seen;
+        bool extra_done = true;
+
+        if (tgt.cls == DeviceClass::THERMOSTAT) {
+          switch (s.thermo_phase) {
+            case TelnetSession::ThermoPhase::WAIT_ON:
+              if (on_done) {
+                s.thermo_phase = TelnetSession::ThermoPhase::WAIT_OFF;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",
+                               dev_id, tgt.name, tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::ThermoPhase::WAIT_OFF:
+              if (off_done) {
+                s.thermo_phase = TelnetSession::ThermoPhase::WAIT_RE_ON;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] DevID 0x%02X (%s) OFF recorded! Please TURN ON '%s' to adjust temperature...\r\n",
+                               dev_id, tgt.name, tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::ThermoPhase::WAIT_RE_ON:
+              // 전원 OFF 이후 다시 ON 패킷이 수신되었거나 temp_ready_on 플래그가 활성화된 경우
+              if (grp->coverage.temp_ready_on || (grp->last_ctl_len > grp->power_slot.action_offset && grp->last_ctl_raw[grp->power_slot.action_offset] == grp->power_slot.on_val)) {
+                s.thermo_phase = TelnetSession::ThermoPhase::WAIT_TEMP;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] '%s' is ON. Please change Target Temperature (희망온도 조절) for '%s'...\r\n",
+                               tgt.name, tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::ThermoPhase::WAIT_TEMP:
+              if (grp->coverage.temp_set_seen) {
+                s.thermo_phase = TelnetSession::ThermoPhase::WAIT_AWAY;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #4] Target Temp recorded! Please press 'Away (외출)' mode on wallpad (or press Enter to skip)...\r\n");
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::ThermoPhase::WAIT_AWAY:
+              if (grp->coverage.away_mode_seen) {
+                s.thermo_phase = TelnetSession::ThermoPhase::WAIT_RECALL;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #5] Please TURN ON '%s' again to verify Target Temp Recall...\r\n", tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::ThermoPhase::WAIT_RECALL:
+              if (grp->temp_recall_verified) {
+                s.thermo_phase = TelnetSession::ThermoPhase::VERIFIED;
+              } else {
+                continue;
+              }
+              break;
+
+            case TelnetSession::ThermoPhase::VERIFIED:
+              break;
+          }
+        } else if (tgt.cls == DeviceClass::VENT) {
+          switch (s.vent_phase) {
+            case TelnetSession::VentPhase::WAIT_ON:
+              if (on_done) {
+                s.vent_phase = TelnetSession::VentPhase::WAIT_OFF;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",
+                               dev_id, tgt.name, tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::VentPhase::WAIT_OFF:
+              if (off_done) {
+                s.vent_phase = TelnetSession::VentPhase::WAIT_RE_ON;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #2] DevID 0x%02X (%s) OFF recorded! Please TURN ON '%s' to adjust Fan Speed...\r\n",
+                               dev_id, tgt.name, tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::VentPhase::WAIT_RE_ON:
+              if (grp->coverage.speed_ready_on || (grp->last_ctl_len > grp->power_slot.action_offset && grp->last_ctl_raw[grp->power_slot.action_offset] == grp->power_slot.on_val)) {
+                s.vent_phase = TelnetSession::VentPhase::WAIT_SPEED;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #3] '%s' is ON. Please change Fan Speed (풍량 조절 2단/3단) for '%s' (or press Enter to skip)...\r\n",
+                               tgt.name, tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::VentPhase::WAIT_SPEED:
+              if (grp->speed_slot.level_count >= 2) {
+                s.vent_phase = TelnetSession::VentPhase::VERIFIED;
+              } else {
+                continue;
+              }
+              break;
+
+            case TelnetSession::VentPhase::VERIFIED:
+              break;
+          }
+        } else {
+          switch (s.switch_phase) {
+            case TelnetSession::SwitchPhase::WAIT_ON:
+              if (on_done) {
+                s.switch_phase = TelnetSession::SwitchPhase::WAIT_OFF;
+                s.wizard_action_cooldown_until_ms = millis() + 300;
+                sendTelnetMsgf(s.sock, "\r\n>> [CAPTURED #1] DevID 0x%02X (%s) ON recorded! Please now TURN OFF '%s'...\r\n",
+                               dev_id, tgt.name, tgt.name);
+                s.wizard_step_start_ms = millis();
+                continue;
+              }
+              break;
+
+            case TelnetSession::SwitchPhase::WAIT_OFF:
+              if (off_done) {
+                s.switch_phase = TelnetSession::SwitchPhase::VERIFIED;
+              } else {
+                continue;
+              }
+              break;
+
+            case TelnetSession::SwitchPhase::VERIFIED:
+              break;
+          }
+        }
+      }
+
+      // ★ [FSM 완전 격리 방어벽]
+      // 대상 기기가 최종 검증 완료(VERIFIED) 상태에 도달하지 않았다면,
+      // 어떠한 연속 패킷이나 미완료 트랜잭션이라도 아래의 MATCH DETECTED로 빠져나가지 않고 다음 입력을 대기!
+      bool is_verified = false;
+      if (tgt.cls == DeviceClass::THERMOSTAT) {
+        is_verified = (s.thermo_phase == TelnetSession::ThermoPhase::VERIFIED);
+      } else if (tgt.cls == DeviceClass::VENT) {
+        is_verified = (s.vent_phase == TelnetSession::VentPhase::VERIFIED);
+      } else if (need_dual_action) {
+        is_verified = (s.switch_phase == TelnetSession::SwitchPhase::VERIFIED);
+      } else {
+        is_verified = true; // MOMENTARY 등 단발성 기기
+      }
+
+      if (!is_verified) {
+        continue;
+      }
+
+      // ★ [최종 확정 시점에만 기기 분류 및 그룹명 영구 등록]
+      g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
+
+      // ★ MATCH 완료 시 커버리지 보정 후 즉시 VERIFIED로 전환 (버스 패킷 대기 없이)
+      // MOMENTARY/GAS는 onControlTransaction 시점에 클래스가 UNKNOWN이어서 coverage 플래그가 누락될 수 있음
+      {
+        GroupControlTemplate *matched = g_control_registry.findGroup(dev_id);
+        if (matched) {
+          if (tgt.cls == DeviceClass::MOMENTARY) {
+            if (matched->power_slot.action_offset == 0xFF) {
+              matched->power_slot.action_offset = (matched->frame_len >= 3) ? (matched->frame_len - 3) : 7;
+            }
+            // 실제 수신된 제어 패킷의 바이트(raw_template)에서만 추출하며, 임의 추정 금지
+            if (matched->power_slot.action_offset < matched->frame_len &&
+                matched->raw_template[matched->power_slot.action_offset] != 0x00) {
+              matched->power_slot.on_val = matched->raw_template[matched->power_slot.action_offset];
+              matched->power_slot.discovered = true;
+              matched->coverage.call_seen = true;
+            }
+            matched->power_slot.off_val = 0x00;
+          }
+          if (tgt.cls == DeviceClass::GAS) {
+            matched->coverage.valve_close_seen = true;
+            matched->coverage.power_off_seen = true;
+            matched->close_slot.discovered = true;
+            if (matched->close_slot.action_offset == 0xFF) {
+              matched->close_slot.action_offset = (matched->frame_len >= 3) ? (matched->frame_len - 3) : 7;
+            }
+            if (matched->close_slot.off_val == 0x02 || matched->close_slot.off_val == 0) {
+              // 실제 패킷 상의 제어 토큰(0x03 등)으로 보정
+              if (matched->close_slot.action_offset < matched->frame_len) {
+                matched->close_slot.off_val = matched->raw_template[matched->close_slot.action_offset];
+              } else {
+                matched->close_slot.off_val = 0x03;
+              }
+            }
+          }
+          if (matched->coverage.isFullyCovered()) {
+            matched->status = GroupControlTemplate::Status::VERIFIED;
+          }
+        }
+      }
+
+      sendTelnetMsgf(s.sock, "\r\n>> [MATCH DETECTED!] DevID 0x%02X matched to '%s'!\r\n",
+                     dev_id, tgt.name);
+
+      // 즉시 상세 청사진 출력 (정적 버퍼 사용하여 스택 소모 0)
+      s_wizard_scratch_buf[0] = '\0';
+      AppendBuf out{s_wizard_scratch_buf, sizeof(s_wizard_scratch_buf)};
+      WallpadCli::wallpadPrintControlDetail(out, dev_id);
+      sendTelnetMsgLen(s.sock, out.buf, out.offset);
+
+      // 다음 단계로 비동기 즉시 전이
+      handleWizardStepAdvance(&s, false, true);
+    }
+  }
+}
+
 void TelnetManager::onClientConnect(int new_sock,
                                     const struct sockaddr_in &client_addr,
                                     uint32_t now) {
@@ -837,6 +1338,12 @@ void TelnetManager::tick() {
       continue;
     }
 
+    // [마법사 비동기 타임아웃] 단계당 45초 동안 패킷 및 입력 미발생 시 자동 스킵
+    if (s.wizard_step > 0 && TimeUtils::isElapsed(s.wizard_step_start_ms, 45000)) {
+      s.wizard_step_start_ms = millis();
+      handleWizardStepAdvance(&s, true, false);
+    }
+
     if (FD_ISSET(s.sock, &errorfds)) {
       handleClientDisconnect(&s);
       continue;
@@ -899,4 +1406,66 @@ void Task_Telnet(void *pvParameters) {
       xSemaphoreTake(g_tracer_sem, 0);
     }
   }
+}
+
+// ============================================================================
+// WIZARD HINT PEEK
+// Engine.cpp가 onControlTransaction() 호출 직전에 읽어 hint를 전달.
+// 락 없는 읽기 전용 함수 — 위저드가 어떤 단계를 기다리는지 의미론적으로 추론.
+// ============================================================================
+AckSlotHint TelnetManager::peekWizardHint(uint8_t dev_id) const noexcept {
+  static constexpr AckSlotHint THERMO_HINTS[] = {
+      AckSlotHint::POWER, // WAIT_ON
+      AckSlotHint::POWER, // WAIT_OFF
+      AckSlotHint::POWER, // WAIT_RE_ON
+      AckSlotHint::TEMP,  // WAIT_TEMP (오직 4단계에서만 TEMP 슬롯 탐색)
+      AckSlotHint::POWER, // WAIT_AWAY
+      AckSlotHint::POWER, // WAIT_RECALL
+      AckSlotHint::NONE   // VERIFIED
+  };
+
+  static constexpr AckSlotHint VENT_HINTS[] = {
+      AckSlotHint::POWER, // WAIT_ON
+      AckSlotHint::POWER, // WAIT_OFF
+      AckSlotHint::POWER, // WAIT_RE_ON
+      AckSlotHint::SPEED, // WAIT_SPEED (오직 4단계에서만 SPEED 슬롯 탐색)
+      AckSlotHint::NONE   // VERIFIED
+  };
+
+  for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
+    const TelnetSession &s = _sessions[i];
+    if (s.sock < 0 || s.wizard_step < 1 || s.wizard_step > WIZARD_TOTAL_STEPS) continue;
+    if (s.wizard_dev_id != 0 && s.wizard_dev_id != dev_id) continue;
+
+    uint8_t cur_idx = s.wizard_step - 1;
+    if (cur_idx >= WIZARD_TOTAL_STEPS) continue;
+    const auto &tgt = s_wizard_targets[cur_idx];
+
+    // 이미 이 세션에서 학습 완료된 기기라면 NONE 반환 → VERIFIED 상태 보호
+    for (uint8_t l = 0; l < s.wizard_learned_count; ++l) {
+      if (s.wizard_learned_devs[l] == dev_id) return AckSlotHint::NONE;
+    }
+
+    // 이번 스텝의 타겟 기기가 이미 지정되어 있는데(wizard_dev_id != 0), dev_id가 다르면 NONE
+    if (s.wizard_dev_id != 0 && s.wizard_dev_id != dev_id) {
+      return AckSlotHint::NONE;
+    }
+
+    switch (tgt.cls) {
+      case DeviceClass::THERMOSTAT:
+        return (static_cast<uint8_t>(s.thermo_phase) < sizeof(THERMO_HINTS) / sizeof(THERMO_HINTS[0]))
+                   ? THERMO_HINTS[static_cast<uint8_t>(s.thermo_phase)]
+                   : AckSlotHint::NONE;
+
+      case DeviceClass::VENT:
+        return (static_cast<uint8_t>(s.vent_phase) < sizeof(VENT_HINTS) / sizeof(VENT_HINTS[0]))
+                   ? VENT_HINTS[static_cast<uint8_t>(s.vent_phase)]
+                   : AckSlotHint::NONE;
+
+      default:
+        // SWITCH, GAS, MOMENTARY 등은 기본적으로 전원 토큰 탐색
+        return AckSlotHint::POWER;
+    }
+  }
+  return AckSlotHint::NONE;
 }

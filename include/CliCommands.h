@@ -9,6 +9,7 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context);
 
 namespace WallpadCli {
 void cmdWallpad(EmbeddedCli *cli, char *args, void *context);
+void cmdCtl(EmbeddedCli *cli, char *args, void *context);
 void cmdTrace(EmbeddedCli *cli, char *args, void *context);
 void cmdStop(EmbeddedCli *cli, char *args, void *context);
 void cmdDevs(EmbeddedCli *cli, char *args, void *context);
@@ -21,6 +22,13 @@ void wallpadSetProfile(int sock, const char *key);
 
 void devsPrintTier1Targets(AppendBuf &out, uint32_t now);
 void devsPrintTier2Cache(AppendBuf &out, uint32_t now);
+
+void wallpadPrintControlTable(AppendBuf &out);
+void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id);
+void wallpadControlLearn(int sock, uint8_t dev_id);
+void wallpadPrintControlLearnStatus(AppendBuf &out);
+void wallpadControlAbort(int sock);
+void wallpadControlReset(int sock, uint8_t dev_id, bool is_full = false);
 } // namespace WallpadCli
 
 namespace SystemCli {
@@ -41,6 +49,8 @@ void otaValidate(int sock);
 namespace ConfigCli {
 void cmdConfig(EmbeddedCli *cli, char *args, void *context);
 void cmdSave(EmbeddedCli *cli, char *args, void *context);
+void cmdEw11(EmbeddedCli *cli, char *args, void *context);
+void cmdRoutes(EmbeddedCli *cli, char *args, void *context);
 void printConfig(int sock);
 void setConfig(void *session_context, const char *key, const char *value);
 } // namespace ConfigCli

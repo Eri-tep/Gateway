@@ -37,9 +37,16 @@ struct VendorProfileDescriptor {
   uint8_t dev_id_offset; // 장치 ID 위치 (예: 3)
   uint8_t sub1_offset;   // 서브 ID #1 위치 (예: 5)
   uint8_t sub2_offset;   // 서브 ID #2 위치 (예: 6)
-  uint8_t door_stx;      // 도어폰 STX (예: 0x7F, 0x02 등, 0이면 비활성)
-  uint8_t door_etx;      // 도어폰 ETX (예: 0xEE, 0x03 등)
-  uint8_t door_len;      // 도어폰 패킷 길이 (예: 9)
+  uint8_t is_swapped_addr{0};     // 1: DA/SA 교차 주소 모드, 0: 1:1 직접
+  uint8_t gw_addr_offset{2};      // GW 주소 위치 (QUERY 기준) = ACK 기준 DevType 위치
+  uint8_t gw_addr{0x01};          // GW 주소값
+  uint8_t learned_query_len{11};  // 학습된 쿼리 길이
+  uint8_t len_offset{0xFF};       // 패킷 내 길이 필드 위치 (0xFF: 고정 프레임)
+  uint8_t has_len_field{0};       // 1: 길이 필드 보유, 0: 암묵적/고정 프레임
+  uint8_t seq_offset{0xFF};       // 시퀀스 카운터 위치 (0xFF: 없음)
+  uint8_t ack_flag_offset{0xFF};  // ACK 상태 플래그 위치 (0xFF: 없음)
+  uint8_t learned_ctrl_lens[4]{0}; // 관측된 제어(CMD/CTL) 패킷 가변 길이 목록
+  uint8_t ctrl_len_cnt{0};        // 관측된 제어 패킷 길이 가짓수
 };
 
 // ============================================================================
@@ -72,6 +79,8 @@ struct PollingTargetEntry {
   uint32_t restored_ms{0};
   uint8_t raw_query_len{0};
   std::array<uint8_t, 64> raw_query_data{};
+  uint8_t raw_ack_len{0};
+  std::array<uint8_t, 64> raw_ack_data{};
 };
 
 class PollingTargetRegistry {
@@ -86,10 +95,15 @@ private:
 public:
   void registerOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                        const uint8_t *raw_pkt = nullptr, size_t raw_len = 0);
+  void updateResponse(const uint8_t *query_pkt, size_t query_len,
+                      const uint8_t *ack_pkt, size_t ack_len);
+  void reindexWithOffsets(uint8_t dev_id_offset, uint8_t sub1_offset,
+                          uint8_t sub2_offset);
   void sweepExpired(uint32_t ttl_ms = 30000);
   size_t getActiveTargets(PollingTargetEntry *out_buf, size_t max_count);
   size_t activeCount() const;
   size_t totalCount() const;
+  size_t ackedCount() const;
   bool getEntry(size_t index, PollingTargetEntry &out) const;
   void resetHits();
   void clear();
@@ -121,6 +135,24 @@ struct AutoProbeDescriptor {
   uint8_t ack_opcode{0x04};
   bool opcodes_locked{false};
   bool control_seen{false};
+  uint8_t dev_id_offset{3};   // DevType 위치 (QUERY 기준 / swap 없으면 ACK도 동일)
+  uint8_t sub1_offset{5};
+  uint8_t sub2_offset{6};
+  uint8_t payload_offset{7};
+  bool is_swapped_addr{false};
+  bool offsets_locked{false};
+  // ★ swap 구조 보완 필드 (DA/SA 교차 프로토콜 지원)
+  uint8_t gw_addr_offset{2};  // GW 주소 위치 (QUERY 기준) = ACK 기준 DevType 위치
+  uint8_t gw_addr{0x01};      // 버스에서 관측된 GW 자신의 RS-485 주소값 (기본: 0x01)
+  // ★ 학습된 쿼리 패킷 길이 (버스 관측 기반, buildQueryPacket 동적 길이 사용)
+  uint8_t learned_query_len{11};  // 관측된 쿼리 패킷 최빈 길이 (기본: 11)
+  uint8_t len_offset{0xFF};       // 패킷 내 길이 필드 위치 (0xFF: 고정 프레임)
+  bool has_len_field{false};      // 패킷 내 명시적 길이 필드 유무
+  uint8_t seq_offset{0xFF};       // 시퀀스 카운터 위치 (0xFF: 없음)
+  bool has_seq_counter{false};    // 시퀀스 카운터 유무
+  uint8_t ack_flag_offset{0xFF};  // ACK/Status 플래그 위치 (0xFF: 없음)
+  uint8_t learned_ctrl_lens[4]{0}; // 관측된 제어(CMD/CTL) 패킷 가변 길이 목록
+  uint8_t ctrl_len_cnt{0};        // 관측된 제어 패킷 길이 가짓수
   uint32_t matched_packets{0};
   uint32_t tested_packets{0};
   bool is_locked{false};
@@ -149,6 +181,8 @@ public:
   void feedControlPair(span<const uint8_t> ctrl_req,
                        span<const uint8_t> ack_res);
   bool isLocked() const;
+  bool isOffsetsLocked() const;
+  bool analyzeCacheMatrix();
   AutoProbeDescriptor getDescriptor() const;
   void reset();
   uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
@@ -219,6 +253,8 @@ public:
   virtual uint8_t getEtx() const = 0;
   virtual uint8_t getMinPacketLen() const = 0;
   virtual uint8_t getMaxPacketLen() const = 0;
+  virtual bool isLocked() const = 0;
+  virtual bool isAutoMode() const = 0;
 
   // Stream packet length extraction:
   // > 0 : Full packet length extracted
@@ -243,6 +279,18 @@ public:
   const char *getVendorName() const override;
   const char *getProfileKey() const override;
   uint8_t getVendorId() const override;
+
+  bool isLocked() const override {
+    VendorProfileDescriptor d = activeProfile();
+    if (isAutoProfile(d)) {
+      return g_auto_probing_engine.isLocked();
+    }
+    return true;
+  }
+  bool isAutoMode() const override {
+    VendorProfileDescriptor d = activeProfile();
+    return isAutoProfile(d);
+  }
 
   bool validatePacket(span<const uint8_t> frame) const override;
   bool isQueryPacket(span<const uint8_t> frame) const override;

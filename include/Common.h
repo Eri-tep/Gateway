@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.9";
+constexpr const char *FIRMWARE_VERSION = "v1.1.2";
 } // namespace Config
 
 namespace Config::Task {
@@ -214,21 +214,22 @@ constexpr uint32_t INITIAL_CACHING_GRACE_PERIOD_MS = 5000;
 constexpr uint32_t SYSTEM_MONITOR_INTERVAL_MS = 15000;
 // [CH4 도어폰] 버튼 신호 디바운스 대기 (기본: 500ms)
 constexpr uint32_t DOORPHONE_DEBOUNCE_MS = 500;
+// [월패드 Auto 학습] 범용 인터패킷 갭 감지 타이머 (기본: 20ms 침묵 = 1프레임
+// 캡처, 9600bps 기준 패킷 분할 방지)
+constexpr uint32_t WALLPAD_AUTO_IPG_MS = 20;
 // [CH4 도어폰] 범용 인터패킷 갭 감지 타이머 (기본: 25ms 침묵 = 1프레임 종료
 // 판정)
 constexpr uint32_t DOORPHONE_IPG_MS = 25;
 // [CH4 도어폰] 보레이트 기반 바이트 간 최대 허용 연속 지연 타이머 동적 계산
-constexpr uint32_t DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS = 8;
+constexpr uint32_t DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS = 16;
 inline uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
   if (baud == 0)
     return DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS;
-  // 11비트(1바이트) 기준 약 2.5 ~ 3 문자 시간 계산: (28000 / baud)
-  uint32_t timeout = (28000UL + baud - 1) / baud;
-  return (timeout < 4) ? 4 : (timeout > 20 ? 20 : timeout);
+  // 3860 baud 기준 16ms 보장, 고속 보레이트(9600 등) 시 비례 축소 (최소 6ms,
+  // 최대 20ms)
+  uint32_t timeout = (60000UL + baud - 1) / baud;
+  return (timeout < 6) ? 6 : (timeout > 20 ? 20 : timeout);
 }
-// [CH5 도어폰 TCP] 세션 유지용 무조건 1시간 주기 하트비트 더미 패킷 주기 (1시간
-// = 3600초)
-constexpr uint32_t DOORPHONE_HEARTBEAT_INTERVAL_MS = 3600000;
 // [CH2 월패드] 가상 응답(Virtual ACK) 지연 (기본: 30ms)
 constexpr uint32_t CH2_CACHE_DELAY_MS = 30;
 // [CH3 월패드] 가상 응답(Virtual ACK) 지연 (기본: 240ms)
@@ -297,8 +298,8 @@ constexpr int RX_GPIO = 38;
 namespace Config::TCP {
 // [포트] Telnet CLI 접속 포트 (23)
 constexpr uint16_t TELNET_PORT = 23;
-// [포트] CH5 도어폰 TCP 서버 포트 (8898)
-constexpr uint16_t DOORPHONE_PORT = 8898;
+// [포트] CH5 EW11 수신 전용 TCP 서버 포트 (8898)
+constexpr uint16_t EW11_PORT = 8898;
 // [포트] CH6 월패드/허브 TCP 서버 포트 (8899)
 constexpr uint16_t HUB_PORT = 8899;
 // [포트] CH7 SmartThings & 관리 JSON-RPC TCP 서버 포트 (8900)
@@ -308,18 +309,18 @@ constexpr uint16_t MGMT_PORT = 8900;
 constexpr uint8_t MAX_TELNET_CLIENTS = 3;
 // [접속 제한] CH6 허브 TCP 동시 클라이언트 최대 수 (3대)
 constexpr uint8_t MAX_HUB_CLIENTS = 3;
-// [접속 제한] CH5 도어폰 TCP 동시 클라이언트 최대 수 (3대)
-constexpr uint8_t MAX_DOORPHONE_CLIENTS = 3;
 // [접속 제한] CH7 관리 TCP 동시 클라이언트 최대 수 (3대)
 constexpr uint8_t MAX_MGMT_CLIENTS = 3;
+
+// [CH5 EW11 멀티 TCP 클라이언트 슬롯 풀 (최대 5대: Slot 0: EV, Slot 1~4: AC)]
+constexpr uint8_t MAX_EW11_SLOTS = 5;
+// [포트] CH5 EW11 슬롯별 전용 TCP 서버 포트 (Slot 0: 8898, Slot 1~4: 8891~8894)
+constexpr uint16_t EW11_SLOT_PORTS[MAX_EW11_SLOTS] = {8898, 8891, 8892, 8893,
+                                                      8894};
 
 // [소켓 버퍼] TCP SO_RCVBUF / SO_SNDBUF 크기 (4096B = 4KB)
 constexpr int SOCKET_BUFFER_SIZE = 4096;
 
-// [CH5 도어폰] 토큰 버킷 버스트 용량 (기본: 16개)
-constexpr uint32_t CH5_TOKEN_BURST = 16;
-// [CH5 도어폰] 토큰 리필 속도 (기본: 200ms)
-constexpr uint32_t CH5_TOKEN_REFILL_MS = 200;
 // [CH6 허브] 토큰 버킷 버스트 용량 (기본: 32개)
 constexpr uint32_t CH6_TOKEN_BURST = 32;
 // [CH6 허브] 토큰 리필 속도 (기본: 100ms)
@@ -331,13 +332,6 @@ constexpr uint32_t TELNET_SESSION_TIMEOUT_MS = 600000;
 constexpr uint32_t CLEANUP_INTERVAL_MS = 30000;
 // [보안] 인증 실패 클라이언트 차단 시간 (기본: 5초)
 constexpr uint32_t AUTH_FAIL_PENALTY_MS = 5000;
-
-// [CH5 Keepalive] 최초 아이들 (기본: 15초)
-constexpr uint32_t CH5_KEEPALIVE_IDLE_SEC = 15;
-// [CH5 Keepalive] 프로브 간격 (기본: 5초)
-constexpr uint32_t CH5_KEEPALIVE_INTVL_SEC = 5;
-// [CH5 Keepalive] 허용 횟수 (기본: 12회)
-constexpr uint32_t CH5_KEEPALIVE_CNT = 12;
 
 // [기본 Keepalive] 최초 아이들 (기본: 60초)
 constexpr uint32_t DEFAULT_KEEPALIVE_IDLE_SEC = 60;
@@ -419,17 +413,21 @@ struct FramingTracker {
     status.store(FramingStatus::WAITING, std::memory_order_relaxed);
   }
 
-  void clearNvs() noexcept {
+  void clearNvs(const char *nvs_ns = "dp_frame",
+                const char *tag = "DOORPHONE") noexcept {
     reset();
     Preferences prefs;
-    if (prefs.begin("dp_frame", false)) {
+    if (prefs.begin(nvs_ns, false)) {
       prefs.clear();
       prefs.end();
-      ::Serial.println(F("[DOORPHONE] Cleared framing NVS storage."));
+      ::Serial.printf("[%s] Cleared framing NVS storage (%s).\r\n", tag,
+                      nvs_ns);
     }
   }
 
-  void processFrame(uint8_t stx, uint8_t etx, uint8_t len = 0) noexcept {
+  void processFrame(uint8_t stx, uint8_t etx, uint8_t len = 0,
+                    const char *nvs_ns = "dp_frame",
+                    const char *tag = "DOORPHONE") noexcept {
     if (is_custom_fixed.load(std::memory_order_relaxed)) {
       // Custom 고정 락 모드: 노이즈나 외래 패킷으로 인한 상태 변경 불가 (영구
       // 락)
@@ -459,7 +457,7 @@ struct FramingTracker {
           consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
       if (m >= 3) {
         status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-        saveToNvs();
+        saveToNvs(nvs_ns, tag);
       } else {
         status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
       }
@@ -490,9 +488,10 @@ struct FramingTracker {
     }
   }
 
-  void restoreFromNvs() noexcept {
+  void restoreFromNvs(const char *nvs_ns = "dp_frame",
+                      const char *tag = "DOORPHONE") noexcept {
     Preferences prefs;
-    if (prefs.begin("dp_frame", true)) {
+    if (prefs.begin(nvs_ns, true)) {
       uint8_t s = prefs.getUChar("stx", 0);
       uint8_t e = prefs.getUChar("etx", 0);
       uint8_t l = prefs.getUChar("len", 0);
@@ -506,14 +505,15 @@ struct FramingTracker {
         consecutive_matches.store(3, std::memory_order_relaxed);
         is_custom_fixed.store(fixed, std::memory_order_relaxed);
         status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-        ::Serial.printf("[DOORPHONE] Restored framing from NVS: STX 0x%02X, "
+        ::Serial.printf("[%s] Restored framing from NVS (%s): STX 0x%02X, "
                         "ETX 0x%02X, Len %u%s\r\n",
-                        s, e, l, fixed ? " (FIXED)" : "");
+                        tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
       }
     }
   }
 
-  void saveToNvs() noexcept {
+  void saveToNvs(const char *nvs_ns = "dp_frame",
+                 const char *tag = "DOORPHONE") noexcept {
     uint8_t s = candidate_stx.load(std::memory_order_relaxed);
     uint8_t e = candidate_etx.load(std::memory_order_relaxed);
     uint8_t l = candidate_len.load(std::memory_order_relaxed);
@@ -521,16 +521,16 @@ struct FramingTracker {
     if (s == 0 || e == 0)
       return;
     Preferences prefs;
-    if (prefs.begin("dp_frame", false)) {
+    if (prefs.begin(nvs_ns, false)) {
       prefs.putUChar("stx", s);
       prefs.putUChar("etx", e);
       prefs.putUChar("len", l);
       prefs.putBool("locked", true);
       prefs.putBool("fixed", fixed);
       prefs.end();
-      ::Serial.printf("[DOORPHONE] Saved framing to NVS: STX 0x%02X, ETX "
+      ::Serial.printf("[%s] Saved framing to NVS (%s): STX 0x%02X, ETX "
                       "0x%02X, Len %u%s\r\n",
-                      s, e, l, fixed ? " (FIXED)" : "");
+                      tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
     }
   }
 
@@ -542,7 +542,92 @@ struct FramingTracker {
             etx == candidate_etx.load(std::memory_order_relaxed));
   }
 };
+
+struct DoorphoneProfile {
+  uint8_t match_stx; // 매칭 키: STX (0이면 무시)
+  uint8_t match_etx; // 매칭 키: ETX (0이면 무시)
+  uint8_t match_len; // 매칭 키: 길이 (0이면 가변 길이 허용)
+  const char *desc;  // 카탈로그 프로파일 명칭
+
+  // 3-Step 시퀀스 및 이벤트 시맨틱 바이트
+  uint8_t bell_front; // 현관 벨 호출 수신
+  uint8_t bell_lobby; // 로비 벨 호출 수신
+  uint8_t call_front; // 현관 통화 시작 송신
+  uint8_t call_lobby; // 로비 통화 시작 송신
+  uint8_t open_front; // 현관 문열림 송신
+  uint8_t open_lobby; // 로비 문열림 송신
+  uint8_t end_front;  // 현관 통화 종료 송신
+  uint8_t end_lobby;  // 로비 통화 종료 송신
+};
+
+inline const DoorphoneProfile s_doorphone_catalog[] = {
+    // #1: 현대통신 표준 도어폰 (0x7F .. 0xEE, 5바이트)
+    {0x7F, 0xEE, 5, "Hyundai HT Standard", 0xB5, 0x5A, 0xB9, 0x5F, 0xB4, 0x61,
+     0xB8, 0x60},
+    // #2: 코맥스 / 일반 STX-ETX 도어폰 (0x02 .. 0x03)
+    {0x02, 0x03, 0, "Commax / Generic STX-ETX", 0x10, 0x20, 0x11, 0x21, 0x12,
+     0x22, 0x13, 0x23},
+    // #3: 삼성 / 기타 도어폰 프로파일 (0xAA .. 0x55)
+    {0xAA, 0x55, 0, "Generic Vendor A", 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+     0x07, 0x08}};
+
+inline constexpr size_t DOORPHONE_CATALOG_COUNT =
+    sizeof(s_doorphone_catalog) / sizeof(s_doorphone_catalog[0]);
+
+inline const DoorphoneProfile *matchDoorphoneCatalog(uint8_t stx, uint8_t etx,
+                                                     uint8_t len) noexcept {
+  if (stx == 0 || etx == 0)
+    return nullptr;
+  for (size_t i = 0; i < DOORPHONE_CATALOG_COUNT; ++i) {
+    const auto &item = s_doorphone_catalog[i];
+    if (item.match_stx == stx && item.match_etx == etx) {
+      if (item.match_len == 0 || item.match_len == len) {
+        return &item;
+      }
+    }
+  }
+  return nullptr;
+}
+
+struct DoorphoneState {
+  std::atomic<bool> front_bell{false};
+  std::atomic<bool> lobby_bell{false};
+  std::atomic<uint32_t> last_bell_ms{0};
+};
 } // namespace Config::Doorphone
+
+extern Config::Doorphone::DoorphoneState g_doorphone_state;
+
+enum class Ew11DeviceType : uint8_t {
+  WALLPAD_COMPATIBLE = 0, // 엘리베이터 (월패드 0xF7/0xEE 규격)
+  AIR_CONDITIONER = 1     // 에어컨 1~4대
+};
+
+struct Ew11ClientSlot {
+  bool enabled{false};
+  char name[16]{""};
+  char target_ip[16]{""};
+  uint16_t target_port{8899};
+  Ew11DeviceType dev_type{Ew11DeviceType::WALLPAD_COMPATIBLE};
+  Config::Doorphone::FramingTracker
+      tracker; // 슬롯별 독립 프레이밍 자율 학습기 (STX/ETX/길이 수렴)
+  int sock{-1};
+  bool is_connected{false};
+  uint32_t last_reconnect_ms{0};
+  uint8_t rx_buf[1024];
+  size_t rx_len{0};
+  uint32_t last_rx_ms{0};
+  uint32_t rx_pkts{0};
+  uint32_t tx_pkts{0};
+  uint32_t dropped_pkts{0};
+  uint8_t last_query_data[64]{0}; // 1차 캐시(질문) 보관용 버퍼
+  uint8_t last_query_len{0};      // 1차 캐시(질문) 길이
+  uint8_t last_ctrl_data[64]{0};  // 제어 명령 송신 보관용 버퍼
+  uint8_t last_ctrl_len{0};       // 제어 명령 송신 길이
+  uint32_t last_ctrl_tx_ms{0};    // 제어 명령 송신 타임스탬프
+};
+
+extern Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
 
 namespace Config::Devices {
 inline constexpr uint8_t DEV_HEAT_EXCHANGER = 0x2B; // 전열교환기 (ERV) ID
@@ -567,10 +652,9 @@ static_assert(Config::TCP::MAX_TELNET_CLIENTS > 0 &&
 static_assert(Config::TCP::MAX_HUB_CLIENTS > 0 &&
                   Config::TCP::MAX_HUB_CLIENTS <= 8,
               "Config error: TCP::MAX_HUB_CLIENTS must be between 1 and 8");
-static_assert(
-    Config::TCP::MAX_DOORPHONE_CLIENTS > 0 &&
-        Config::TCP::MAX_DOORPHONE_CLIENTS <= 8,
-    "Config error: TCP::MAX_DOORPHONE_CLIENTS must be between 1 and 8");
+static_assert(Config::TCP::MAX_EW11_SLOTS > 0 &&
+                  Config::TCP::MAX_EW11_SLOTS <= 8,
+              "Config error: TCP::MAX_EW11_SLOTS must be between 1 and 8");
 static_assert(Config::Queue::POOL_SIZE_CONTROL > 0,
               "Config error: Queue::POOL_SIZE_CONTROL must be > 0");
 static_assert(Config::Queue::UART_EVENT_QUEUE_SIZE > 0,
@@ -1355,18 +1439,19 @@ extern QueueHandle_t g_ch1_control_queue, g_ch1_vip_queue;
 extern QueueSetHandle_t g_ch1_queue_set;
 extern QueueHandle_t g_uart0_event_queue, g_uart1_event_queue,
     g_uart2_event_queue;
-extern QueueHandle_t g_ch4_passthrough_queue, g_ch4_to_tcp_queue,
-    g_ch6_to_tcp_queue;
+extern QueueHandle_t g_ch4_passthrough_queue, g_ch6_to_tcp_queue;
 extern SemaphoreHandle_t g_ch6_mutex;
 extern SemaphoreHandle_t g_ch5_mutex;
 extern SemaphoreHandle_t g_mgmt_mutex;
 extern RuntimeConfig g_config;
 extern portMUX_TYPE g_config_mux;
-extern TelnetTracer g_telnet_tracer;
 extern std::atomic<uint32_t> g_ch1_bus_ms;
 extern std::atomic<bool> g_config_dirty;
 extern std::atomic<bool> g_ota_in_progress;
 extern std::atomic<bool> g_initial_caching_complete;
+// ★ wallpad reset 시 수렴 상태를 재초기화하여 재학습·재락을 허용하는 신호
+// 플래그
+extern std::atomic<bool> g_probe_convergence_reset;
 extern EventGroupHandle_t g_system_event_group;
 constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
 constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
@@ -1455,6 +1540,45 @@ int8_t System_ReadTempC();
 void System_EnterRescueMode(const char *reason);
 void System_CheckOtaHealth();
 [[nodiscard]] bool System_IsOtaPendingVerify();
+
+void Ew11_LoadConfig();
+void Ew11_SaveConfig();
+bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                  const char *name = nullptr);
+bool Ew11_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
+
+struct RouteEndpoint {
+  uint8_t channel_id{1}; // 기본 채널: CH1 (메인 물리 RS-485)
+  int8_t slot_idx{-1};   // CH5인 경우 슬롯 인덱스 (0~4), 그 외 -1
+  uint32_t last_seen_ms{0};
+};
+
+struct DeviceRouteEntry {
+  uint8_t dev_id{0};
+  uint8_t sub1{0};
+  uint8_t sub2{0};
+  RouteEndpoint endpoint{};
+};
+
+class DeviceRouteRegistry {
+public:
+  static constexpr size_t MAX_ROUTES = 64;
+
+private:
+  DeviceRouteEntry _entries[MAX_ROUTES]{};
+  size_t _count{0};
+  mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+
+public:
+  void recordRoute(uint8_t channel_id, int8_t slot_idx, uint8_t dev_id,
+                   uint8_t sub1, uint8_t sub2);
+  bool lookupRoute(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                   RouteEndpoint &out_ep) const;
+  size_t getRoutes(DeviceRouteEntry *out_buf, size_t max_count) const;
+  void clear();
+};
+
+extern DeviceRouteRegistry g_route_registry;
 
 extern std::atomic<bool> g_rescue_mode;
 extern bool g_rollback_detected;

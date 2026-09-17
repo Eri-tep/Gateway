@@ -3,7 +3,7 @@
 ## 3단계 배포 명령어
 1. 드라이버 패키징:
    ```bash
-   smartthings edge:drivers:package ./smartthings-gateway-edge-driver
+   smartthings edge:drivers:package ./gateway-edge-driver
    ```
 2. 채널에 드라이버 등록 (Assign):
    ```bash

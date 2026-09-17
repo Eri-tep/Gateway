@@ -2,6 +2,7 @@ local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local command_handlers = require "command_handlers"
 local gateway_client = require "gateway_client"
+local telemetry_handler = require "telemetry_handler"
 local log = require "log"
 
 local function schedule_polling_timer(driver, device)
@@ -22,14 +23,56 @@ local function schedule_polling_timer(driver, device)
 end
 
 local function device_init(driver, device)
-  log.info("Initializing ESP32 Gateway Device: " .. tostring(device.label))
+  log.info("Initializing Device: " .. tostring(device.label) .. " (Type: " .. tostring(device.type) .. ")")
+
+  -- 자식 기기(도어폰 - 세대 도어 / 로비 도어 / 레거시)인 경우 초기 상태 설정
+  local p_key = device.parent_assigned_child_key
+  if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
+    local cap_motion = capabilities.motionSensor
+    local comp_main = device.profile.components["main"]
+    if comp_main then
+      device:emit_component_event(comp_main, capabilities.switch.switch.off())
+      if cap_motion then
+        device:emit_component_event(comp_main, cap_motion.motion.inactive())
+      end
+    end
+    local comp_lobby = device.profile.components["lobby"]
+    if comp_lobby then
+      device:emit_component_event(comp_lobby, capabilities.switch.switch.off())
+      if cap_motion then
+        device:emit_component_event(comp_lobby, cap_motion.motion.inactive())
+      end
+    end
+    return
+  end
+
   device:set_field("__state_cache", nil, { persist = true })
   device:try_update_metadata({ profile = "gateway-ultra" })
   if not device:get_field("ota_channel") then
     device:set_field("ota_channel", device.preferences.otaChannel or "main")
   end
+
+  -- childDeviceManager 초기 상태 idle 설정
+  local comp_main = device.profile.components["main"]
+  local cap_mgr = capabilities["digituniverse06711.childDeviceManager"]
+  if cap_mgr and comp_main then
+    device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
+  end
+
   schedule_polling_timer(driver, device)
   command_handlers.refresh_telemetry(driver, device)
+
+  -- CH7 실시간 푸시 이벤트 리스너 실행 (단 1회)
+  if not device:get_field("listener_started") then
+    device:set_field("listener_started", true)
+    local ip = device.preferences.gatewayIp or "172.30.1.3"
+    local port = tonumber(device.preferences.gatewayPort) or 8900
+    gateway_client.start_event_listener(driver, ip, port, function(d, event_data)
+      if event_data.event == "doorphone" then
+        telemetry_handler.handle_doorphone_event(d, event_data)
+      end
+    end)
+  end
 end
 
 local function device_added(driver, device)
@@ -163,6 +206,12 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     [capabilities.switch.ID] = {
       [capabilities.switch.commands.on.NAME] = command_handlers.handle_switch_on,
       [capabilities.switch.commands.off.NAME] = command_handlers.handle_switch_off
+    },
+    ["digituniverse06711.childDeviceManager"] = {
+      ["setAction"] = command_handlers.handle_child_device_action
+    },
+    [capabilities.momentary.ID] = {
+      [capabilities.momentary.commands.push.NAME] = command_handlers.handle_momentary_push
     }
   }
 })

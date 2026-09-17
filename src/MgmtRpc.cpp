@@ -107,17 +107,21 @@ static void Task_HttpOta(void *pvParameters) {
     xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
   }
 
+  esp_task_wdt_add(nullptr);
   WiFiClient *stream = http.getStreamPtr();
   static uint8_t s_ota_buff[4096]; // Flash 4KB Sector 일치 정적 버퍼 (Zero Heap / Zero Stack)
   size_t written = 0;
   uint32_t last_progress_ms = 0;
+  uint32_t last_activity_ms = millis();
 
   while (http.connected() && (written < static_cast<size_t>(contentLength))) {
+    esp_task_wdt_reset();
     size_t sizeAvailable = stream->available();
     if (sizeAvailable > 0) {
       size_t to_read = std::min(sizeAvailable, sizeof(s_ota_buff));
       int c = stream->readBytes(s_ota_buff, to_read);
       if (c > 0) {
+        last_activity_ms = millis();
         size_t w = Update.write(s_ota_buff, c);
         if (w != static_cast<size_t>(c)) {
           snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
@@ -135,9 +139,17 @@ static void Task_HttpOta(void *pvParameters) {
         }
       }
     } else {
-      vTaskDelay(pdMS_TO_TICKS(1));
+      if (millis() - last_activity_ms > 20000) {
+        snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Timeout");
+        snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Stream read timeout (20s)");
+        ::Serial.println(F("[OTA] Stream read timeout."));
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(5));
     }
   }
+
+  esp_task_wdt_delete(nullptr);
 
   if (written == static_cast<size_t>(contentLength) && Update.end(true)) {
     if (Update.isFinished()) {
@@ -145,7 +157,7 @@ static void Task_HttpOta(void *pvParameters) {
       ::Serial.println(F("[OTA] Update OK! Rebooting into new firmware in 1s..."));
       http.end();
       vTaskDelay(pdMS_TO_TICKS(1000));
-      esp_restart();
+      System_Restart("HTTP OTA Update");
     }
   } else {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
@@ -183,8 +195,8 @@ void Mgmt_StartHttpOta(const char *url) {
     return;
   }
 
-  // Priority 12 (Network 태스크와 동급 상향 조정으로 CPU 기아 방지)
-  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 8192, url_copy, 12, nullptr, 0);
+  // Priority 14 (Core 1에서 CH1보다 높은 최우선 순위 부여로 RS485 대기 중 OTA 스트림 즉시 처리)
+  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, url_copy, 14, nullptr, 1);
 }
 
 // ============================================================================
@@ -448,7 +460,16 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
                        static_cast<unsigned>(i + 1), time_buf, e.reason, up_str);
     }
   }
-  out.append("]}}");
+  out.append("],");
+
+  // Doorphone State
+  bool f_bell = g_doorphone_state.front_bell.load(std::memory_order_relaxed);
+  bool l_bell = g_doorphone_state.lobby_bell.load(std::memory_order_relaxed);
+  uint32_t b_ms = g_doorphone_state.last_bell_ms.load(std::memory_order_relaxed);
+  out.appendFormat("\"doorphone\":{\"front_bell\":%s,\"lobby_bell\":%s,\"last_bell_ms\":%u}",
+                   f_bell ? "true" : "false", l_bell ? "true" : "false", static_cast<unsigned>(b_ms));
+
+  out.append("}}");
 }
 
 // ============================================================================
@@ -786,6 +807,126 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
+  // 14. doorphone_action (SmartThings / RPC Doorphone 3-Step Sequence Controller)
+  if (strcasecmp(cmd, "doorphone_action") == 0) {
+    char action_buf[32] = {0};
+    findJsonStringValue(json_str, "action", action_buf, sizeof(action_buf));
+
+    bool is_open_front = (strcasecmp(action_buf, "open_front") == 0 || strcasecmp(action_buf, "open") == 0);
+    bool is_open_lobby = (strcasecmp(action_buf, "open_lobby") == 0);
+
+    if (is_open_front || is_open_lobby) {
+      uint8_t dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
+      uint8_t dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
+      uint8_t dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+
+      if (dp_stx == 0) dp_stx = 0x7F;
+      if (dp_etx == 0) dp_etx = 0xEE;
+
+      const Config::Doorphone::DoorphoneProfile *dp_prof =
+          Config::Doorphone::matchDoorphoneCatalog(dp_stx, dp_etx, dp_len);
+
+      uint8_t op_call = is_open_front ? (dp_prof ? dp_prof->call_front : 0xB9)
+                                      : (dp_prof ? dp_prof->call_lobby : 0x5F);
+      uint8_t op_open = is_open_front ? (dp_prof ? dp_prof->open_front : 0xB4)
+                                      : (dp_prof ? dp_prof->open_lobby : 0x61);
+      uint8_t op_end  = is_open_front ? (dp_prof ? dp_prof->end_front  : 0xB8)
+                                      : (dp_prof ? dp_prof->end_lobby  : 0x60);
+
+      // Structure for task parameters
+      struct DpTaskArgs {
+        uint8_t c_stx;
+        uint8_t c_etx;
+        uint8_t c_call;
+        uint8_t c_open;
+        uint8_t c_end;
+      };
+
+      DpTaskArgs *args = new DpTaskArgs{dp_stx, dp_etx, op_call, op_open, op_end};
+
+      xTaskCreate([](void *param) {
+        DpTaskArgs *a = reinterpret_cast<DpTaskArgs *>(param);
+        uint8_t c_call = a->c_call;
+        uint8_t c_open = a->c_open;
+        uint8_t c_end  = a->c_end;
+        uint8_t c_stx  = a->c_stx;
+        uint8_t c_etx  = a->c_etx;
+        delete a;
+
+        auto send_dp = [c_stx, c_etx](uint8_t op) {
+          StaticPacket pkt{4, 5};
+          pkt.data[0] = c_stx;
+          pkt.data[1] = op;
+          pkt.data[2] = 0x00;
+          pkt.data[3] = 0x00;
+          pkt.data[4] = c_etx;
+          if (g_ch4_passthrough_queue) {
+            xQueueSend(g_ch4_passthrough_queue, &pkt, 0);
+          }
+        };
+
+        // 1단계: 통화 시작
+        send_dp(c_call);
+        vTaskDelay(pdMS_TO_TICKS(350));
+
+        // 2단계: 문열림
+        send_dp(c_open);
+        vTaskDelay(pdMS_TO_TICKS(750));
+
+        // 3단계: 통화 종료
+        send_dp(c_end);
+
+        // 초인종 벨 플래그 리셋
+        g_doorphone_state.front_bell.store(false, std::memory_order_release);
+        g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
+
+        vTaskDelete(nullptr);
+      }, "DP_Seq", 2048, args, 2, nullptr);
+
+      char ok_msg[128];
+      snprintf(ok_msg, sizeof(ok_msg),
+               "{\"res\":\"ok\",\"action\":\"%s\",\"msg\":\"Doorphone sequence triggered (Call -> Open -> End)\"}\n",
+               action_buf);
+      send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    const char *err_msg = "{\"res\":\"error\",\"msg\":\"Unknown doorphone action (Use open_front or open_lobby)\"}\n";
+    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+    return;
+  }
+
+  // 15. set_ew11 (CH5 EW11 Multi-Client Slot Configuration)
+  if (strcasecmp(cmd, "set_ew11") == 0) {
+    long slot = findJsonIntValue(json_str, "slot", -1);
+    long port = findJsonIntValue(json_str, "port", 0);
+    char ip[32] = {0};
+    char name[16] = {0};
+    findJsonStringValue(json_str, "ip", ip, sizeof(ip));
+    findJsonStringValue(json_str, "name", name, sizeof(name));
+
+    // enabled 여부 판별 (명시적 enabled 필드가 있거나, ip가 제공되면 true)
+    int en_val = findJsonIntValue(json_str, "enabled", -1);
+    bool enabled = (en_val == 1) || (en_val == -1 && strlen(ip) > 0);
+
+    if (slot >= 0 && slot < Config::TCP::MAX_EW11_SLOTS) {
+      uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[slot];
+      uint16_t target_port = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : (g_ew11_slots[slot].target_port > 0 ? g_ew11_slots[slot].target_port : def_slot_port);
+      if (target_port == 8899) target_port = def_slot_port; // 구버전 8899 기본값 보정
+      if (Ew11_SetSlot(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr, target_port, name[0] ? name : nullptr)) {
+        char ok_msg[192];
+        snprintf(ok_msg, sizeof(ok_msg),
+                 "{\"res\":\"ok\",\"slot\":%ld,\"enabled\":%s,\"ip\":\"%s\",\"port\":%u,\"msg\":\"EW11 slot %ld updated & saved to NVS\"}\n",
+                 slot, enabled ? "true" : "false", ip, target_port, slot);
+        send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+        return;
+      }
+    }
+    const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid EW11 slot (0-4) or parameters\"}\n";
+    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+    return;
+  }
+
   // Unknown Command
   const char *unk_msg = "{\"res\":\"error\",\"msg\":\"Unknown command\"}\n";
   send(sock, unk_msg, strlen(unk_msg), MSG_DONTWAIT);
@@ -824,5 +965,24 @@ void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
       continue;
     }
     p++;
+  }
+}
+
+// ============================================================================
+// CH7 실시간 도어폰 이벤트 브로드캐스트 (Server Push)
+// ============================================================================
+void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) {
+  char buf[128];
+  int len = snprintf(buf, sizeof(buf),
+                     "{\"event\":\"doorphone\",\"front_bell\":%s,\"lobby_bell\":%s}\n",
+                     front_bell ? "true" : "false", lobby_bell ? "true" : "false");
+  if (len <= 0 || !g_mgmt_mutex) return;
+
+  MutexLocker lock(g_mgmt_mutex);
+  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+    if (g_mgmt_sessions[i].sock >= 0) {
+      send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
+      g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 }

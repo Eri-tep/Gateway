@@ -2,6 +2,7 @@
 #include "MgmtRpc.h"
 #include "TelnetCli.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_ota_ops.h"
 #include "esp_task_wdt.h"
 #include <cstdarg>
@@ -216,6 +217,235 @@ void cmdSave(EmbeddedCli *cli, char *args, void *context) {
   int sock = getSock(context);
   Config_Save();
   sendTelnetMsg(sock, "[OK] Configuration successfully committed and saved to NVS flash!\r\n");
+}
+
+void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
+  int sock = getSock(context);
+  int argc = embeddedCliGetTokenCount(args);
+
+  if (argc == 0 || (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "list") == 0) ||
+      (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "status") == 0)) {
+    char buf[1024];
+    AppendBuf out{buf, sizeof(buf)};
+    out.append("\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("                      CH5 EW11 TCP CLIENT SOCKET STATUS                         \r\n");
+    out.append(Fmt::DIV80EQ);
+    out.appendFormat("%-6s %-13s %-6s %-18s %-14s %s\r\n",
+                     "Slot", "Name", "Port", "Client IP", "Status", "Packets(RX/TX)");
+    out.append(Fmt::DIV80);
+
+    {
+      MutexLocker lock(g_ch5_mutex);
+      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        auto &slot = g_ew11_slots[s];
+        const char *status_str = !slot.enabled ? "Disabled"
+                                 : !slot.is_connected ? "Listening"
+                                 : (slot.rx_pkts == 0) ? "Idle" : "Connected";
+
+        out.appendFormat("#%-5d %-13s %-6u %-18s %-14s %u / %u\r\n",
+                         s, slot.name,
+                         slot.target_port,
+                         slot.is_connected ? (slot.target_ip[0] ? slot.target_ip : "Connected") : (slot.target_ip[0] ? slot.target_ip : "-"),
+                         status_str,
+                         static_cast<unsigned>(slot.rx_pkts),
+                         static_cast<unsigned>(slot.tx_pkts));
+      }
+    }
+    out.append(Fmt::DIV80);
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+    return;
+  }
+
+  const char *sub = embeddedCliGetToken(args, 1);
+
+  if (strcasecmp(sub, "frame") == 0) {
+    if (argc < 4) {
+      sendTelnetMsg(sock, "[ERROR] Usage: ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+    uint8_t stx = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 16));
+    uint8_t etx = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 4), nullptr, 16));
+    uint8_t len = 0;
+    if (argc >= 5) {
+      len = static_cast<uint8_t>(atoi(embeddedCliGetToken(args, 5)));
+    }
+    char ns[16], tag[16];
+    snprintf(ns, sizeof(ns), "e%d_frame", slot);
+    snprintf(tag, sizeof(tag), "EW11_#%d", slot);
+    g_ew11_slots[slot].tracker.setFixedLock(stx, etx, len);
+    g_ew11_slots[slot].tracker.saveToNvs(ns, tag);
+    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing permanently fixed to STX 0x%02X, ETX 0x%02X, Len %u.\r\n",
+                   slot, stx, etx, len);
+    return;
+  }
+
+  if (strcasecmp(sub, "reset") == 0) {
+    if (argc < 2) {
+      sendTelnetMsg(sock, "[ERROR] Usage: ew11 reset <slot:0-4>\r\n");
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+    char ns[16], tag[16];
+    snprintf(ns, sizeof(ns), "e%d_frame", slot);
+    snprintf(tag, sizeof(tag), "EW11_#%d", slot);
+    g_ew11_slots[slot].tracker.clearNvs(ns, tag);
+    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing tracker reset to autonomous auto-probing.\r\n", slot);
+    return;
+  }
+
+  if (strcasecmp(sub, "set") == 0) {
+    if (argc < 2) {
+      sendTelnetMsg(sock, "[ERROR] Usage: ew11 set <slot:0-4> [port] [allowed_ip] [name] [enable:1/0]\r\n");
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+
+    uint16_t default_port = Config::TCP::EW11_SLOT_PORTS[slot];
+    uint16_t port = g_ew11_slots[slot].target_port > 0 ? g_ew11_slots[slot].target_port : default_port;
+    const char *ip_str = nullptr;
+    const char *name_str = nullptr;
+    bool enabled = g_ew11_slots[slot].enabled;
+
+    // 인자 파싱: ew11 set <slot> [port/ip] ...
+    // 토큰 3이 숫자(포트)인지 IP인지 유연하게 지원
+    if (argc >= 3) {
+      const char *tok3 = embeddedCliGetToken(args, 3);
+      if (strchr(tok3, '.') != nullptr) {
+        // IP 주소 형식인 경우
+        ip_str = (strcmp(tok3, "-") == 0 || strcmp(tok3, "none") == 0) ? "" : tok3;
+      } else {
+        int p_val = atoi(tok3);
+        if (p_val > 0 && p_val <= 65535) port = static_cast<uint16_t>(p_val);
+      }
+    }
+
+    if (argc >= 4) {
+      const char *tok4 = embeddedCliGetToken(args, 4);
+      if (strchr(tok4, '.') != nullptr) {
+        ip_str = (strcmp(tok4, "-") == 0 || strcmp(tok4, "none") == 0) ? "" : tok4;
+      } else if (port == default_port && atoi(tok4) > 0) {
+        port = static_cast<uint16_t>(atoi(tok4));
+      } else {
+        name_str = tok4;
+      }
+    }
+
+    if (argc >= 5) {
+      const char *tok5 = embeddedCliGetToken(args, 5);
+      if (name_str == nullptr && !isdigit(tok5[0])) {
+        name_str = tok5;
+      } else if (isdigit(tok5[0])) {
+        enabled = (atoi(tok5) != 0);
+      }
+    }
+
+    if (argc >= 6) {
+      enabled = (atoi(embeddedCliGetToken(args, 6)) != 0);
+    }
+
+    if (Ew11_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port, name_str)) {
+      sendTelnetMsgf(sock, "[OK] EW11 Slot #%d configured (Name: %s, Listen Port: %u, Allowed IP: %s, Enabled: %s) and saved to NVS!\r\n",
+                     slot, g_ew11_slots[slot].name, g_ew11_slots[slot].target_port,
+                     g_ew11_slots[slot].target_ip[0] ? g_ew11_slots[slot].target_ip : "Any",
+                     g_ew11_slots[slot].enabled ? "true" : "false");
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Failed to configure EW11 slot.\r\n");
+    }
+    return;
+  }
+
+  if (strcasecmp(sub, "enable") == 0 || strcasecmp(sub, "disable") == 0) {
+    if (argc < 2) {
+      sendTelnetMsgf(sock, "[ERROR] Usage: ew11 %s <slot:0-4>\r\n", sub);
+      return;
+    }
+    int slot = atoi(embeddedCliGetToken(args, 2));
+    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+      return;
+    }
+    bool enable = (strcasecmp(sub, "enable") == 0);
+    {
+      MutexLocker lock(g_ch5_mutex);
+      g_ew11_slots[slot].enabled = enable;
+      if (!enable && g_ew11_slots[slot].sock >= 0) {
+        close(g_ew11_slots[slot].sock);
+        g_ew11_slots[slot].sock = -1;
+        g_ew11_slots[slot].is_connected = false;
+        g_ew11_slots[slot].rx_len = 0;
+      }
+    }
+    Ew11_SaveConfig();
+    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n", slot, enable ? "ENABLED" : "DISABLED");
+    return;
+  }
+
+  sendTelnetMsg(sock, "Usage: ew11 [list | set <slot> [port] [allowed_ip] [name] [enable] | frame <slot> <stx> <etx> [len] | reset <slot> | enable <slot> | disable <slot>]\r\n");
+}
+
+void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
+  int sock = getSock(context);
+  int argc = embeddedCliGetTokenCount(args);
+
+  if (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "clear") == 0) {
+    g_route_registry.clear();
+    sendTelnetMsg(sock, "[OK] Dynamic device ingress routing table cleared.\r\n");
+    return;
+  }
+
+  static DeviceRouteEntry entries[DeviceRouteRegistry::MAX_ROUTES];
+  size_t count = g_route_registry.getRoutes(entries, DeviceRouteRegistry::MAX_ROUTES);
+
+  char buf[2048];
+  AppendBuf out{buf, sizeof(buf)};
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("                 DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)         \r\n");
+  out.append(Fmt::DIV80EQ);
+  out.appendFormat("%-22s %-25s %s\r\n", "Target [DevID:Sub1:Sub2]", "Egress Destination", "Last Seen");
+  out.append(Fmt::DIV80);
+
+  if (count == 0) {
+    out.append("  (No device routes learned yet. Waiting for bus/EW11 packets...)\r\n");
+  } else {
+    uint32_t now = millis();
+    for (size_t i = 0; i < count; i++) {
+      const auto &e = entries[i];
+      char tgt_str[24];
+      snprintf(tgt_str, sizeof(tgt_str), "[0x%02X:%02X:%02X]", e.dev_id, e.sub1, e.sub2);
+
+      char dst_str[32];
+      if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
+        snprintf(dst_str, sizeof(dst_str), "CH#5 Slot %d", e.endpoint.slot_idx);
+      } else {
+        snprintf(dst_str, sizeof(dst_str), "CH#%u", e.endpoint.channel_id);
+      }
+
+      char el_str[20];
+      Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str, sizeof(el_str));
+
+      out.appendFormat("  %-20s -> %-23s (%s ago)\r\n", tgt_str, dst_str, el_str);
+    }
+  }
+
+  out.append(Fmt::DIV80);
+  out.append("Usage: routes        - View learned device routes\r\n");
+  out.append("       routes clear  - Clear routing table cache\r\n\r\n");
+  sendTelnetMsgLen(sock, out.buf, out.offset);
 }
 
 } // namespace ConfigCli
@@ -679,6 +909,18 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
   out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
   out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
+  out.append("  wallpad simulate <hex...>       Inject raw hex packet into auto-probing engine\r\n");
+  out.append(Fmt::DIV80);
+  out.append(" [ CONTROL BLUEPRINT & LEARNING ]\r\n");
+  out.append("  ctl [table|list]                Display learned control blueprint table\r\n");
+  out.append("  ctl <dev_id>                    Dump detailed packet blueprint & action slots (e.g. ctl 0x18)\r\n");
+  out.append("  ctl learn [id|all]              Active probing session (all groups if omitted)\r\n");
+  out.append("  ctl lock [dev_id|all]           Lock blueprint(s) into immutable state\r\n");
+  out.append("  ctl unlock [dev_id|all]         Unlock blueprint(s) for continuous learning\r\n");
+  out.append("  ctl name <dev_id> <name>        Assign custom group name (e.g. ctl name 0x1B Gas)\r\n");
+  out.append("  ctl class <dev_id> <class>      Assign device class (light|outlet|vent|thermo|gas|ev)\r\n");
+  out.append("  ctl status                      Show active probing real-time progress\r\n");
+  out.append("  ctl reset [id|all]              Reset blueprint(s) and wipe from NVS flash\r\n");
   out.append("  trace [on|off|ctl|ack|pol|...]  Live packet stream monitoring with filters\r\n");
   out.append("  q                               Shortcut to stop live tracing immediately\r\n");
   out.append(Fmt::DIV80);
@@ -689,6 +931,12 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   out.append("  wifi scan                       Scan surrounding 2.4GHz Wi-Fi AP networks\r\n");
   out.append("  wifi connect <ssid> [password]  Connect to target Wi-Fi AP network\r\n");
   out.append("  wifi disconnect                 Disconnect current Wi-Fi station\r\n");
+  out.append("  ew11 [list|status]              Show CH5 EW11 multi-client slots & framing status\r\n");
+  out.append("  ew11 set <slot> <ip> [port]     Configure EW11 slot IP & port (Saved to NVS)\r\n");
+  out.append("  ew11 frame <slot> <stx> <etx>   Manually fix slot packet framing in NVS\r\n");
+  out.append("  ew11 reset <slot>               Reset slot framing tracker to autonomous auto-probing\r\n");
+  out.append("  ew11 enable/disable <slot>      Enable or disable target EW11 client slot\r\n");
+  out.append("  routes [clear]                  Show dynamic device ingress routing table\r\n");
   out.append("  config                          View all runtime configuration parameters\r\n");
   out.append("  config set <key> <val>          Modify a configuration parameter (runtime)\r\n");
   out.append("  config reset                    Reset runtime configuration to system defaults\r\n");
@@ -782,6 +1030,11 @@ static void formatSources(uint8_t src_mask, char *buf, size_t buf_len) {
     if (idx > 0 && idx < buf_len)
       idx += snprintf(buf + idx, buf_len - idx, "+");
     idx += snprintf(buf + idx, buf_len - idx, "CH3");
+  }
+  if (src_mask & (1 << 5)) {
+    if (idx > 0 && idx < buf_len)
+      idx += snprintf(buf + idx, buf_len - idx, "+");
+    idx += snprintf(buf + idx, buf_len - idx, "CH5");
   }
   if (src_mask & (1 << 6)) {
     if (idx > 0 && idx < buf_len)
@@ -958,8 +1211,40 @@ void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
 void wallpadPrintStatus(AppendBuf &out) {
   auto *active = WallpadParserFactory::getActiveParser();
   auto desc = g_auto_probing_engine.getDescriptor();
+  VendorProfileDescriptor active_prof;
+  bool is_manual_prof = false;
+  if (ProfileRepository::getActiveProfile(active_prof) && strcasecmp(active_prof.key, "auto") != 0) {
+    is_manual_prof = true;
+    // 수동 프로파일 정보로 desc 오버라이드 (이미 확정 저장된 프로파일)
+    desc.stx = active_prof.stx;
+    desc.etx = active_prof.etx;
+    desc.checksum_algo = active_prof.cs_algo;
+    desc.opcode_offset = active_prof.opcode_offset;
+    desc.query_opcode = active_prof.query_op;
+    desc.control_opcode = active_prof.ctrl_op;
+    desc.ack_opcode = active_prof.ack_op;
+    desc.control_seen = (active_prof.ctrl_op != 0);
+    desc.dev_id_offset = active_prof.dev_id_offset;
+    desc.sub1_offset = active_prof.sub1_offset;
+    desc.sub2_offset = active_prof.sub2_offset;
+    desc.is_swapped_addr = (active_prof.is_swapped_addr != 0);
+    desc.is_locked = true;
+    desc.opcodes_locked = true;
+    desc.offsets_locked = true;
+    desc.payload_offset = std::max({active_prof.opcode_offset, active_prof.dev_id_offset,
+                                    active_prof.sub1_offset, active_prof.sub2_offset}) + 1;
+  }
+
   size_t active_targets = g_polling_targets.activeCount();
+  size_t verified_targets = g_polling_targets.verifiedCount();
   size_t online_devs = g_device_repo.getOnlineCount();
+
+  const char *phase_str = "Phase 1/3 (Framing Probing)";
+  if (is_manual_prof || desc.offsets_locked) {
+    phase_str = "Phase 3/3: Fully Locked";
+  } else if (desc.is_locked) {
+    phase_str = "Phase 2/3: Cache Syncing";
+  }
 
   out.append("\r\n");
   out.append(Fmt::DIV80EQ);
@@ -968,19 +1253,20 @@ void wallpadPrintStatus(AppendBuf &out) {
   out.appendFormat("Active Profile  : %s (ID: %u)\r\n",
                    active ? active->getProfileKey() : "Standard",
                    static_cast<unsigned>(g_config.wallpad_profile));
-  out.appendFormat("Profile Mode    : %s\r\n",
-                   (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE))
-                       ? (desc.is_locked ? "Auto Adaptive [LOCKED]" : "Auto Adaptive [LEARNING]")
-                       : "Manual Fixed");
+  if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
+    out.appendFormat("Profile Mode    : Auto Adaptive [%s]\r\n", phase_str);
+  } else {
+    out.appendFormat("Profile Mode    : Manual Fixed\r\n");
+  }
   out.appendFormat("Devices Tracked : %u Active / %u Online (%u Offline) [%s]\r\n",
                    static_cast<unsigned>(active_targets), static_cast<unsigned>(online_devs),
                    static_cast<unsigned>(g_device_repo.count() >= online_devs ? (g_device_repo.count() - online_devs) : 0),
                    (online_devs >= active_targets && active_targets > 0) ? "100% Synced" : "Syncing");
   out.append(Fmt::DIV80);
-  out.append("Category       Parameter       Value / Rule                               Status\r\n");
+  out.append("Packet Field    Parameter       Value / Layout Rule                       Status\r\n");
   out.append(Fmt::DIV80);
 
-  // 1. Framing
+  // 1. Header (STX, LEN)
   char stx_buf[16], etx_buf[16], len_buf[32], pkt_len_buf[32];
   snprintf(stx_buf, sizeof(stx_buf), "%02X", active ? active->getStx() : 0xF7);
   snprintf(etx_buf, sizeof(etx_buf), "%02X", active ? active->getEtx() : 0xEE);
@@ -988,37 +1274,80 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   size_t total_tgts = g_polling_targets.totalCount();
 
-  // Collect observed raw packet lengths from active polling targets
-  uint8_t q_lens[8];
-  size_t q_len_cnt = 0;
-  for (size_t i = 0; i < total_tgts && q_len_cnt < 8; ++i) {
-    PollingTargetEntry entry;
-    if (g_polling_targets.getEntry(i, entry) && entry.raw_query_len > 0) {
-      if (std::find(q_lens, q_lens + q_len_cnt, entry.raw_query_len) == q_lens + q_len_cnt) {
-        q_lens[q_len_cnt++] = entry.raw_query_len;
+  uint8_t q_lens[8], ack_lens[8];
+  size_t q_len_cnt = 0, ack_len_cnt = 0;
+
+  auto add_unique_len = [](uint8_t *arr, size_t &cnt, uint8_t len) {
+    if (len >= 3 && len <= 64 && cnt < 8) {
+      if (std::find(arr, arr + cnt, len) == arr + cnt) {
+        arr[cnt++] = len;
       }
+    }
+  };
+
+  for (size_t i = 0; i < total_tgts; ++i) {
+    PollingTargetEntry entry;
+    if (g_polling_targets.getEntry(i, entry)) {
+      if (entry.raw_query_len > 0) add_unique_len(q_lens, q_len_cnt, entry.raw_query_len);
+      if (entry.raw_ack_len > 0) add_unique_len(ack_lens, ack_len_cnt, entry.raw_ack_len);
     }
   }
   std::sort(q_lens, q_lens + q_len_cnt);
-  if (q_len_cnt > 0) {
-    size_t off = 0;
-    for (size_t i = 0; i < q_len_cnt; ++i) {
-      off += snprintf(pkt_len_buf + off, sizeof(pkt_len_buf) - off, "%s%u", (i == 0 ? "" : ", "), q_lens[i]);
+  std::sort(ack_lens, ack_lens + ack_len_cnt);
+
+  auto format_lens = [](const uint8_t *arr, size_t cnt, char *out, size_t out_sz, const char *fallback) {
+    if (cnt == 0) {
+      snprintf(out, out_sz, "%s", fallback);
+      return;
     }
-    snprintf(pkt_len_buf + off, sizeof(pkt_len_buf) - off, " Bytes");
+    size_t off = 0;
+    for (size_t i = 0; i < cnt; ++i) {
+      off += snprintf(out + off, out_sz - off, "%s%u", (i == 0 ? "" : ", "), arr[i]);
+    }
+    snprintf(out + off, out_sz - off, " Byte");
+  };
+
+  char def_len_buf[16];
+  if (desc.learned_query_len > 0) {
+    snprintf(def_len_buf, sizeof(def_len_buf), "%u Byte", desc.learned_query_len);
   } else {
-    snprintf(pkt_len_buf, sizeof(pkt_len_buf), "11 Bytes");
+    snprintf(def_len_buf, sizeof(def_len_buf), "Waiting");
   }
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Framing", "STX", stx_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "ETX", etx_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Length", pkt_len_buf, "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Length Field", len_buf, "[LOCKED]");
+  char q_str[32], ack_str[32];
+  format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), def_len_buf);
+  format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), def_len_buf);
+
+  char len_prefix[16];
+  if (desc.has_len_field) {
+    snprintf(len_prefix, sizeof(len_prefix), "Byte #%u", desc.len_offset);
+  } else {
+    snprintf(len_prefix, sizeof(len_prefix), desc.is_locked ? "Fixed" : "Waiting");
+  }
+
+  char q_val[48], cmd_val[48], ack_val[48];
+  snprintf(q_val, sizeof(q_val), "%s : %s", len_prefix, q_str);
+  if (desc.ctrl_len_cnt > 0) {
+    char cmd_lens_str[32];
+    format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), def_len_buf);
+    snprintf(cmd_val, sizeof(cmd_val), "%s : %s", len_prefix, cmd_lens_str);
+  } else {
+    snprintf(cmd_val, sizeof(cmd_val), "%s : Waiting", len_prefix);
+  }
+  snprintf(ack_val, sizeof(ack_val), "%s : %s", len_prefix, ack_str);
+
+  const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
+  const char *cmd_status = (desc.control_seen && desc.ctrl_len_cnt > 0) ? "[LOCKED]" : "[WAITING]";
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "[ST] STX", stx_buf, len_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Query", q_val, len_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Command", cmd_val, cmd_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Response", ack_val, len_status);
   out.append(Fmt::DIV80);
 
-  // 2. Addressing & Data (Observed Byte Values)
-  uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16], data0_ids[16];
-  size_t dev_id_cnt = 0, sub1_cnt = 0, sub2_cnt = 0, data0_cnt = 0;
+  // 2. Addressing (Address Mode, Device Type, Sub-ID)
+  uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16];
+  size_t dev_id_cnt = 0, sub1_cnt = 0, sub2_cnt = 0;
 
   for (size_t i = 0; i < total_tgts; ++i) {
     PollingTargetEntry entry;
@@ -1032,19 +1361,12 @@ void wallpadPrintStatus(AppendBuf &out) {
       if (sub2_cnt < 16 && std::find(sub2_ids, sub2_ids + sub2_cnt, entry.sub2) == sub2_ids + sub2_cnt) {
         sub2_ids[sub2_cnt++] = entry.sub2;
       }
-      if (entry.raw_query_len >= 8 && data0_cnt < 16) {
-        uint8_t d0 = entry.raw_query_data[7];
-        if (std::find(data0_ids, data0_ids + data0_cnt, d0) == data0_ids + data0_cnt) {
-          data0_ids[data0_cnt++] = d0;
-        }
-      }
     }
   }
 
   std::sort(dev_ids, dev_ids + dev_id_cnt);
   std::sort(sub1_ids, sub1_ids + sub1_cnt);
   std::sort(sub2_ids, sub2_ids + sub2_cnt);
-  std::sort(data0_ids, data0_ids + data0_cnt);
 
   auto format_hex_list = [](const uint8_t *arr, size_t cnt, const char *prefix, char *out, size_t out_sz) {
     if (cnt == 0) {
@@ -1054,115 +1376,274 @@ void wallpadPrintStatus(AppendBuf &out) {
     char hex_str[64] = {0};
     size_t off = 0;
     for (size_t d = 0; d < cnt; ++d) {
-      if (off + 5 >= 25) { // 25자 초과 시 뒷부분 줄임표 처리하여 39자 폭 절대 준수
+      if (off + 5 >= 24) {
         off += snprintf(hex_str + off, sizeof(hex_str) - off, ", ..");
         break;
       }
       off += snprintf(hex_str + off, sizeof(hex_str) - off, "%s%02X",
                       (d == 0 ? "" : ", "), arr[d]);
     }
-    snprintf(out, out_sz, "%s (%s)", prefix, hex_str);
+    snprintf(out, out_sz, "%s : %s", prefix, hex_str);
   };
 
-  char dev_list_buf[64], sub1_list_buf[64], sub2_list_buf[64], data_list_buf[64];
-  format_hex_list(dev_ids, dev_id_cnt, "Byte #3", dev_list_buf, sizeof(dev_list_buf));
-  format_hex_list(sub1_ids, sub1_cnt, "Byte #5", sub1_list_buf, sizeof(sub1_list_buf));
-  format_hex_list(sub2_ids, sub2_cnt, "Byte #6", sub2_list_buf, sizeof(sub2_list_buf));
-  format_hex_list(data0_ids, data0_cnt, "Byte #7 ~ #(N-3)", data_list_buf, sizeof(data_list_buf));
-
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Addressing", "Device ID", dev_list_buf, "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Sub-ID #1", sub1_list_buf, "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Sub-ID #2", sub2_list_buf, "[LOCKED]");
-  out.append(Fmt::DIV80);
-
-  // 3. Opcodes
-  char off_buf[32], q_buf[16], c_buf[16], a_buf[16];
-  const char *c_status = "[WAITING]";
-  if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
-    snprintf(off_buf, sizeof(off_buf), "Byte #%u", desc.opcode_offset);
-    snprintf(q_buf, sizeof(q_buf), "%02X", desc.query_opcode);
-    if (desc.control_seen) {
-      snprintf(c_buf, sizeof(c_buf), "%02X", desc.control_opcode);
-      c_status = "[LOCKED]";
+  char addr_mode_buf[48];
+  if (desc.offsets_locked) {
+    if (desc.is_swapped_addr) {
+      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Swapped (GW:Byte#%u <-> ID:Byte#%u)",
+               desc.gw_addr_offset, desc.dev_id_offset);
     } else {
-      snprintf(c_buf, sizeof(c_buf), "--");
-      c_status = "[WAITING]";
-    }
-    snprintf(a_buf, sizeof(a_buf), "%02X", desc.ack_opcode);
-  } else {
-    snprintf(off_buf, sizeof(off_buf), "Byte #4");
-    snprintf(q_buf, sizeof(q_buf), "01");
-    snprintf(c_buf, sizeof(c_buf), "02");
-    c_status = "[LOCKED]";
-    snprintf(a_buf, sizeof(a_buf), "04");
-  }
-
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Opcodes", "Position", off_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Query", q_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Control", c_buf, c_status);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "ACK", a_buf, desc.opcodes_locked ? "[LOCKED]" : "[LEARNING]");
-  out.append(Fmt::DIV80);
-
-  // 4. Payload
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Payload", "Range", data_list_buf, "[STABLE]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Length", "0 ~ 11 Bytes", "[STABLE]");
-  out.append(Fmt::DIV80);
-
-  // 5. Checksum
-  char cs_buf[36], match_buf[36];
-  const char *match_status = "[STABLE]";
-  if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
-    snprintf(cs_buf, sizeof(cs_buf), "%s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
-    uint32_t pct = desc.tested_packets ? (desc.matched_packets * 100 / desc.tested_packets) : 100;
-    snprintf(match_buf, sizeof(match_buf), "%u%% (%u / %u)", static_cast<unsigned>(pct), static_cast<unsigned>(desc.matched_packets), static_cast<unsigned>(desc.tested_packets));
-    if (pct >= 95) {
-      match_status = "[STABLE]";
-    } else if (pct >= 80) {
-      match_status = "[NOISY]";
-    } else {
-      match_status = "[ERROR]";
+      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Direct (Single Address)");
     }
   } else {
-    snprintf(cs_buf, sizeof(cs_buf), "XOR [0 .. N-3]");
-    snprintf(match_buf, sizeof(match_buf), "N/A");
-    match_status = "[STABLE]";
+    snprintf(addr_mode_buf, sizeof(addr_mode_buf), "%s", desc.is_locked ? "Probing..." : "Waiting");
+  }
+  const char *addr_status = desc.offsets_locked ? "[LOCKED]" : (desc.is_locked ? "[LEARNING]" : "[WAITING]");
+
+  char gw_val_buf[48];
+  if (desc.offsets_locked) {
+    if (desc.gw_addr_offset != 0xFF) {
+      snprintf(gw_val_buf, sizeof(gw_val_buf), "Byte #%u : %02X", desc.gw_addr_offset, desc.gw_addr);
+    } else {
+      snprintf(gw_val_buf, sizeof(gw_val_buf), "Val: %02X", desc.gw_addr);
+    }
+  } else {
+    snprintf(gw_val_buf, sizeof(gw_val_buf), "-");
   }
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Checksum", "Formula", cs_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "", "Match Rate", match_buf, match_status);
+  char dev_off_label[32], sub1_off_label[32], sub2_off_label[32];
+  if (desc.offsets_locked) {
+    snprintf(dev_off_label, sizeof(dev_off_label), "Byte #%u", desc.dev_id_offset);
+    snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #%u", desc.sub1_offset);
+    snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #%u", desc.sub2_offset);
+  } else {
+    snprintf(dev_off_label, sizeof(dev_off_label), "Probing...");
+    snprintf(sub1_off_label, sizeof(sub1_off_label), "Probing...");
+    snprintf(sub2_off_label, sizeof(sub2_off_label), "Probing...");
+  }
+
+  char dev_list_buf[64], sub1_list_buf[64], sub2_list_buf[64];
+  format_hex_list(dev_ids, dev_id_cnt, dev_off_label, dev_list_buf, sizeof(dev_list_buf));
+  format_hex_list(sub1_ids, sub1_cnt, sub1_off_label, sub1_list_buf, sizeof(sub1_list_buf));
+  format_hex_list(sub2_ids, sub2_cnt, sub2_off_label, sub2_list_buf, sizeof(sub2_list_buf));
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Addressing", "Addr Mode", addr_mode_buf, addr_status);
+  if (desc.offsets_locked) {
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[GW] Master", gw_val_buf, addr_status);
+  }
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[ID] Device", dev_list_buf, addr_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[S1] Sub Addr", sub1_list_buf, addr_status);
+  if (desc.sub2_offset != 0xFF && desc.sub2_offset != desc.sub1_offset && sub2_cnt > 0) {
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[S2] Sub Addr", sub2_list_buf, addr_status);
+  }
   out.append(Fmt::DIV80);
 
-  // 6. Door Framing (Universal IPG Engine)
+  // 3. Command (Opcode, Sub-Command)
+  char op_line_buf[48];
+  char ctl_hex[8];
+  if (desc.control_seen && desc.control_opcode != 0) {
+    snprintf(ctl_hex, sizeof(ctl_hex), "%02X", desc.control_opcode);
+  } else {
+    // ★ 제어 패킷 미관측 - 가정값("02") 대신 명시적으로 미확인 표시
+    snprintf(ctl_hex, sizeof(ctl_hex), "??");
+  }
+  snprintf(op_line_buf, sizeof(op_line_buf), "Byte #%u : QRY:%02X, CTL:%s, ACK:%02X",
+           desc.opcode_offset, desc.query_opcode, ctl_hex, desc.ack_opcode);
+
+  // ★ [LOCKED] 상태: QRY/ACK 락 여부 + CTL 관측 여부를 구분하여 표시
+  const char *opcode_status;
+  if (!desc.opcodes_locked) {
+    opcode_status = "[LEARNING]";
+  } else if (!desc.control_seen || desc.control_opcode == 0) {
+    opcode_status = "[WAITING]";        // QRY+ACK 확정, CTL은 아직 미관측(대기)
+  } else {
+    opcode_status = "[LOCKED]";         // QRY+CTL+ACK 모두 확정
+  }
+
+  char seq_line_buf[32];
+  if (desc.has_seq_counter) {
+    snprintf(seq_line_buf, sizeof(seq_line_buf), "Byte #%u : +1 Counter", desc.seq_offset);
+  } else {
+    snprintf(seq_line_buf, sizeof(seq_line_buf), desc.offsets_locked ? "-" : "None");
+  }
+  const char *seq_status = desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[UNUSED]") : "[WAITING]";
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "[OP] Opcode", op_line_buf, opcode_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sequence", seq_line_buf, seq_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[CX] Context", sub1_list_buf, addr_status);
+  out.append(Fmt::DIV80);
+
+  // 4. Payload (Data Range, Length Rule)
+  char payload_range_buf[48];
+  char payload_len_buf[32];
+  if (desc.offsets_locked) {
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #%u ~ #[N-3]", desc.payload_offset);
+    snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - %u] Byte", desc.payload_offset + 2);
+  } else {
+    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #7 ~ #[N-3] : Est");
+    snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - 9] Byte : Est");
+  }
+  const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Payload", "[PL] Data Range", payload_range_buf, payload_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[PL] Length", payload_len_buf, payload_status);
+  out.append(Fmt::DIV80);
+
+  // 5. Tail (Checksum, ETX)
+  char cs_algo_buf[48];
+  snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #[N-2] : %s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
+  char etx_line_buf[32];
+  snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #[N-1] : %s", etx_buf);
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "[CS] Checksum", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[ET] ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.append(Fmt::DIV80);
+
+  // 6. Bus Physical (CH1/CH2/CH3 RS-485 Config)
+  uint32_t b1 = g_config.uart_baud_rate;
+  uint32_t b2 = g_config.ch2_baud_rate;
+  uint32_t b3 = g_config.ch3_baud_rate;
+
+  char baud_buf[48];
+  if (b1 == b2 && b2 == b3) {
+    snprintf(baud_buf, sizeof(baud_buf), "%u bps : CH1~3", static_cast<unsigned>(b1));
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+  } else {
+    snprintf(baud_buf, sizeof(baud_buf), "CH1:%u, CH2:%u, CH3:%u",
+             static_cast<unsigned>(b1), static_cast<unsigned>(b2), static_cast<unsigned>(b3));
+    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+  }
+  char ipg_silence_buf[48];
+  snprintf(ipg_silence_buf, sizeof(ipg_silence_buf), "%u ms : CH1~3",
+           static_cast<unsigned>(Config::Timing::WALLPAD_AUTO_IPG_MS));
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", ipg_silence_buf, "[CONFIG]");
+  out.append(Fmt::DIV80);
+
+  // 7. Doorphone (CH4 Universal IPG Engine)
   Config::Doorphone::FramingStatus dp_status = g_doorphone_tracker.status.load(std::memory_order_relaxed);
   const char *dp_status_str = (dp_status == Config::Doorphone::FramingStatus::LOCKED)   ? "[LOCKED]"
                             : (dp_status == Config::Doorphone::FramingStatus::LEARNING) ? "[LEARNING]"
                             : (dp_status == Config::Doorphone::FramingStatus::NOISY)    ? "[NOISY]"
                                                                                         : "[WAITING]";
 
-  char dp_stx_buf[16], dp_etx_buf[16];
+  char dp_frame_buf[48];
   if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
-    snprintf(dp_stx_buf, sizeof(dp_stx_buf), "--");
-    snprintf(dp_etx_buf, sizeof(dp_etx_buf), "--");
+    snprintf(dp_frame_buf, sizeof(dp_frame_buf), "-- .. --");
   } else {
-    uint8_t stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-    uint8_t etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-    snprintf(dp_stx_buf, sizeof(dp_stx_buf), "%02X", stx);
-    snprintf(dp_etx_buf, sizeof(dp_etx_buf), "%02X", etx);
+    uint8_t dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
+    uint8_t dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
+    uint8_t dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+    if (dp_len > 0) {
+      snprintf(dp_frame_buf, sizeof(dp_frame_buf), "%02X .. %02X (%u Bytes)", dp_stx, dp_etx, dp_len);
+    } else {
+      snprintf(dp_frame_buf, sizeof(dp_frame_buf), "%02X .. %02X", dp_stx, dp_etx);
+    }
   }
 
-  char dp_len_buf[32];
-  uint8_t learned_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-  if (learned_len > 0) {
-    snprintf(dp_len_buf, sizeof(dp_len_buf), "%u Bytes", learned_len);
+  char dp_baud_buf[32];
+  snprintf(dp_baud_buf, sizeof(dp_baud_buf), "%u bps", static_cast<unsigned>(g_config.doorphone_baud_rate));
+  char dp_ipg_buf[32];
+  snprintf(dp_ipg_buf, sizeof(dp_ipg_buf), "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_IPG_MS));
+  char dp_debounce_buf[32];
+  snprintf(dp_debounce_buf, sizeof(dp_debounce_buf), "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_DEBOUNCE_MS));
+
+  uint8_t cur_dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
+  uint8_t cur_dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
+  uint8_t cur_dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+  const Config::Doorphone::DoorphoneProfile *dp_prof =
+      Config::Doorphone::matchDoorphoneCatalog(cur_dp_stx, cur_dp_etx, cur_dp_len);
+
+  char dp_match_buf[48];
+  char dp_ops_f_buf[64];
+  char dp_ops_l_buf[64];
+  const char *dp_match_status = "[UNKNOWN]";
+
+  if (dp_prof) {
+    snprintf(dp_match_buf, sizeof(dp_match_buf), "%s", dp_prof->desc);
+    dp_match_status = "[ACTIVE]";
+    snprintf(dp_ops_f_buf, sizeof(dp_ops_f_buf), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+             dp_prof->bell_front, dp_prof->call_front, dp_prof->open_front, dp_prof->end_front);
+    snprintf(dp_ops_l_buf, sizeof(dp_ops_l_buf), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+             dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby, dp_prof->end_lobby);
   } else {
-    snprintf(dp_len_buf, sizeof(dp_len_buf), "--");
+    snprintf(dp_match_buf, sizeof(dp_match_buf), "No Catalog Match");
+    snprintf(dp_ops_f_buf, sizeof(dp_ops_f_buf), "Bell:B5, Call:B9, Open:B4, End:B8 (Default)");
+    snprintf(dp_ops_l_buf, sizeof(dp_ops_l_buf), "Bell:5A, Call:5F, Open:61, End:60 (Default)");
   }
 
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "Door Framing", "STX",         dp_stx_buf,                         dp_status_str);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "ETX",         dp_etx_buf,                         dp_status_str);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "Length",      dp_len_buf,                         dp_status_str);
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "Time-gap",    "25 ms",                            "[LOCKED]");
-  out.appendFormat("%-15s%-16s%-39s%10s\r\n", "",             "Debounce",    "500 ms",                           "[LOCKED]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Doorphone (CH4)", "Framing", dp_frame_buf, dp_status_str);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Catalog Match", dp_match_buf, dp_match_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Opcodes(F)", dp_ops_f_buf, dp_prof ? "[ACTIVE]" : "[DEFAULT]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Opcodes(L)", dp_ops_l_buf, dp_prof ? "[ACTIVE]" : "[DEFAULT]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Baudrate", dp_baud_buf, "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Time-gap", dp_ipg_buf, "[CONFIG]");
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Debounce", dp_debounce_buf, "[CONFIG]");
+  out.append(Fmt::DIV80);
+
+  // 8. EW11 Streaming (CH5 Multi-Slot Framing)
+  {
+    MutexLocker lock(g_ch5_mutex);
+    bool first_ew11 = true;
+    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+      auto &slot = g_ew11_slots[s];
+      uint16_t listen_port = slot.target_port ? slot.target_port : Config::TCP::EW11_SLOT_PORTS[s];
+      char port_title[24];
+      snprintf(port_title, sizeof(port_title), "%u", listen_port);
+
+      char slot_detail[48];
+      const char *slot_status_str = "[UNUSED]";
+
+      if (!slot.enabled && !slot.is_connected && slot.target_ip[0] == '\0') {
+        snprintf(slot_detail, sizeof(slot_detail), "Disabled");
+        slot_status_str = "[UNUSED]";
+      } else {
+        const char *ip_str = slot.target_ip[0] ? slot.target_ip : "-";
+        if (slot.is_connected) {
+          snprintf(slot_detail, sizeof(slot_detail), "Connect: %s", ip_str);
+          slot_status_str = "[ACTIVE]";
+        } else {
+          snprintf(slot_detail, sizeof(slot_detail), "Listening");
+          slot_status_str = "[WAITING]";
+        }
+      }
+
+      out.appendFormat("%-16s%-16s%-38s%10s\r\n",
+                       first_ew11 ? "EW11 (CH5)" : "",
+                       port_title, slot_detail, slot_status_str);
+      first_ew11 = false;
+    }
+  }
+  out.append(Fmt::DIV80);
+
+  // 9. Runtime Sync & Telemetry
+  char conv_buf[48];
+  uint32_t conv_pct = active_targets ? (verified_targets * 100 / active_targets) : 0;
+  snprintf(conv_buf, sizeof(conv_buf), "%u / %u Targets (%u%%)",
+           static_cast<unsigned>(verified_targets), static_cast<unsigned>(active_targets),
+           static_cast<unsigned>(conv_pct));
+  const char *conv_status = (verified_targets >= active_targets && active_targets > 0)
+                                ? "[SYNCED]"
+                                : (desc.is_locked ? "[SYNCING]" : "[WAITING]");
+
+  char cs_rate_buf[48];
+  uint32_t cs_pct = desc.tested_packets ? (desc.matched_packets * 100 / desc.tested_packets) : 100;
+  auto format_compact = [](char *buf, size_t sz, uint32_t count) {
+    if (count >= 1000000) {
+      snprintf(buf, sz, "%.1fM", count / 1000000.0);
+    } else if (count >= 1000) {
+      snprintf(buf, sz, "%.1fk", count / 1000.0);
+    } else {
+      snprintf(buf, sz, "%u", static_cast<unsigned>(count));
+    }
+  };
+  char m_str[16], t_str[16];
+  format_compact(m_str, sizeof(m_str), desc.matched_packets);
+  format_compact(t_str, sizeof(t_str), desc.tested_packets);
+
+  snprintf(cs_rate_buf, sizeof(cs_rate_buf), "%s / %s Packets (%u%%)",
+           m_str, t_str, static_cast<unsigned>(cs_pct));
+  const char *cs_status = (cs_pct >= 95) ? "[STABLE]" : (cs_pct >= 80 ? "[NOISY]" : "[ERROR]");
+
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Runtime Sync", "Cache Sync", conv_buf, conv_status);
+  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "CS Validation", cs_rate_buf, cs_status);
   out.append(Fmt::DIV80EQ);
   out.append("\r\n");
 }
@@ -1257,6 +1738,858 @@ void wallpadSetProfile(int sock, const char *key) {
   }
 }
 
+void wallpadPrintControlTable(AppendBuf &out) {
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("                    DEVICE GROUP CONTROL BLUEPRINT TABLE                     \r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("DevID   Name     Class   Coverage  Mode (Channel)   Param Slot      Status\r\n");
+  out.append(Fmt::DIV80);
+
+  // 캐시가 수렴되었으나 템플릿이 비어있다면 자동 합성 시도
+  if (g_control_registry.getGroupCount() == 0) {
+    g_control_registry.synthesizeFromConvergedCache();
+  }
+
+  size_t count = g_control_registry.getGroupCount();
+  if (count == 0) {
+    out.append("  (No control templates learned yet. Waiting for bus traffic or active probe)\r\n");
+  } else {
+    // 레지스트리는 이미 dev_id 오름차순으로 유지되므로 스택 대형 배열 없이 1개씩 안전하게 순회 출력
+    for (size_t i = 0; i < count; ++i) {
+      GroupControlTemplate grp;
+      if (!g_control_registry.getGroupByIndex(i, grp) || grp.dev_id == 0) continue;
+
+      char mode_str[20]{"-"};
+      bool has_discovered_slot = (grp.power_slot.discovered || grp.temp_slot.discovered ||
+                                  grp.speed_slot.discovered || grp.mode_slot.discovered ||
+                                  grp.close_slot.discovered);
+      if (has_discovered_slot && grp.status != GroupControlTemplate::Status::WAITING &&
+          grp.status != GroupControlTemplate::Status::EMPTY) {
+        if (grp.coverage.dev_class == DeviceClass::VENT) {
+          // 환기: 풍량 채널(0x40)과 운전모드 채널(0x42)
+          uint8_t spd_cat = (grp.power_slot.category_val >= 0x20) ? grp.power_slot.category_val : 0x40;
+          uint8_t mod_cat = (grp.mode_slot.category_val >= 0x20) ? grp.mode_slot.category_val : 0x42;
+          if (spd_cat == mod_cat) {
+            spd_cat = 0x40;
+            mod_cat = 0x42;
+          }
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", spd_cat, mod_cat);
+        } else if (grp.coverage.dev_class == DeviceClass::THERMOSTAT) {
+          // 난방: 희망온도 채널(0x45)과 전원 채널(0x46)
+          uint8_t tmp_cat = (grp.temp_slot.category_val >= 0x20) ? grp.temp_slot.category_val : 0x45;
+          uint8_t pwr_cat = (grp.power_slot.category_val >= 0x20) ? grp.power_slot.category_val : 0x46;
+          if (tmp_cat == pwr_cat) {
+            tmp_cat = 0x45;
+            pwr_cat = 0x46;
+          }
+          snprintf(mode_str, sizeof(mode_str), "MULTI (%02X/%02X)", tmp_cat, pwr_cat);
+        } else if (grp.power_slot.discovered) {
+          uint8_t cat = grp.power_slot.category_val;
+          if (cat < 0x20 && grp.frame_len >= 6 && grp.raw_template[5] >= 0x20) {
+            cat = grp.raw_template[5];
+          }
+          if (cat >= 0x20) {
+            snprintf(mode_str, sizeof(mode_str), "SINGLE (%02X)", cat);
+          } else {
+            snprintf(mode_str, sizeof(mode_str), "SINGLE");
+          }
+        }
+      } else {
+        // 미학습/골격 상태는 다른 열들과 일관되게 '-' 로 표기
+        snprintf(mode_str, sizeof(mode_str), "-");
+      }
+
+      char param_str[20]{"-"};
+      if (grp.coverage.dev_class != DeviceClass::UNKNOWN) {
+        if (grp.coverage.dev_class == DeviceClass::THERMOSTAT && grp.temp_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "T:5~35C");
+        } else if (grp.temp_slot.discovered && grp.speed_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "T:5~35C S:L%u",
+                   grp.speed_slot.level_count);
+        } else if (grp.temp_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "T:5~35C");
+        } else if (grp.speed_slot.discovered) {
+          if (grp.speed_slot.level_count > 0) {
+            snprintf(param_str, sizeof(param_str), "S:L1~L%u",
+                     grp.speed_slot.level_count);
+          } else {
+            snprintf(param_str, sizeof(param_str), "S:%u~%u",
+                     grp.speed_slot.min_val, grp.speed_slot.max_val);
+          }
+        } else if (grp.close_slot.discovered) {
+          snprintf(param_str, sizeof(param_str), "C:0x%02X",
+                   grp.close_slot.off_val);
+        }
+      }
+
+      const char *stat_str = "WAITING";
+      switch (grp.status) {
+      case GroupControlTemplate::Status::EMPTY: stat_str = "EMPTY"; break;
+      case GroupControlTemplate::Status::WAITING: stat_str = (grp.frame_len > 0) ? "STANDBY" : "WAITING"; break;
+      case GroupControlTemplate::Status::CAPTURING: stat_str = "CAPTURING"; break;
+      case GroupControlTemplate::Status::PARTIAL: stat_str = "PARTIAL"; break;
+      case GroupControlTemplate::Status::VERIFIED: stat_str = "VERIFIED"; break;
+      case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
+      case GroupControlTemplate::Status::LOCKED: stat_str = "LOCKED"; break;
+      }
+
+      const char *type_str = "-";
+      switch (grp.coverage.dev_class) {
+      case DeviceClass::GAS:        type_str = "GAS"; break;
+      case DeviceClass::THERMOSTAT: type_str = "THERMO"; break;
+      case DeviceClass::VENT:       type_str = "VENT"; break;
+      case DeviceClass::AIRCON:     type_str = "AIRCON"; break;
+      case DeviceClass::MOMENTARY:  type_str = "MOMENT"; break;
+      case DeviceClass::SWITCH:     type_str = "SWITCH"; break;
+      case DeviceClass::UNKNOWN:
+      default:
+        type_str = "-";
+        break;
+      }
+
+      char cov_str[16]{"-"};
+      if (grp.coverage.dev_class != DeviceClass::UNKNOWN) {
+        int c = 0;
+        int total_c = 2;
+        switch (grp.coverage.dev_class) {
+        case DeviceClass::GAS:
+          total_c = 1;
+          if (grp.coverage.valve_close_seen || grp.coverage.power_off_seen) c++;
+          break;
+        case DeviceClass::THERMOSTAT:
+          total_c = 4;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          if (grp.coverage.temp_set_seen) c++;
+          if (grp.temp_recall_verified) c++;
+          break;
+        case DeviceClass::VENT:
+          total_c = (grp.speed_slot.level_count >= 3 || grp.coverage.speed_l3_seen) ? 5 : 4;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          if (grp.coverage.speed_l1_seen) c++;
+          if (grp.coverage.speed_l2_seen) c++;
+          if (total_c == 5 && grp.coverage.speed_l3_seen) c++;
+          break;
+        case DeviceClass::AIRCON:
+          total_c = 7;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          if (grp.coverage.temp_set_seen) c++;
+          if (grp.coverage.speed_l1_seen) c++;
+          if (grp.coverage.speed_l2_seen) c++;
+          if (grp.coverage.speed_l3_seen) c++;
+          if (grp.coverage.temp_while_off_seen) c++;
+          break;
+        case DeviceClass::MOMENTARY:
+          total_c = 1;
+          if (grp.coverage.call_seen) c++;
+          break;
+        case DeviceClass::SWITCH:
+        default:
+          total_c = 2;
+          if (grp.coverage.power_on_seen) c++;
+          if (grp.coverage.power_off_seen) c++;
+          break;
+        }
+        snprintf(cov_str, sizeof(cov_str), "%d/%d", c, total_c);
+      }
+
+      // 수직 열 칼정렬:
+      // "DevID   Name     Class   Coverage  Mode (Channel)   Param Slot      Status"
+      // 0x18    Thermo   THERMO  4/4       MULTI (45/46)    T:5~35C         VERIFIED
+      out.appendFormat("0x%02X    %-8s %-7s %-9s %-16s %-15s %s\r\n",
+                       grp.dev_id, grp.group_name, type_str, cov_str,
+                       mode_str, param_str, stat_str);
+    }
+  }
+  out.append(Fmt::DIV80EQ);
+  out.append("\r\n");
+}
+
+void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
+  const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+  if (!grp) {
+    out.appendFormat("[ERROR] Control blueprint for DevID 0x%02X not found.\r\n", dev_id);
+    return;
+  }
+
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.appendFormat("             CONTROL BLUEPRINT: %s (0x%02X, %uB)             \r\n",
+                   grp->group_name, grp->dev_id, grp->frame_len);
+  out.append(Fmt::DIV80EQ);
+
+  // 1. Control Frame Blueprint (CTL- / CTL+)
+  auto ad = g_auto_probing_engine.getDescriptor();
+  out.append("Control Frame Transactions (Pre vs Post State):\r\n");
+
+  auto formatFrameWithRoles = [&](const char *label, const uint8_t *raw, size_t len,
+                                  const uint8_t *cmp, size_t cmp_len, bool is_ack = false) {
+    if (!raw || len == 0) return;
+    char hex_str[128]{0};
+    char rol_str[128]{0};
+    size_t h_len = snprintf(hex_str, sizeof(hex_str), "  %-6s: ", label);
+    size_t r_len = snprintf(rol_str, sizeof(rol_str), "  %-6s: ", "[Rol]");
+
+    for (size_t i = 0; i < len && i < 24; ++i) {
+      bool is_changed = (cmp && i < cmp_len && raw[i] != cmp[i]);
+      uint8_t cat_idx = 0xFF;
+      if (grp->power_slot.category_offset != 0xFF) cat_idx = grp->power_slot.category_offset;
+      else if (grp->temp_slot.category_offset != 0xFF) cat_idx = grp->temp_slot.category_offset;
+      else if (grp->speed_slot.category_offset != 0xFF) cat_idx = grp->speed_slot.category_offset;
+
+      // 1순위: 확정된 고정 프레임 골격 (ST, LN, GW, ID, OP, CX, S1, S2, CS, ET)
+      const char *r = nullptr;
+      if (i == 0) r = "ST";
+      else if (i == len - 1) r = "ET";
+      else if (i == len - 2) r = "CS";
+      else if (ad.has_len_field && i == ad.len_offset) r = "LN";
+      else if (i == ad.opcode_offset) r = "OP";
+      else if (i == ad.dev_id_offset) r = "ID";
+      else if (ad.gw_addr_offset != 0xFF && i == ad.gw_addr_offset) r = "GW";
+      else if (cat_idx != 0xFF && i == cat_idx) r = "CX";
+      else if (grp->sub1_offset != 0xFF && i == grp->sub1_offset) r = "S1";
+      else if (grp->sub2_offset != 0xFF && i == grp->sub2_offset) r = "S2";
+
+      // 2순위: 순수 페이로드 영역 (ad.payload_offset ~ 체크섬 직전)
+      bool is_payload = (r == nullptr);
+
+      if (is_payload) {
+        h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "[%02X] ", raw[i]);
+      } else {
+        h_len += snprintf(hex_str + h_len, sizeof(hex_str) - h_len, "%02X ", raw[i]);
+      }
+
+      if (r != nullptr) {
+        r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "%-2s ", r);
+      } else if (is_ack) {
+        // [ACK 전용 채널 분기 기반 심볼 표기]
+        // 현재 ACK 프레임의 컨텍스트(cat_idx)에 맞춰 해당 슬롯의 오프셋 우선 참조
+        uint8_t frame_cat = (cat_idx != 0xFF && cat_idx < len) ? raw[cat_idx] : 0xFF;
+        const ActionSlot *matched_slot = nullptr;
+        if (grp->power_slot.discovered && frame_cat == grp->power_slot.category_val) matched_slot = &grp->power_slot;
+        else if (grp->temp_slot.discovered && frame_cat == grp->temp_slot.category_val) matched_slot = &grp->temp_slot;
+        else if (grp->speed_slot.discovered && frame_cat == grp->speed_slot.category_val) matched_slot = &grp->speed_slot;
+
+        if (matched_slot && matched_slot->ack_state_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[AS] ");
+        } else if (matched_slot && matched_slot->ack_target_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, (grp->coverage.dev_class == DeviceClass::VENT) ? "[FS] " : "[TT] ");
+        } else if (matched_slot && matched_slot->ack_telemetry_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[AT] ");
+        } else if (grp->ack_slots.discovered && grp->ack_slots.power_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[AS] ");
+        } else if (grp->ack_slots.discovered && grp->ack_slots.target_temp_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[TT] ");
+        } else if (grp->ack_slots.discovered && grp->ack_slots.current_temp_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[AT] ");
+        } else if (grp->ack_slots.discovered && grp->ack_slots.fan_speed_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[FS] ");
+        } else if (grp->ack_slots.discovered && grp->ack_slots.valve_state_offset == i) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[VS] ");
+        } else if (is_changed) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[~~] ");
+        } else {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[PL] ");
+        }
+      } else {
+        // [CTL 제어 전용 심볼 표기]
+        bool is_val = (grp->power_slot.discovered && grp->power_slot.action_offset == i) ||
+                      (grp->temp_slot.discovered  && grp->temp_slot.action_offset  == i) ||
+                      (grp->speed_slot.discovered && grp->speed_slot.action_offset == i) ||
+                      (grp->close_slot.discovered && grp->close_slot.action_offset == i);
+        bool is_ctx = (grp->power_slot.discovered && grp->power_slot.category_offset == i) ||
+                      (grp->temp_slot.discovered  && grp->temp_slot.category_offset  == i) ||
+                      (grp->speed_slot.discovered && grp->speed_slot.category_offset == i);
+        if (is_ctx) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[CX] ");
+        } else if (is_val) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[VL] ");
+        } else if (is_changed) {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[~~] ");
+        } else {
+          r_len += snprintf(rol_str + r_len, sizeof(rol_str) - r_len, "[PL] ");
+        }
+      }
+    }
+    out.appendFormat("%s\r\n%s\r\n", hex_str, rol_str);
+  };
+
+  // [3-단계 트랜잭션 히스토리 출력]
+  if (grp->hist_count > 0) {
+    for (uint8_t h = 0; h < grp->hist_count; ++h) {
+      char ctl_lbl[16];
+      if (grp->hist_count == 3) {
+        snprintf(ctl_lbl, sizeof(ctl_lbl), (h == 0) ? "CTL-2" : ((h == 1) ? "CTL-1" : "CTL+"));
+      } else if (grp->hist_count == 2) {
+        snprintf(ctl_lbl, sizeof(ctl_lbl), (h == 0) ? "CTL-" : "CTL+");
+      } else {
+        snprintf(ctl_lbl, sizeof(ctl_lbl), "CTL+");
+      }
+      const uint8_t *prev_raw = (h > 0) ? grp->ctl_hist[h - 1].raw : nullptr;
+      size_t prev_len = (h > 0) ? grp->ctl_hist[h - 1].len : 0;
+      out.append("--------------------------------------------------------------------------------\r\n");
+      formatFrameWithRoles(ctl_lbl, grp->ctl_hist[h].raw, grp->ctl_hist[h].len, prev_raw, prev_len, false);
+    }
+  } else if (grp->ctl_before_len > 0 || grp->ctl_after_len > 0 || grp->frame_len > 0) {
+    if (grp->ctl_before_len > 0) {
+      out.append("--------------------------------------------------------------------------------\r\n");
+      formatFrameWithRoles("CTL-", grp->ctl_before_raw, grp->ctl_before_len,
+                           grp->ctl_after_raw, grp->ctl_after_len, false);
+    }
+    const uint8_t *cur_ctl = (grp->ctl_after_len > 0) ? grp->ctl_after_raw : grp->raw_template;
+    size_t cur_len = (grp->ctl_after_len > 0) ? grp->ctl_after_len : grp->frame_len;
+    out.append("--------------------------------------------------------------------------------\r\n");
+    formatFrameWithRoles("CTL+", cur_ctl, cur_len, grp->ctl_before_raw, grp->ctl_before_len, false);
+  } else {
+    out.append("  (Control frame not captured yet)\r\n");
+  }
+
+  out.append(Fmt::DIV80);
+  out.append("Captured ACK Transactions (Pre vs Post State):\r\n");
+
+  if (grp->hist_count > 0 && grp->ack_hist[0].len > 0) {
+    for (uint8_t h = 0; h < grp->hist_count; ++h) {
+      if (grp->ack_hist[h].len == 0) continue;
+      char ack_lbl[16];
+      if (grp->hist_count == 3) {
+        snprintf(ack_lbl, sizeof(ack_lbl), (h == 0) ? "ACK-2" : ((h == 1) ? "ACK-1" : "ACK+"));
+      } else if (grp->hist_count == 2) {
+        snprintf(ack_lbl, sizeof(ack_lbl), (h == 0) ? "ACK-" : "ACK+");
+      } else {
+        snprintf(ack_lbl, sizeof(ack_lbl), "ACK+");
+      }
+      const uint8_t *prev_raw = (h > 0) ? grp->ack_hist[h - 1].raw : nullptr;
+      size_t prev_len = (h > 0) ? grp->ack_hist[h - 1].len : 0;
+      out.append("--------------------------------------------------------------------------------\r\n");
+      formatFrameWithRoles(ack_lbl, grp->ack_hist[h].raw, grp->ack_hist[h].len, prev_raw, prev_len, true);
+    }
+  } else if (grp->last_ack_before_len > 0 || grp->last_ack_after_len > 0) {
+    if (grp->last_ack_before_len > 0) {
+      out.append("--------------------------------------------------------------------------------\r\n");
+      formatFrameWithRoles("ACK-", grp->last_ack_before_raw, grp->last_ack_before_len,
+                           grp->last_ack_after_raw, grp->last_ack_after_len, true);
+    }
+    if (grp->last_ack_after_len > 0) {
+      out.append("--------------------------------------------------------------------------------\r\n");
+      formatFrameWithRoles("ACK+", grp->last_ack_after_raw, grp->last_ack_after_len,
+                           grp->last_ack_before_raw, grp->last_ack_before_len, true);
+    }
+  } else {
+    out.append("  (No device ACK packet captured yet)\r\n");
+  }
+
+  out.append(Fmt::DIV80);
+  out.append("Learning Roadmap:\r\n");
+  const auto &cov = grp->coverage;
+
+  if (cov.dev_class == DeviceClass::THERMOSTAT) {
+    out.appendFormat("  [1/4] Power ON      : [%-4s]  ON=0x%02X\r\n",
+                     cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/4] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+                     cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
+    out.appendFormat("  [3/4] Target Temp   : [%-4s]  Slot=#%u (5~35C Standard)\r\n",
+                     cov.temp_set_seen ? "DONE" : "WAIT", grp->temp_slot.action_offset);
+    out.appendFormat("  [4/4] Recall Verify : [%-4s]  Re-ON Temp Restored\r\n",
+                     grp->temp_recall_verified ? "DONE" : "WAIT");
+  } else if (cov.dev_class == DeviceClass::VENT) {
+    uint8_t vent_total_steps = (grp->speed_slot.level_count >= 3 || cov.speed_l3_seen) ? 5 : 4;
+    out.appendFormat("  [1/%u] Power ON      : [%-4s]  ON=0x%02X\r\n",
+                     vent_total_steps, cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/%u] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+                     vent_total_steps, cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
+    out.appendFormat("  [3/%u] Fan Speed L1  : [%-4s]  Token=0x%02X\r\n",
+                     vent_total_steps, cov.speed_l1_seen ? "DONE" : "WAIT",
+                     (grp->speed_slot.level_count >= 1) ? grp->speed_slot.level_tokens[0] : 0);
+    out.appendFormat("  [4/%u] Fan Speed L2  : [%-4s]  Token=0x%02X\r\n",
+                     vent_total_steps, cov.speed_l2_seen ? "DONE" : "WAIT",
+                     (grp->speed_slot.level_count >= 2) ? grp->speed_slot.level_tokens[1] : 0);
+    if (vent_total_steps == 5) {
+      out.appendFormat("  [5/5] Fan Speed L3  : [%-4s]  Token=0x%02X\r\n",
+                       cov.speed_l3_seen ? "DONE" : "WAIT",
+                       (grp->speed_slot.level_count >= 3) ? grp->speed_slot.level_tokens[2] : 0);
+    }
+  } else if (cov.dev_class == DeviceClass::GAS) {
+    bool is_verified_or_locked = (grp->status == GroupControlTemplate::Status::VERIFIED ||
+                                  grp->status == GroupControlTemplate::Status::LOCKED);
+    out.appendFormat("  [1/2] Close Trigger : [%-4s]  Close=0x%02X\r\n",
+                     (cov.valve_close_seen || cov.power_off_seen) ? "DONE" : "WAIT", grp->close_slot.off_val);
+    out.appendFormat("  [2/2] Verified/Lock : [%-4s]  Status %s\r\n",
+                     is_verified_or_locked ? "DONE" : "WAIT",
+                     (grp->status == GroupControlTemplate::Status::LOCKED) ? "Locked" : "Verified");
+  } else if (cov.dev_class == DeviceClass::AIRCON) {
+    out.appendFormat("  [1/6] Power ON      : [%-4s]  ON=0x%02X\r\n",
+                     cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/6] Target Temp   : [%-4s]  Range=%u~%u C\r\n",
+                     cov.temp_set_seen ? "DONE" : "WAIT", grp->temp_slot.min_val, grp->temp_slot.max_val);
+    out.appendFormat("  [3/6] Fan Speed L1  : [%-4s]  Min=%u\r\n",
+                     cov.speed_l1_seen ? "DONE" : "WAIT", grp->speed_slot.min_val);
+    out.appendFormat("  [4/6] Fan Speed L2  : [%-4s]  Mid=2\r\n",
+                     cov.speed_l2_seen ? "DONE" : "WAIT");
+    out.appendFormat("  [5/6] Fan Speed L3  : [%-4s]  Max=%u\r\n",
+                     cov.speed_l3_seen ? "DONE" : "WAIT", grp->speed_slot.max_val);
+    out.appendFormat("  [6/6] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+                     cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
+  } else if (cov.dev_class == DeviceClass::MOMENTARY) {
+    bool is_verified_or_locked = (grp->status == GroupControlTemplate::Status::VERIFIED ||
+                                  grp->status == GroupControlTemplate::Status::LOCKED);
+    out.appendFormat("  [1/2] Call Trigger  : [%-4s]  Token=0x%02X\r\n",
+                     cov.call_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/2] Verified/Lock : [%-4s]  Status %s\r\n",
+                     is_verified_or_locked ? "DONE" : "WAIT",
+                     (grp->status == GroupControlTemplate::Status::LOCKED) ? "Locked" : "Verified");
+  } else if (cov.dev_class == DeviceClass::SWITCH) {
+    bool is_verified_or_locked = (grp->status == GroupControlTemplate::Status::VERIFIED ||
+                                  grp->status == GroupControlTemplate::Status::LOCKED);
+    out.appendFormat("  [1/3] Power ON      : [%-4s]  ON=0x%02X\r\n",
+                     cov.power_on_seen ? "DONE" : "WAIT", grp->power_slot.on_val);
+    out.appendFormat("  [2/3] Power OFF     : [%-4s]  OFF=0x%02X\r\n",
+                     cov.power_off_seen ? "DONE" : "WAIT", grp->power_slot.off_val);
+    out.appendFormat("  [3/3] Verified/Lock : [%-4s]  Status %s\r\n",
+                     is_verified_or_locked ? "DONE" : "WAIT",
+                     (grp->status == GroupControlTemplate::Status::LOCKED) ? "Locked" : "Verified");
+  } else {
+    out.append("  (Unassigned Device Class - Run 'ctl learn' to configure roadmap)\r\n");
+  }
+
+  out.append(Fmt::DIV80);
+  out.append("Packet Diff Monitor (Byte Order Parameter Slots):\r\n");
+
+  // [ST] Header STX
+  out.appendFormat("  [ST]  Header STX    : Byte #0 (0x%02X)\r\n", ad.stx);
+  if (ad.has_len_field && ad.len_offset < grp->frame_len) {
+    out.appendFormat("  [LN]  Length Field  : Byte #%u (Dynamic)\r\n", ad.len_offset);
+  }
+  if (ad.gw_addr_offset != 0xFF) {
+    out.appendFormat("  [GW]  Gateway Slot  : Byte #%u (Val: 0x%02X)\r\n", ad.gw_addr_offset, ad.gw_addr);
+  }
+  out.appendFormat("  [ID]  Device ID     : Byte #%u (0x%02X)\r\n", ad.dev_id_offset, grp->dev_id);
+  out.appendFormat("  [OP]  Opcode Slot   : Byte #%u (QRY:0x%02X, CTL:0x%02X, ACK:0x%02X)\r\n",
+                   ad.opcode_offset, ad.query_opcode, ad.control_opcode, ad.ack_opcode);
+
+  // [CX] Context Slot
+  uint8_t ctx_off = 0xFF;
+  if (grp->power_slot.category_offset != 0xFF) ctx_off = grp->power_slot.category_offset;
+  else if (grp->temp_slot.category_offset != 0xFF) ctx_off = grp->temp_slot.category_offset;
+  else if (grp->speed_slot.category_offset != 0xFF) ctx_off = grp->speed_slot.category_offset;
+
+  uint8_t vl_off = 0xFF;
+  if (grp->power_slot.discovered) vl_off = grp->power_slot.action_offset;
+  else if (grp->temp_slot.discovered) vl_off = grp->temp_slot.action_offset;
+  else if (grp->speed_slot.discovered) vl_off = grp->speed_slot.action_offset;
+  else if (grp->close_slot.discovered) vl_off = grp->close_slot.action_offset;
+
+  // 출력 헬퍼 함수
+  auto print_cx = [&]() {
+    if (ctx_off != 0xFF) {
+      if (cov.dev_class == DeviceClass::THERMOSTAT) {
+        out.appendFormat("  [CX]  Context Slot  : Byte #%u | Pwr: 0x%02X | Temp: 0x%02X\r\n",
+                         ctx_off, grp->power_slot.category_val ? grp->power_slot.category_val : 0x46,
+                         grp->temp_slot.category_val ? grp->temp_slot.category_val : 0x45);
+      } else if (cov.dev_class == DeviceClass::VENT) {
+        if (grp->power_slot.category_val != 0 && grp->speed_slot.category_val != 0 &&
+            grp->power_slot.category_val != grp->speed_slot.category_val) {
+          out.appendFormat("  [CX]  Context Slot  : Byte #%u | Pwr: 0x%02X | FanSpeed: 0x%02X\r\n",
+                           ctx_off, grp->power_slot.category_val, grp->speed_slot.category_val);
+        } else {
+          uint8_t c_val = grp->power_slot.category_val ? grp->power_slot.category_val : grp->speed_slot.category_val;
+          out.appendFormat("  [CX]  Context Slot  : Byte #%u (Val: 0x%02X)\r\n", ctx_off, c_val);
+        }
+      } else {
+        out.appendFormat("  [CX]  Context Slot  : Byte #%u (Val: 0x%02X)\r\n", ctx_off, grp->power_slot.category_val);
+      }
+    }
+  };
+
+  auto print_s1 = [&]() {
+    if (grp->sub1_offset != 0xFF) {
+      if (grp->ctl_sub1_override != 0xFF) {
+        if (cov.dev_class == DeviceClass::SWITCH && (grp->ctl_sub1_override & 0x0F) != 0) {
+          uint8_t room_num = (grp->ctl_sub1_override >> 4) & 0x0F;
+          uint8_t sub_idx  = grp->ctl_sub1_override & 0x0F;
+          out.appendFormat("  [S1]  Sub1 Slot     : Byte #%u [Room: High 4-bit | Index: Low 4-bit] (Observed: 0x%02X -> R%u/N%u)\r\n",
+                           grp->sub1_offset, grp->ctl_sub1_override, room_num, sub_idx);
+        } else {
+          out.appendFormat("  [S1]  Sub1 Slot     : Byte #%u (Override: 0x%02X)\r\n", grp->sub1_offset, grp->ctl_sub1_override);
+        }
+      } else {
+        out.appendFormat("  [S1]  Sub1 Slot     : Byte #%u\r\n", grp->sub1_offset);
+      }
+    }
+  };
+
+  auto print_s2 = [&]() {
+    if (grp->sub2_offset != 0xFF && grp->sub2_offset != grp->sub1_offset) {
+      out.appendFormat("  [S2]  Sub2 Slot     : Byte #%u\r\n", grp->sub2_offset);
+    }
+  };
+
+  auto print_vl = [&]() {
+    if (cov.dev_class == DeviceClass::THERMOSTAT && grp->power_slot.discovered && grp->temp_slot.discovered) {
+      out.appendFormat("  [VL]  Action Slot   : [Pwr/0x%02X] Byte #%u (0x%02X/0x%02X) | [Temp/0x%02X] Byte #%u (%u~%u C)\r\n",
+                       grp->power_slot.category_val ? grp->power_slot.category_val : 0x46,
+                       grp->power_slot.action_offset, grp->power_slot.on_val, grp->power_slot.off_val,
+                       grp->temp_slot.category_val ? grp->temp_slot.category_val : 0x45,
+                       grp->temp_slot.action_offset,
+                       grp->temp_slot.min_val ? grp->temp_slot.min_val : 5,
+                       grp->temp_slot.max_val ? grp->temp_slot.max_val : 35);
+    } else if (cov.dev_class == DeviceClass::THERMOSTAT) {
+      out.appendFormat("  [VL]  Action Slot   : Byte #%u | Pwr: 0x%02X/0x%02X | Temp: %u~%u C (Samples: %u)\r\n",
+                       grp->power_slot.discovered ? grp->power_slot.action_offset : grp->temp_slot.action_offset,
+                       grp->power_slot.on_val, grp->power_slot.off_val,
+                       grp->temp_slot.min_val ? grp->temp_slot.min_val : 5,
+                       grp->temp_slot.max_val ? grp->temp_slot.max_val : 35,
+                       grp->power_slot.sample_count + grp->temp_slot.sample_count);
+    } else if (cov.dev_class == DeviceClass::VENT) {
+      bool has_multi_ctx = (grp->power_slot.category_offset != 0xFF && grp->speed_slot.category_offset != 0xFF &&
+                            grp->power_slot.category_val != 0 && grp->speed_slot.category_val != 0 &&
+                            grp->power_slot.category_val != grp->speed_slot.category_val);
+      if (has_multi_ctx && grp->speed_slot.discovered) {
+        out.appendFormat("  [VL]  Action Slot   : [Pwr/0x%02X] Byte #%u (0x%02X/0x%02X) | [Speed/0x%02X] Byte #%u (Levels: %u)\r\n",
+                         grp->power_slot.category_val,
+                         grp->power_slot.action_offset, grp->power_slot.on_val ? grp->power_slot.on_val : 0x01, grp->power_slot.off_val,
+                         grp->speed_slot.category_val,
+                         grp->speed_slot.discovered ? grp->speed_slot.action_offset : grp->power_slot.action_offset,
+                         grp->speed_slot.level_count ? grp->speed_slot.level_count : 2);
+      } else {
+        out.appendFormat("  [VL]  Action Slot   : Byte #%u | Levels: %u | PwrOFF: 0x%02X (Samples: %u)\r\n",
+                         grp->power_slot.action_offset, grp->speed_slot.level_count,
+                         grp->power_slot.off_val, grp->power_slot.sample_count);
+      }
+    } else if (cov.dev_class == DeviceClass::GAS) {
+      out.appendFormat("  [VL]  Action Slot   : Byte #%u | CloseToken: 0x%02X (Samples: %u)\r\n",
+                       grp->close_slot.action_offset, grp->close_slot.off_val, grp->close_slot.sample_count);
+    } else if (grp->power_slot.discovered) {
+      out.appendFormat("  [VL]  Action Slot   : Byte #%u | ON: 0x%02X | OFF: 0x%02X (Samples: %u)\r\n",
+                       grp->power_slot.action_offset, grp->power_slot.on_val, grp->power_slot.off_val,
+                       grp->power_slot.sample_count);
+    }
+  };
+
+  // 바이트 인덱스 순서에 따라 동적 정렬 출력
+  // CX, S1, S2, VL 의 오프셋 순서에 맞게 출력
+  struct SlotItem {
+    uint8_t offset;
+    int type; // 0: CX, 1: S1, 2: S2, 3: VL
+  };
+  SlotItem items[4];
+  size_t item_count = 0;
+  if (ctx_off != 0xFF) items[item_count++] = {ctx_off, 0};
+  if (grp->sub1_offset != 0xFF) items[item_count++] = {grp->sub1_offset, 1};
+  if (grp->sub2_offset != 0xFF && grp->sub2_offset != grp->sub1_offset) items[item_count++] = {grp->sub2_offset, 2};
+  if (vl_off != 0xFF) items[item_count++] = {vl_off, 3};
+
+  for (size_t i = 0; i < item_count; ++i) {
+    for (size_t j = i + 1; j < item_count; ++j) {
+      if (items[i].offset > items[j].offset) {
+        std::swap(items[i], items[j]);
+      }
+    }
+  }
+
+  for (size_t i = 0; i < item_count; ++i) {
+    switch (items[i].type) {
+      case 0: print_cx(); break;
+      case 1: print_s1(); break;
+      case 2: print_s2(); break;
+      case 3: print_vl(); break;
+    }
+  }
+
+  // [CS] & [ET]
+  out.append("  [CS]  Checksum Slot : Byte #[N-2] (XOR)\r\n");
+  out.appendFormat("  [ET]  Tail ETX      : Byte #[N-1] (0x%02X)\r\n", ad.etx);
+
+  out.append(Fmt::DIV80);
+  out.append("Protocol Attributes & Device Behaviors:\r\n");
+
+  const char *adm_str = ad.is_swapped_addr ? "Swapped Header Address" : "Direct (Single Address)";
+  out.appendFormat("  [ADM] Addr Mode     : %s\r\n", adm_str);
+  out.appendFormat("  [SEQ] Sequence      : %s\r\n", (ad.seq_offset != 0xFF) ? "Byte Managed" : "Unused");
+
+  if (grp->ack_slots.discovered || grp->power_slot.ack_state_offset != 0xFF || grp->temp_slot.ack_target_offset != 0xFF || grp->speed_slot.ack_target_offset != 0xFF) {
+    char ack_summary[128]{0};
+    size_t a_off = 0;
+    if (cov.dev_class == DeviceClass::THERMOSTAT && grp->power_slot.discovered && grp->temp_slot.discovered) {
+      // 듀얼 컨텍스트 채널 분기 표기
+      a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off,
+                        "[Pwr/0x%02X] State=[AS](#%u) | [Temp/0x%02X] Target=[TT](#%u) Ambient=[AT](#%u)",
+                        grp->power_slot.category_val ? grp->power_slot.category_val : 0x46,
+                        (grp->power_slot.ack_state_offset != 0xFF) ? grp->power_slot.ack_state_offset : grp->ack_slots.power_offset,
+                        grp->temp_slot.category_val ? grp->temp_slot.category_val : 0x45,
+                        (grp->temp_slot.ack_target_offset != 0xFF) ? grp->temp_slot.ack_target_offset : grp->ack_slots.target_temp_offset,
+                        (grp->temp_slot.ack_telemetry_offset != 0xFF) ? grp->temp_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset);
+    } else if (cov.dev_class == DeviceClass::VENT) {
+      uint8_t pwr_ack = (grp->power_slot.ack_state_offset != 0xFF) ? grp->power_slot.ack_state_offset : grp->ack_slots.power_offset;
+      uint8_t spd_ack = (grp->speed_slot.ack_target_offset != 0xFF) ? grp->speed_slot.ack_target_offset : grp->ack_slots.fan_speed_offset;
+      if (pwr_ack != 0xFF && spd_ack != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "Power=[AS](#%u) FanSpeed=[FS](#%u)", pwr_ack, spd_ack);
+      } else if (spd_ack != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "Power=[AS](#9) FanSpeed=[FS](#%u)", spd_ack);
+      } else if (pwr_ack != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "Power=[AS](#%u) FanSpeed=[FS](#8)", pwr_ack);
+      } else {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "Power=[AS](#9) FanSpeed=[FS](#8)");
+      }
+    } else {
+      if (grp->ack_slots.power_offset != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "Power=[AS](#%u) ", grp->ack_slots.power_offset);
+      }
+      if (grp->ack_slots.target_temp_offset != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "TargetTemp=[TT](#%u) ", grp->ack_slots.target_temp_offset);
+      }
+      if (grp->ack_slots.current_temp_offset != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "AmbientTemp=[AT](#%u) ", grp->ack_slots.current_temp_offset);
+      }
+      if (grp->ack_slots.fan_speed_offset != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "Speed=[FS](#%u) ", grp->ack_slots.fan_speed_offset);
+      }
+      if (grp->ack_slots.valve_state_offset != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off, "Valve=[VS](#%u) ", grp->ack_slots.valve_state_offset);
+      }
+    }
+    out.appendFormat("  [ACK] State Slots   : %s\r\n", ack_summary);
+  } else {
+    out.append("  [ACK] State Slots   : Not Discovered (Awaiting transaction)\r\n");
+  }
+
+  if (cov.dev_class == DeviceClass::THERMOSTAT) {
+    if (grp->away_has_dedicated_temp) {
+      if (grp->away_mode_token != 0xFF) {
+        out.appendFormat("  [AWY] Away Mode     : Token: 0x%02X | Fixed Temp: %u C\r\n", grp->away_mode_token, grp->away_fixed_temp);
+      } else {
+        out.appendFormat("  [AWY] Away Temp     : %u C\r\n", grp->away_fixed_temp);
+      }
+    } else if (grp->away_mode_token != 0xFF) {
+      out.appendFormat("  [AWY] Away Token    : 0x%02X\r\n", grp->away_mode_token);
+    } else {
+      out.append("  [AWY] Away Mode     : None\r\n");
+    }
+    out.appendFormat("  [RCL] Temp Recall   : %s\r\n", grp->temp_recall_verified ? "Verified" : "Unverified");
+    const char *off_str = "Unknown";
+    if (grp->off_temp_behavior == ThermoOffTempBehavior::AUTO_POWER_ON) off_str = "Auto Power-ON";
+    else if (grp->off_temp_behavior == ThermoOffTempBehavior::PASSIVE_MEMORY) off_str = "Passive Memory";
+    else if (grp->off_temp_behavior == ThermoOffTempBehavior::LOCKED_IGNORE) off_str = "Locked / Ignore";
+    out.appendFormat("  [OFF] OFF-State Temp: %s\r\n", off_str);
+  }
+
+  const char *stat_str = "WAITING";
+  switch (grp->status) {
+  case GroupControlTemplate::Status::EMPTY: stat_str = "EMPTY"; break;
+  case GroupControlTemplate::Status::WAITING: stat_str = "WAITING"; break;
+  case GroupControlTemplate::Status::CAPTURING: stat_str = "CAPTURING"; break;
+  case GroupControlTemplate::Status::PARTIAL: stat_str = "PARTIAL"; break;
+  case GroupControlTemplate::Status::VERIFIED: stat_str = "VERIFIED"; break;
+  case GroupControlTemplate::Status::PROBING: stat_str = "PROBING"; break;
+  case GroupControlTemplate::Status::LOCKED: stat_str = "LOCKED"; break;
+  }
+
+  out.append(Fmt::DIV80);
+  if (grp->last_learned_ms > 0) {
+    out.appendFormat("Status: %-10s | Last Learned: %u ms ago\r\n", stat_str, millis() - grp->last_learned_ms);
+  } else {
+    out.appendFormat("Status: %-10s | Last Learned: Never\r\n", stat_str);
+  }
+  out.append(Fmt::DIV80EQ);
+  out.append("\r\n");
+}
+
+void wallpadPrintControlLearnStatus(AppendBuf &out) {
+  out.append("\r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("                  PASSIVE CONTROL LEARNING ENGINE STATUS                     \r\n");
+  out.append(Fmt::DIV80EQ);
+  out.append("Mode            : PASSIVE EVENT-DRIVEN (Zero-Traffic Artificial Probing)\r\n");
+  out.append("Trigger Method  : Physical Wallpad / Wall Switch User Actions\r\n");
+  out.append("Diff Algorithm  : Dynamic Triplet Diff (CTL vs Pre-ACK / Post-ACK)\r\n");
+  out.append("Telemetry Sync  : Dynamic [ENV] Ambient Sensor Co-learning Enabled\r\n");
+  out.append(Fmt::DIV80);
+  out.append("Learned Device Groups:\r\n");
+
+  size_t total_groups = g_control_registry.getGroupCount();
+  if (total_groups == 0) {
+    out.append("  (No device control blueprints learned yet. Operate a wallpad/switch to learn)\r\n");
+  } else {
+    out.append("DevID  Name          Class       Len    Power Slot    Temp Slot     Speed Slot\r\n");
+    out.append(Fmt::DIV80);
+
+    for (size_t i = 0; i < total_groups; ++i) {
+      GroupControlTemplate grp{};
+      if (g_control_registry.getGroupByIndex(i, grp)) {
+        const char *cls_str = "-";
+        switch (grp.coverage.dev_class) {
+        case DeviceClass::THERMOSTAT: cls_str = "THERMOSTAT"; break;
+        case DeviceClass::AIRCON:     cls_str = "AIRCON"; break;
+        case DeviceClass::VENT:       cls_str = "VENT"; break;
+        case DeviceClass::GAS:        cls_str = "GAS"; break;
+        case DeviceClass::MOMENTARY:  cls_str = "MOMENTARY"; break;
+        case DeviceClass::SWITCH:     cls_str = "SWITCH"; break;
+        case DeviceClass::UNKNOWN:
+        default:                      cls_str = "-"; break;
+        }
+
+        char pwr_b[16];
+        if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.power_slot.discovered) {
+          snprintf(pwr_b, sizeof(pwr_b), "#%u", grp.power_slot.action_offset);
+        } else {
+          snprintf(pwr_b, sizeof(pwr_b), "-");
+        }
+
+        char tmp_b[16];
+        if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.temp_slot.discovered) {
+          if (grp.temp_slot.telemetry_offset != 0xFF) {
+            snprintf(tmp_b, sizeof(tmp_b), "#%u (ENV:#%u)", grp.temp_slot.action_offset, grp.temp_slot.telemetry_offset);
+          } else {
+            snprintf(tmp_b, sizeof(tmp_b), "#%u", grp.temp_slot.action_offset);
+          }
+        } else {
+          snprintf(tmp_b, sizeof(tmp_b), "-");
+        }
+
+        char spd_b[16];
+        if (grp.coverage.dev_class != DeviceClass::UNKNOWN && grp.speed_slot.discovered) {
+          snprintf(spd_b, sizeof(spd_b), "#%u", grp.speed_slot.action_offset);
+        } else {
+          snprintf(spd_b, sizeof(spd_b), "-");
+        }
+
+        out.appendFormat("0x%02X   %-13s %-11s %2uB    %-13s %-13s %s\r\n",
+                         grp.dev_id, grp.group_name, cls_str, grp.frame_len,
+                         pwr_b, tmp_b, spd_b);
+      }
+    }
+  }
+  out.append(Fmt::DIV80EQ);
+  out.append("\r\n");
+}
+
+void wallpadControlLearnInteractive(TelnetManager::TelnetSession *session, char *args) {
+  if (!session || session->sock < 0) return;
+  int sock = session->sock;
+  size_t count = g_control_registry.getGroupCount();
+  if (count == 0) {
+    // ctl reset 후에도 버스에서 폴링 중인 기기 목록을 감지하여 자동 등록
+    size_t total_targets = g_polling_targets.totalCount();
+    for (size_t t = 0; t < total_targets; ++t) {
+      PollingTargetEntry entry{};
+      if (g_polling_targets.getEntry(t, entry) && entry.is_active && entry.dev_id != 0) {
+        g_control_registry.registerOrTouch(entry.dev_id);
+      }
+    }
+    count = g_control_registry.getGroupCount();
+  }
+
+  if (count == 0) {
+    sendTelnetMsg(sock, "\r\n[ERROR] No device IDs detected yet. Please ensure RS-485 bus traffic is active.\r\n");
+    return;
+  }
+
+  sendTelnetMsg(sock, "\r\n");
+  sendTelnetMsg(sock, "================================================================================\r\n");
+  sendTelnetMsg(sock, "             INTERACTIVE DEVICE CONTROL LEARNING WIZARD                        \r\n");
+  sendTelnetMsg(sock, "================================================================================\r\n");
+  sendTelnetMsg(sock, "Discovered Device IDs on Bus: ");
+  size_t valid_cnt = 0;
+  for (size_t i = 0; i < count; ++i) {
+    GroupControlTemplate grp;
+    if (g_control_registry.getGroupByIndex(i, grp) && grp.dev_id != 0) {
+      if (valid_cnt > 0) sendTelnetMsg(sock, ", ");
+      sendTelnetMsgf(sock, "0x%02X (%s)", grp.dev_id, grp.group_name);
+      if (valid_cnt < ControlTemplateRegistry::MAX_GROUPS) {
+        session->prev_learned_ms[valid_cnt] = grp.last_learned_ms;
+      }
+      valid_cnt++;
+
+      // ★ [원칙] 오로지 LOCKED 상태인 기기만 기존 학습 결과(슬롯/검증)를 완벽 보존!
+      // VERIFIED/CAPTURING 상태인 기기는 사용자가 위저드에서 얼마든지 덮어씌워 재학습할 수 있도록 허용
+      // 단, 1/2차 캐시에서 이미 분류된 dev_class와 name은 보존하여 기기 식별을 유지!
+      GroupControlTemplate *live_grp = g_control_registry.findGroup(grp.dev_id);
+      if (live_grp && live_grp->status != GroupControlTemplate::Status::LOCKED) {
+        DeviceClass cur_cls = live_grp->coverage.dev_class;
+        live_grp->coverage = SlotCoverage{};
+        live_grp->coverage.dev_class = cur_cls;
+        live_grp->power_slot = ActionSlot{};
+        live_grp->speed_slot = ActionSlot{};
+        live_grp->temp_slot = ActionSlot{};
+        live_grp->close_slot = ActionSlot{};
+        live_grp->mode_slot = ActionSlot{};
+        live_grp->ack_slots = AckStateSlots{};
+        live_grp->status = GroupControlTemplate::Status::CAPTURING;
+      }
+    }
+  }
+  sendTelnetMsg(sock, "\r\n");
+  sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
+  sendTelnetMsg(sock, "We will guide you through: Light -> Outlet -> Vent -> Thermo -> Gas -> Aircon -> EV\r\n");
+  sendTelnetMsg(sock, "(Operate physical wallpad/switches when prompted. Timeout: 45s | Enter: Skip | 'q': Abort)\r\n");
+  sendTelnetMsg(sock, "--------------------------------------------------------------------------------\r\n");
+
+  // 비동기 이벤트-드라이븐 마법사 Step 1 시작 (블로킹/슬립 일절 없음!)
+  session->wizard_step = 1;
+  session->wizard_dev_id = 0;
+  session->wizard_sub_phase = 0;
+  session->wizard_last_prompt = 0;
+  session->wizard_step_start_ms = millis();
+  session->wizard_step_cooldown_until_ms = 0;
+  session->wizard_action_cooldown_until_ms = 0;
+  session->thermo_phase = TelnetManager::TelnetSession::ThermoPhase::WAIT_ON;
+  session->vent_phase = TelnetManager::TelnetSession::VentPhase::WAIT_ON;
+  session->switch_phase = TelnetManager::TelnetSession::SwitchPhase::WAIT_ON;
+  // ★ 신규 학습 세션 시작 시 이전 학습 이력 목록 완전 초기화 (재학습 시 패킷 차단 방지)
+  session->wizard_learned_count = 0;
+  memset(session->wizard_learned_devs, 0, sizeof(session->wizard_learned_devs));
+  session->wizard_step_start_ms = millis();
+  session->last_activity_ms = millis();
+
+  sendTelnetMsg(sock, "\r\n[Step 1: Light (조명)]\r\n");
+  sendTelnetMsg(sock, ">> Please TURN ON and TURN OFF 'Light' on your wallpad/switch now...\r\n");
+  sendTelnetMsg(sock, ">> (Waiting for packet transaction... 45s timeout | Enter: Skip | 'q': Abort)\r\n");
+}
+
+void wallpadControlAbort(int sock) {
+  sendTelnetMsg(sock, "[INFO] Passive learning mode does not run background probing loops.\r\n");
+  sendTelnetMsg(sock, "       To reset learned blueprints, use 'ctl reset <dev_id>' or 'ctl reset all'.\r\n");
+}
+
+void wallpadControlReset(int sock, uint8_t dev_id, bool is_full) {
+  // ctl reset 시 현재 접속 중인 텔넷 세션의 위저드 잔여 상태 및 학습 이력 일괄 초기화
+  for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
+    auto *s = g_telnet_manager.getSession(i);
+    if (s && s->sock >= 0) {
+      s->wizard_step = 0;
+      s->wizard_dev_id = 0;
+      s->wizard_learned_count = 0;
+      memset(s->wizard_learned_devs, 0, sizeof(s->wizard_learned_devs));
+    }
+  }
+
+  if (dev_id == 0) {
+    g_control_registry.resetGroup(0, is_full);
+    if (is_full) {
+      sendTelnetMsg(sock, "[OK] Full reset: Memory/NVS cleared and baseline classes auto-mapped from 1st/2nd cache.\r\n");
+    } else {
+      sendTelnetMsg(sock, "[OK] All learned control blueprints reset (device skeleton, classes & names preserved).\r\n");
+    }
+  } else {
+    const auto *grp = g_control_registry.findGroup(dev_id);
+    if (grp && grp->status == GroupControlTemplate::Status::LOCKED) {
+      sendTelnetMsgf(sock, "[WARN] DevID 0x%02X is LOCKED. Cannot reset! Run 'ctl unlock 0x%02X' first.\r\n", dev_id, dev_id);
+      return;
+    }
+    if (g_control_registry.resetGroup(dev_id, is_full)) {
+      if (is_full) {
+        sendTelnetMsgf(sock, "[OK] DevID 0x%02X completely wiped and removed from registry & NVS.\r\n", dev_id);
+      } else {
+        sendTelnetMsgf(sock, "[OK] DevID 0x%02X blueprint reset (skeleton & name preserved).\r\n", dev_id);
+      }
+    } else {
+      sendTelnetMsgf(sock, "[WARN] Control blueprint for DevID 0x%02X not found.\r\n", dev_id);
+    }
+  }
+}
+
 void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
   int sock = getSock(context);
   int argc = embeddedCliGetTokenCount(args);
@@ -1301,9 +2634,241 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
   } else if (strcasecmp(sub, "reset") == 0) {
     g_auto_probing_engine.reset();
     g_doorphone_tracker.clearNvs();
-    sendTelnetMsg(sock, "[OK] Auto-probing engine & Doorphone framing reset. Re-analyzing RS-485 bus traffic...\r\n");
+    g_probe_convergence_reset.store(true, std::memory_order_release);
+  } else if (strcasecmp(sub, "simulate") == 0) {
+    if (argc < 2) {
+      sendTelnetMsg(sock, "[ERROR] Usage: wallpad simulate <hex_bytes...> (e.g. wallpad simulate F7 0E 01 19 01 40 11 01 00 B6 EE)\r\n");
+      return;
+    }
+    uint8_t sim_buf[64]{0};
+    size_t sim_len = 0;
+    for (int i = 2; i <= argc && sim_len < sizeof(sim_buf); ++i) {
+      const char *tok = embeddedCliGetToken(args, i);
+      if (!tok) break;
+      char *endp = nullptr;
+      unsigned long val = strtoul(tok, &endp, 16);
+      if (endp != tok) {
+        sim_buf[sim_len++] = static_cast<uint8_t>(val);
+      }
+    }
+    if (sim_len < 3) {
+      sendTelnetMsg(sock, "[ERROR] Simulated packet must be at least 3 bytes.\r\n");
+      return;
+    }
+    g_auto_probing_engine.feedFrame(span<const uint8_t>(sim_buf, sim_len));
+    sendTelnetMsgf(sock, "[OK] Fed %u simulated bytes into Auto-Probing Engine.\r\n", sim_len);
+  } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    out.append("\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("                    WALLPAD & PROTOCOL COMMAND REFERENCE                      \r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("Command                           Description\r\n");
+    out.append(Fmt::DIV80);
+    out.append("  wallpad [status]                Show auto-probing status, timings & locked profile\r\n");
+    out.append("  wallpad list                    List available vendor & saved NVS custom profiles\r\n");
+    out.append("  wallpad set <key|id>            Manually switch active wallpad vendor profile\r\n");
+    out.append("  wallpad save <name>             Save current auto-learned profile to NVS slot\r\n");
+    out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
+    out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
+    out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
+    out.append("  wallpad simulate <hex...>       Inject raw hex packet into auto-probing engine\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("Tip: Use 'ctl' for device control blueprints & learned slots.\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("\r\n");
+    sendTelnetMsgLen(sock, out.buf, out.offset);
   } else {
-    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset]\r\n");
+    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset | simulate <hex...> | help]\r\n");
+  }
+}
+
+void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
+  int sock = getSock(context);
+  int argc = embeddedCliGetTokenCount(args);
+
+  if (argc == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    wallpadPrintControlTable(out);
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+    return;
+  }
+
+  const char *sub = embeddedCliGetToken(args, 1);
+
+  if (strcasecmp(sub, "table") == 0 || strcasecmp(sub, "list") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    wallpadPrintControlTable(out);
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  } else if (strcasecmp(sub, "status") == 0 || strcasecmp(sub, "learn-status") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    wallpadPrintControlLearnStatus(out);
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  } else if (strcasecmp(sub, "learn") == 0) {
+    wallpadControlLearnInteractive(getSession(context), args);
+  } else if (strcasecmp(sub, "reset") == 0) {
+    uint8_t dev_id = 0;
+    bool is_full = false;
+    if (argc >= 2) {
+      const char *arg = embeddedCliGetToken(args, 2);
+      if (strcasecmp(arg, "full") == 0) {
+        is_full = true;
+      } else if (strcasecmp(arg, "all") != 0) {
+        dev_id = static_cast<uint8_t>(strtoul(arg, nullptr, 0));
+        if (argc >= 3 && strcasecmp(embeddedCliGetToken(args, 3), "full") == 0) {
+          is_full = true;
+        }
+      }
+    }
+    wallpadControlReset(sock, dev_id, is_full);
+  } else if (strcasecmp(sub, "name") == 0 || strcasecmp(sub, "setname") == 0) {
+    if (argc >= 3) {
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+      const char *name = embeddedCliGetToken(args, 3);
+      if (dev_id == 0 || !name || strlen(name) == 0) {
+        sendTelnetMsg(sock, "[ERROR] Usage: ctl name <dev_id> <custom_name> (e.g. ctl name 0x1B Gas)\r\n");
+      } else {
+        if (g_control_registry.setGroupName(dev_id, name)) {
+          sendTelnetMsgf(sock, "[OK] DevID 0x%02X group name set to '%s' and saved to NVS flash.\r\n", dev_id, name);
+        } else {
+          sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry. Learn or capture it first.\r\n", dev_id);
+        }
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl name <dev_id> <custom_name> (e.g. ctl name 0x1B Gas)\r\n");
+    }
+  } else if (strcasecmp(sub, "class") == 0 || strcasecmp(sub, "setclass") == 0) {
+    if (argc >= 3) {
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+      const char *cls_str = embeddedCliGetToken(args, 3);
+      const char *custom_name = (argc >= 4) ? embeddedCliGetToken(args, 4) : nullptr;
+      DeviceClass cls = DeviceClass::UNKNOWN;
+      const char *def_name = cls_str;
+
+      if (strcasecmp(cls_str, "light") == 0 || strcasecmp(cls_str, "switch") == 0) {
+        cls = DeviceClass::SWITCH;
+        def_name = "Light";
+      } else if (strcasecmp(cls_str, "outlet") == 0) {
+        cls = DeviceClass::SWITCH;
+        def_name = "Outlet";
+      } else if (strcasecmp(cls_str, "vent") == 0 || strcasecmp(cls_str, "fan") == 0) {
+        cls = DeviceClass::VENT;
+        def_name = "Vent";
+      } else if (strcasecmp(cls_str, "thermo") == 0 || strcasecmp(cls_str, "thermostat") == 0 || strcasecmp(cls_str, "heat") == 0) {
+        cls = DeviceClass::THERMOSTAT;
+        def_name = "Thermo";
+      } else if (strcasecmp(cls_str, "gas") == 0) {
+        cls = DeviceClass::GAS;
+        def_name = "Gas";
+      } else if (strcasecmp(cls_str, "aircon") == 0 || strcasecmp(cls_str, "ac") == 0) {
+        cls = DeviceClass::AIRCON;
+        def_name = "Aircon";
+      } else if (strcasecmp(cls_str, "ev") == 0 || strcasecmp(cls_str, "elevator") == 0) {
+        cls = DeviceClass::MOMENTARY;
+        def_name = "Elevator";
+      }
+
+      if (dev_id == 0 || cls == DeviceClass::UNKNOWN) {
+        sendTelnetMsg(sock, "[ERROR] Usage: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
+      } else {
+        const char *final_name = (custom_name && strlen(custom_name) > 0) ? custom_name : def_name;
+        if (g_control_registry.setGroupClass(dev_id, cls, final_name)) {
+          sendTelnetMsgf(sock, "[OK] DevID 0x%02X class set to %s ('%s') and saved to NVS flash.\r\n", dev_id, cls_str, final_name);
+        } else {
+          sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
+        }
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
+    }
+  } else if (strcasecmp(sub, "lock") == 0) {
+    bool lock_all = (argc < 2 || strcasecmp(embeddedCliGetToken(args, 2), "all") == 0);
+    uint8_t dev_id = 0;
+    if (!lock_all) {
+      dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+    }
+    if (lock_all) {
+      size_t locked_cnt = 0, total_cnt = g_control_registry.getGroupCount();
+      for (size_t i = 0; i < total_cnt; ++i) {
+        GroupControlTemplate grp;
+        if (g_control_registry.getGroupByIndex(i, grp) && grp.status == GroupControlTemplate::Status::VERIFIED) {
+          if (g_control_registry.lockGroup(grp.dev_id, false)) locked_cnt++;
+        }
+      }
+      sendTelnetMsgf(sock, "[OK] %u VERIFIED device control blueprint(s) LOCKED (immutable).\r\n", locked_cnt);
+      if (locked_cnt < total_cnt) {
+        sendTelnetMsgf(sock, "     (%u unverified blueprint(s) skipped. Complete learning to VERIFIED before locking)\r\n",
+                       total_cnt - locked_cnt);
+      }
+    } else if (dev_id != 0) {
+      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+      if (!grp) {
+        sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
+      } else if (grp->status == GroupControlTemplate::Status::LOCKED) {
+        sendTelnetMsgf(sock, "[INFO] DevID 0x%02X is already LOCKED.\r\n", dev_id);
+      } else if (grp->status != GroupControlTemplate::Status::VERIFIED) {
+        sendTelnetMsgf(sock, "[WARN] Cannot lock DevID 0x%02X: Not VERIFIED yet. Complete learning first!\r\n", dev_id);
+      } else {
+        g_control_registry.lockGroup(dev_id, false);
+        sendTelnetMsgf(sock, "[OK] DevID 0x%02X control blueprint has been LOCKED (immutable).\r\n", dev_id);
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl lock [dev_id | all]\r\n");
+    }
+  } else if (strcasecmp(sub, "unlock") == 0) {
+    bool unlock_all = (argc < 2 || strcasecmp(embeddedCliGetToken(args, 2), "all") == 0);
+    uint8_t dev_id = 0;
+    if (!unlock_all) {
+      dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
+    }
+    if (unlock_all) {
+      g_control_registry.unlockGroup(0, true);
+      sendTelnetMsg(sock, "[OK] All device control blueprints have been UNLOCKED.\r\n");
+    } else if (dev_id != 0) {
+      if (g_control_registry.unlockGroup(dev_id, false)) {
+        sendTelnetMsgf(sock, "[OK] DevID 0x%02X control blueprint has been UNLOCKED.\r\n", dev_id);
+      } else {
+        sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
+      }
+    } else {
+      sendTelnetMsg(sock, "[ERROR] Usage: ctl unlock [dev_id | all]\r\n");
+    }
+  } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
+    s_cli_scratch_buf[0] = '\0';
+    AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+    out.append("\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("             DEVICE GROUP CONTROL BLUEPRINT & LEARNING COMMANDS               \r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("Command                           Description\r\n");
+    out.append(Fmt::DIV80);
+    out.append("  ctl                             Display learned control blueprint table\r\n");
+    out.append("  ctl learn                       Run step-by-step interactive learning wizard\r\n");
+    out.append("  ctl <dev_id>                    Inspect packet blueprint, roadmap & slots (e.g. ctl 0x18)\r\n");
+    out.append("  ctl lock [dev_id|all]           Lock blueprint(s) into immutable state\r\n");
+    out.append("  ctl unlock [dev_id|all]         Unlock blueprint(s) for learning\r\n");
+    out.append("  ctl name <dev_id> <name>        Set custom group name (e.g. Gas, Elevator)\r\n");
+    out.append("  ctl reset [dev_id|all]          Reset learned slot(s) (preserves skeleton & name)\r\n");
+    out.append("  ctl reset full                  Factory wipe all blueprints & skeletons from NVS\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("\r\n");
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  } else {
+    // If user passed a dev_id directly like 'ctl 0x18', display detail
+    char *endp = nullptr;
+    uint8_t dev_id = static_cast<uint8_t>(strtoul(sub, &endp, 0));
+    if (endp != sub && dev_id != 0) {
+      s_cli_scratch_buf[0] = '\0';
+      AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+      wallpadPrintControlDetail(out, dev_id);
+      sendTelnetMsgLen(sock, out.buf, out.offset);
+    } else {
+      sendTelnetMsg(sock, "Usage: ctl [<dev_id> | lock [id|all] | unlock [id|all] | name <id> <name> | reset [id] | help]\r\n");
+    }
   }
 }
 

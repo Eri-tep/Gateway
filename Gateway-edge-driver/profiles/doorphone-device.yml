@@ -1,0 +1,27 @@
+name: doorphone-device
+components:
+  - id: main
+    label: "세대 도어"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: motionSensor
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: DoorBell
+
+  - id: lobby
+    label: "로비 도어"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: motionSensor
+        version: 1
+    categories:
+      - name: DoorBell
+
+metadata:
+  vid: "4eb585eb-f283-3f64-8599-7e51c0ae7331"
+  mnmn: "SmartThingsCommunity"
