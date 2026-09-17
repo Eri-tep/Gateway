@@ -37,6 +37,12 @@ static void Task_HttpOta(void *pvParameters) {
   g_http_ota_state.progress_pct = 0;
   g_http_ota_state.last_error[0] = '\0';
 
+  // OTA 시작 즉시 시스템 상태를 OTA 모드로 전환하여 네트워크/워치독 충돌 방지
+  g_ota_in_progress.store(true, std::memory_order_release);
+  if (g_system_event_group) {
+    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+
   bool is_https = (strncmp(url, "https://", 8) == 0);
   WiFiClient plain_client;
   WiFiClientSecure secure_client;
@@ -59,6 +65,8 @@ static void Task_HttpOta(void *pvParameters) {
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "HTTP begin failed");
     ::Serial.println(F("[OTA] HTTP begin connection failed."));
     g_http_ota_state.in_progress = false;
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
     free(url);
     vTaskDelete(nullptr);
     return;
@@ -72,6 +80,8 @@ static void Task_HttpOta(void *pvParameters) {
     ::Serial.printf("[OTA] HTTP GET error: %s\r\n", g_http_ota_state.last_error);
     http.end();
     g_http_ota_state.in_progress = false;
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
     free(url);
     vTaskDelete(nullptr);
     return;
@@ -84,6 +94,8 @@ static void Task_HttpOta(void *pvParameters) {
     ::Serial.printf("[OTA] Invalid firmware size: %d\r\n", contentLength);
     http.end();
     g_http_ota_state.in_progress = false;
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
     free(url);
     vTaskDelete(nullptr);
     return;
@@ -98,14 +110,11 @@ static void Task_HttpOta(void *pvParameters) {
     ::Serial.printf("[OTA] Update.begin failed: %s\r\n", g_http_ota_state.last_error);
     http.end();
     g_http_ota_state.in_progress = false;
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
     free(url);
     vTaskDelete(nullptr);
     return;
-  }
-
-  g_ota_in_progress.store(true, std::memory_order_release);
-  if (g_system_event_group) {
-    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
   }
 
   esp_task_wdt_add(nullptr);
@@ -117,27 +126,23 @@ static void Task_HttpOta(void *pvParameters) {
 
   while (http.connected() && (written < static_cast<size_t>(contentLength))) {
     esp_task_wdt_reset();
-    size_t sizeAvailable = stream->available();
-    if (sizeAvailable > 0) {
-      size_t to_read = std::min(sizeAvailable, sizeof(s_ota_buff));
-      int c = stream->readBytes(s_ota_buff, to_read);
-      if (c > 0) {
-        last_activity_ms = millis();
-        size_t w = Update.write(s_ota_buff, c);
-        if (w != static_cast<size_t>(c)) {
-          snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
-          snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Flash write error at %u", (unsigned)written);
-          ::Serial.printf("[OTA] %s\r\n", g_http_ota_state.last_error);
-          break;
-        }
-        written += w;
-        uint32_t now = millis();
-        if (now - last_progress_ms >= 200 || written == static_cast<size_t>(contentLength)) {
-          last_progress_ms = now;
-          uint8_t pct = static_cast<uint8_t>((written * 100) / contentLength);
-          g_http_ota_state.progress_pct = pct;
-          snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Downloading (%u%%)", pct);
-        }
+    int c = stream->read(s_ota_buff, sizeof(s_ota_buff));
+    if (c > 0) {
+      last_activity_ms = millis();
+      size_t w = Update.write(s_ota_buff, c);
+      if (w != static_cast<size_t>(c)) {
+        snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
+        snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Flash write error at %u", (unsigned)written);
+        ::Serial.printf("[OTA] %s\r\n", g_http_ota_state.last_error);
+        break;
+      }
+      written += w;
+      uint32_t now = millis();
+      if (now - last_progress_ms >= 200 || written == static_cast<size_t>(contentLength)) {
+        last_progress_ms = now;
+        uint8_t pct = static_cast<uint8_t>((written * 100) / contentLength);
+        g_http_ota_state.progress_pct = pct;
+        snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Downloading (%u%%)", pct);
       }
     } else {
       if (millis() - last_activity_ms > 20000) {
@@ -146,7 +151,7 @@ static void Task_HttpOta(void *pvParameters) {
         ::Serial.println(F("[OTA] Stream read timeout."));
         break;
       }
-      taskYIELD();
+      vTaskDelay(pdMS_TO_TICKS(5));
     }
   }
 

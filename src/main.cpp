@@ -1175,8 +1175,10 @@ void Task_Network(void *pvParameters) {
     g_wdt_monitor.feed(4);
     ArduinoOTA.handle();
     if (g_ota_in_progress.load(std::memory_order_relaxed)) {
+      esp_task_wdt_reset();
+      g_wdt_monitor.feed(4);
       ArduinoOTA.handle();
-      vTaskDelay(pdMS_TO_TICKS(10));
+      vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
 
