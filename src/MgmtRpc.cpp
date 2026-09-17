@@ -146,7 +146,7 @@ static void Task_HttpOta(void *pvParameters) {
         ::Serial.println(F("[OTA] Stream read timeout."));
         break;
       }
-      vTaskDelay(pdMS_TO_TICKS(1));
+      taskYIELD();
     }
   }
 
@@ -196,8 +196,8 @@ void Mgmt_StartHttpOta(const char *url) {
     return;
   }
 
-  // Core 0에 배치: Wi-Fi/LwIP 네트워크 스택과 동일 코어에서 실행되어 Cross-Core IPC 오버헤드 제거 및 최고 전송속도 보장
-  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, url_copy, 12, nullptr, 0);
+  // Core 1에서 최고 우선순위(15)로 실행: Core 0의 Wi-Fi/LwIP 네트워크 수신 스레드와 코어를 분리하여 병렬 최대 throughput 보장
+  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, url_copy, 15, nullptr, 1);
 }
 
 // ============================================================================
