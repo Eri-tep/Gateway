@@ -1178,7 +1178,7 @@ void Task_Network(void *pvParameters) {
       esp_task_wdt_reset();
       g_wdt_monitor.feed(4);
       ArduinoOTA.handle();
-      vTaskDelay(pdMS_TO_TICKS(20));
+      vTaskDelay(pdMS_TO_TICKS(1)); // 최소 지연(1ms)으로 패킷 수신 대기열 즉각 소비 (20ms 병목 제거)
       continue;
     }
 
@@ -2315,12 +2315,18 @@ static void Boot_InitWifiAndOta() {
       if (g_system_event_group) {
         xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
       }
+      ::Serial.println(F("[ArduinoOTA] Start transfer..."));
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+      esp_task_wdt_reset();
+      g_wdt_monitor.feed(4);
     });
     ArduinoOTA.onEnd([]() {
       g_ota_in_progress.store(false, std::memory_order_release);
       if (g_system_event_group) {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
       }
+      ::Serial.println(F("[ArduinoOTA] Finished successfully!"));
       vTaskDelay(pdMS_TO_TICKS(200));
       System_Restart("OTA Firmware Update");
     });
@@ -2329,6 +2335,7 @@ static void Boot_InitWifiAndOta() {
       if (g_system_event_group) {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
       }
+      ::Serial.printf("[ArduinoOTA] Error (%u)\r\n", (unsigned)error);
     });
     ArduinoOTA.begin();
   }
