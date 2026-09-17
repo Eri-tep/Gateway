@@ -3,9 +3,11 @@ components:
   - id: main
     label: "엘리베이터"
     capabilities:
+      - id: switch
+        version: 1
       - id: momentary
         version: 1
-      - id: switch
+      - id: digituniverse06711.history
         version: 1
       - id: refresh
         version: 1

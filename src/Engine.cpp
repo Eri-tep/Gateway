@@ -545,26 +545,40 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
         default:                      cls_str = "switch"; break;
       }
 
+      bool is_outlet = (grp->coverage.dev_class == DeviceClass::SWITCH) &&
+                       (strcasestr(grp->group_name, "Outlet") != nullptr || grp->frame_len >= 17);
+      if (is_outlet) {
+        cls_str = "outlet";
+      }
+
       int pwr = 0;
       int t_temp = 0, c_temp = 0, spd = 0;
+      float power_w = 0.0f;
+      int floor = 1;
+      int direction = 0;
       const char *v_state = "closed";
 
       if (grp->ack_slots.power_offset != 0xFF && grp->ack_slots.power_offset < ack.length) {
-        pwr = (ack.data[grp->ack_slots.power_offset] == grp->power_slot.on_val) ? 1 : 0;
+        uint8_t b = ack.data[grp->ack_slots.power_offset];
+        pwr = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
       } else if (grp->power_slot.discovered && grp->power_slot.ack_state_offset != 0xFF && grp->power_slot.ack_state_offset < ack.length) {
-        pwr = (ack.data[grp->power_slot.ack_state_offset] == grp->power_slot.on_val) ? 1 : 0;
+        uint8_t b = ack.data[grp->power_slot.ack_state_offset];
+        pwr = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
       }
 
       if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
         t_temp = dev->last_target_temp > 0 ? dev->last_target_temp : 22;
         if (grp->ack_slots.target_temp_offset != 0xFF && grp->ack_slots.target_temp_offset < ack.length) {
           uint8_t b = ack.data[grp->ack_slots.target_temp_offset];
-          if (b >= 5 && b <= 35) t_temp = b;
+          if (b >= 5 && b <= 35) {
+            t_temp = b;
+            dev->last_target_temp = b;
+          }
         }
-        c_temp = 22;
+        c_temp = t_temp; // 설정온도로 기본 대체
         if (grp->ack_slots.current_temp_offset != 0xFF && grp->ack_slots.current_temp_offset < ack.length) {
           uint8_t b = ack.data[grp->ack_slots.current_temp_offset];
-          if (b >= 0 && b <= 50) c_temp = b;
+          if (b >= 5 && b <= 50) c_temp = b;
         }
       } else if (grp->coverage.dev_class == DeviceClass::VENT) {
         spd = 1;
@@ -576,9 +590,16 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
         if (grp->ack_slots.valve_state_offset != 0xFF && grp->ack_slots.valve_state_offset < ack.length) {
           v_state = (ack.data[grp->ack_slots.valve_state_offset] == grp->close_slot.off_val) ? "closed" : "open";
         }
+      } else if (is_outlet && ack.length >= 11) {
+        uint16_t raw_w = (static_cast<uint16_t>(ack.data[9]) << 8) | ack.data[10];
+        if (raw_w < 50000) power_w = static_cast<float>(raw_w) / 10.0f;
+      } else if (grp->coverage.dev_class == DeviceClass::MOMENTARY && ack.length >= 6) {
+        floor = ack.data[5];
+        if (floor < 1 || floor > 60) floor = 1;
+        if (ack.length >= 7) direction = ack.data[6];
       }
 
-      Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, cls_str, pwr, t_temp, c_temp, spd, v_state);
+      Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, cls_str, pwr, t_temp, c_temp, spd, v_state, power_w, floor, direction);
     }
   }
 }

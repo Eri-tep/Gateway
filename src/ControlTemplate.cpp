@@ -1455,7 +1455,7 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
   if (grp->sub2_offset < grp->frame_len) out.data[grp->sub2_offset] = sub2;
 
   // 액션 슬롯 주입 (오직 학습/발견된 슬롯만 주입)
-  if (action == ControlActionType::POWER) {
+  if (action == ControlActionType::POWER || action == ControlActionType::MOMENTARY_TRIGGER) {
     // [SAFETY] 가스 밸브는 안전상 절대 열기(ON) 명령을 허용하지 않음 (단방향 닫기만 허용)
     if (grp->coverage.dev_class == DeviceClass::GAS && value > 0) {
       return false;
@@ -1465,7 +1465,11 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
       out.data[grp->power_slot.category_offset] = grp->power_slot.category_val;
     }
     if (grp->power_slot.action_offset < grp->frame_len) {
-      out.data[grp->power_slot.action_offset] = (value > 0) ? grp->power_slot.on_val : grp->power_slot.off_val;
+      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && value == 2 && grp->away_mode_token != 0) {
+        out.data[grp->power_slot.action_offset] = grp->away_mode_token;
+      } else {
+        out.data[grp->power_slot.action_offset] = (value > 0) ? grp->power_slot.on_val : grp->power_slot.off_val;
+      }
     }
   } else if (action == ControlActionType::SET_TEMP) {
     if (!grp->temp_slot.discovered) return false;

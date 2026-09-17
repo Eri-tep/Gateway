@@ -13,17 +13,68 @@ local function get_connection_info(device)
 end
 
 local function refresh_telemetry(driver, device)
-  local ip, port = get_connection_info(device)
+  local main_gw = nil
+  for _, d in ipairs(driver:get_devices()) do
+    if d.device_network_id == "esp32_wallpad_gateway_ctrl" then
+      main_gw = d
+      break
+    end
+  end
+
+  local target_device = main_gw or device
+  local ip, port = get_connection_info(target_device)
   local data, err = gateway_client.get_telemetry(ip, port)
-  if data then
-    telemetry_handler.handle_telemetry(driver, device, data)
-  else
+  if data and main_gw then
+    telemetry_handler.handle_telemetry(driver, main_gw, data)
+  elseif not data then
     log.error("Failed to query gateway telemetry: " .. tostring(err))
   end
 end
 
 function CommandHandlers.handle_refresh(driver, device, command)
-  log.info("🔄 [CMD] Safe Telemetry Refresh requested")
+  log.info(string.format("🔄 [CMD] Refresh requested on: %s", tostring(device.label)))
+  local p_key = device.parent_assigned_child_key or ""
+
+  -- 자식 기기 새로고침 처리
+  if p_key:match("^dev_") then
+    -- 난방인 경우 지원 모드 (난방, 외출, 꺼짐) 갱신
+    if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
+      local ev = capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" })
+      ev.state_change = true
+      device:emit_event(ev)
+    end
+
+    -- 엘리베이터인 경우 대기/상태 복원
+    local cap_hist = capabilities["digituniverse06711.history"]
+    if cap_hist and p_key:match("^dev_34_") then
+      local ev_active = device:get_field("ev_active")
+      if not ev_active then
+        local ev = cap_hist.history({ value = "대기" })
+        ev.state_change = true
+        device:emit_event(ev)
+      end
+    end
+
+    -- 게이트웨이에서 최신 실제 기기 상태 조회하여 즉시 동기화
+    local ip, port = get_gateway_ip_port(driver)
+    device.thread:call_with_delay(0.1, function()
+      local res, _ = gateway_client.get_locked_devices(ip, port)
+      if res and res.devices then
+        for _, ldev in ipairs(res.devices) do
+          local d_id = tonumber(ldev.dev_id) or 0
+          local s1 = tonumber(ldev.sub1) or 0
+          local s2 = tonumber(ldev.sub2) or 0
+          local c_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+          if c_key == p_key then
+            telemetry_handler.handle_device_state_event(driver, ldev)
+            break
+          end
+        end
+      end
+    end)
+    return
+  end
+
   refresh_telemetry(driver, device)
 end
 
@@ -219,7 +270,7 @@ local CHILD_FRONT_KEY = "doorphone_front"
 local CHILD_LOBBY_KEY = "doorphone_lobby"
 
 function CommandHandlers.handle_child_device_action(driver, device, command)
-  local action = (command.args and command.args.action) or "idle"
+  local action = (command.args and (command.args.action or command.args[1])) or "idle"
   local comp_main = device.profile.components["main"]
   local cap_mgr = capabilities["digituniverse06711.childDeviceManager"]
 
@@ -300,7 +351,9 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
 
         if not exists then
           local prof = "child-switch"
-          if d_cls == "thermostat" then
+          if d_cls == "outlet" then
+            prof = "child-outlet"
+          elseif d_cls == "thermostat" then
             prof = "child-thermostat"
           elseif d_cls == "vent" then
             prof = "child-vent"
@@ -326,36 +379,55 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
           log.info(string.format("ℹ️ [CHILD] Device '%s' (%s) already exists", child_key, d_name))
         end
       end
+
+      -- 자식 기기 생성 및 등록 후 게이트웨이의 최신 실제 상태를 즉시 동기화
+      device.thread:call_with_delay(0.8, function()
+        log.info("🔄 [CHILD] Applying initial states for all child devices from Gateway...")
+        for _, ldev in ipairs(res.devices) do
+          telemetry_handler.handle_device_state_event(driver, ldev)
+        end
+      end)
     elseif err then
       log.error("❌ [CHILD] Failed to fetch locked devices: " .. tostring(err))
     else
       log.info("ℹ️ [CHILD] No LOCKED devices found on Gateway yet.")
     end
 
-    -- 1.5초 후 자동으로 Idle 복귀
-    device.thread:call_with_delay(1.5, function()
+    -- 2.0초 후 자동으로 Idle 복귀
+    device.thread:call_with_delay(2.0, function()
       if cap_mgr and comp_main then
         device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
       end
     end)
   elseif action == "remove" then
     log.info("🗑️ [CHILD] Removing All Child Devices...")
+    local targets = {}
     for _, dev in ipairs(driver:get_devices()) do
       local p_key = dev.parent_assigned_child_key or ""
       if p_key == "doorphone" or p_key == CHILD_FRONT_KEY or p_key == CHILD_LOBBY_KEY or
          p_key:match("^dev_") or
          dev.label == "도어폰" or dev.label == "세대 도어" or dev.label == "로비 도어" then
-        log.info("🗑️ [CHILD] Deleting device: " .. tostring(dev.label) .. " (Key: " .. tostring(p_key) .. ")")
-        if driver.try_delete_device then
-          driver:try_delete_device(dev.id)
-        elseif dev.try_delete then
-          dev:try_delete()
-        end
+        table.insert(targets, { id = dev.id, label = dev.label, key = p_key })
       end
     end
 
-    -- 1.5초 후 자동으로 Idle 복귀
-    device.thread:call_with_delay(1.5, function()
+    log.info(string.format("🗑️ [CHILD] Found %d child devices to delete", #targets))
+    for i, t in ipairs(targets) do
+      local delay = (i - 1) * 0.15
+      device.thread:call_with_delay(delay, function()
+        log.info(string.format("🗑️ [CHILD] Deleting device (%d/%d): %s (ID: %s, Key: %s)", i, #targets, tostring(t.label), tostring(t.id), tostring(t.key)))
+        local ok, del_err = pcall(function()
+          driver:try_delete_device(t.id)
+        end)
+        if not ok then
+          log.error("❌ [CHILD] Failed to delete device " .. tostring(t.id) .. ": " .. tostring(del_err))
+        end
+      end)
+    end
+
+    -- 모든 기기 삭제 완료 후 자동으로 Idle 복귀
+    local total_wait = math.max(2.0, (#targets * 0.15) + 1.0)
+    device.thread:call_with_delay(total_wait, function()
       if cap_mgr and comp_main then
         device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
       end
@@ -430,8 +502,20 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
   if not d_id then return end
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("💡 [CHILD CMD] %s ON -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
+
+  local is_momentary = device:supports_capability_by_id(capabilities.momentary.ID)
   device:emit_event(capabilities.switch.switch.on())
-  gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+
+  if is_momentary then
+    device:set_field("ev_active", true)
+    local cap_hist = capabilities["digituniverse06711.history"]
+    if cap_hist then
+      device:emit_event(cap_hist.history({ value = "호출 중..." }))
+    end
+    gateway_client.device_control(ip, port, d_id, s1, s2, "momentary", 1)
+  else
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+  end
 end
 
 function CommandHandlers.handle_child_switch_off(driver, device, command)
@@ -439,8 +523,19 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
   if not d_id then return end
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("💡 [CHILD CMD] %s OFF -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
+
+  local is_momentary = device:supports_capability_by_id(capabilities.momentary.ID)
   device:emit_event(capabilities.switch.switch.off())
-  gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+
+  if is_momentary then
+    device:set_field("ev_active", false)
+    local cap_hist = capabilities["digituniverse06711.history"]
+    if cap_hist then
+      device:emit_event(cap_hist.history({ value = "대기" }))
+    end
+  else
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+  end
 end
 
 function CommandHandlers.handle_child_set_heating_setpoint(driver, device, command)
@@ -449,28 +544,95 @@ function CommandHandlers.handle_child_set_heating_setpoint(driver, device, comma
   local temp = tonumber(command.args.heatingSetpoint) or 22
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🔥 [CHILD CMD] %s SetTemp -> %dC (DevID 0x%02X %d-%d)", device.label, temp, d_id, s1, s2))
-  device:emit_event(capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = temp, unit = "C" }))
+
+  local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = temp, unit = "C" })
+  sp_evt.state_change = true
+  device:emit_event(sp_evt)
+
+  -- [핵심] 현재 온도 센서 부재 시 설정 온도로 상시 대체 동기화
+  if capabilities.temperatureMeasurement then
+    local cur_evt = capabilities.temperatureMeasurement.temperature({ value = temp, unit = "C" })
+    cur_evt.state_change = true
+    device:emit_event(cur_evt)
+  end
+
+  device:set_field("last_thermo_temp", temp, { persist = true })
   gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
 end
 
 function CommandHandlers.handle_child_set_thermostat_mode(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
-  local mode = command.args.mode or "off"
-  local pwr = (mode == "heat") and 1 or 0
+  local mode = (command.args and command.args.mode) or "off"
+  local pwr = 0
+  if mode == "heat" then
+    pwr = 1
+  elseif mode == "away" or mode == "eco" then
+    pwr = 2
+  end
   local ip, port = get_gateway_ip_port(driver)
-  log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (DevID 0x%02X %d-%d)", device.label, mode, d_id, s1, s2))
+  log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (pwr=%d, DevID 0x%02X %d-%d)", device.label, mode, pwr, d_id, s1, s2))
   device:emit_event(capabilities.thermostatMode.thermostatMode(mode))
   gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
+end
+
+function CommandHandlers.handle_child_set_vent_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local mode = (command.args and command.args.mode) or "low"
+  local spd = 1
+  if mode == "medium" then
+    spd = 2
+  elseif mode == "high" then
+    spd = 3
+  end
+  local ip, port = get_gateway_ip_port(driver)
+  log.info(string.format("🌀 [CHILD CMD] %s SetVentMode -> %s (speed=%d) (DevID 0x%02X %d-%d)", device.label, mode, spd, d_id, s1, s2))
+  local cap_vent = capabilities["digituniverse06711.ventmode"]
+  if cap_vent then
+    device:emit_event(cap_vent.ventMode(mode))
+  end
+  device:emit_event(capabilities.switch.switch.on())
+  gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", spd)
 end
 
 function CommandHandlers.handle_child_set_fan_speed(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
   local spd = tonumber(command.args.speed) or 1
+  local mode = (spd == 2) and "medium" or (spd >= 3 and "high" or "low")
   local ip, port = get_gateway_ip_port(driver)
-  log.info(string.format("🌀 [CHILD CMD] %s SetFanSpeed -> %d (DevID 0x%02X %d-%d)", device.label, spd, d_id, s1, s2))
-  device:emit_event(capabilities.fanSpeed.fanSpeed(spd))
+  log.info(string.format("🌀 [CHILD CMD] %s SetFanSpeed -> %d (%s) (DevID 0x%02X %d-%d)", device.label, spd, mode, d_id, s1, s2))
+  local cap_vent = capabilities["digituniverse06711.ventmode"]
+  if cap_vent then
+    device:emit_event(cap_vent.ventMode(mode))
+  end
+  if capabilities.airConditionerFanMode then
+    device:emit_event(capabilities.airConditionerFanMode.fanMode(mode))
+  end
+  gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", spd)
+end
+
+function CommandHandlers.handle_child_set_ac_fan_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local mode = (command.args and (command.args.fanMode or command.args.mode)) or "low"
+  local spd = 1
+  if mode == "medium" then
+    spd = 2
+  elseif mode == "high" then
+    spd = 3
+  end
+  local ip, port = get_gateway_ip_port(driver)
+  log.info(string.format("🌀 [CHILD CMD] %s SetAcFanMode -> %s (speed=%d) (DevID 0x%02X %d-%d)", device.label, mode, spd, d_id, s1, s2))
+  local cap_vent = capabilities["digituniverse06711.ventmode"]
+  if cap_vent then
+    device:emit_event(cap_vent.ventMode(mode))
+  end
+  if capabilities.airConditionerFanMode then
+    device:emit_event(capabilities.airConditionerFanMode.fanMode(mode))
+  end
+  device:emit_event(capabilities.switch.switch.on())
   gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", spd)
 end
 
@@ -488,6 +650,12 @@ function CommandHandlers.handle_child_momentary_push(driver, device, command)
   if not d_id then return end
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🛗 [CHILD CMD] %s PUSH -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
+  device:set_field("ev_active", true)
+  device:emit_event(capabilities.switch.switch.on())
+  local cap_hist = capabilities["digituniverse06711.history"]
+  if cap_hist then
+    device:emit_event(cap_hist.history({ value = "호출 중..." }))
+  end
   device:emit_event(capabilities.momentary.push())
   gateway_client.device_control(ip, port, d_id, s1, s2, "momentary", 1)
 end

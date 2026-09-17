@@ -82,6 +82,12 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     return
   end
 
+  -- 자식 기기 오염 방지: 게이트웨이 기기가 아닌 경우 즉시 리턴
+  if device.device_network_id ~= "esp32_wallpad_gateway_ctrl" then
+    log.warn("Attempted to run gateway telemetry report on non-gateway device: " .. tostring(device.label))
+    return
+  end
+
   local comp_main = device.profile.components["main"]
   local comp_wallpad = device.profile.components["wallpad"] or comp_main
   local comp_diag = device.profile.components["diagnostics"] or comp_main
@@ -491,34 +497,140 @@ function TelemetryHandler.handle_device_state_event(driver, event_data)
       log.info(string.format("📡 [DEVICE STATE] %s (%s) State Update: Power=%s",
                              dev.label, target_key, tostring(event_data.power)))
 
-      -- 1. Switch
-      if event_data.power ~= nil and capabilities.switch then
+      -- 1. Switch (단, momentary 엘리베이터는 도착 시에만 자동 꺼짐 제어)
+      if d_cls ~= "momentary" and event_data.power ~= nil and capabilities.switch then
         local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
         dev:emit_event(sw_evt)
       end
 
-      -- 2. Thermostat
+      -- 2. Outlet (실시간 전력량 W & 누적 전력량 kWh, 매월 1일 자동 리셋)
+      if d_cls == "outlet" then
+        local cur_month = os.date("%Y-%m")
+        local last_month = dev:get_field("last_energy_month")
+        local monthly_kwh = dev:get_field("monthly_energy_kwh") or 0.0
+
+        if last_month ~= cur_month then
+          monthly_kwh = 0.0
+          dev:set_field("monthly_energy_kwh", 0.0, { persist = true })
+          dev:set_field("last_energy_month", cur_month, { persist = true })
+          log.info(string.format("📅 [OUTLET] New month (%s) detected! Reset monthly energy to 0.0 kWh", cur_month))
+        end
+
+        if event_data.power_w ~= nil then
+          local p_w = tonumber(event_data.power_w) or 0.0
+          local now_ts = os.time()
+          local last_ts = dev:get_field("last_power_ts") or now_ts
+          local dt = math.max(0, now_ts - last_ts)
+
+          if dt > 0 and dt <= 300 and p_w > 0 then
+            monthly_kwh = monthly_kwh + (p_w * dt / 3600000.0)
+            dev:set_field("monthly_energy_kwh", monthly_kwh, { persist = true })
+          end
+          dev:set_field("last_power_ts", now_ts, { persist = true })
+
+          if capabilities.powerMeter then
+            dev:emit_event(capabilities.powerMeter.power({ value = p_w, unit = "W" }))
+          end
+          if capabilities.energyMeter then
+            local kwh_val = math.floor(monthly_kwh * 1000 + 0.5) / 1000
+            dev:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
+          end
+        end
+      end
+
+      -- 3. Elevator (Momentary: 호출 후 실시간 층수 추적 & 도착 시 자동 꺼짐)
+      if d_cls == "momentary" then
+        local floor = tonumber(event_data.floor) or 1
+        local dir = tonumber(event_data.direction) or 0 -- 1: 상승, 2: 하강, 0: 정지/도착
+        local cap_hist = capabilities["digituniverse06711.history"]
+        local ev_active = dev:get_field("ev_active")
+
+        if ev_active then
+          if dir == 1 then
+            if cap_hist then
+              dev:emit_event(cap_hist.history({ value = string.format("%d층 상승 중", floor) }))
+            end
+          elseif dir == 2 then
+            if cap_hist then
+              dev:emit_event(cap_hist.history({ value = string.format("%d층 하강 중", floor) }))
+            end
+          elseif dir == 0 then
+            -- 도착 / 정지 ➔ 스위치 자동 OFF 및 도착 이력 표시
+            if cap_hist then
+              dev:emit_event(cap_hist.history({ value = string.format("%d층 도착", floor) }))
+            end
+            if capabilities.switch then
+              dev:emit_event(capabilities.switch.switch.off())
+            end
+            dev:set_field("ev_active", false)
+            log.info(string.format("🛗 [ELEVATOR] Arrived at %dF! Auto Switch OFF", floor))
+          end
+        else
+          if cap_hist then
+            local status_text = "대기"
+            if dir == 1 then
+              status_text = string.format("%d층 (상승)", floor)
+            elseif dir == 2 then
+              status_text = string.format("%d층 (하강)", floor)
+            elseif floor > 0 then
+              status_text = string.format("%d층 대기", floor)
+            end
+            dev:emit_event(cap_hist.history({ value = status_text }))
+          end
+        end
+      end
+
+      -- 4. Thermostat (난방/외출/꺼짐 3모드 & 현재온도 부재 시 설정온도로 대체)
       if d_cls == "thermostat" then
         if event_data.power ~= nil and capabilities.thermostatMode then
-          local mode_evt = (event_data.power == 1) and capabilities.thermostatMode.thermostatMode("heat") or capabilities.thermostatMode.thermostatMode("off")
-          dev:emit_event(mode_evt)
+          local mode_str = "off"
+          if event_data.power == 1 then
+            mode_str = "heat"
+          elseif event_data.power == 2 then
+            mode_str = "away"
+          end
+          dev:emit_event(capabilities.thermostatMode.thermostatMode(mode_str))
         end
-        if event_data.target_temp and event_data.target_temp > 0 and capabilities.thermostatHeatingSetpoint then
-          dev:emit_event(capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = event_data.target_temp, unit = "C" }))
+
+        local saved_temp = dev:get_field("last_thermo_temp") or 22
+        local target_temp = (event_data.target_temp and event_data.target_temp > 0) and event_data.target_temp or saved_temp
+        if target_temp > 0 then
+          dev:set_field("last_thermo_temp", target_temp, { persist = true })
         end
-        if event_data.current_temp and event_data.current_temp > 0 and capabilities.temperatureMeasurement then
-          dev:emit_event(capabilities.temperatureMeasurement.temperature({ value = event_data.current_temp, unit = "C" }))
+
+        local current_temp = (event_data.current_temp and event_data.current_temp > 0) and event_data.current_temp or target_temp
+
+        if capabilities.thermostatHeatingSetpoint then
+          local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = target_temp, unit = "C" })
+          sp_evt.state_change = true
+          dev:emit_event(sp_evt)
+        end
+        if capabilities.temperatureMeasurement then
+          local cur_evt = capabilities.temperatureMeasurement.temperature({ value = current_temp, unit = "C" })
+          cur_evt.state_change = true
+          dev:emit_event(cur_evt)
         end
       end
 
-      -- 3. Vent
+      -- 5. Vent (약풍/중풍/강풍 드롭다운 & 팬 속도 동기화)
       if d_cls == "vent" then
-        if event_data.fan_speed and event_data.fan_speed > 0 and capabilities.fanSpeed then
-          dev:emit_event(capabilities.fanSpeed.fanSpeed(event_data.fan_speed))
+        if event_data.fan_speed and event_data.fan_speed > 0 then
+          local spd = tonumber(event_data.fan_speed) or 1
+          local mode_str = (spd == 2) and "medium" or (spd >= 3 and "high" or "low")
+          local cap_vent = capabilities["digituniverse06711.ventmode"]
+          if cap_vent then
+            dev:emit_event(cap_vent.ventMode(mode_str))
+          end
+          if capabilities.fanSpeed then
+            dev:emit_event(capabilities.fanSpeed.fanSpeed(spd))
+          end
+          if capabilities.airConditionerFanMode then
+            dev:emit_event(capabilities.airConditionerFanMode.fanMode(mode_str))
+          end
         end
       end
 
-      -- 4. Gas Valve
+      -- 6. Gas Valve
       if d_cls == "gas" and capabilities.valve then
         local v_evt = (event_data.valve == "closed") and capabilities.valve.valve.closed() or capabilities.valve.valve.open()
         dev:emit_event(v_evt)

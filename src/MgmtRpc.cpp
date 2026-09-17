@@ -146,7 +146,7 @@ static void Task_HttpOta(void *pvParameters) {
         ::Serial.println(F("[OTA] Stream read timeout."));
         break;
       }
-      vTaskDelay(pdMS_TO_TICKS(5));
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
 
@@ -196,8 +196,8 @@ void Mgmt_StartHttpOta(const char *url) {
     return;
   }
 
-  // Priority 14 (Core 1에서 CH1보다 높은 최우선 순위 부여로 RS485 대기 중 OTA 스트림 즉시 처리)
-  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, url_copy, 14, nullptr, 1);
+  // Core 0에 배치: Wi-Fi/LwIP 네트워크 스택과 동일 코어에서 실행되어 Cross-Core IPC 오버헤드 제거 및 최고 전송속도 보장
+  xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, url_copy, 12, nullptr, 0);
 }
 
 // ============================================================================
@@ -499,6 +499,12 @@ void Mgmt_SerializeLockedDevices(AppendBuf &out) {
       default:                      cls_str = "switch"; break;
     }
 
+    bool is_outlet = (grp->coverage.dev_class == DeviceClass::SWITCH) &&
+                     (strcasestr(grp->group_name, "Outlet") != nullptr || grp->frame_len >= 17);
+    if (is_outlet) {
+      cls_str = "outlet";
+    }
+
     char name_buf[32];
     if (grp->coverage.dev_class == DeviceClass::GAS ||
         grp->coverage.dev_class == DeviceClass::VENT ||
@@ -512,30 +518,33 @@ void Mgmt_SerializeLockedDevices(AppendBuf &out) {
     int target_temp = 0;
     int current_temp = 0;
     int fan_speed = 0;
+    float power_w = 0.0f;
+    int floor = 1;
+    int direction = 0;
     const char *valve_state = "closed";
 
     // Power 판정
     if (grp->ack_slots.power_offset != 0xFF && grp->ack_slots.power_offset < snap.last_ack_len) {
       uint8_t b = snap.last_ack_data[grp->ack_slots.power_offset];
-      power = (b == grp->power_slot.on_val) ? 1 : 0;
+      power = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
     } else if (grp->power_slot.discovered && grp->power_slot.ack_state_offset != 0xFF && grp->power_slot.ack_state_offset < snap.last_ack_len) {
       uint8_t b = snap.last_ack_data[grp->power_slot.ack_state_offset];
-      power = (b == grp->power_slot.on_val) ? 1 : 0;
+      power = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
     } else if (snap.state_len > 0) {
       power = snap.state_data[0] > 0 ? 1 : 0;
     }
 
-    // Thermostat
+    // Thermostat: 현재온도 부재 시 설정온도로 대체!
     if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
       target_temp = snap.last_target_temp > 0 ? snap.last_target_temp : 22;
       if (grp->ack_slots.target_temp_offset != 0xFF && grp->ack_slots.target_temp_offset < snap.last_ack_len) {
         uint8_t b = snap.last_ack_data[grp->ack_slots.target_temp_offset];
         if (b >= 5 && b <= 35) target_temp = b;
       }
-      current_temp = 22;
+      current_temp = target_temp; // 설정온도로 기본 대체
       if (grp->ack_slots.current_temp_offset != 0xFF && grp->ack_slots.current_temp_offset < snap.last_ack_len) {
         uint8_t b = snap.last_ack_data[grp->ack_slots.current_temp_offset];
-        if (b >= 0 && b <= 50) current_temp = b;
+        if (b >= 5 && b <= 50) current_temp = b;
       }
     }
 
@@ -557,6 +566,23 @@ void Mgmt_SerializeLockedDevices(AppendBuf &out) {
       }
     }
 
+    // Outlet: 실시간 소비전력(W)
+    if (is_outlet && snap.last_ack_len >= 11) {
+      uint16_t raw_w = (static_cast<uint16_t>(snap.last_ack_data[9]) << 8) | snap.last_ack_data[10];
+      if (raw_w < 50000) {
+        power_w = static_cast<float>(raw_w) / 10.0f;
+      }
+    }
+
+    // Momentary (엘리베이터): 층수 및 방향
+    if (grp->coverage.dev_class == DeviceClass::MOMENTARY && snap.last_ack_len >= 6) {
+      floor = snap.last_ack_data[5];
+      if (floor < 1 || floor > 60) floor = 1;
+      if (snap.last_ack_len >= 7) {
+        direction = snap.last_ack_data[6]; // 1: 상승, 2: 하강, 0: 정지
+      }
+    }
+
     RouteEndpoint ep{1, -1, 0};
     uint8_t ch = 1;
     if (g_route_registry.lookupRoute(snap.dev_id, snap.sub1, snap.sub2, ep)) {
@@ -573,6 +599,10 @@ void Mgmt_SerializeLockedDevices(AppendBuf &out) {
       out.appendFormat(",\"fan_speed\":%d", fan_speed);
     } else if (grp->coverage.dev_class == DeviceClass::GAS) {
       out.appendFormat(",\"valve\":\"%s\"", valve_state);
+    } else if (is_outlet) {
+      out.appendFormat(",\"power_w\":%.1f", power_w);
+    } else if (grp->coverage.dev_class == DeviceClass::MOMENTARY) {
+      out.appendFormat(",\"floor\":%d,\"direction\":%d", floor, direction);
     }
     out.append("}");
     locked_count++;
@@ -1096,6 +1126,13 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     StaticPacket dummy{};
     g_control_dispatcher.dispatch(req, dummy);
 
+    if (act == ControlActionType::SET_TEMP) {
+      DeviceStateEntry *dev = g_device_repo.findMutable(static_cast<uint8_t>(dev_id), static_cast<uint8_t>(sub1), static_cast<uint8_t>(sub2), false);
+      if (dev) {
+        dev->last_target_temp = static_cast<uint8_t>(val);
+      }
+    }
+
     const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Control packet dispatched\"}\n";
     send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
     return;
@@ -1167,7 +1204,8 @@ void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) {
 void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                const char *dev_class, int power,
                                int target_temp, int current_temp,
-                               int speed, const char *valve_state) {
+                               int speed, const char *valve_state,
+                               float power_w, int floor, int direction) {
   char buf[256];
   int len = 0;
   if (dev_class && strcasecmp(dev_class, "thermostat") == 0) {
@@ -1182,6 +1220,14 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
     len = snprintf(buf, sizeof(buf),
                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"valve\":\"%s\"}\n",
                    dev_id, sub1, sub2, dev_class, valve_state ? valve_state : "closed");
+  } else if (dev_class && strcasecmp(dev_class, "outlet") == 0) {
+    len = snprintf(buf, sizeof(buf),
+                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"power\":%d,\"power_w\":%.1f}\n",
+                   dev_id, sub1, sub2, dev_class, power, power_w);
+  } else if (dev_class && strcasecmp(dev_class, "momentary") == 0) {
+    len = snprintf(buf, sizeof(buf),
+                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"power\":%d,\"floor\":%d,\"direction\":%d}\n",
+                   dev_id, sub1, sub2, dev_class, power, floor, direction);
   } else {
     len = snprintf(buf, sizeof(buf),
                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"power\":%d}\n",

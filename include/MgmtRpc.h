@@ -54,5 +54,6 @@ void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell);
 void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                const char *dev_class, int power,
                                int target_temp = 0, int current_temp = 0,
-                               int speed = 0, const char *valve_state = nullptr);
+                               int speed = 0, const char *valve_state = nullptr,
+                               float power_w = 0.0f, int floor = 0, int direction = 0);
 void Mgmt_BroadcastDevicesUpdated();
