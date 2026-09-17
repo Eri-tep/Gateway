@@ -26,7 +26,7 @@ local function device_init(driver, device)
   log.info("Initializing Device: " .. tostring(device.label) .. " (Type: " .. tostring(device.type) .. ")")
 
   -- 자식 기기(도어폰 - 세대 도어 / 로비 도어 / 레거시)인 경우 초기 상태 설정
-  local p_key = device.parent_assigned_child_key
+  local p_key = device.parent_assigned_child_key or ""
   if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
     local cap_motion = capabilities.motionSensor
     local comp_main = device.profile.components["main"]
@@ -42,6 +42,29 @@ local function device_init(driver, device)
       if cap_motion then
         device:emit_component_event(comp_lobby, cap_motion.motion.inactive())
       end
+    end
+    return
+  end
+
+  -- ★ 동적 자식 기기 (LOCKED 조명/난방/환기/가스/엘리베이터)인 경우 초기 상태 설정
+  if p_key:match("^dev_") then
+    if capabilities.switch then
+      device:emit_event(capabilities.switch.switch.off())
+    end
+    if capabilities.thermostatMode then
+      device:emit_event(capabilities.thermostatMode.thermostatMode("off"))
+    end
+    if capabilities.thermostatHeatingSetpoint then
+      device:emit_event(capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = 22, unit = "C" }))
+    end
+    if capabilities.temperatureMeasurement then
+      device:emit_event(capabilities.temperatureMeasurement.temperature({ value = 22, unit = "C" }))
+    end
+    if capabilities.fanSpeed then
+      device:emit_event(capabilities.fanSpeed.fanSpeed(1))
+    end
+    if capabilities.valve then
+      device:emit_event(capabilities.valve.valve.closed())
     end
     return
   end
@@ -70,6 +93,10 @@ local function device_init(driver, device)
     gateway_client.start_event_listener(driver, ip, port, function(d, event_data)
       if event_data.event == "doorphone" then
         telemetry_handler.handle_doorphone_event(d, event_data)
+      elseif event_data.event == "device_state" then
+        telemetry_handler.handle_device_state_event(d, event_data)
+      elseif event_data.event == "devices_updated" then
+        telemetry_handler.handle_devices_updated_event(d, event_data)
       end
     end)
   end
@@ -212,6 +239,18 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     },
     [capabilities.momentary.ID] = {
       [capabilities.momentary.commands.push.NAME] = command_handlers.handle_momentary_push
+    },
+    [capabilities.thermostatHeatingSetpoint.ID] = {
+      [capabilities.thermostatHeatingSetpoint.commands.setHeatingSetpoint.NAME] = command_handlers.handle_child_set_heating_setpoint
+    },
+    [capabilities.thermostatMode.ID] = {
+      [capabilities.thermostatMode.commands.setThermostatMode.NAME] = command_handlers.handle_child_set_thermostat_mode
+    },
+    [capabilities.fanSpeed.ID] = {
+      [capabilities.fanSpeed.commands.setFanSpeed.NAME] = command_handlers.handle_child_set_fan_speed
+    },
+    [capabilities.valve.ID] = {
+      [capabilities.valve.commands.close.NAME] = command_handlers.handle_child_valve_close
     }
   }
 })

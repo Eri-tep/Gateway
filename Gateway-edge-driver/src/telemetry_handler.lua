@@ -473,5 +473,69 @@ function TelemetryHandler.handle_doorphone_event(driver, event_data)
   end
 end
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 실시간 기기 상태 이벤트 핸들러 (CH7 Server Push)
+-- ═══════════════════════════════════════════════════════════════════════════
+function TelemetryHandler.handle_device_state_event(driver, event_data)
+  if not event_data then return end
+  local d_id = tonumber(event_data.dev_id)
+  local s1 = tonumber(event_data.sub1)
+  local s2 = tonumber(event_data.sub2)
+  if not d_id or not s1 or not s2 then return end
+
+  local target_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+  local d_cls = event_data.class or "switch"
+
+  for _, dev in ipairs(driver:get_devices()) do
+    if dev.parent_assigned_child_key == target_key then
+      log.info(string.format("📡 [DEVICE STATE] %s (%s) State Update: Power=%s",
+                             dev.label, target_key, tostring(event_data.power)))
+
+      -- 1. Switch
+      if event_data.power ~= nil and capabilities.switch then
+        local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+        dev:emit_event(sw_evt)
+      end
+
+      -- 2. Thermostat
+      if d_cls == "thermostat" then
+        if event_data.power ~= nil and capabilities.thermostatMode then
+          local mode_evt = (event_data.power == 1) and capabilities.thermostatMode.thermostatMode("heat") or capabilities.thermostatMode.thermostatMode("off")
+          dev:emit_event(mode_evt)
+        end
+        if event_data.target_temp and event_data.target_temp > 0 and capabilities.thermostatHeatingSetpoint then
+          dev:emit_event(capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = event_data.target_temp, unit = "C" }))
+        end
+        if event_data.current_temp and event_data.current_temp > 0 and capabilities.temperatureMeasurement then
+          dev:emit_event(capabilities.temperatureMeasurement.temperature({ value = event_data.current_temp, unit = "C" }))
+        end
+      end
+
+      -- 3. Vent
+      if d_cls == "vent" then
+        if event_data.fan_speed and event_data.fan_speed > 0 and capabilities.fanSpeed then
+          dev:emit_event(capabilities.fanSpeed.fanSpeed(event_data.fan_speed))
+        end
+      end
+
+      -- 4. Gas Valve
+      if d_cls == "gas" and capabilities.valve then
+        local v_evt = (event_data.valve == "closed") and capabilities.valve.valve.closed() or capabilities.valve.valve.open()
+        dev:emit_event(v_evt)
+      end
+
+      break
+    end
+  end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 기기 락 변경 이벤트 핸들러 (CH7 Server Push)
+-- ═══════════════════════════════════════════════════════════════════════════
+function TelemetryHandler.handle_devices_updated_event(driver, event_data)
+  log.info("🔔 [DEVICES UPDATED] Gateway reports new device LOCKED! Click 'Add' on Child Device Manager to sync.")
+end
+
 return TelemetryHandler
+
 

@@ -138,6 +138,24 @@ function GatewayClient.set_ew11(ip, port, slot, target_ip, target_port, name, en
   })
 end
 
+function GatewayClient.get_locked_devices(ip, port)
+  return GatewayClient.send_rpc(ip, port, {
+    cmd = "get_locked_devices"
+  })
+end
+
+function GatewayClient.device_control(ip, port, dev_id, sub1, sub2, action, value)
+  return GatewayClient.send_rpc(ip, port, {
+    cmd = "device_control",
+    dev_id = dev_id,
+    sub1 = sub1,
+    sub2 = sub2,
+    action = action,
+    value = value
+  })
+end
+
+
 --- CH7 (8900) 실시간 푸시 이벤트 리스너 (백그라운드 지속 소켓)
 function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
   if not ip or not port then return end

@@ -1,6 +1,7 @@
 #include "ControlTemplate.h"
 #include "WallpadParser.h"
 #include "Config.h"
+#include "MgmtRpc.h"
 #include <Preferences.h>
 #include <algorithm>
 
@@ -290,6 +291,7 @@ bool ControlTemplateRegistry::lockGroup(uint8_t dev_id, bool lock_all) {
   taskEXIT_CRITICAL(&_mux);
   if (modified) {
     saveToNvs();
+    Mgmt_BroadcastDevicesUpdated();
     return true;
   }
   return false;
@@ -310,6 +312,7 @@ bool ControlTemplateRegistry::unlockGroup(uint8_t dev_id, bool unlock_all) {
   taskEXIT_CRITICAL(&_mux);
   if (modified) {
     saveToNvs();
+    Mgmt_BroadcastDevicesUpdated();
     return true;
   }
   return false;

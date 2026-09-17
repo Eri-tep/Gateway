@@ -525,11 +525,62 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
     return;
   }
 
+  bool ack_changed = (dev->last_ack_len != ack.length || memcmp(dev->last_ack_data.data(), ack.data.data(), ack.length) != 0);
   dev->last_ack_len = ack.length;
   memcpy(dev->last_ack_data.data(), ack.data.data(), ack.length);
   dev->last_updated_ms = millis();
   dev->timeout_count = 0;
   dev->is_online = true;
+
+  if (ack_changed) {
+    const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+    if (grp && grp->status == GroupControlTemplate::Status::LOCKED) {
+      const char *cls_str = "switch";
+      switch (grp->coverage.dev_class) {
+        case DeviceClass::THERMOSTAT: cls_str = "thermostat"; break;
+        case DeviceClass::VENT:       cls_str = "vent"; break;
+        case DeviceClass::GAS:        cls_str = "gas"; break;
+        case DeviceClass::MOMENTARY:  cls_str = "momentary"; break;
+        case DeviceClass::AIRCON:     cls_str = "aircon"; break;
+        default:                      cls_str = "switch"; break;
+      }
+
+      int pwr = 0;
+      int t_temp = 0, c_temp = 0, spd = 0;
+      const char *v_state = "closed";
+
+      if (grp->ack_slots.power_offset != 0xFF && grp->ack_slots.power_offset < ack.length) {
+        pwr = (ack.data[grp->ack_slots.power_offset] == grp->power_slot.on_val) ? 1 : 0;
+      } else if (grp->power_slot.discovered && grp->power_slot.ack_state_offset != 0xFF && grp->power_slot.ack_state_offset < ack.length) {
+        pwr = (ack.data[grp->power_slot.ack_state_offset] == grp->power_slot.on_val) ? 1 : 0;
+      }
+
+      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
+        t_temp = dev->last_target_temp > 0 ? dev->last_target_temp : 22;
+        if (grp->ack_slots.target_temp_offset != 0xFF && grp->ack_slots.target_temp_offset < ack.length) {
+          uint8_t b = ack.data[grp->ack_slots.target_temp_offset];
+          if (b >= 5 && b <= 35) t_temp = b;
+        }
+        c_temp = 22;
+        if (grp->ack_slots.current_temp_offset != 0xFF && grp->ack_slots.current_temp_offset < ack.length) {
+          uint8_t b = ack.data[grp->ack_slots.current_temp_offset];
+          if (b >= 0 && b <= 50) c_temp = b;
+        }
+      } else if (grp->coverage.dev_class == DeviceClass::VENT) {
+        spd = 1;
+        if (grp->ack_slots.fan_speed_offset != 0xFF && grp->ack_slots.fan_speed_offset < ack.length) {
+          uint8_t b = ack.data[grp->ack_slots.fan_speed_offset];
+          if (b >= 1 && b <= 3) spd = b;
+        }
+      } else if (grp->coverage.dev_class == DeviceClass::GAS) {
+        if (grp->ack_slots.valve_state_offset != 0xFF && grp->ack_slots.valve_state_offset < ack.length) {
+          v_state = (ack.data[grp->ack_slots.valve_state_offset] == grp->close_slot.off_val) ? "closed" : "open";
+        }
+      }
+
+      Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, cls_str, pwr, t_temp, c_temp, spd, v_state);
+    }
+  }
 }
 
 void DeviceRepository::handlePollingTimeout(const DeviceStateEntry *dev) {

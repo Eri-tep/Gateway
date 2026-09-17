@@ -48,5 +48,11 @@ extern MgmtSession g_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
 void Mgmt_Init();
 void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len);
 void Mgmt_SerializeTelemetry(AppendBuf &out);
+void Mgmt_SerializeLockedDevices(AppendBuf &out);
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str);
 void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell);
+void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                               const char *dev_class, int power,
+                               int target_temp = 0, int current_temp = 0,
+                               int speed = 0, const char *valve_state = nullptr);
+void Mgmt_BroadcastDevicesUpdated();

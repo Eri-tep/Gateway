@@ -1,5 +1,6 @@
 #include "MgmtRpc.h"
 #include "WallpadParser.h"
+#include "ControlTemplate.h"
 #include "esp_core_dump.h"
 #include <HTTPClient.h>
 #include <Update.h>
@@ -473,6 +474,114 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
 }
 
 // ============================================================================
+// LOCKED 기기 목록 및 상태 직렬화
+// ============================================================================
+void Mgmt_SerializeLockedDevices(AppendBuf &out) {
+  out.append("{\"res\":\"ok\",\"devices\":[");
+  size_t count = g_device_repo.count();
+  size_t locked_count = 0;
+
+  for (size_t i = 0; i < count; ++i) {
+    DeviceStateEntry snap{};
+    if (!g_device_repo.getSnapshot(i, snap) || snap.dev_id == 0) continue;
+
+    const GroupControlTemplate *grp = g_control_registry.findGroup(snap.dev_id);
+    if (!grp || grp->status != GroupControlTemplate::Status::LOCKED) continue;
+
+    const char *cls_str = "switch";
+    switch (grp->coverage.dev_class) {
+      case DeviceClass::THERMOSTAT: cls_str = "thermostat"; break;
+      case DeviceClass::VENT:       cls_str = "vent"; break;
+      case DeviceClass::GAS:        cls_str = "gas"; break;
+      case DeviceClass::MOMENTARY:  cls_str = "momentary"; break;
+      case DeviceClass::AIRCON:     cls_str = "aircon"; break;
+      case DeviceClass::SWITCH:
+      default:                      cls_str = "switch"; break;
+    }
+
+    char name_buf[32];
+    if (grp->coverage.dev_class == DeviceClass::GAS ||
+        grp->coverage.dev_class == DeviceClass::VENT ||
+        grp->coverage.dev_class == DeviceClass::MOMENTARY) {
+      snprintf(name_buf, sizeof(name_buf), "%s", grp->group_name);
+    } else {
+      snprintf(name_buf, sizeof(name_buf), "%s %u-%u", grp->group_name, snap.sub1, snap.sub2);
+    }
+
+    int power = 0;
+    int target_temp = 0;
+    int current_temp = 0;
+    int fan_speed = 0;
+    const char *valve_state = "closed";
+
+    // Power 판정
+    if (grp->ack_slots.power_offset != 0xFF && grp->ack_slots.power_offset < snap.last_ack_len) {
+      uint8_t b = snap.last_ack_data[grp->ack_slots.power_offset];
+      power = (b == grp->power_slot.on_val) ? 1 : 0;
+    } else if (grp->power_slot.discovered && grp->power_slot.ack_state_offset != 0xFF && grp->power_slot.ack_state_offset < snap.last_ack_len) {
+      uint8_t b = snap.last_ack_data[grp->power_slot.ack_state_offset];
+      power = (b == grp->power_slot.on_val) ? 1 : 0;
+    } else if (snap.state_len > 0) {
+      power = snap.state_data[0] > 0 ? 1 : 0;
+    }
+
+    // Thermostat
+    if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
+      target_temp = snap.last_target_temp > 0 ? snap.last_target_temp : 22;
+      if (grp->ack_slots.target_temp_offset != 0xFF && grp->ack_slots.target_temp_offset < snap.last_ack_len) {
+        uint8_t b = snap.last_ack_data[grp->ack_slots.target_temp_offset];
+        if (b >= 5 && b <= 35) target_temp = b;
+      }
+      current_temp = 22;
+      if (grp->ack_slots.current_temp_offset != 0xFF && grp->ack_slots.current_temp_offset < snap.last_ack_len) {
+        uint8_t b = snap.last_ack_data[grp->ack_slots.current_temp_offset];
+        if (b >= 0 && b <= 50) current_temp = b;
+      }
+    }
+
+    // Vent
+    if (grp->coverage.dev_class == DeviceClass::VENT) {
+      fan_speed = 1;
+      if (grp->ack_slots.fan_speed_offset != 0xFF && grp->ack_slots.fan_speed_offset < snap.last_ack_len) {
+        uint8_t b = snap.last_ack_data[grp->ack_slots.fan_speed_offset];
+        if (b >= 1 && b <= 3) fan_speed = b;
+      }
+    }
+
+    // Gas
+    if (grp->coverage.dev_class == DeviceClass::GAS) {
+      if (grp->ack_slots.valve_state_offset != 0xFF && grp->ack_slots.valve_state_offset < snap.last_ack_len) {
+        valve_state = (snap.last_ack_data[grp->ack_slots.valve_state_offset] == grp->close_slot.off_val) ? "closed" : "open";
+      } else {
+        valve_state = "closed";
+      }
+    }
+
+    RouteEndpoint ep{1, -1, 0};
+    uint8_t ch = 1;
+    if (g_route_registry.lookupRoute(snap.dev_id, snap.sub1, snap.sub2, ep)) {
+      ch = ep.channel_id;
+    }
+
+    if (locked_count > 0) out.append(",");
+    out.appendFormat("{\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"name\":\"%s\",\"channel\":%u,\"power\":%d",
+                     snap.dev_id, snap.sub1, snap.sub2, cls_str, name_buf, ch, power);
+
+    if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
+      out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d", target_temp, current_temp);
+    } else if (grp->coverage.dev_class == DeviceClass::VENT) {
+      out.appendFormat(",\"fan_speed\":%d", fan_speed);
+    } else if (grp->coverage.dev_class == DeviceClass::GAS) {
+      out.appendFormat(",\"valve\":\"%s\"", valve_state);
+    }
+    out.append("}");
+    locked_count++;
+  }
+
+  out.appendFormat("],\"count\":%u}\n", static_cast<unsigned>(locked_count));
+}
+
+// ============================================================================
 // JSON-RPC 디스패처
 // ============================================================================
 static inline const char *findJsonStringValue(const char *json, const char *key, char *out_val, size_t max_len) {
@@ -927,6 +1036,71 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
+  // 16. get_locked_devices (Query all verified & LOCKED devices)
+  if (strcasecmp(cmd, "get_locked_devices") == 0) {
+    static char dev_buf[4096];
+    dev_buf[0] = '\0';
+    AppendBuf ab{dev_buf, sizeof(dev_buf)};
+    Mgmt_SerializeLockedDevices(ab);
+    send(sock, ab.buf, ab.offset, MSG_DONTWAIT);
+    g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+
+  // 17. device_control (Bidirectional Control Assembly & Safe Dispatch)
+  if (strcasecmp(cmd, "device_control") == 0) {
+    long dev_id = findJsonIntValue(json_str, "dev_id", 0);
+    long sub1 = findJsonIntValue(json_str, "sub1", 0);
+    long sub2 = findJsonIntValue(json_str, "sub2", 0);
+    char act_str[32] = {0};
+    findJsonStringValue(json_str, "action", act_str, sizeof(act_str));
+    long val = findJsonIntValue(json_str, "value", 0);
+
+    if (dev_id <= 0 || dev_id > 255) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid or missing dev_id\"}\n";
+      send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    const GroupControlTemplate *grp = g_control_registry.findGroup(static_cast<uint8_t>(dev_id));
+    if (!grp || grp->status != GroupControlTemplate::Status::LOCKED) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Device is not registered or not LOCKED\"}\n";
+      send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    ControlActionType act = ControlActionType::UNKNOWN;
+    if (strcasecmp(act_str, "power") == 0) act = ControlActionType::POWER;
+    else if (strcasecmp(act_str, "set_temp") == 0) act = ControlActionType::SET_TEMP;
+    else if (strcasecmp(act_str, "fan_speed") == 0) act = ControlActionType::FAN_SPEED;
+    else if (strcasecmp(act_str, "valve_close") == 0) act = ControlActionType::VALVE_CLOSE;
+    else if (strcasecmp(act_str, "momentary") == 0) act = ControlActionType::MOMENTARY_TRIGGER;
+
+    if (act == ControlActionType::UNKNOWN) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid action (power/set_temp/fan_speed/valve_close/momentary)\"}\n";
+      send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    StaticPacket req{};
+    if (!g_control_registry.buildControlPacket(static_cast<uint8_t>(dev_id),
+                                              static_cast<uint8_t>(sub1),
+                                              static_cast<uint8_t>(sub2),
+                                              act, static_cast<int>(val), req)) {
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Failed to build control packet (blueprint missing or forbidden action)\"}\n";
+      send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    req.channel_id = 7;
+    StaticPacket dummy{};
+    g_control_dispatcher.dispatch(req, dummy);
+
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Control packet dispatched\"}\n";
+    send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+    return;
+  }
+
   // Unknown Command
   const char *unk_msg = "{\"res\":\"error\",\"msg\":\"Unknown command\"}\n";
   send(sock, unk_msg, strlen(unk_msg), MSG_DONTWAIT);
@@ -986,3 +1160,59 @@ void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) {
     }
   }
 }
+
+// ============================================================================
+// CH7 실시간 기기 상태 브로드캐스트 (Server Push)
+// ============================================================================
+void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                               const char *dev_class, int power,
+                               int target_temp, int current_temp,
+                               int speed, const char *valve_state) {
+  char buf[256];
+  int len = 0;
+  if (dev_class && strcasecmp(dev_class, "thermostat") == 0) {
+    len = snprintf(buf, sizeof(buf),
+                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"power\":%d,\"target_temp\":%d,\"current_temp\":%d}\n",
+                   dev_id, sub1, sub2, dev_class, power, target_temp, current_temp);
+  } else if (dev_class && strcasecmp(dev_class, "vent") == 0) {
+    len = snprintf(buf, sizeof(buf),
+                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"power\":%d,\"fan_speed\":%d}\n",
+                   dev_id, sub1, sub2, dev_class, power, speed);
+  } else if (dev_class && strcasecmp(dev_class, "gas") == 0) {
+    len = snprintf(buf, sizeof(buf),
+                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"valve\":\"%s\"}\n",
+                   dev_id, sub1, sub2, dev_class, valve_state ? valve_state : "closed");
+  } else {
+    len = snprintf(buf, sizeof(buf),
+                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"power\":%d}\n",
+                   dev_id, sub1, sub2, dev_class ? dev_class : "switch", power);
+  }
+
+  if (len <= 0 || !g_mgmt_mutex) return;
+
+  MutexLocker lock(g_mgmt_mutex);
+  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+    if (g_mgmt_sessions[i].sock >= 0) {
+      send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
+      g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+}
+
+// ============================================================================
+// CH7 LOCKED 기기 변경(추가/해제) 브로드캐스트 (Server Push)
+// ============================================================================
+void Mgmt_BroadcastDevicesUpdated() {
+  const char *msg = "{\"event\":\"devices_updated\"}\n";
+  size_t len = strlen(msg);
+  if (!g_mgmt_mutex) return;
+
+  MutexLocker lock(g_mgmt_mutex);
+  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+    if (g_mgmt_sessions[i].sock >= 0) {
+      send(g_mgmt_sessions[i].sock, msg, len, MSG_DONTWAIT);
+      g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+}
+

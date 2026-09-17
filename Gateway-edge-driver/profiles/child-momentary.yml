@@ -1,0 +1,13 @@
+name: child-momentary
+components:
+  - id: main
+    label: "엘리베이터"
+    capabilities:
+      - id: momentary
+        version: 1
+      - id: switch
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Elevator
