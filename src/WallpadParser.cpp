@@ -666,7 +666,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     StaticPacket r;
   };
   std::vector<PktPair> pairs;
-  pairs.reserve(64);
+  pairs.reserve(std::min<size_t>(g_polling_targets.totalCount(), 32));
 
   size_t target_count = g_polling_targets.totalCount();
   for (size_t i = 0; i < target_count; ++i) {
