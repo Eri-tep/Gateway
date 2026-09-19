@@ -202,6 +202,8 @@ constexpr uint32_t MAX_LOCK_HOLD_MS = 300;
 constexpr uint32_t UPTIME_24H_MS = 86400000;
 // [CH1 버스] 패킷 간 최소 안정 지연 (기본: 15ms)
 constexpr uint32_t CH1_INTER_PACKET_DELAY_MS = 15;
+// [UART] TX 전송 완료 대기 타임아웃 (기본: 20ms, 9600bps 14B 기준 이론치 ~16ms + 마진)
+constexpr uint32_t UART_TX_DONE_TIMEOUT_MS = 20;
 // [CH1 마스터] 정기 폴링 간격 (기본: 1000ms)
 constexpr uint32_t CH1_POLL_INTERVAL_MS = 1000;
 // [기기 헬스] 오프라인(Stale) 판정 임계치 (기본: 3분)

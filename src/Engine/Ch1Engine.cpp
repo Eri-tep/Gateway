@@ -371,7 +371,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
 
     uart_flush_input(UART_NUM_0);
     uart_write_bytes(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
-    uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(20));
+    uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
     g_ch1_bus_ms.store(millis(), std::memory_order_release);
     g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
   }
