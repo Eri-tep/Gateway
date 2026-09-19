@@ -300,16 +300,12 @@ namespace Config::TCP {
 constexpr uint16_t TELNET_PORT = 23;
 // [포트] CH5 EW11 수신 전용 TCP 서버 포트 (8898)
 constexpr uint16_t EW11_PORT = 8898;
-// [포트] CH6 월패드/허브 TCP 서버 포트 (8899)
-constexpr uint16_t HUB_PORT = 8899;
-// [포트] CH7 SmartThings & 관리 JSON-RPC TCP 서버 포트 (8900)
+// [포트] CH6 SmartThings & 관리 JSON-RPC TCP 서버 포트 (8900)
 constexpr uint16_t MGMT_PORT = 8900;
 
 // [접속 제한] Telnet CLI 동시 클라이언트 최대 수 (3대)
 constexpr uint8_t MAX_TELNET_CLIENTS = 3;
-// [접속 제한] CH6 허브 TCP 동시 클라이언트 최대 수 (3대)
-constexpr uint8_t MAX_HUB_CLIENTS = 3;
-// [접속 제한] CH7 관리 TCP 동시 클라이언트 최대 수 (3대)
+// [접속 제한] CH6 관리 TCP 동시 클라이언트 최대 수 (3대)
 constexpr uint8_t MAX_MGMT_CLIENTS = 3;
 
 // [CH5 EW11 멀티 TCP 클라이언트 슬롯 풀 (최대 5대: Slot 0: EV, Slot 1~4: AC)]
@@ -320,11 +316,6 @@ constexpr uint16_t EW11_SLOT_PORTS[MAX_EW11_SLOTS] = {8898, 8891, 8892, 8893,
 
 // [소켓 버퍼] TCP SO_RCVBUF / SO_SNDBUF 크기 (4096B = 4KB)
 constexpr int SOCKET_BUFFER_SIZE = 4096;
-
-// [CH6 허브] 토큰 버킷 버스트 용량 (기본: 32개)
-constexpr uint32_t CH6_TOKEN_BURST = 32;
-// [CH6 허브] 토큰 리필 속도 (기본: 100ms)
-constexpr uint32_t CH6_TOKEN_REFILL_MS = 100;
 
 // [세션] Telnet 세션 자동 정리 타임아웃 (기본: 10분)
 constexpr uint32_t TELNET_SESSION_TIMEOUT_MS = 600000;
@@ -607,7 +598,7 @@ struct Ew11ClientSlot {
   bool enabled{false};
   char name[16]{""};
   char target_ip[16]{""};
-  uint16_t target_port{8899};
+  uint16_t target_port{8898};
   Ew11DeviceType dev_type{Ew11DeviceType::WALLPAD_COMPATIBLE};
   Config::Doorphone::FramingTracker
       tracker; // 슬롯별 독립 프레이밍 자율 학습기 (STX/ETX/길이 수렴)
@@ -649,9 +640,9 @@ static_assert(
 static_assert(Config::TCP::MAX_TELNET_CLIENTS > 0 &&
                   Config::TCP::MAX_TELNET_CLIENTS <= 8,
               "Config error: TCP::MAX_TELNET_CLIENTS must be between 1 and 8");
-static_assert(Config::TCP::MAX_HUB_CLIENTS > 0 &&
-                  Config::TCP::MAX_HUB_CLIENTS <= 8,
-              "Config error: TCP::MAX_HUB_CLIENTS must be between 1 and 8");
+static_assert(Config::TCP::MAX_MGMT_CLIENTS > 0 &&
+                  Config::TCP::MAX_MGMT_CLIENTS <= 8,
+              "Config error: TCP::MAX_MGMT_CLIENTS must be between 1 and 8");
 static_assert(Config::TCP::MAX_EW11_SLOTS > 0 &&
                   Config::TCP::MAX_EW11_SLOTS <= 8,
               "Config error: TCP::MAX_EW11_SLOTS must be between 1 and 8");
@@ -1055,7 +1046,6 @@ struct PacketStatistics {
   SingleChannelStats ch4;
   TcpSocketStats ch5;
   TcpSocketStats ch6;
-  TcpSocketStats ch7;
 
   void resetAll() {
     ch1.reset();
@@ -1064,7 +1054,6 @@ struct PacketStatistics {
     ch4.reset();
     ch5.reset();
     ch6.reset();
-    ch7.reset();
   }
 };
 
@@ -1097,21 +1086,21 @@ struct ChanStats {
 };
 
 struct TcpChanStats {
-  bool is_connected{false};
-  uint32_t connection_count{0};
   uint32_t rx_pkts{0};
   uint32_t tx_pkts{0};
   uint32_t dropped_pkts{0};
   uint32_t uncached_pkts{0};
+  uint16_t connection_count{0};
+  bool is_connected{false};
 
   TcpChanStats() = default;
   TcpChanStats(const TcpSocketStats &s) noexcept
-      : is_connected(s.is_connected.load(std::memory_order_relaxed)),
-        connection_count(s.connection_count.load(std::memory_order_relaxed)),
-        rx_pkts(s.rx_pkts.load(std::memory_order_relaxed)),
+      : rx_pkts(s.rx_pkts.load(std::memory_order_relaxed)),
         tx_pkts(s.tx_pkts.load(std::memory_order_relaxed)),
         dropped_pkts(s.dropped_pkts.load(std::memory_order_relaxed)),
-        uncached_pkts(s.uncached_pkts.load(std::memory_order_relaxed)) {}
+        uncached_pkts(s.uncached_pkts.load(std::memory_order_relaxed)),
+        connection_count(s.connection_count.load(std::memory_order_relaxed)),
+        is_connected(s.is_connected.load(std::memory_order_relaxed)) {}
 
   TcpChanStats &operator=(const TcpSocketStats &s) noexcept {
     is_connected = s.is_connected.load(std::memory_order_relaxed);
@@ -1131,7 +1120,6 @@ struct PktSnapshot {
   ChanStats ch4;
   TcpChanStats ch5;
   TcpChanStats ch6;
-  TcpChanStats ch7;
 };
 
 // ============================================================================

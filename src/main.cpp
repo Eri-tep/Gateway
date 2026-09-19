@@ -476,15 +476,6 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 SoftwareSerial g_doorphone_serial;
 RuntimeConfig g_config{};
 
-struct TcpFragSession {
-  int sock = -1;
-  uint8_t buffer[256];
-  size_t len = 0;
-  uint32_t connected_at_ms = 0;
-};
-static TcpFragSession hub_sessions[Config::TCP::MAX_HUB_CLIENTS];
-SemaphoreHandle_t g_ch6_mutex = nullptr;
-
 Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
 SemaphoreHandle_t g_ch5_mutex = nullptr;
 SemaphoreHandle_t g_ctrl_queue_mutex = nullptr;
@@ -543,9 +534,6 @@ static void Tcp_PollAndReceive(SessionType (&sessions)[N],
     }
   }
 }
-
-static TokenBucket s_ch6_bucket(Config::TCP::CH6_TOKEN_BURST,
-                                Config::TCP::CH6_TOKEN_REFILL_MS);
 
 StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
     g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,
@@ -1020,7 +1008,7 @@ void Task_Network(void *pvParameters) {
       ew11_server_fds[s] = sfd;
     }
   } else {
-    Serial.println(F("[RESCUE] CH6 & CH7 TCP server ports disabled in Rescue "
+    Serial.println(F("[RESCUE] CH6 TCP server port disabled in Rescue "
                      "Mode. Dedicated to OTA & Telnet."));
   }
 
@@ -1149,7 +1137,7 @@ void Task_Network(void *pvParameters) {
                                 Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
                                 Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
                                 Config::TCP::DEFAULT_KEEPALIVE_CNT,
-                                g_pkt_stats.ch7);
+                                g_pkt_stats.ch6);
       }
 
       // ★ [CH5] EW11 슬롯별 전용 포트로 접속한 TCP 클라이언트 accept (Slot 0: 8898, Slot 1~4: 8891~8894)
@@ -1230,9 +1218,6 @@ void Task_Network(void *pvParameters) {
 
     if (TimeUtils::isElapsed(t_tcp, Config::TCP::CLEANUP_INTERVAL_MS)) {
       t_tcp = now;
-      g_pkt_stats.ch6.is_connected.store(
-          Tcp_HasActiveSession(hub_sessions, g_ch6_mutex),
-          std::memory_order_relaxed);
 
       // EW11 슬롯 중 하나라도 연결되어 있으면 CH5 연결 상태 true
       bool any_ew11_conn = false;
@@ -1248,7 +1233,7 @@ void Task_Network(void *pvParameters) {
       g_pkt_stats.ch5.is_connected.store(any_ew11_conn,
                                          std::memory_order_relaxed);
 
-      g_pkt_stats.ch7.is_connected.store(
+      g_pkt_stats.ch6.is_connected.store(
           Tcp_HasActiveSession(g_mgmt_sessions, g_mgmt_mutex),
           std::memory_order_relaxed);
     }
@@ -1777,7 +1762,6 @@ void System_Restart(const char *reason) {
   g_telnet_tracer.setClient(-1);
   g_telnet_manager.shutdownForReboot();
 
-  Tcp_CloseAllSessions(hub_sessions, g_ch6_mutex);
   {
     MutexLocker lock(g_ch5_mutex);
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
