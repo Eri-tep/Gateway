@@ -59,7 +59,7 @@ void Tcp_PollAndReceive(SessionType (&sessions)[N],
     }
 
     if (FD_ISSET(s, &readfds)) {
-      uint8_t rx_buf[128];
+      uint8_t rx_buf[Config::TCP::POLL_RX_CHUNK_SIZE];
       int r = recv(s, rx_buf, sizeof(rx_buf), 0);
       if (r > 0) {
         handler(&sessions[i], rx_buf, r);

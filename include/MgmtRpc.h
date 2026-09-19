@@ -36,7 +36,7 @@ void Mgmt_StartHttpOta(const char *url);
 // ============================================================================
 struct MgmtSession {
   int sock{-1};
-  uint8_t buffer[512];
+  uint8_t buffer[Config::TCP::MGMT_BUFFER_SIZE];
   size_t len{0};
   uint32_t connected_at_ms{0};
 };

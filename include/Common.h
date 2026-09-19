@@ -322,6 +322,12 @@ constexpr uint16_t EW11_SLOT_PORTS[MAX_EW11_SLOTS] = {8898, 8891, 8892, 8893,
 
 // [소켓 버퍼] TCP SO_RCVBUF / SO_SNDBUF 크기 (4096B = 4KB)
 constexpr int SOCKET_BUFFER_SIZE = 4096;
+// [수신 버퍼] CH5 Hub 클라이언트 슬롯 수신 누적 버퍼 (1024B)
+constexpr size_t HUB_RX_BUFFER_SIZE = 1024;
+// [세션 버퍼] CH6 관리 TCP JSON 수신 버퍼 (512B)
+constexpr size_t MGMT_BUFFER_SIZE = 512;
+// [폴링 청크] TCP 스트림 1회 수신 청크 버퍼 (128B)
+constexpr size_t POLL_RX_CHUNK_SIZE = 128;
 
 // [세션] Telnet 세션 자동 정리 타임아웃 (기본: 10분)
 constexpr uint32_t TELNET_SESSION_TIMEOUT_MS = 600000;
@@ -611,7 +617,7 @@ struct HubClientSlot {
   int sock{-1};
   bool is_connected{false};
   uint32_t last_reconnect_ms{0};
-  uint8_t rx_buf[1024];
+  uint8_t rx_buf[Config::TCP::HUB_RX_BUFFER_SIZE];
   size_t rx_len{0};
   uint32_t last_rx_ms{0};
   uint32_t rx_pkts{0};
