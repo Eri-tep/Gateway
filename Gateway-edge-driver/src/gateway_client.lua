@@ -156,24 +156,24 @@ function GatewayClient.device_control(ip, port, dev_id, sub1, sub2, action, valu
 end
 
 
---- CH7 (8900) 실시간 푸시 이벤트 리스너 (백그라운드 지속 소켓)
+--- CH6 (8900) 실시간 푸시 이벤트 리스너 (백그라운드 지속 소켓)
 function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
   if not ip or not port then return end
 
   local cosock = require "cosock"
   cosock.spawn(function()
-    log.info(string.format("📡 [CH7 PUSH] Starting persistent event listener on %s:%d", ip, port))
+    log.info(string.format("📡 [CH6 PUSH] Starting persistent event listener on %s:%d", ip, port))
     while true do
       local tcp, err = socket.tcp()
       if tcp then
         tcp:settimeout(nil) -- 블로킹 대기
         local ok, conn_err = tcp:connect(ip, port)
         if ok then
-          log.info(string.format("✅ [CH7 PUSH] Connected to Gateway %s:%d for push notifications", ip, port))
+          log.info(string.format("✅ [CH6 PUSH] Connected to Gateway %s:%d for push notifications", ip, port))
           while true do
             local line, recv_err = tcp:receive("*l")
             if not line then
-              log.warn(string.format("⚠️ [CH7 PUSH] Connection lost (%s), reconnecting...", tostring(recv_err)))
+              log.warn(string.format("⚠️ [CH6 PUSH] Connection lost (%s), reconnecting...", tostring(recv_err)))
               break
             end
             if #line > 0 then
@@ -188,12 +188,12 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
           tcp:close()
         else
           tcp:close()
-          log.warn(string.format("⚠️ [CH7 PUSH] Connect failed: %s, retrying in 5s...", tostring(conn_err)))
+          log.warn(string.format("⚠️ [CH6 PUSH] Connect failed: %s, retrying in 5s...", tostring(conn_err)))
         end
       end
       cosock.socket.sleep(5)
     end
-  end, "ch7_push_listener")
+  end, "ch6_push_listener")
 end
 
 return GatewayClient
