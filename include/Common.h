@@ -1439,8 +1439,7 @@ extern QueueHandle_t g_ch1_control_queue, g_ch1_vip_queue;
 extern QueueSetHandle_t g_ch1_queue_set;
 extern QueueHandle_t g_uart0_event_queue, g_uart1_event_queue,
     g_uart2_event_queue;
-extern QueueHandle_t g_ch4_passthrough_queue, g_ch6_to_tcp_queue;
-extern SemaphoreHandle_t g_ch6_mutex;
+extern QueueHandle_t g_ch4_passthrough_queue;
 extern SemaphoreHandle_t g_ch5_mutex;
 extern SemaphoreHandle_t g_mgmt_mutex;
 extern RuntimeConfig g_config;

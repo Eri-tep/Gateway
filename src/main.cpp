@@ -393,22 +393,19 @@ PacketStatistics g_pkt_stats;
 SystemMetricsTracker g_metrics;
 TaskWdtMonitor g_wdt_monitor;
 
-StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf,
-    g_ch6_to_tcp_queue_buf;
+StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf;
 uint8_t
     g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 uint8_t
     g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 uint8_t
     g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t g_ch6_to_tcp_storage[Config::Queue::POOL_SIZE_CONTROL *
-                             sizeof(StaticPacket)];
 
 QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
 QueueSetHandle_t g_ch1_queue_set = nullptr;
 QueueHandle_t g_uart0_event_queue = nullptr, g_uart1_event_queue = nullptr,
               g_uart2_event_queue = nullptr;
-QueueHandle_t g_ch4_passthrough_queue = nullptr, g_ch6_to_tcp_queue = nullptr;
+QueueHandle_t g_ch4_passthrough_queue = nullptr;
 
 EventGroupHandle_t g_wifi_event_group = nullptr;
 EventGroupHandle_t g_system_event_group = nullptr;
@@ -1934,7 +1931,6 @@ static void Boot_InitSyncPrimitives() {
   g_ch1_control_queue = init_q(&g_ch1_ctrl_queue_buf, g_ch1_ctrl_storage);
   g_ch1_vip_queue = init_q(&g_ch1_vip_queue_buf, g_ch1_vip_storage);
   g_ch4_passthrough_queue = init_q(&g_ch4_pass_queue_buf, g_ch4_pass_storage);
-  g_ch6_to_tcp_queue = init_q(&g_ch6_to_tcp_queue_buf, g_ch6_to_tcp_storage);
 
   // CH1 Event-Driven 큐셋 생성 및 등록 (VIP: 8 + Control: 8 = 16)
   g_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL * 2);
@@ -1950,8 +1946,6 @@ static void Boot_InitSyncPrimitives() {
 
   if (!g_ctrl_queue_mutex)
     g_ctrl_queue_mutex = xSemaphoreCreateMutex();
-  if (!g_ch6_mutex)
-    g_ch6_mutex = xSemaphoreCreateMutex();
   if (!g_ch5_mutex)
     g_ch5_mutex = xSemaphoreCreateMutex();
 
