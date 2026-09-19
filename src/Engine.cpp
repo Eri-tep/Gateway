@@ -1101,31 +1101,6 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     }
     ack.channel_id = ctrlPacket.channel_id;
 
-    // ★ [추가] 스마트싱스/앱(CH6) 전송용 주소 변환 (0x42 -> 0x40 및 Checksum 재계산)
-    // 오프셋 학습 완료 시 동적 오프셋 사용, 미완료 시 기본값(3,5) fallback
-    StaticPacket ch6_ack = ack;
-    if (ch6_ack.length >= 7 && ch6_ack.data[0] == 0xF7) {
-      auto ad = g_auto_probing_engine.getDescriptor();
-      // ACK DevType 위치: swap 구조일 때 gw_addr_offset, 아닐 때 dev_id_offset
-      uint8_t ack_dev_off  = (ad.offsets_locked && ad.is_swapped_addr)
-                                 ? ad.gw_addr_offset : (ad.offsets_locked ? ad.dev_id_offset : 3);
-      uint8_t ack_sub1_off = ad.offsets_locked ? ad.sub1_offset : 5;
-
-      if (ack_dev_off < ch6_ack.length && ack_sub1_off < ch6_ack.length) {
-        uint8_t ack_dev_id = ch6_ack.data[ack_dev_off];
-        const GroupControlTemplate *grp = g_control_registry.findGroup(ack_dev_id);
-        if (grp && grp->power_slot.category_val != 0 && grp->power_slot.category_val != 0xFF) {
-          uint8_t cur_sub1 = ch6_ack.data[ack_sub1_off];
-          // 보조 제어 채널(speed 또는 temp)로 ACK가 온 경우 스마트싱스 상태 조회를 위해 기본 채널로 정규화
-          if (cur_sub1 == grp->speed_slot.category_val || cur_sub1 == grp->temp_slot.category_val) {
-            ch6_ack.data[ack_sub1_off] = grp->power_slot.category_val;
-            ch6_ack.data[ch6_ack.length - 2] =
-                PacketCodec::calculateChecksum(ch6_ack.data.data(), ch6_ack.length);
-          }
-        }
-      }
-    }
-
     // CH2/CH3 포워딩 설정 테이블화
     struct WallpadForwardConfig {
       uart_port_t uart_num;
@@ -1147,9 +1122,6 @@ static void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
       }
       g_telnet_tracer.trace(ctrlPacket.channel_id, true, TraceType::ACK, ack);
       cfg.stats.tx_pkts.fetch_add(1, std::memory_order_relaxed);
-      Ch6_SendAck(ch6_ack);
-    } else if (ctrlPacket.channel_id == 6) {
-      Ch6_SendAck(ch6_ack);
     }
   } else {
     g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
