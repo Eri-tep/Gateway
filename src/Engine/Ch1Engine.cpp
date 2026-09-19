@@ -345,9 +345,11 @@ void Ch1_WaitBusIdle(uint32_t silence_ms) {
 void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
   StaticPacket ack_before{};
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  auto *parser = WallpadParserFactory::getActiveParser();
+  auto *const parser = WallpadParserFactory::getActiveParser();
+  bool is_ctrl_query = false;
   if (parser) {
     span<const uint8_t> ctl_span(ctrlPacket.data.data(), ctrlPacket.length);
+    is_ctrl_query = parser->isQueryPacket(ctl_span);
     if (parser->extractDeviceKey(ctl_span, dev_id, sub1, sub2)) {
       const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
       if (cached && cached->last_ack_len > 0) {
@@ -392,7 +394,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     g_auto_probing_engine.feedControlPair(
         span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length),
         span<const uint8_t>(ack.data.data(), ack.length));
-    if (!parser || !parser->isQueryPacket(span<const uint8_t>(ctrlPacket.data.data(), ctrlPacket.length))) {
+    if (!is_ctrl_query) {
       // 위저드가 현재 어떤 조작을 기다리는지 semantic hint를 먼저 읽은 후 전달
       AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
       g_control_registry.onControlTransaction(ctrlPacket, ack_before, ack, hint);
