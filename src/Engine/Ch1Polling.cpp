@@ -10,8 +10,8 @@ void Ch1_PollNext(size_t &current_dev_idx) {
   size_t active_cnt = g_polling_targets.getActiveTargets(s_active_targets, PollingTargetRegistry::MAX_TARGETS);
 
   uint8_t poll_dev_id = 0, poll_sub1 = 0, poll_sub2 = 0;
+  const uint8_t *poll_raw_ptr = nullptr;
   uint8_t poll_raw_len = 0;
-  uint8_t poll_raw_data[64] = {0};
   bool target_selected = false;
   uint32_t now = millis();
 
@@ -60,7 +60,7 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       poll_sub2 = tgt.sub2;
       poll_raw_len = tgt.raw_query_len;
       if (poll_raw_len > 0)
-        memcpy(poll_raw_data, tgt.raw_query_data.data(), poll_raw_len);
+        poll_raw_ptr = tgt.raw_query_data.data();
 
       if (best_prio == 3) {
         g_device_repo.setLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
@@ -99,11 +99,11 @@ void Ch1_PollNext(size_t &current_dev_idx) {
     MutexLocker lock(g_uart0_mutex, pdMS_TO_TICKS(100));
     if (lock.isLocked()) {
       StaticPacket q_pkt;
-      if (poll_raw_len > 0) {
+      if (poll_raw_len > 0 && poll_raw_ptr) {
         // ★ [1차 캐시 직접 투과] 월패드/앱에서 수신된 실제 Raw 쿼리 패킷을 100% 그대로 CH1으로 송신!
         q_pkt.channel_id = 1;
         q_pkt.length = poll_raw_len;
-        memcpy(q_pkt.data.data(), poll_raw_data, poll_raw_len);
+        memcpy(q_pkt.data.data(), poll_raw_ptr, poll_raw_len);
       } else {
         PacketBuilder::Ch1_BuildQueryPacket(q_pkt, poll_dev_id, poll_sub1,
                                              poll_sub2);
