@@ -707,134 +707,6 @@ static int Ew11_AcceptClient(int slot_idx, int server_fd) {
   return new_sock;
 }
 
-static void Ch6_SendAck_Direct(const StaticPacket &ack) {
-  if (!s_ch6_bucket.consume()) {
-    g_telnet_tracer.trace(6, true, TraceType::DRP, ack);
-    g_pkt_stats.ch6.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-
-  MutexLocker lock(g_ch6_mutex);
-  bool sent = false;
-  for (int i = 0; i < Config::TCP::MAX_HUB_CLIENTS; i++) {
-    if (hub_sessions[i].sock >= 0) {
-      int s =
-          send(hub_sessions[i].sock, ack.data.data(), ack.length, MSG_DONTWAIT);
-      if (s == static_cast<int>(ack.length))
-        sent = true;
-    }
-  }
-
-  if (sent) {
-    g_telnet_tracer.trace(6, true, TraceType::ACK, ack);
-    g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    s_ch6_bucket.restore();
-    g_telnet_tracer.trace(6, true, TraceType::DRP, ack);
-    g_pkt_stats.ch6.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-  }
-}
-
-void Ch6_SendAck(const StaticPacket &ack) {
-  if (g_ch6_to_tcp_queue) {
-    xQueueSend(g_ch6_to_tcp_queue, &ack, 0);
-  }
-}
-
-void Ch6_Data(TcpFragSession *s, const uint8_t *data, size_t len) {
-  if (!s || s->sock < 0 || !data || len == 0)
-    return;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  uint8_t stx = parser ? parser->getStx() : PKT_STX;
-
-  if (s->len + len > sizeof(s->buffer)) {
-    size_t stx_pos = 0;
-    while (stx_pos < s->len && s->buffer[stx_pos] != stx) {
-      stx_pos++;
-    }
-    if (stx_pos == 0 && s->len > 0)
-      stx_pos = 1;
-    if (stx_pos < s->len) {
-      memmove(s->buffer, s->buffer + stx_pos, s->len - stx_pos);
-      s->len -= stx_pos;
-    } else {
-      s->len = 0;
-    }
-    if (s->len + len > sizeof(s->buffer)) {
-      s->len = 0;
-      close(s->sock);
-      s->sock = -1;
-      return;
-    }
-  }
-
-  std::copy(data, data + len, s->buffer + s->len);
-  s->len += len;
-  size_t p = 0;
-
-  while (p < s->len) {
-    if (s->buffer[p] != stx) {
-      p++;
-      continue;
-    }
-
-    int len_res =
-        parser ? parser->extractPacketLength(s->buffer, s->len, p) : -1;
-    if (len_res == 0) {
-      // 불완전 패킷 (추가 데이터 수신 대기)
-      break;
-    }
-    if (len_res < 0) {
-      p++;
-      continue;
-    }
-
-    uint8_t p_len = static_cast<uint8_t>(len_res);
-    span<const uint8_t> frame(&s->buffer[p], p_len);
-    if (!parser->validatePacket(frame)) {
-      StaticPacket drp_pkt{6, p_len};
-      std::copy(&s->buffer[p], &s->buffer[p + p_len], drp_pkt.data.begin());
-      g_telnet_tracer.trace(6, false, TraceType::DRP, drp_pkt);
-      g_pkt_stats.ch6.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-      p += p_len;
-      continue;
-    }
-
-    g_pkt_stats.ch6.rx_pkts.fetch_add(1, std::memory_order_relaxed);
-    StaticPacket req{6, p_len};
-    std::copy(&s->buffer[p], &s->buffer[p + p_len], req.data.begin());
-
-    bool is_query = parser->isQueryPacket(frame);
-    g_telnet_tracer.trace(6, false, is_query ? TraceType::QRY : TraceType::CTL,
-                          req);
-
-    if (is_query) {
-      uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-      if (parser->extractDeviceKey(frame, dev_id, sub1, sub2)) {
-        g_polling_targets.registerOrTouch(6, dev_id, sub1, sub2,
-                                          req.data.data(), req.length);
-      }
-      StaticPacket v_ack{};
-      if (g_control_dispatcher.dispatch(req, v_ack)) {
-        Ch6_SendAck(v_ack);
-      } else {
-        g_pkt_stats.ch6.uncached_pkts.fetch_add(1, std::memory_order_relaxed);
-      }
-    } else if (parser->isControlPacket(frame)) {
-      StaticPacket dummy{};
-      g_control_dispatcher.dispatch(req, dummy);
-    }
-
-    p += p_len;
-  }
-  if (p > 0) {
-    s->len -= p;
-    if (s->len > 0) {
-      memmove(s->buffer, s->buffer + p, s->len);
-    }
-  }
-}
-
 static void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data,
                                size_t pkt_len) {
   if (!slot || !pkt_data || pkt_len == 0)
@@ -936,10 +808,6 @@ static void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data,
       }
     }
   }
-
-  // 수신된 EW11 패킷은 CH6(스마트싱스/허브 TCP 8899)으로 즉시 실시간 바이패스
-  // 브로드캐스트!
-  Ch6_SendAck_Direct(pkt);
 }
 
 void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
@@ -1336,11 +1204,6 @@ void Task_Network(void *pvParameters) {
       }
     }
 
-    StaticPacket ch6_pkt;
-    while (g_ch6_to_tcp_queue &&
-           xQueueReceive(g_ch6_to_tcp_queue, &ch6_pkt, 0) == pdTRUE) {
-      Ch6_SendAck_Direct(ch6_pkt);
-    }
 
     uint32_t now = millis();
     if (TimeUtils::isElapsed(t_chk,

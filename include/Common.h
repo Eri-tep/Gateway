@@ -1374,7 +1374,6 @@ public:
   bool dispatch(StaticPacket &req, StaticPacket &virtual_ack_out);
 };
 
-void Ch6_SendAck(const StaticPacket &ack);
 
 struct HwSnapshot {
   uint8_t cpu0_cur, cpu0_15m_avg, cpu0_15m_peak, cpu0_24h_avg, cpu0_24h_peak;
