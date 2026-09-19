@@ -235,7 +235,7 @@ void TelnetTracer::flushToClient() {
         delay_tag = "PASSTHRU";
         delay_ms = -2;
       } else {
-        // [CH4 송신] 상위 앱(CH7/RPC)에서 도어폰 버스로 인젝션 송신된 순간
+        // [CH4 송신] 상위 앱(CH6/RPC)에서 도어폰 버스로 인젝션 송신된 순간
         if (s_door_tracker.active) {
           delay_ms = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
           delay_tag = "INJECT ";

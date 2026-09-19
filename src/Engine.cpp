@@ -266,7 +266,7 @@ void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt) {
                    "Status", "Conn", "RX Pkts", "TX Pkts", "Dropped", "Uncache");
   out.append(DIV80);
 
-  // CH6 Hub
+  // CH6 SmartThings & Mgmt JSON-RPC (8900)
   {
     bool is_conn = pkt.ch6.is_connected;
     uint32_t rx = pkt.ch6.rx_pkts;
@@ -274,7 +274,7 @@ void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt) {
     const char *status_str = !is_conn               ? "Disconnected"
                              : (rx == 0 && tx == 0) ? "Idle"
                                                      : "Connected";
-    out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n", "CH#6_Hub", Config::TCP::HUB_PORT, status_str,
+    out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n", "CH#6_Mgmt", Config::TCP::MGMT_PORT, status_str,
                      static_cast<unsigned>(pkt.ch6.connection_count), static_cast<unsigned>(rx), static_cast<unsigned>(tx),
                      static_cast<unsigned>(pkt.ch6.dropped_pkts), static_cast<unsigned>(pkt.ch6.uncached_pkts));
   }
@@ -1747,7 +1747,7 @@ void Task_Ch4(void *pvParameters) {
             last_pkt = packet;
             last_pkt_ms = now;
 
-            // 도어폰 초인종(벨) 및 호출 종료 상태 실시간 감지 & CH7 브로드캐스트
+            // 도어폰 초인종(벨) 및 호출 종료 상태 실시간 감지 & CH6 브로드캐스트
             if (packet.length >= 2) {
               uint8_t opcode = packet.data[1];
               bool state_changed = false;

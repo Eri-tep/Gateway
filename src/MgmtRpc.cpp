@@ -312,9 +312,6 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
   uint32_t ch6_tx = g_pkt_stats.ch6.tx_pkts.load(std::memory_order_relaxed);
   uint32_t ch6_drp = g_pkt_stats.ch6.dropped_pkts.load(std::memory_order_relaxed);
 
-  uint32_t ch7_rx = g_pkt_stats.ch7.rx_pkts.load(std::memory_order_relaxed);
-  uint32_t ch7_tx = g_pkt_stats.ch7.tx_pkts.load(std::memory_order_relaxed);
-
   // CRC 에러율 계산
   float crc_rate = (ch1_rx > 0) ? (static_cast<float>(ch1_crc) * 100.0f / static_cast<float>(ch1_rx)) : 0.0f;
 
@@ -414,15 +411,13 @@ void Mgmt_SerializeTelemetry(AppendBuf &out) {
                    "\"ch3\":{\"rx\":%u,\"tx\":%u,\"uncached\":%u},"
                    "\"ch4\":{\"rx\":%u,\"tx\":%u,\"inv\":%u},"
                    "\"ch5\":{\"rx\":%u,\"tx\":%u,\"dropped\":%u},"
-                   "\"ch6\":{\"rx\":%u,\"tx\":%u,\"dropped\":%u},"
-                   "\"ch7\":{\"rx\":%u,\"tx\":%u}},",
+                   "\"ch6\":{\"rx\":%u,\"tx\":%u}},",
                    ch1_rx, ch1_tx, ch1_crc, ch1_tout, crc_rate,
                    ch2_rx, ch2_tx, ch2_uncached,
                    ch3_rx, ch3_tx, ch3_uncached,
                    ch4_rx, ch4_tx, ch4_inv,
                    ch5_rx, ch5_tx, ch5_drp,
-                   ch6_rx, ch6_tx, ch6_drp,
-                   ch7_rx, ch7_tx);
+                   ch6_rx, ch6_tx);
 
   // Diagnostics & CoreDump
   out.append("\"diagnostics\":{");
@@ -675,7 +670,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     Mgmt_SerializeTelemetry(ab);
     ab.append("\n");
     send(sock, ab.buf, ab.offset, MSG_DONTWAIT);
-    g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     return;
   }
 
@@ -1083,7 +1078,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     AppendBuf ab{dev_buf, sizeof(dev_buf)};
     Mgmt_SerializeLockedDevices(ab);
     send(sock, ab.buf, ab.offset, MSG_DONTWAIT);
-    g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     return;
   }
 
@@ -1132,7 +1127,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       return;
     }
 
-    req.channel_id = 7;
+    req.channel_id = 6;
     StaticPacket dummy{};
     g_control_dispatcher.dispatch(req, dummy);
 
@@ -1159,7 +1154,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
   if (!s || s->sock < 0 || !data || len == 0) return;
 
-  g_pkt_stats.ch7.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+  g_pkt_stats.ch6.rx_pkts.fetch_add(1, std::memory_order_relaxed);
 
   if (s->len + len > sizeof(s->buffer)) {
     s->len = 0; // 버퍼 오버플로우 방어
@@ -1203,13 +1198,13 @@ void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) {
   for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
     if (g_mgmt_sessions[i].sock >= 0) {
       send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
-      g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
 }
 
 // ============================================================================
-// CH7 실시간 기기 상태 브로드캐스트 (Server Push)
+// CH6 실시간 기기 상태 브로드캐스트 (Server Push)
 // ============================================================================
 void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                const char *dev_class, int power,
@@ -1250,13 +1245,13 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
     if (g_mgmt_sessions[i].sock >= 0) {
       send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
-      g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
 }
 
 // ============================================================================
-// CH7 LOCKED 기기 변경(추가/해제) 브로드캐스트 (Server Push)
+// CH6 LOCKED 기기 변경(추가/해제) 브로드캐스트 (Server Push)
 // ============================================================================
 void Mgmt_BroadcastDevicesUpdated() {
   const char *msg = "{\"event\":\"devices_updated\"}\n";
@@ -1267,7 +1262,7 @@ void Mgmt_BroadcastDevicesUpdated() {
   for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
     if (g_mgmt_sessions[i].sock >= 0) {
       send(g_mgmt_sessions[i].sock, msg, len, MSG_DONTWAIT);
-      g_pkt_stats.ch7.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
 }
