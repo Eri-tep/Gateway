@@ -629,7 +629,7 @@ void wallpadPrintStatus(AppendBuf &out) {
     MutexLocker lock(g_ch5_mutex);
     bool first_ew11 = true;
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      auto &slot = g_ew11_slots[s];
+      auto &slot = g_hub_slots[s];
       uint16_t listen_port = slot.target_port ? slot.target_port : Config::TCP::EW11_SLOT_PORTS[s];
       char port_title[24];
       snprintf(port_title, sizeof(port_title), "%u", listen_port);

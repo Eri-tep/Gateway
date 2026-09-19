@@ -13,7 +13,7 @@ void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
   setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
 }
 
-int Ew11_AcceptClient(int slot_idx, int server_fd) {
+int Hub_AcceptClient(int slot_idx, int server_fd) {
   if (slot_idx < 0 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || server_fd < 0)
     return -1;
 
@@ -36,7 +36,7 @@ int Ew11_AcceptClient(int slot_idx, int server_fd) {
            b[3]);
 
   MutexLocker lock(g_ch5_mutex);
-  auto &slot = g_ew11_slots[slot_idx];
+  auto &slot = g_hub_slots[slot_idx];
 
   // 1) 특정 허용 IP가 지정되어 있는 경우 일치 여부 검사 (미지정이거나 비어있으면 모든 사설 IP 허용)
   if (slot.target_ip[0] != '\0' && strcmp(slot.target_ip, client_ip_str) != 0) {
@@ -78,7 +78,7 @@ int Ew11_AcceptClient(int slot_idx, int server_fd) {
   return new_sock;
 }
 
-void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data,
+static void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
                                size_t pkt_len) {
   if (!slot || !pkt_data || pkt_len == 0)
     return;
@@ -98,7 +98,7 @@ void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data,
     if (parser->extractDeviceKey(frame, dev_id, sub1, sub2) && dev_id != 0 &&
         dev_id != parser->getStx() && dev_id != parser->getEtx() &&
         dev_id != 0xFF) {
-      int8_t s_idx = static_cast<int8_t>(slot - g_ew11_slots);
+      int8_t s_idx = static_cast<int8_t>(slot - g_hub_slots);
       g_route_registry.recordRoute(5, s_idx, dev_id, sub1, sub2);
 
       bool is_query = parser->isQueryPacket(frame);
@@ -181,7 +181,7 @@ void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data,
   }
 }
 
-void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
+void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
   if (!slot || slot->sock < 0 || !data || len == 0)
     return;
 
@@ -194,7 +194,7 @@ void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
   std::copy(data, data + len, slot->rx_buf + slot->rx_len);
   slot->rx_len += len;
 
-  int slot_idx = static_cast<int>(slot - g_ew11_slots);
+  int slot_idx = static_cast<int>(slot - g_hub_slots);
 
   // ★ [소켓 0: 월패드 서브기기 통신] 채널 1, 2, 3, 6과 100% 동일한 공통 파서 및
   // 무결성 검증 파이프라인
@@ -240,7 +240,7 @@ void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
         continue;
       }
 
-      Ew11_ProcessPacket(slot, &slot->rx_buf[p], p_len);
+      Hub_ProcessPacket(slot, &slot->rx_buf[p], p_len);
       p += p_len;
     }
 
@@ -277,7 +277,7 @@ void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
     if (c_len >= 3 && (p + c_len) <= slot->rx_len) {
       if (slot->rx_buf[p + c_len - 1] == target_etx) {
         slot->tracker.processFrame(target_stx, target_etx, c_len, ns, tag);
-        Ew11_ProcessPacket(slot, &slot->rx_buf[p], c_len);
+        Hub_ProcessPacket(slot, &slot->rx_buf[p], c_len);
         p += c_len;
         continue;
       }
@@ -297,7 +297,7 @@ void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
     if (found_frame) {
       uint8_t frame_len = static_cast<uint8_t>(end_idx - p + 1);
       slot->tracker.processFrame(target_stx, target_etx, frame_len, ns, tag);
-      Ew11_ProcessPacket(slot, &slot->rx_buf[p], frame_len);
+      Hub_ProcessPacket(slot, &slot->rx_buf[p], frame_len);
       p += frame_len;
     } else {
       if (slot->rx_len - p < 64) {
@@ -316,26 +316,26 @@ void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len) {
   }
 }
 
-void Ew11_LoadConfig() {
+void Hub_LoadConfig() {
   Preferences p;
   p.begin("ew11-config", true);
   MutexLocker lock(g_ch5_mutex);
 
   // 기본값 설정
   // Slot 0: Elevator (기본 포트: 8898)
-  g_ew11_slots[0].enabled = p.getBool("e0_en", true);
+  g_hub_slots[0].enabled = p.getBool("e0_en", true);
   p.getString("e0_name", "Elevator")
-      .toCharArray(g_ew11_slots[0].name, sizeof(g_ew11_slots[0].name));
+      .toCharArray(g_hub_slots[0].name, sizeof(g_hub_slots[0].name));
   p.getString("e0_ip", "172.30.1.245")
-      .toCharArray(g_ew11_slots[0].target_ip,
-                   sizeof(g_ew11_slots[0].target_ip));
+      .toCharArray(g_hub_slots[0].target_ip,
+                   sizeof(g_hub_slots[0].target_ip));
   uint16_t p0 = p.getUShort("e0_port", 8898);
   if (p0 == 0 || p0 == 8899) p0 = 8898; // 기존 구버전 기본값 마이그레이션
-  g_ew11_slots[0].target_port = p0;
-  g_ew11_slots[0].dev_type = Ew11DeviceType::WALLPAD_COMPATIBLE;
-  g_ew11_slots[0].sock = -1;
-  g_ew11_slots[0].is_connected = false;
-  g_ew11_slots[0].rx_len = 0;
+  g_hub_slots[0].target_port = p0;
+  g_hub_slots[0].dev_type = HubDeviceType::WALLPAD_COMPATIBLE;
+  g_hub_slots[0].sock = -1;
+  g_hub_slots[0].is_connected = false;
+  g_hub_slots[0].rx_len = 0;
 
   // Slot 1~4: AC 1~4 (기본 포트: 8891~8894)
   for (int i = 1; i < Config::TCP::MAX_EW11_SLOTS; i++) {
@@ -346,30 +346,30 @@ void Ew11_LoadConfig() {
     snprintf(k_pt, sizeof(k_pt), "e%d_port", i);
     snprintf(def_nm, sizeof(def_nm), "AC_%d", i);
 
-    g_ew11_slots[i].enabled = p.getBool(k_en, false);
+    g_hub_slots[i].enabled = p.getBool(k_en, false);
     p.getString(k_nm, def_nm)
-        .toCharArray(g_ew11_slots[i].name, sizeof(g_ew11_slots[i].name));
-    p.getString(k_ip, "").toCharArray(g_ew11_slots[i].target_ip,
-                                      sizeof(g_ew11_slots[i].target_ip));
+        .toCharArray(g_hub_slots[i].name, sizeof(g_hub_slots[i].name));
+    p.getString(k_ip, "").toCharArray(g_hub_slots[i].target_ip,
+                                      sizeof(g_hub_slots[i].target_ip));
     uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[i]; // 8891, 8892, 8893, 8894
     uint16_t pi = p.getUShort(k_pt, def_slot_port);
     if (pi == 0 || pi == 8899) pi = def_slot_port; // 기존 구버전 기본값 마이그레이션
-    g_ew11_slots[i].target_port = pi;
-    g_ew11_slots[i].dev_type = Ew11DeviceType::AIR_CONDITIONER;
-    g_ew11_slots[i].sock = -1;
-    g_ew11_slots[i].is_connected = false;
-    g_ew11_slots[i].rx_len = 0;
+    g_hub_slots[i].target_port = pi;
+    g_hub_slots[i].dev_type = HubDeviceType::AIR_CONDITIONER;
+    g_hub_slots[i].sock = -1;
+    g_hub_slots[i].is_connected = false;
+    g_hub_slots[i].rx_len = 0;
   }
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
     char ns[16], tag[16];
     snprintf(ns, sizeof(ns), "e%d_frame", s);
     snprintf(tag, sizeof(tag), "EW11_#%d", s);
-    g_ew11_slots[s].tracker.restoreFromNvs(ns, tag);
+    g_hub_slots[s].tracker.restoreFromNvs(ns, tag);
   }
   p.end();
 }
 
-void Ew11_SaveConfig() {
+void Hub_SaveConfig() {
   Preferences p;
   p.begin("ew11-config", false);
   MutexLocker lock(g_ch5_mutex);
@@ -381,21 +381,21 @@ void Ew11_SaveConfig() {
     snprintf(k_ip, sizeof(k_ip), "e%d_ip", i);
     snprintf(k_pt, sizeof(k_pt), "e%d_port", i);
 
-    p.putBool(k_en, g_ew11_slots[i].enabled);
-    p.putString(k_nm, g_ew11_slots[i].name);
-    p.putString(k_ip, g_ew11_slots[i].target_ip);
-    p.putUShort(k_pt, g_ew11_slots[i].target_port);
+    p.putBool(k_en, g_hub_slots[i].enabled);
+    p.putString(k_nm, g_hub_slots[i].name);
+    p.putString(k_ip, g_hub_slots[i].target_ip);
+    p.putUShort(k_pt, g_hub_slots[i].target_port);
   }
   p.end();
 }
 
-bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                  const char *name) {
+bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                 const char *name) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
     return false;
 
   MutexLocker lock(g_ch5_mutex);
-  auto &slot = g_ew11_slots[slot_idx];
+  auto &slot = g_hub_slots[slot_idx];
 
   bool reconnect_needed = false;
   if (slot.enabled != enabled || strcmp(slot.target_ip, ip ? ip : "") != 0 ||
@@ -426,15 +426,15 @@ bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
     slot.last_reconnect_ms = 0; // 즉시 재연결 유도
   }
 
-  Ew11_SaveConfig();
+  Hub_SaveConfig();
   return true;
 }
 
-bool Ew11_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
+bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
     return false;
   MutexLocker lock(g_ch5_mutex);
-  auto &slot = g_ew11_slots[slot_idx];
+  auto &slot = g_hub_slots[slot_idx];
   if (!slot.enabled || slot.sock < 0 || !slot.is_connected)
     return false;
 

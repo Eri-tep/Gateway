@@ -135,12 +135,12 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
 
     // [동적 라우팅] 학습된 경로가 CH5(EW11)인 경우 해당 EW11 TCP 소켓으로 직접 인젝션 송신
     if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0 && ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {
-      auto &sl = g_ew11_slots[ep.slot_idx];
+      auto &sl = g_hub_slots[ep.slot_idx];
       sl.last_ctrl_len = static_cast<uint8_t>(std::min<size_t>(req.length, sizeof(sl.last_ctrl_data)));
       memcpy(sl.last_ctrl_data, req.data.data(), sl.last_ctrl_len);
       sl.last_ctrl_tx_ms = millis();
 
-      bool sent = Ew11_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
+      bool sent = Hub_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
       g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP, req);
       return false;
     }

@@ -132,5 +132,5 @@ int Tcp_AcceptAndAssignSlot(int server_fd, SessionType (&sessions)[N],
   return new_sock;
 }
 
-int Ew11_AcceptClient(int slot_idx, int server_fd);
-void Ew11_Data(Ew11ClientSlot *slot, const uint8_t *data, size_t len);
+int Hub_AcceptClient(int slot_idx, int server_fd);
+void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len);

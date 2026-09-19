@@ -504,9 +504,9 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 
     if (slot >= 0 && slot < Config::TCP::MAX_EW11_SLOTS) {
       uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[slot];
-      uint16_t target_port = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : (g_ew11_slots[slot].target_port > 0 ? g_ew11_slots[slot].target_port : def_slot_port);
+      uint16_t target_port = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : (g_hub_slots[slot].target_port > 0 ? g_hub_slots[slot].target_port : def_slot_port);
       if (target_port == 8899) target_port = def_slot_port; // 구버전 8899 기본값 보정
-      if (Ew11_SetSlot(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr, target_port, name[0] ? name : nullptr)) {
+      if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr, target_port, name[0] ? name : nullptr)) {
         char ok_msg[192];
         snprintf(ok_msg, sizeof(ok_msg),
                  "{\"res\":\"ok\",\"slot\":%ld,\"enabled\":%s,\"ip\":\"%s\",\"port\":%u,\"msg\":\"EW11 slot %ld updated & saved to NVS\"}\n",

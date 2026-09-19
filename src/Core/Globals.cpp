@@ -40,7 +40,7 @@ EventGroupHandle_t g_system_event_group = nullptr;
 SoftwareSerial g_doorphone_serial;
 RuntimeConfig g_config{};
 
-Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
+HubClientSlot g_hub_slots[Config::TCP::MAX_EW11_SLOTS];
 SemaphoreHandle_t g_ch5_mutex = nullptr;
 SemaphoreHandle_t g_ctrl_queue_mutex = nullptr;
 

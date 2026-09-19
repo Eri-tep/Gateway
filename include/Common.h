@@ -589,17 +589,17 @@ struct DoorphoneState {
 
 extern Config::Doorphone::DoorphoneState g_doorphone_state;
 
-enum class Ew11DeviceType : uint8_t {
+enum class HubDeviceType : uint8_t {
   WALLPAD_COMPATIBLE = 0, // 엘리베이터 (월패드 0xF7/0xEE 규격)
   AIR_CONDITIONER = 1     // 에어컨 1~4대
 };
 
-struct Ew11ClientSlot {
+struct HubClientSlot {
   bool enabled{false};
   char name[16]{""};
   char target_ip[16]{""};
   uint16_t target_port{8898};
-  Ew11DeviceType dev_type{Ew11DeviceType::WALLPAD_COMPATIBLE};
+  HubDeviceType dev_type{HubDeviceType::WALLPAD_COMPATIBLE};
   Config::Doorphone::FramingTracker
       tracker; // 슬롯별 독립 프레이밍 자율 학습기 (STX/ETX/길이 수렴)
   int sock{-1};
@@ -618,7 +618,7 @@ struct Ew11ClientSlot {
   uint32_t last_ctrl_tx_ms{0};    // 제어 명령 송신 타임스탬프
 };
 
-extern Ew11ClientSlot g_ew11_slots[Config::TCP::MAX_EW11_SLOTS];
+extern HubClientSlot g_hub_slots[Config::TCP::MAX_EW11_SLOTS];
 
 namespace Config::Devices {
 inline constexpr uint8_t DEV_HEAT_EXCHANGER = 0x2B; // 전열교환기 (ERV) ID
@@ -1554,11 +1554,11 @@ void System_CheckCoreDump();
 extern const char *s_pending_reboot_reason;
 [[nodiscard]] bool System_IsOtaPendingVerify();
 
-void Ew11_LoadConfig();
-void Ew11_SaveConfig();
-bool Ew11_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                  const char *name = nullptr);
-bool Ew11_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
+void Hub_LoadConfig();
+void Hub_SaveConfig();
+bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                 const char *name = nullptr);
+bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
 
 struct RouteEndpoint {
   uint8_t channel_id{1}; // 기본 채널: CH1 (메인 물리 RS-485)

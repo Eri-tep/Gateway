@@ -204,7 +204,7 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     {
       MutexLocker lock(g_ch5_mutex);
       for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-        auto &slot = g_ew11_slots[s];
+        auto &slot = g_hub_slots[s];
         const char *status_str = !slot.enabled ? "Disabled"
                                  : !slot.is_connected ? "Listening"
                                  : (slot.rx_pkts == 0) ? "Idle" : "Connected";
@@ -244,8 +244,8 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     char ns[16], tag[16];
     snprintf(ns, sizeof(ns), "e%d_frame", slot);
     snprintf(tag, sizeof(tag), "EW11_#%d", slot);
-    g_ew11_slots[slot].tracker.setFixedLock(stx, etx, len);
-    g_ew11_slots[slot].tracker.saveToNvs(ns, tag);
+    g_hub_slots[slot].tracker.setFixedLock(stx, etx, len);
+    g_hub_slots[slot].tracker.saveToNvs(ns, tag);
     sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing permanently fixed to STX 0x%02X, ETX 0x%02X, Len %u.\r\n",
                    slot, stx, etx, len);
     return;
@@ -264,7 +264,7 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     char ns[16], tag[16];
     snprintf(ns, sizeof(ns), "e%d_frame", slot);
     snprintf(tag, sizeof(tag), "EW11_#%d", slot);
-    g_ew11_slots[slot].tracker.clearNvs(ns, tag);
+    g_hub_slots[slot].tracker.clearNvs(ns, tag);
     sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing tracker reset to autonomous auto-probing.\r\n", slot);
     return;
   }
@@ -281,10 +281,10 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     }
 
     uint16_t default_port = Config::TCP::EW11_SLOT_PORTS[slot];
-    uint16_t port = g_ew11_slots[slot].target_port > 0 ? g_ew11_slots[slot].target_port : default_port;
+    uint16_t port = g_hub_slots[slot].target_port > 0 ? g_hub_slots[slot].target_port : default_port;
     const char *ip_str = nullptr;
     const char *name_str = nullptr;
-    bool enabled = g_ew11_slots[slot].enabled;
+    bool enabled = g_hub_slots[slot].enabled;
 
     // 인자 파싱: ew11 set <slot> [port/ip] ...
     // 토큰 3이 숫자(포트)인지 IP인지 유연하게 지원
@@ -323,11 +323,11 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
       enabled = (atoi(embeddedCliGetToken(args, 6)) != 0);
     }
 
-    if (Ew11_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port, name_str)) {
+    if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port, name_str)) {
       sendTelnetMsgf(sock, "[OK] EW11 Slot #%d configured (Name: %s, Listen Port: %u, Allowed IP: %s, Enabled: %s) and saved to NVS!\r\n",
-                     slot, g_ew11_slots[slot].name, g_ew11_slots[slot].target_port,
-                     g_ew11_slots[slot].target_ip[0] ? g_ew11_slots[slot].target_ip : "Any",
-                     g_ew11_slots[slot].enabled ? "true" : "false");
+                     slot, g_hub_slots[slot].name, g_hub_slots[slot].target_port,
+                     g_hub_slots[slot].target_ip[0] ? g_hub_slots[slot].target_ip : "Any",
+                     g_hub_slots[slot].enabled ? "true" : "false");
     } else {
       sendTelnetMsg(sock, "[ERROR] Failed to configure EW11 slot.\r\n");
     }
@@ -347,15 +347,15 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     bool enable = (strcasecmp(sub, "enable") == 0);
     {
       MutexLocker lock(g_ch5_mutex);
-      g_ew11_slots[slot].enabled = enable;
-      if (!enable && g_ew11_slots[slot].sock >= 0) {
-        close(g_ew11_slots[slot].sock);
-        g_ew11_slots[slot].sock = -1;
-        g_ew11_slots[slot].is_connected = false;
-        g_ew11_slots[slot].rx_len = 0;
+      g_hub_slots[slot].enabled = enable;
+      if (!enable && g_hub_slots[slot].sock >= 0) {
+        close(g_hub_slots[slot].sock);
+        g_hub_slots[slot].sock = -1;
+        g_hub_slots[slot].is_connected = false;
+        g_hub_slots[slot].rx_len = 0;
       }
     }
-    Ew11_SaveConfig();
+    Hub_SaveConfig();
     sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n", slot, enable ? "ENABLED" : "DISABLED");
     return;
   }

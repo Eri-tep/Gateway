@@ -104,15 +104,15 @@ void Task_Network(void *pvParameters) {
       }
     }
 
-    // ★ CH5 EW11 멀티 클라이언트 NVS 설정 로드 (Slot 0: Elevator, Slot 1~4: AC)
-    Ew11_LoadConfig();
+    // ★ CH5 Hub 멀티 클라이언트 NVS 설정 로드 (Slot 0: Elevator, Slot 1~4: AC)
+    Hub_LoadConfig();
 
-    // ★ CH5 EW11 슬롯별 전용 리스너 서버 소켓 바인딩 및 리슨 (Slot 0: 8898, Slot 1~4: 8891~8894)
+    // ★ CH5 Hub 슬롯별 전용 리스너 서버 소켓 바인딩 및 리슨 (Slot 0: 8898, Slot 1~4: 8891~8894)
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      uint16_t listen_port = g_ew11_slots[s].target_port;
+      uint16_t listen_port = g_hub_slots[s].target_port;
       if (listen_port == 0) {
         listen_port = Config::TCP::EW11_SLOT_PORTS[s];
-        g_ew11_slots[s].target_port = listen_port;
+        g_hub_slots[s].target_port = listen_port;
       }
 
       int sfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -136,7 +136,7 @@ void Task_Network(void *pvParameters) {
           sfd = -1;
         } else {
           ESP_LOGI("EW11", "[CH5] Listening for EW11 slot %d (%s) on port %u",
-                   s, g_ew11_slots[s].name, listen_port);
+                   s, g_hub_slots[s].name, listen_port);
         }
       }
       ew11_server_fds[s] = sfd;
@@ -255,8 +255,8 @@ void Task_Network(void *pvParameters) {
     {
       MutexLocker lock(g_ch5_mutex);
       for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-        if (g_ew11_slots[s].sock >= 0) {
-          add_read_fd(g_ew11_slots[s].sock);
+        if (g_hub_slots[s].sock >= 0) {
+          add_read_fd(g_hub_slots[s].sock);
         }
       }
     }
@@ -277,7 +277,7 @@ void Task_Network(void *pvParameters) {
       // ★ [CH5] EW11 슬롯별 전용 포트로 접속한 TCP 클라이언트 accept (Slot 0: 8898, Slot 1~4: 8891~8894)
       for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
         if (ew11_server_fds[s] >= 0 && FD_ISSET(ew11_server_fds[s], &readfds)) {
-          Ew11_AcceptClient(s, ew11_server_fds[s]);
+          Hub_AcceptClient(s, ew11_server_fds[s]);
         }
       }
 
@@ -290,7 +290,7 @@ void Task_Network(void *pvParameters) {
       {
         MutexLocker lock(g_ch5_mutex);
         for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-          auto &slot = g_ew11_slots[s];
+          auto &slot = g_hub_slots[s];
           if (slot.sock < 0)
             continue;
 
@@ -309,7 +309,7 @@ void Task_Network(void *pvParameters) {
             uint8_t temp_buf[1024];
             int r = recv(slot.sock, temp_buf, sizeof(temp_buf), 0);
             if (r > 0) {
-              Ew11_Data(&slot, temp_buf, r);
+              Hub_Data(&slot, temp_buf, r);
             } else if (r == 0 ||
                        (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
               close(slot.sock);
@@ -358,7 +358,7 @@ void Task_Network(void *pvParameters) {
       {
         MutexLocker lock(g_ch5_mutex);
         for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-          if (g_ew11_slots[s].is_connected) {
+          if (g_hub_slots[s].is_connected) {
             any_ew11_conn = true;
             break;
           }

@@ -295,9 +295,9 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
                      static_cast<unsigned>(rs_st[i]->timeouts), static_cast<unsigned>(rs_st[i]->uncached_pkts));
   }
 
-  // CH5 EW11 TCP Clients (Slot 0: 8898, Slot 1~4: 8891~8894)
+  // CH5 Hub TCP Clients (Slot 0: 8898, Slot 1~4: 8891~8894)
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-    auto &slot = g_ew11_slots[s];
+    auto &slot = g_hub_slots[s];
     if (!slot.enabled && strlen(slot.target_ip) == 0 && slot.target_port == 0) continue;
 
     char chan_name[16];

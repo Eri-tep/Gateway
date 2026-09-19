@@ -514,11 +514,11 @@ void System_Restart(const char *reason) {
   {
     MutexLocker lock(g_ch5_mutex);
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      if (g_ew11_slots[s].sock >= 0) {
-        close(g_ew11_slots[s].sock);
-        g_ew11_slots[s].sock = -1;
-        g_ew11_slots[s].is_connected = false;
-        g_ew11_slots[s].rx_len = 0;
+      if (g_hub_slots[s].sock >= 0) {
+        close(g_hub_slots[s].sock);
+        g_hub_slots[s].sock = -1;
+        g_hub_slots[s].is_connected = false;
+        g_hub_slots[s].rx_len = 0;
       }
     }
   }
