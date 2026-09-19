@@ -1605,7 +1605,7 @@ extern uint8_t g_warm_cache_restored_count;
 extern std::atomic<bool> g_warm_cache_dirty;
 extern std::atomic<uint32_t> g_warm_cache_dirty_ms;
 
-void WarmCache_SaveToRtc();
-void WarmCache_SaveToNvs();
-void WarmCache_RestoreOnBoot();
-void WarmCache_CheckNvsDebounce();
+void Cache_SaveToRtc();
+void Cache_SaveToNvs();
+void Cache_RestoreOnBoot();
+void Cache_CheckNvsDebounce();

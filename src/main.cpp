@@ -14,7 +14,7 @@
 
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 
-void WarmCache_SaveToRtc() {
+void Cache_SaveToRtc() {
   memset(&rtc_warm_cache, 0, sizeof(rtc_warm_cache));
   rtc_warm_cache.magic = RTC_MAGIC_WARM_CACHE;
   rtc_warm_cache.count =
@@ -27,8 +27,8 @@ void WarmCache_SaveToRtc() {
   }
 }
 
-void WarmCache_SaveToNvs() {
-  WarmCache_SaveToRtc();
+void Cache_SaveToNvs() {
+  Cache_SaveToRtc();
   if (rtc_warm_cache.count > 0) {
     Preferences p;
     if (p.begin("wp_wc", false)) {
@@ -44,7 +44,7 @@ void WarmCache_SaveToNvs() {
   g_warm_cache_dirty.store(false, std::memory_order_release);
 }
 
-void WarmCache_RestoreOnBoot() {
+void Cache_RestoreOnBoot() {
   uint32_t now = millis();
   esp_reset_reason_t reason = esp_reset_reason();
 
@@ -108,14 +108,14 @@ void WarmCache_RestoreOnBoot() {
       F("[WARM CACHE] Cold start initialized (No prior cache found)."));
 }
 
-void WarmCache_CheckNvsDebounce() {
+void Cache_CheckNvsDebounce() {
   if (g_warm_cache_dirty.load(std::memory_order_acquire)) {
     uint32_t dirty_ms = g_warm_cache_dirty_ms.load(std::memory_order_relaxed);
     if (dirty_ms > 0 &&
         TimeUtils::isElapsed(dirty_ms,
                              Config::Timing::WARM_CACHE_NVS_DEBOUNCE_MS)) {
-      WarmCache_SaveToRtc();
-      WarmCache_SaveToNvs();
+      Cache_SaveToRtc();
+      Cache_SaveToNvs();
     }
   }
 }
@@ -527,8 +527,8 @@ void System_Restart(const char *reason) {
   uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));
   uart_wait_tx_done(UART_NUM_2, pdMS_TO_TICKS(50));
 
-  WarmCache_SaveToRtc();
-  WarmCache_SaveToNvs();
+  Cache_SaveToRtc();
+  Cache_SaveToNvs();
 
   rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
   vTaskDelay(pdMS_TO_TICKS(150));
@@ -949,7 +949,7 @@ void setup() {
   Serial.printf("[CONFIG] WiFi SSID: '%s', Timeout: %us, AP SSID: '%s'\r\n",
                 g_config.wifi_ssid, g_config.wifi_connect_timeout_s,
                 g_config.ap_ssid);
-  WarmCache_RestoreOnBoot();
+  Cache_RestoreOnBoot();
   g_doorphone_tracker.restoreFromNvs();
   g_control_registry.init();
   Mgmt_Init();

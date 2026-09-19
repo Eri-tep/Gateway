@@ -159,7 +159,7 @@ void Task_Network(void *pvParameters) {
     }
 
     System_CheckOtaHealth();
-    WarmCache_CheckNvsDebounce();
+    Cache_CheckNvsDebounce();
 
     if (!g_rescue_mode.load(std::memory_order_relaxed) && g_wifi_event_group) {
       EventBits_t bits = xEventGroupGetBits(g_wifi_event_group);

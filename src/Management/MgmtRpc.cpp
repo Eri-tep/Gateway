@@ -190,7 +190,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 
   // 5. cache_sync
   if (strcasecmp(cmd, "cache_sync") == 0) {
-    WarmCache_SaveToNvs();
+    Cache_SaveToNvs();
     const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Warm cache synced to NVS\"}\n";
     send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
     return;
