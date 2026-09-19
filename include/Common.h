@@ -1424,6 +1424,21 @@ extern Ch1StateMetrics g_ch1_state_metrics;
 extern DeviceRepository g_device_repo;
 extern ControlDispatcher g_control_dispatcher;
 extern QueueHandle_t g_ch1_control_queue, g_ch1_vip_queue;
+extern StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf;
+extern uint8_t g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+extern uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+extern uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+
+extern StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
+    g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,
+    g_telnet_task_buf;
+extern StackType_t stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
+    stackCore1Slave[Config::Task::STACK_SIZE_CORE1],
+    stackCore1Slave2[Config::Task::STACK_SIZE_CORE1],
+    stackCore1Ch4[Config::Task::STACK_SIZE_CH4],
+    stackCore0Net[Config::Task::STACK_SIZE_CORE0],
+    telnetTaskStack[Config::Task::STACK_SIZE_TELNET];
+extern EventGroupHandle_t g_wifi_event_group;
 extern QueueSetHandle_t g_ch1_queue_set;
 extern QueueHandle_t g_uart0_event_queue, g_uart1_event_queue,
     g_uart2_event_queue;
@@ -1468,7 +1483,14 @@ void System_TakeSnapshot(SysSnapshot &sys_snapshot, HwSnapshot &hw_snapshot,
                          StackSnapshot &stack_snapshot,
                          PktSnapshot &pkt_snapshot);
 
+extern uint32_t rtc_magic;
 extern uint32_t rtc_last_alive_ms[6];
+constexpr uint32_t RTC_MAGIC_WDT = 0x57445431;
+extern uint32_t rtc_rescue_magic;
+constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343;
+extern uint32_t rtc_clean_restart_magic;
+constexpr uint32_t RTC_MAGIC_CLEAN_RESTART = 0x5AA55AA5;
+extern RtcWarmCache rtc_warm_cache;
 extern uint32_t rtc_crash_counter;
 
 struct TaskWdtMetrics {
@@ -1526,6 +1548,10 @@ void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out);
 int8_t System_ReadTempC();
 void System_EnterRescueMode(const char *reason);
 void System_CheckOtaHealth();
+void System_LogResetReason();
+void System_DiagnoseStuck();
+void System_CheckCoreDump();
+extern const char *s_pending_reboot_reason;
 [[nodiscard]] bool System_IsOtaPendingVerify();
 
 void Ew11_LoadConfig();
