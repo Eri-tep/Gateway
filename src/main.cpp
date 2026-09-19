@@ -1087,7 +1087,6 @@ void Task_Network(void *pvParameters) {
   uint32_t t_dp_heartbeat = millis();
   uint32_t last_ch5_activity_ms = 0;
 
-  int hub_server_fd = -1;
   int door_server_fd = -1;
   int mgmt_server_fd = -1;
   int ew11_server_fds[Config::TCP::MAX_EW11_SLOTS];
@@ -1096,27 +1095,6 @@ void Task_Network(void *pvParameters) {
   }
 
   if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    hub_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (hub_server_fd >= 0) {
-      int opt = 1;
-      setsockopt(hub_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-      int flags = fcntl(hub_server_fd, F_GETFL, 0);
-      fcntl(hub_server_fd, F_SETFL, flags | O_NONBLOCK);
-
-      struct sockaddr_in saddr;
-      memset(&saddr, 0, sizeof(saddr));
-      saddr.sin_family = AF_INET;
-      saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-      saddr.sin_port = htons(Config::TCP::HUB_PORT);
-      if (bind(hub_server_fd, reinterpret_cast<struct sockaddr *>(&saddr),
-               sizeof(saddr)) < 0 ||
-          listen(hub_server_fd, Config::TCP::MAX_HUB_CLIENTS) < 0) {
-        ESP_LOGE("NET", "Failed to bind/listen hub server: errno %d", errno);
-        close(hub_server_fd);
-        hub_server_fd = -1;
-      }
-    }
-
     mgmt_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (mgmt_server_fd >= 0) {
       int opt = 1;
@@ -1162,18 +1140,19 @@ void Task_Network(void *pvParameters) {
         saddr.sin_family = AF_INET;
         saddr.sin_addr.s_addr = htonl(INADDR_ANY);
         saddr.sin_port = htons(listen_port);
-        if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
+        if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr),
+                 sizeof(saddr)) < 0 ||
             listen(sfd, 1) < 0) {
-          ESP_LOGE("NET", "Failed to bind/listen EW11 Slot #%d server (%u): errno %d",
+          ESP_LOGE("EW11", "Failed to bind/listen EW11 slot %d on port %u: errno %d",
                    s, listen_port, errno);
           close(sfd);
-          ew11_server_fds[s] = -1;
+          sfd = -1;
         } else {
-          ew11_server_fds[s] = sfd;
-          ESP_LOGI("NET", "★ CH5 EW11 Slot #%d (%s) listening on port %u",
+          ESP_LOGI("EW11", "[CH5] Listening for EW11 slot %d (%s) on port %u",
                    s, g_ew11_slots[s].name, listen_port);
         }
       }
+      ew11_server_fds[s] = sfd;
     }
   } else {
     Serial.println(F("[RESCUE] CH6 & CH7 TCP server ports disabled in Rescue "
@@ -1188,7 +1167,7 @@ void Task_Network(void *pvParameters) {
       esp_task_wdt_reset();
       g_wdt_monitor.feed(4);
       ArduinoOTA.handle();
-      vTaskDelay(pdMS_TO_TICKS(1)); // 최소 지연(1ms)으로 패킷 수신 대기열 즉각 소비 (20ms 병목 제거)
+      vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
 
@@ -1269,20 +1248,10 @@ void Task_Network(void *pvParameters) {
       }
     };
 
-    add_read_fd(hub_server_fd);
     add_read_fd(mgmt_server_fd);
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
       if (ew11_server_fds[s] >= 0) {
         add_read_fd(ew11_server_fds[s]);
-      }
-    }
-
-    {
-      MutexLocker lock(g_ch6_mutex);
-      for (int i = 0; i < Config::TCP::MAX_HUB_CLIENTS; i++) {
-        if (hub_sessions[i].sock >= 0) {
-          add_read_fd(hub_sessions[i].sock);
-        }
       }
     }
 
@@ -1310,14 +1279,6 @@ void Task_Network(void *pvParameters) {
     int act = select(max_fd + 1, &readfds, &writefds, &errorfds, &tv);
 
     if (act > 0) {
-      if (hub_server_fd >= 0 && FD_ISSET(hub_server_fd, &readfds)) {
-        Tcp_AcceptAndAssignSlot(hub_server_fd, hub_sessions, g_ch6_mutex,
-                                Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
-                                Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
-                                Config::TCP::DEFAULT_KEEPALIVE_CNT,
-                                g_pkt_stats.ch6);
-      }
-
       if (mgmt_server_fd >= 0 && FD_ISSET(mgmt_server_fd, &readfds)) {
         Tcp_AcceptAndAssignSlot(mgmt_server_fd, g_mgmt_sessions, g_mgmt_mutex,
                                 Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
@@ -1332,10 +1293,6 @@ void Task_Network(void *pvParameters) {
           Ew11_AcceptClient(s, ew11_server_fds[s]);
         }
       }
-
-      Tcp_PollAndReceive(hub_sessions, g_ch6_mutex, readfds, errorfds,
-                         [](TcpFragSession *s, const uint8_t *data,
-                            size_t len) { Ch6_Data(s, data, len); });
 
       Tcp_PollAndReceive(g_mgmt_sessions, g_mgmt_mutex, readfds, errorfds,
                          [](MgmtSession *s, const uint8_t *data, size_t len) {
