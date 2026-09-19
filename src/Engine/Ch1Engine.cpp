@@ -164,119 +164,122 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
     return;
   }
 
-  MutexLocker lock(_cache_mutex);
-  DeviceStateEntry *dev = findMutable(dev_id, sub1, sub2, true);
-  if (UNLIKELY(!dev)) {
-    return;
-  }
+  bool should_broadcast = false;
+  const char *b_cls_str = "switch";
+  int b_pwr = 0, b_t_temp = 0, b_c_temp = 0, b_spd = 0, b_floor = 1, b_direction = 0;
+  float b_power_w = 0.0f;
+  const char *b_v_state = "closed";
 
-  bool ack_changed = (dev->last_ack_len != ack.length || memcmp(dev->last_ack_data.data(), ack.data.data(), ack.length) != 0);
-  dev->last_ack_len = ack.length;
-  memcpy(dev->last_ack_data.data(), ack.data.data(), ack.length);
-  dev->last_updated_ms = millis();
-  dev->timeout_count = 0;
-  dev->is_online = true;
-
-  if (ack_changed) {
-    const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
-    if (grp && grp->status == GroupControlTemplate::Status::LOCKED) {
-      const char *cls_str = "switch";
-      switch (grp->coverage.dev_class) {
-        case DeviceClass::THERMOSTAT: cls_str = "thermostat"; break;
-        case DeviceClass::VENT:       cls_str = "vent"; break;
-        case DeviceClass::GAS:        cls_str = "gas"; break;
-        case DeviceClass::MOMENTARY:  cls_str = "momentary"; break;
-        case DeviceClass::AIRCON:     cls_str = "aircon"; break;
-        default:                      cls_str = "switch"; break;
-      }
-
-      bool is_outlet = (grp->coverage.dev_class == DeviceClass::SWITCH) &&
-                       (strcasestr(grp->group_name, "Outlet") != nullptr || grp->frame_len >= 17);
-      if (is_outlet) {
-        cls_str = "outlet";
-      }
-
-      int pwr = 0;
-      int t_temp = 0, c_temp = 0, spd = 0;
-      float power_w = 0.0f;
-      int floor = 1;
-      int direction = 0;
-      const char *v_state = "closed";
-
-      if (grp->ack_slots.power_offset != 0xFF && grp->ack_slots.power_offset < ack.length) {
-        uint8_t b = ack.data[grp->ack_slots.power_offset];
-        pwr = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
-      } else if (grp->power_slot.discovered && grp->power_slot.ack_state_offset != 0xFF && grp->power_slot.ack_state_offset < ack.length) {
-        uint8_t b = ack.data[grp->power_slot.ack_state_offset];
-        pwr = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
-      }
-
-      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
-        t_temp = dev->last_target_temp > 0 ? dev->last_target_temp : 22;
-        c_temp = dev->last_current_temp > 0 ? dev->last_current_temp : t_temp;
-
-        // 컨텍스트 채널 분기별 독립 슬롯 참조 (Zero-Hardcoding / Blueprint Driven)
-        uint8_t cat_val = 0;
-        if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < ack.length) {
-          cat_val = ack.data[grp->temp_slot.category_offset];
-        } else if (grp->power_slot.category_offset != 0xFF && grp->power_slot.category_offset < ack.length) {
-          cat_val = ack.data[grp->power_slot.category_offset];
-        }
-
-        uint8_t target_off = 0xFF;
-        uint8_t current_off = 0xFF;
-
-        if (grp->temp_slot.category_val != 0 && cat_val == grp->temp_slot.category_val) {
-          // [TEMP Context: 0x45 등] 온도 제어 응답 채널
-          target_off = (grp->temp_slot.ack_target_offset != 0xFF) ? grp->temp_slot.ack_target_offset : grp->ack_slots.target_temp_offset;
-          current_off = (grp->temp_slot.ack_telemetry_offset != 0xFF) ? grp->temp_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
-        } else if (grp->power_slot.category_val != 0 && cat_val == grp->power_slot.category_val) {
-          // [POWER Context: 0x46 등] 전원/상태 주기적 응답 채널
-          target_off = (grp->power_slot.ack_target_offset != 0xFF) ? grp->power_slot.ack_target_offset : 0xFF;
-          current_off = (grp->power_slot.ack_telemetry_offset != 0xFF) ? grp->power_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
-        } else {
-          // 기본 fallback 슬롯
-          target_off = grp->ack_slots.target_temp_offset;
-          current_off = grp->ack_slots.current_temp_offset;
-        }
-
-        // 외출 모드(pwr == 2) 시 외출 고정 온도로 왜곡되지 않도록 보호
-        if (pwr != 2 && target_off != 0xFF && target_off < ack.length) {
-          uint8_t b = ack.data[target_off];
-          if (b >= 5 && b <= 35) {
-            t_temp = b;
-            dev->last_target_temp = b;
-          }
-        }
-
-        if (current_off != 0xFF && current_off < ack.length) {
-          uint8_t b = ack.data[current_off];
-          if (b >= 5 && b <= 50) {
-            c_temp = b;
-            dev->last_current_temp = b;
-          }
-        }
-      } else if (grp->coverage.dev_class == DeviceClass::VENT) {
-        spd = 1;
-        if (grp->ack_slots.fan_speed_offset != 0xFF && grp->ack_slots.fan_speed_offset < ack.length) {
-          uint8_t b = ack.data[grp->ack_slots.fan_speed_offset];
-          if (b >= 1 && b <= 3) spd = b;
-        }
-      } else if (grp->coverage.dev_class == DeviceClass::GAS) {
-        if (grp->ack_slots.valve_state_offset != 0xFF && grp->ack_slots.valve_state_offset < ack.length) {
-          v_state = (ack.data[grp->ack_slots.valve_state_offset] == grp->close_slot.off_val) ? "closed" : "open";
-        }
-      } else if (is_outlet && ack.length >= 11) {
-        uint16_t raw_w = (static_cast<uint16_t>(ack.data[9]) << 8) | ack.data[10];
-        if (raw_w < 50000) power_w = static_cast<float>(raw_w) / 10.0f;
-      } else if (grp->coverage.dev_class == DeviceClass::MOMENTARY && ack.length >= 6) {
-        floor = ack.data[5];
-        if (floor < 1 || floor > 60) floor = 1;
-        if (ack.length >= 7) direction = ack.data[6];
-      }
-
-      Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, cls_str, pwr, t_temp, c_temp, spd, v_state, power_w, floor, direction);
+  {
+    MutexLocker lock(_cache_mutex);
+    DeviceStateEntry *dev = findMutable(dev_id, sub1, sub2, true);
+    if (UNLIKELY(!dev)) {
+      return;
     }
+
+    bool ack_changed = (dev->last_ack_len != ack.length || memcmp(dev->last_ack_data.data(), ack.data.data(), ack.length) != 0);
+    dev->last_ack_len = ack.length;
+    memcpy(dev->last_ack_data.data(), ack.data.data(), ack.length);
+    dev->last_updated_ms = millis();
+    dev->timeout_count = 0;
+    dev->is_online = true;
+
+    if (ack_changed) {
+      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+      if (grp && grp->status == GroupControlTemplate::Status::LOCKED) {
+        should_broadcast = true;
+        switch (grp->coverage.dev_class) {
+          case DeviceClass::THERMOSTAT: b_cls_str = "thermostat"; break;
+          case DeviceClass::VENT:       b_cls_str = "vent"; break;
+          case DeviceClass::GAS:        b_cls_str = "gas"; break;
+          case DeviceClass::MOMENTARY:  b_cls_str = "momentary"; break;
+          case DeviceClass::AIRCON:     b_cls_str = "aircon"; break;
+          default:                      b_cls_str = "switch"; break;
+        }
+
+        bool is_outlet = (grp->coverage.dev_class == DeviceClass::SWITCH) &&
+                         (strcasestr(grp->group_name, "Outlet") != nullptr || grp->frame_len >= 17);
+        if (is_outlet) {
+          b_cls_str = "outlet";
+        }
+
+        if (grp->ack_slots.power_offset != 0xFF && grp->ack_slots.power_offset < ack.length) {
+          uint8_t b = ack.data[grp->ack_slots.power_offset];
+          b_pwr = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
+        } else if (grp->power_slot.discovered && grp->power_slot.ack_state_offset != 0xFF && grp->power_slot.ack_state_offset < ack.length) {
+          uint8_t b = ack.data[grp->power_slot.ack_state_offset];
+          b_pwr = (b == grp->power_slot.on_val) ? 1 : ((grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) ? 2 : 0);
+        }
+
+        if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
+          b_t_temp = dev->last_target_temp > 0 ? dev->last_target_temp : 22;
+          b_c_temp = dev->last_current_temp > 0 ? dev->last_current_temp : b_t_temp;
+
+          // 컨텍스트 채널 분기별 독립 슬롯 참조 (Zero-Hardcoding / Blueprint Driven)
+          uint8_t cat_val = 0;
+          if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < ack.length) {
+            cat_val = ack.data[grp->temp_slot.category_offset];
+          } else if (grp->power_slot.category_offset != 0xFF && grp->power_slot.category_offset < ack.length) {
+            cat_val = ack.data[grp->power_slot.category_offset];
+          }
+
+          uint8_t target_off = 0xFF;
+          uint8_t current_off = 0xFF;
+
+          if (grp->temp_slot.category_val != 0 && cat_val == grp->temp_slot.category_val) {
+            // [TEMP Context: 0x45 등] 온도 제어 응답 채널
+            target_off = (grp->temp_slot.ack_target_offset != 0xFF) ? grp->temp_slot.ack_target_offset : grp->ack_slots.target_temp_offset;
+            current_off = (grp->temp_slot.ack_telemetry_offset != 0xFF) ? grp->temp_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
+          } else if (grp->power_slot.category_val != 0 && cat_val == grp->power_slot.category_val) {
+            // [POWER Context: 0x46 등] 전원/상태 주기적 응답 채널
+            target_off = (grp->power_slot.ack_target_offset != 0xFF) ? grp->power_slot.ack_target_offset : 0xFF;
+            current_off = (grp->power_slot.ack_telemetry_offset != 0xFF) ? grp->power_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
+          } else {
+            // 기본 fallback 슬롯
+            target_off = grp->ack_slots.target_temp_offset;
+            current_off = grp->ack_slots.current_temp_offset;
+          }
+
+          // 외출 모드(pwr == 2) 시 외출 고정 온도로 왜곡되지 않도록 보호
+          if (b_pwr != 2 && target_off != 0xFF && target_off < ack.length) {
+            uint8_t b = ack.data[target_off];
+            if (b >= 5 && b <= 35) {
+              b_t_temp = b;
+              dev->last_target_temp = b;
+            }
+          }
+
+          if (current_off != 0xFF && current_off < ack.length) {
+            uint8_t b = ack.data[current_off];
+            if (b >= 5 && b <= 50) {
+              b_c_temp = b;
+              dev->last_current_temp = b;
+            }
+          }
+        } else if (grp->coverage.dev_class == DeviceClass::VENT) {
+          b_spd = 1;
+          if (grp->ack_slots.fan_speed_offset != 0xFF && grp->ack_slots.fan_speed_offset < ack.length) {
+            uint8_t b = ack.data[grp->ack_slots.fan_speed_offset];
+            if (b >= 1 && b <= 3) b_spd = b;
+          }
+        } else if (grp->coverage.dev_class == DeviceClass::GAS) {
+          if (grp->ack_slots.valve_state_offset != 0xFF && grp->ack_slots.valve_state_offset < ack.length) {
+            b_v_state = (ack.data[grp->ack_slots.valve_state_offset] == grp->close_slot.off_val) ? "closed" : "open";
+          }
+        } else if (is_outlet && ack.length >= 11) {
+          uint16_t raw_w = (static_cast<uint16_t>(ack.data[9]) << 8) | ack.data[10];
+          if (raw_w < 50000) b_power_w = static_cast<float>(raw_w) / 10.0f;
+        } else if (grp->coverage.dev_class == DeviceClass::MOMENTARY && ack.length >= 6) {
+          b_floor = ack.data[5];
+          if (b_floor < 1 || b_floor > 60) b_floor = 1;
+          if (ack.length >= 7) b_direction = ack.data[6];
+        }
+      }
+    }
+  } // _cache_mutex unlocked
+
+  if (should_broadcast) {
+    Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, b_cls_str, b_pwr, b_t_temp, b_c_temp, b_spd, b_v_state, b_power_w, b_floor, b_direction);
   }
 }
 
