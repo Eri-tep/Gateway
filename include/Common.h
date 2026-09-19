@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.6";
+constexpr const char *FIRMWARE_VERSION = "v1.1.7";
 } // namespace Config
 
 namespace Config::Task {
@@ -202,7 +202,8 @@ constexpr uint32_t MAX_LOCK_HOLD_MS = 300;
 constexpr uint32_t UPTIME_24H_MS = 86400000;
 // [CH1 버스] 패킷 간 최소 안정 지연 (기본: 15ms)
 constexpr uint32_t CH1_INTER_PACKET_DELAY_MS = 15;
-// [UART] TX 전송 완료 대기 타임아웃 (기본: 20ms, 9600bps 14B 기준 이론치 ~16ms + 마진)
+// [UART] TX 전송 완료 대기 타임아웃 (기본: 20ms, 9600bps 14B 기준 이론치 ~16ms
+// + 마진)
 constexpr uint32_t UART_TX_DONE_TIMEOUT_MS = 20;
 // [CH1 마스터] 정기 폴링 간격 (기본: 1000ms)
 constexpr uint32_t CH1_POLL_INTERVAL_MS = 1000;
@@ -1374,7 +1375,6 @@ public:
   bool dispatch(StaticPacket &req, StaticPacket &virtual_ack_out);
 };
 
-
 struct HwSnapshot {
   uint8_t cpu0_cur, cpu0_15m_avg, cpu0_15m_peak, cpu0_24h_avg, cpu0_24h_peak;
   uint8_t cpu1_cur, cpu1_15m_avg, cpu1_15m_peak, cpu1_24h_avg, cpu1_24h_peak;
@@ -1436,10 +1436,14 @@ extern Ch1StateMetrics g_ch1_state_metrics;
 extern DeviceRepository g_device_repo;
 extern ControlDispatcher g_control_dispatcher;
 extern QueueHandle_t g_ch1_control_queue, g_ch1_vip_queue;
-extern StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf;
-extern uint8_t g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-extern uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-extern uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+extern StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf,
+    g_ch1_vip_queue_buf;
+extern uint8_t
+    g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+extern uint8_t
+    g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+extern uint8_t
+    g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 
 extern StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
     g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,
