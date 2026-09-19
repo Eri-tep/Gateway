@@ -12,15 +12,20 @@
 | :--- | :--- | :--- |
 | `System_` | 하드웨어 측정, 재부팅, 코어덤프, 스냅샷 | `System_ReadTempC()`, `System_Restart()`, `System_TakeSnapshot()` |
 | `Config_` | NVS 설정 로드/저장/리셋 | `Config_Load()`, `Config_Save()`, `Config_ResetDefaults()` |
+| `Cache_` | RTC 메모리 및 NVS 기반 영구 캐시/부팅 상태 동기화 | `Cache_SaveToRtc()`, `Cache_SaveToNvs()`, `Cache_RestoreOnBoot()` |
+| `Hub_` | CH5 멀티 슬롯 TCP 허브 클라이언트 관리 및 통신 | `Hub_LoadConfig()`, `Hub_SaveConfig()`, `Hub_SetSlot()`, `Hub_SendPacket()` |
 | `Queue_` | RTOS 큐 특수 동작 | `Queue_EnqueueDropHead()` |
 | `Tcp_` | TCP 소켓 유틸리티, IP 필터링 | `Tcp_IsAllowedIP()`, `Tcp_EnableKeepalive()` |
 | `Door_` | 도어폰 (CH4/CH5) 프로토콜/시리얼 | `Door_SerialConfig()`, `Door_IsValidOpcode()` |
 | `Uart_` | UART 물리 계층 I/O | `Uart_RecvPacket()` |
 | `Ch1_` ~ `Ch6_` | 각 RS-485 및 TCP 채널 전용 핸들러 | `Ch1_BuildQueryPacket()`, `Ch6_SendAck()`, `Ch6_Data()` |
+| `Boot_` | `main.cpp` 내부 부팅 시퀀스 (`static void` 한정) | `Boot_InitHardwareAndDevices()`, `Boot_StartTasks()` |
 
-> **금지 사항**:
-> - 접두사 없는 순수 camelCase 전역 함수 (예: `readChipTempC()`, `isAllowedClientIP()`)
-> - PascalCase 단독 전역 함수 (예: `CheckAndLogLastResetReason()`)
+> **규칙 및 금지 사항**:
+> - 포맷팅 유틸리티 함수(`FormatHwMetrics` 등)는 전역이 아닌 `namespace Fmt { ... }` 내부에 선언 및 구현합니다.
+> - `Boot_` 접두사는 부팅 시퀀스를 담당하는 `main.cpp` 내부 `static` 전용 함수에만 한정하여 사용합니다.
+> - 접두사 없는 순수 camelCase 전역 함수 (예: `readChipTempC()`, `isAllowedClientIP()`) 금지
+> - PascalCase 단독 전역 함수 (예: `CheckAndLogLastResetReason()`) 금지
 
 ---
 
@@ -55,6 +60,7 @@
 | `g_polling_targets` | `PollingTargetRegistry` | 1차 동적 폴링 타깃 레지스트리 |
 | `g_auto_probing_engine` | `AutoProbingEngine` | 범용 오토 프로빙 학습 엔진 |
 | `g_wdt_monitor` | `TaskWdtMonitor` | 태스크별 WDT 헬스 모니터 |
+| `g_hub_slots` | `HubClientSlot[]` | CH5 멀티 클라이언트 슬롯 풀 |
 
 > **금지 사항**:
 > - 동일 인스턴스에 대한 참조 별칭 선언 금지 (`inline auto &g_metrics = g_metrics_tracker;` 등)
