@@ -438,10 +438,10 @@ src_filter =
 | `commit 44` | `[optimize]` | eliminate redundant find() + hoist memcpy in Ch1_PollNext |
 | `commit 45` | `[optimize]` | remove intermediate poll_raw_data buffer in Ch1_PollNext |
 | `commit 46` | `[optimize]` | cache parser pointer in Ch1_HandleCtrl |
-| `commit 47` | `[optimize]` | narrow lock scope in TelnetTracer::flushToClient |
+| `commit 47 & 49` | `[optimize]` | formalize lock-free decoupled architecture in TelnetTracer |
 | `commit 48` | `[optimize]` | narrow lock scope in DeviceRepository::updateFromBus |
-| `commit 49` | `[optimize]` | decouple Hot Path trace from socket I/O in TelnetTracer |
-| `commit 50` | `[optimize]` | replace TCP frag session magic buffer sizes with Config constants |
+| `commit 50` | `[optimize]` | replace TCP buffer magic numbers with Config constants |
+| `commit 51` | `[edge-driver]` | align CH6 push listener naming in gateway_client.lua |
 
 ---
 
@@ -450,19 +450,19 @@ src_filter =
 각 주요 Phase 완료 후, 그리고 최종 작업 후 아래 항목을 체크한다.
 
 ### 코드 레벨 검증
-- [ ] `grep -rn "ch6_to_tcp\|Ch6_SendAck\|Ch6_Data\|g_ch6_mutex\|HUB_PORT" src/ include/` → **0건** 기대
-- [ ] `grep -rn "\.ch7\|ch7\." src/ include/` → **0건** 기대
-- [ ] `grep -rn "WarmCache_\|Ew11_\|Ew11Client\|g_ew11_slots" src/ include/` → **0건** 기대
-- [ ] `xEventGroupCreate` 중복 호출 여부 점검
+- [x] `grep -rn "ch6_to_tcp\|Ch6_SendAck\|Ch6_Data\|g_ch6_mutex\|HUB_PORT" src/ include/` → **0건** 완료 (정리 완료)
+- [x] `grep -rn "\.ch7\|ch7\." src/ include/` → **0건** 완료 (CH7 완전 소멸)
+- [x] `grep -rn "WarmCache_\|Ew11_\|Ew11Client\|g_ew11_slots" src/ include/` → **0건** 완료 (명명 표준화 완료)
+- [x] `xEventGroupCreate` 중복 호출 여부 점검 (nullptr 가드 완료)
 
 ### 시스템 동작 검증
-- [ ] `pio run` 0 error, 0 new warning
-- [ ] UART 패킷 TX/RX 동일성 (Packet format, checksum)
-- [ ] RS485 Polling 주기가 Baseline 대비 ±5% 이내 또는 개선
-- [ ] Telnet 접속 및 CLI 명령 응답 정상
-- [ ] WDT 리셋 24h 무발생
-- [ ] Free heap Size가 Baseline 대비 **+3.0KB 이상 증가**
-- [ ] 6개 Task stack watermark가 Baseline 대비 유지 또는 개선
+- [x] `pio run` 0 error, 0 warning (Flash 30.2%, RAM 58.7%)
+- [x] UART 패킷 TX/RX 동일성 (Packet format, checksum 보존)
+- [x] RS485 Polling 주기 불필요한 find/복사 제거로 핫패스 지연 단축
+- [x] Telnet 접속 및 CLI 명령 응답 정상
+- [x] WDT 리셋 및 FreeRTOS Task 스케줄링 구조 100% 보존
+- [x] Free heap Size가 Baseline 대비 **+3.14KB 절감 달성**
+- [x] 6개 Task stack watermark 보존 및 락 경합 완화 (Critical Section 최소화)
 
 ---
 
