@@ -60,6 +60,9 @@ void TelnetTracer::trace(uint8_t channel, bool is_tx, TraceType type,
            _traceRing[idx].entry.len);
   }
 
+  // [commit 49: lock-free, zero-alloc non-blocking trace logging]
+  // Hot Path callers (UART RX, CH1 Engine, etc.) only enqueue into the atomic ring buffer
+  // and trigger g_tracer_sem. No mutex locks, dynamic allocation, or blocking socket I/O occur here.
   _traceRing[idx].seq.store(ticket + 1, std::memory_order_release);
 
   if (g_tracer_sem)
@@ -97,6 +100,10 @@ void TelnetTracer::trace(const char *fmt, ...) {
     xSemaphoreGive(g_tracer_sem);
 }
 
+// [commit 47 & 49: lock-free batch consumer & isolated socket I/O]
+// Called exclusively from Task_Telnet context (Core 0). Pulls a batch of entries
+// lock-free from the ring buffer into local_batch, and performs socket I/O entirely
+// outside any shared kernel or application mutexes.
 void TelnetTracer::flushToClient() {
   int c_fd = _client_fd.load(std::memory_order_acquire);
   if (c_fd < 0)
