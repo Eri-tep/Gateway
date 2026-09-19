@@ -16,12 +16,18 @@ void Ch1_PollNext(size_t &current_dev_idx) {
   uint32_t now = millis();
 
   if (active_cnt > 0) {
-    // 0. Super-Priority: Fresh uncached targets (last_updated_ms == 0 or !cached_dev)
+    // 0~2 Priority Target Selection in a single scan:
+    // Priority 1 (Super-Priority): Fresh uncached targets (raw_ack_len == 0 || !cached_dev || last_updated_ms == 0)
+    // Priority 2 (Regular): Online targets (cached_dev->is_online)
+    // Priority 3 (Stale): Stale retry targets (isElapsed CH1_STALE_POLL_INTERVAL_MS)
+    int best_prio = 999;
+    size_t best_idx = 0;
+
     for (size_t i = 0; i < active_cnt; i++) {
       size_t idx = (current_dev_idx + i) % active_cnt;
       const auto &tgt = s_active_targets[idx];
-      
-      // ★ CH5 (EW11 소켓 기기)로 라우팅 학습된 기기는 CH1 RS-485 버스로 폴링하지 않음!
+
+      // ★ CH5 (EW11/Hub 소켓 기기)로 라우팅 학습된 기기는 CH1 RS-485 버스로 폴링하지 않음!
       RouteEndpoint ep;
       if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) && ep.channel_id == 5) {
         continue;
@@ -30,73 +36,39 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
 
       if (tgt.raw_ack_len == 0 || !cached_dev || cached_dev->last_updated_ms == 0) {
-        poll_dev_id = tgt.dev_id;
-        poll_sub1 = tgt.sub1;
-        poll_sub2 = tgt.sub2;
-        poll_raw_len = tgt.raw_query_len;
-        if (poll_raw_len > 0)
-          memcpy(poll_raw_data, tgt.raw_query_data.data(), poll_raw_len);
-        current_dev_idx = (idx + 1) % active_cnt;
-        target_selected = true;
+        // Super-priority found! Immediate break (highest possible priority)
+        best_prio = 1;
+        best_idx = idx;
         break;
-      }
-    }
-
-    // 1. Regular Priority: Online targets
-    if (!target_selected) {
-      for (size_t i = 0; i < active_cnt; i++) {
-        size_t idx = (current_dev_idx + i) % active_cnt;
-        const auto &tgt = s_active_targets[idx];
-
-        // ★ CH5 (EW11 소켓 기기)로 라우팅 학습된 기기는 CH1 RS-485 버스로 폴링하지 않음!
-        RouteEndpoint ep;
-        if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) && ep.channel_id == 5) {
-          continue;
+      } else if (cached_dev->is_online) {
+        if (best_prio > 2) {
+          best_prio = 2;
+          best_idx = idx;
         }
-
-        const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
-
-        if (cached_dev && cached_dev->is_online) {
-          poll_dev_id = tgt.dev_id;
-          poll_sub1 = tgt.sub1;
-          poll_sub2 = tgt.sub2;
-          poll_raw_len = tgt.raw_query_len;
-          if (poll_raw_len > 0)
-            memcpy(poll_raw_data, tgt.raw_query_data.data(), poll_raw_len);
-          current_dev_idx = (idx + 1) % active_cnt;
-          target_selected = true;
-          break;
+      } else if (TimeUtils::isElapsed(cached_dev->last_stale_poll_ms, Config::Timing::CH1_STALE_POLL_INTERVAL_MS)) {
+        if (best_prio > 3) {
+          best_prio = 3;
+          best_idx = idx;
         }
       }
     }
 
-    // 2. If no online target ready, check if any stale target is due for retry (10s backoff)
-    if (!target_selected) {
-      for (size_t i = 0; i < active_cnt; i++) {
-        size_t idx = (current_dev_idx + i) % active_cnt;
-        const auto &tgt = s_active_targets[idx];
+    if (best_prio <= 3) {
+      const auto &tgt = s_active_targets[best_idx];
+      poll_dev_id = tgt.dev_id;
+      poll_sub1 = tgt.sub1;
+      poll_sub2 = tgt.sub2;
+      poll_raw_len = tgt.raw_query_len;
+      if (poll_raw_len > 0)
+        memcpy(poll_raw_data, tgt.raw_query_data.data(), poll_raw_len);
 
-        // ★ CH5 (EW11 소켓 기기)로 라우팅 학습된 기기는 CH1 RS-485 버스로 폴링하지 않음!
-        RouteEndpoint ep;
-        if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) && ep.channel_id == 5) {
-          continue;
-        }
-
-        const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
-        if (cached_dev && TimeUtils::isElapsed(cached_dev->last_stale_poll_ms, Config::Timing::CH1_STALE_POLL_INTERVAL_MS)) {
-          poll_dev_id = tgt.dev_id;
-          poll_sub1 = tgt.sub1;
-          poll_sub2 = tgt.sub2;
-          poll_raw_len = tgt.raw_query_len;
-          if (poll_raw_len > 0)
-            memcpy(poll_raw_data, tgt.raw_query_data.data(), poll_raw_len);
-          g_device_repo.setLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
-          g_ch1_state_metrics.stale_poll_cnt.fetch_add(1, std::memory_order_relaxed);
-          current_dev_idx = (idx + 1) % active_cnt;
-          target_selected = true;
-          break;
-        }
+      if (best_prio == 3) {
+        g_device_repo.setLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
+        g_ch1_state_metrics.stale_poll_cnt.fetch_add(1, std::memory_order_relaxed);
       }
+
+      current_dev_idx = (best_idx + 1) % active_cnt;
+      target_selected = true;
     }
   }
 
