@@ -1,0 +1,8 @@
+[Baseline Build Snapshot]
+Date: 2026-09-19
+Environment: m5stack-atoms3-usb
+Status: SUCCESS
+RAM:   59.7% (used 195496 bytes from 327680 bytes)
+Flash: 30.2% (used 1148049 bytes from 3801088 bytes)
+Warnings: 0
+Errors: 0
