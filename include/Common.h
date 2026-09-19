@@ -284,6 +284,10 @@ constexpr uint8_t MIN_LEN = 3;
 constexpr uint8_t MAX_LEN = 64;
 // [UART] 하드웨어 드라이버 RX 링버퍼 크기 (기본: 2048B)
 constexpr uint16_t UART_HW_RX_BUF_SIZE = 2048;
+// [UART] RX 단일 읽기 청크 버퍼 크기 (64B)
+constexpr size_t UART_READ_CHUNK = 64;
+// [UART] RX 패킷 누적 스트림 버퍼 크기 (128B)
+constexpr size_t MAX_STREAM_BUF = 128;
 } // namespace Config::Packet
 
 namespace Config::GPIO {

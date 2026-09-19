@@ -17,7 +17,8 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
                             UartPollCallback on_poll,
                             void *poll_ctx,
                             const StaticPacket *echo_match) {
-  uint8_t temp[64], stream[128];
+  uint8_t temp[Config::Packet::UART_READ_CHUNK];
+  uint8_t stream[Config::Packet::MAX_STREAM_BUF];
   size_t stream_len = 0;
   uint32_t start_ms = millis();
   uint32_t last_rx_ms = 0;
