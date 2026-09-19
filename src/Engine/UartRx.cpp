@@ -21,7 +21,9 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
   size_t stream_len = 0;
   uint32_t start_ms = millis();
   uint32_t last_rx_ms = 0;
-  auto *parser = WallpadParserFactory::getActiveParser();
+  auto *const parser = WallpadParserFactory::getActiveParser();
+  const bool is_auto_unlocked = (parser && parser->isAutoMode() && !parser->isLocked());
+  const uint8_t stx = parser ? parser->getStx() : PKT_STX;
   QueueHandle_t evt_q = Uart_GetEventQueue(u_num);
 
   while (millis() - start_ms < tout_ms) {
@@ -31,7 +33,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
     // 1. 남아있는 스트림 버퍼에서 즉시 유효 패킷 파싱 시도
     if (stream_len >= 3) {
-      if (parser && parser->isAutoMode() && !parser->isLocked()) {
+      if (is_auto_unlocked) {
         // [Auto Mode Initial Learning: Silence (IPG) Framing]
         if (last_rx_ms > 0 && TimeUtils::isElapsed(last_rx_ms, Config::Timing::WALLPAD_AUTO_IPG_MS)) {
           g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
@@ -50,7 +52,6 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
           return UartRxStatus::SUCCESS;
         }
       } else {
-        uint8_t stx = parser ? parser->getStx() : PKT_STX;
         size_t idx = 0;
         while (idx < stream_len) {
           if (stream[idx] != stx) {
@@ -176,7 +177,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
   }
 
   // 타임아웃 발생 시에도 Auto 모드 미잠금 상태에서 유효 바이트가 있으면 프레임 처리
-  if (stream_len >= 3 && parser && parser->isAutoMode() && !parser->isLocked()) {
+  if (stream_len >= 3 && is_auto_unlocked) {
     g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
     if (!(echo_match && echo_match->length == stream_len &&
           memcmp(echo_match->data.data(), stream, stream_len) == 0)) {
