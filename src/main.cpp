@@ -858,67 +858,77 @@ static void Ew11_ProcessPacket(Ew11ClientSlot *slot, const uint8_t *pkt_data,
       int8_t s_idx = static_cast<int8_t>(slot - g_ew11_slots);
       g_route_registry.recordRoute(5, s_idx, dev_id, sub1, sub2);
 
-      // ★ [CH5 소켓 0: 월패드 서브기기 1차/2차 캐시 엔진]
-      if (s_idx == 0) {
-        bool is_query = parser->isQueryPacket(frame);
-        bool is_ack = parser->isAckPacket(frame);
+      bool is_query = parser->isQueryPacket(frame);
+      bool is_ack = parser->isAckPacket(frame);
 
-        if (is_query) {
-          // 1차 캐시 등록 및 갱신 (위저드로 절대 보내지 않음!)
-          g_polling_targets.registerOrTouch(5, dev_id, sub1, sub2, pkt_data,
-                                            pkt_len);
-          slot->last_query_len = static_cast<uint8_t>(
-              std::min<size_t>(pkt_len, sizeof(slot->last_query_data)));
-          memcpy(slot->last_query_data, pkt_data, slot->last_query_len);
-        } else if (is_ack) {
-          // 2차 캐시 페어링 및 디바이스 레포지토리 최신화
-          if (slot->last_query_len > 0) {
-            g_polling_targets.updateResponse(
-                slot->last_query_data, slot->last_query_len, pkt_data, pkt_len);
-            g_polling_targets.markVerified(dev_id, sub1, sub2);
+      if (is_query) {
+        // 1차 캐시 등록 및 갱신 (위저드로 절대 보내지 않음!)
+        g_polling_targets.registerOrTouch(5, dev_id, sub1, sub2, pkt_data,
+                                          pkt_len);
+        slot->last_query_len = static_cast<uint8_t>(
+            std::min<size_t>(pkt_len, sizeof(slot->last_query_data)));
+        memcpy(slot->last_query_data, pkt_data, slot->last_query_len);
+      } else if (is_ack) {
+        // 2차 캐시 페어링 및 디바이스 레포지토리 최신화
+        if (slot->last_query_len > 0) {
+          g_polling_targets.updateResponse(
+              slot->last_query_data, slot->last_query_len, pkt_data, pkt_len);
+          g_polling_targets.markVerified(dev_id, sub1, sub2);
+        }
+
+        // [CH5/EW11 제어 트랜잭션 수렴] 방금 전송된 제어 명령(last_ctrl)에
+        // 대한 ACK 응답인 경우 학습기에 주입!
+        if (slot->last_ctrl_len > 0 &&
+            millis() - slot->last_ctrl_tx_ms < 2000) {
+          StaticPacket ctrl_pkt{5, slot->last_ctrl_len};
+          memcpy(ctrl_pkt.data.data(), slot->last_ctrl_data,
+                 slot->last_ctrl_len);
+
+          uint8_t c_dev = 0, c_s1 = 0, c_s2 = 0;
+          if (parser->extractDeviceKey(
+                  span<const uint8_t>(ctrl_pkt.data.data(), ctrl_pkt.length),
+                  c_dev, c_s1, c_s2) &&
+              c_dev == dev_id) {
+            StaticPacket ack_before{};
+            const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
+            if (cached && cached->last_ack_len > 0) {
+              ack_before.channel_id = 5;
+              ack_before.length = cached->last_ack_len;
+              std::copy(cached->last_ack_data.begin(),
+                        cached->last_ack_data.begin() + cached->last_ack_len,
+                        ack_before.data.begin());
+            }
+            AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
+            g_control_registry.onControlTransaction(ctrl_pkt, ack_before, pkt,
+                                                    hint);
+            g_telnet_manager.notifyControlTransaction(dev_id);
+            slot->last_ctrl_len = 0; // 1회 트랜잭션 소비 완료
           }
-
-          // ★ [CH5/EW11 제어 트랜잭션 수렴] 방금 전송된 제어 명령(last_ctrl)에
-          // 대한 ACK 응답인 경우 학습기에 주입!
-          if (slot->last_ctrl_len > 0 &&
-              millis() - slot->last_ctrl_tx_ms < 2000) {
-            StaticPacket ctrl_pkt{5, slot->last_ctrl_len};
-            memcpy(ctrl_pkt.data.data(), slot->last_ctrl_data,
-                   slot->last_ctrl_len);
-
-            uint8_t c_dev = 0, c_s1 = 0, c_s2 = 0;
-            if (parser->extractDeviceKey(
-                    span<const uint8_t>(ctrl_pkt.data.data(), ctrl_pkt.length),
-                    c_dev, c_s1, c_s2) &&
-                c_dev == dev_id) {
+        } else {
+          // [Causal Differential Event] 게이트웨이 송신 제어가 아니더라도,
+          // 외부(월패드/물리버튼) 물리 조작으로 인해 직전 상태와 바이트 차이(Diff)가 발생한 경우
+          // 특정 기기 ID나 토큰 하드코딩 없이 비주기 돌발 이벤트로 자동 학습 및 위저드에 전달!
+          const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
+          if (cached && cached->last_ack_len > 0) {
+            bool state_changed = (cached->last_ack_len != pkt_len ||
+                                  memcmp(cached->last_ack_data.data(), pkt_data, pkt_len) != 0);
+            if (state_changed) {
               StaticPacket ack_before{};
-              const auto *cached = g_device_repo.find(dev_id, sub1, sub2);
-              if (cached && cached->last_ack_len > 0) {
-                ack_before.channel_id = 5;
-                ack_before.length = cached->last_ack_len;
-                std::copy(cached->last_ack_data.begin(),
-                          cached->last_ack_data.begin() + cached->last_ack_len,
-                          ack_before.data.begin());
-              }
+              ack_before.channel_id = 5;
+              ack_before.length = cached->last_ack_len;
+              std::copy(cached->last_ack_data.begin(),
+                        cached->last_ack_data.begin() + cached->last_ack_len,
+                        ack_before.data.begin());
               AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
-              g_control_registry.onControlTransaction(ctrl_pkt, ack_before, pkt,
-                                                      hint);
+              g_control_registry.onControlTransaction(pkt, ack_before, pkt, hint);
               g_telnet_manager.notifyControlTransaction(dev_id);
-              slot->last_ctrl_len = 0; // 1회 트랜잭션 소비 완료
             }
           }
-
-          g_device_repo.updateFromBus(pkt);
-        } else {
-          // ★ QRY도 ACK도 아닌 실제 제어(CTL) 또는 돌발 이벤트 순간에만 위저드
-          // 학습기로 전달!
-          AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
-          StaticPacket dummy_before{};
-          g_control_registry.onControlTransaction(pkt, dummy_before, pkt, hint);
-          g_telnet_manager.notifyControlTransaction(dev_id);
         }
+
+        g_device_repo.updateFromBus(pkt);
       } else {
-        // 슬롯 1~4: 향후 에어컨 등 전용 프로토콜
+        // QRY도 ACK도 아닌 비표준 제어(CTL) 또는 돌발 이벤트
         AckSlotHint hint = g_telnet_manager.peekWizardHint(dev_id);
         StaticPacket dummy_before{};
         g_control_registry.onControlTransaction(pkt, dummy_before, pkt, hint);

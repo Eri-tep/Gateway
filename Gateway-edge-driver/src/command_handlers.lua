@@ -503,17 +503,23 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("💡 [CHILD CMD] %s ON -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
 
-  local is_momentary = device:supports_capability_by_id(capabilities.momentary.ID)
+  local p_key = device.parent_assigned_child_key or ""
+  local is_momentary = p_key:match("^dev_34_") ~= nil or device:supports_capability_by_id(capabilities.momentary.ID)
   device:emit_event(capabilities.switch.switch.on())
 
   if is_momentary then
     device:set_field("ev_active", true)
     local cap_hist = capabilities["digituniverse06711.history"]
     if cap_hist then
-      device:emit_event(cap_hist.history({ value = "호출 중..." }))
+      local h_evt = cap_hist.history({ value = "호출 중" })
+      h_evt.state_change = true
+      device:emit_event(h_evt)
     end
     gateway_client.device_control(ip, port, d_id, s1, s2, "momentary", 1)
   else
+    if device:supports_capability_by_id(capabilities.fanSpeed.ID) then
+      device:emit_event(capabilities.fanSpeed.fanSpeed(1))
+    end
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
   end
 end
@@ -524,7 +530,8 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("💡 [CHILD CMD] %s OFF -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
 
-  local is_momentary = device:supports_capability_by_id(capabilities.momentary.ID)
+  local p_key = device.parent_assigned_child_key or ""
+  local is_momentary = p_key:match("^dev_34_") ~= nil or device:supports_capability_by_id(capabilities.momentary.ID)
   device:emit_event(capabilities.switch.switch.off())
 
   if is_momentary then
@@ -534,6 +541,9 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
       device:emit_event(cap_hist.history({ value = "대기" }))
     end
   else
+    if device:supports_capability_by_id(capabilities.fanSpeed.ID) then
+      device:emit_event(capabilities.fanSpeed.fanSpeed(0))
+    end
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
   end
 end
@@ -571,6 +581,15 @@ function CommandHandlers.handle_child_set_thermostat_mode(driver, device, comman
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (pwr=%d, DevID 0x%02X %d-%d)", device.label, mode, pwr, d_id, s1, s2))
   device:emit_event(capabilities.thermostatMode.thermostatMode(mode))
+
+  -- 난방(heat) 모드로 켤 때, 이전에 저장된 희망온도를 즉시 UI에 복원 방출
+  if mode == "heat" and capabilities.thermostatHeatingSetpoint then
+    local saved_temp = device:get_field("last_thermo_temp") or 22
+    local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = saved_temp, unit = "C" })
+    sp_evt.state_change = true
+    device:emit_event(sp_evt)
+  end
+
   gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
 end
 
@@ -590,7 +609,9 @@ function CommandHandlers.handle_child_set_vent_mode(driver, device, command)
   if cap_vent then
     device:emit_event(cap_vent.ventMode(mode))
   end
-  device:emit_event(capabilities.switch.switch.on())
+  local sw_on = capabilities.switch.switch.on()
+  sw_on.state_change = true
+  device:emit_event(sw_on)
   gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", spd)
 end
 
@@ -649,12 +670,15 @@ function CommandHandlers.handle_child_momentary_push(driver, device, command)
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🛗 [CHILD CMD] %s PUSH -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
   device:set_field("ev_active", true)
+  device:set_field("ev_call_ts", os.time())
+  device:set_field("ev_arrived_until", nil)
   device:emit_event(capabilities.switch.switch.on())
   local cap_hist = capabilities["digituniverse06711.history"]
   if cap_hist then
-    device:emit_event(cap_hist.history({ value = "호출 중..." }))
+    local h_evt = cap_hist.history({ value = "호출 중" })
+    h_evt.state_change = true
+    device:emit_event(h_evt)
   end
-  device:emit_event(capabilities.momentary.push())
   gateway_client.device_control(ip, port, d_id, s1, s2, "momentary", 1)
 end
 

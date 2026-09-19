@@ -1,0 +1,34 @@
+﻿{
+    "tag": "ko",
+    "label": "팬 속도",
+    "attributes": {
+        "ventMode": {
+            "label": "팬 속도",
+            "displayTemplate": "{{attribute}} of {{device.label}} is {{value}}",
+            "i18n": {
+                "value": {
+                    "high": {
+                        "label": "강풍"
+                    },
+                    "low": {
+                        "label": "약풍"
+                    },
+                    "medium": {
+                        "label": "중풍"
+                    }
+                }
+            }
+        }
+    },
+    "commands": {
+        "setVentMode": {
+            "label": "팬 속도 설정",
+            "arguments": {
+                "mode": {
+                    "i18n": {},
+                    "label": "속도"
+                }
+            }
+        }
+    }
+}

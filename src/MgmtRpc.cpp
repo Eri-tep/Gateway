@@ -542,7 +542,12 @@ void Mgmt_SerializeLockedDevices(AppendBuf &out) {
     // Thermostat: 현재온도 부재 시 설정온도로 대체!
     if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
       target_temp = snap.last_target_temp > 0 ? snap.last_target_temp : 22;
-      if (grp->ack_slots.target_temp_offset != 0xFF && grp->ack_slots.target_temp_offset < snap.last_ack_len) {
+      // 카테고리/컨텍스트 검증: temp_slot의 카테고리와 일치하는 패킷이거나 외출 상태가 아닐 때만 target_temp 추출
+      bool is_temp_ack = true;
+      if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < snap.last_ack_len) {
+        is_temp_ack = (snap.last_ack_data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
+      }
+      if (is_temp_ack && power != 2 && grp->ack_slots.target_temp_offset != 0xFF && grp->ack_slots.target_temp_offset < snap.last_ack_len) {
         uint8_t b = snap.last_ack_data[grp->ack_slots.target_temp_offset];
         if (b >= 5 && b <= 35) target_temp = b;
       }

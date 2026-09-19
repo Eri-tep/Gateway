@@ -95,12 +95,12 @@ local function device_init(driver, device)
     if cap_vent and device:supports_capability_by_id(cap_vent.ID) then
       device:emit_event(cap_vent.ventMode("low"))
     end
+    if device:supports_capability_by_id(capabilities.fanSpeed.ID) then
+      device:emit_event(capabilities.fanSpeed.fanSpeed(0))
+    end
     if device:supports_capability_by_id(capabilities.airConditionerFanMode.ID) then
       device:emit_event(capabilities.airConditionerFanMode.supportedAcFanModes({ "low", "medium", "high" }))
       device:emit_event(capabilities.airConditionerFanMode.fanMode("low"))
-      if capabilities.fanSpeed then
-        device:emit_event(capabilities.fanSpeed.fanSpeed(1))
-      end
     end
 
     -- 4. Elevator 초기화 (상태 이력: 대기)

@@ -1,0 +1,62 @@
+﻿{
+    "dashboard": {
+        "states": [
+            {
+                "component": "main",
+                "capability": "digituniverse06711.history",
+                "version": 1
+            }
+        ],
+        "actions": [
+            {
+                "component": "main",
+                "capability": "switch",
+                "version": 1
+            }
+        ]
+    },
+    "detailView": [
+        {
+            "component": "main",
+            "capability": "switch",
+            "version": 1
+        },
+        {
+            "component": "main",
+            "capability": "digituniverse06711.history",
+            "version": 1
+        },
+        {
+            "component": "main",
+            "capability": "refresh",
+            "version": 1
+        }
+    ],
+    "automation": {
+        "conditions": [
+            {
+                "component": "main",
+                "capability": "switch",
+                "version": 1
+            },
+            {
+                "component": "main",
+                "capability": "digituniverse06711.history",
+                "version": 1
+            }
+        ],
+        "actions": [
+            {
+                "component": "main",
+                "capability": "switch",
+                "version": 1
+            },
+            {
+                "component": "main",
+                "capability": "refresh",
+                "version": 1
+            }
+        ]
+    },
+    "type": "profile"
+}

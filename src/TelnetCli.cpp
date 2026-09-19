@@ -927,12 +927,20 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
       }
 
       // 현재 단계에 처음으로 매칭되는 기기라면 ID 바인딩 및 클래스 활성화
+      // 단, MOMENTARY 단계에서는 평상시 정적 패킷이 스쳐갈 때 성급히 바인딩하지 않고,
+      // 실제 물리 조작 차분(call_seen)이 있는 기기만 선별 바인딩!
+      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
       if (s.wizard_dev_id == 0) {
+        if (tgt.cls == DeviceClass::MOMENTARY) {
+          if (!grp || !grp->coverage.call_seen) {
+            continue; // 실제 물리 호출 차분이 없으면 선점 금지!
+          }
+        }
         s.wizard_dev_id = dev_id;
         g_control_registry.setGroupClass(dev_id, tgt.cls, tgt.name);
       }
 
-      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
+      grp = g_control_registry.findGroup(dev_id);
       bool need_dual_action = (tgt.cls != DeviceClass::MOMENTARY && tgt.cls != DeviceClass::GAS);
 
       if (need_dual_action && grp) {
@@ -1092,17 +1100,18 @@ void TelnetManager::notifyControlTransaction(uint8_t dev_id) {
       }
 
       // ★ [FSM 완전 격리 방어벽]
-      // 대상 기기가 최종 검증 완료(VERIFIED) 상태에 도달하지 않았다면,
-      // 어떠한 연속 패킷이나 미완료 트랜잭션이라도 아래의 MATCH DETECTED로 빠져나가지 않고 다음 입력을 대기!
       bool is_verified = false;
       if (tgt.cls == DeviceClass::THERMOSTAT) {
         is_verified = (s.thermo_phase == TelnetSession::ThermoPhase::VERIFIED);
       } else if (tgt.cls == DeviceClass::VENT) {
         is_verified = (s.vent_phase == TelnetSession::VentPhase::VERIFIED);
+      } else if (tgt.cls == DeviceClass::MOMENTARY) {
+        // 단발성 기기(엘리베이터 등)는 정적 패킷이 아닌 실제 호출/트리거 차분(call_seen)이 관측되어야만 검증 완료!
+        is_verified = (grp && grp->coverage.call_seen);
       } else if (need_dual_action) {
         is_verified = (s.switch_phase == TelnetSession::SwitchPhase::VERIFIED);
       } else {
-        is_verified = true; // MOMENTARY 등 단발성 기기
+        is_verified = true;
       }
 
       if (!is_verified) {

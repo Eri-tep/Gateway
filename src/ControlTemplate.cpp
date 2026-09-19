@@ -500,17 +500,26 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     if (ad.has_len_field && ad.len_offset < pkt.length) {
       if (pkt.data[ad.len_offset] != pkt.length) return false;
     }
-    // (5) Opcode 검증: CTL 패킷은 반드시 동적 학습된 control_opcode이거나 제어 프레임이어야 하며, QRY나 ACK 패킷 차단
+    // (5) Opcode 검증: CTL 패킷은 control_opcode이거나, 외부 단발성 이벤트(ctl == ack_after)여야 함
     if (!is_ack) {
-      if (ad.opcode_offset < pkt.length && ad.control_opcode != 0) {
-        if (pkt.data[ad.opcode_offset] != ad.control_opcode) return false;
+      bool is_event_ctl = (ctl.length == ack_after.length &&
+                           memcmp(ctl.data.data(), ack_after.data.data(), ctl.length) == 0);
+      if (!is_event_ctl) {
+        if (ad.opcode_offset < pkt.length && ad.control_opcode != 0) {
+          if (pkt.data[ad.opcode_offset] != ad.control_opcode) return false;
+        } else {
+          span<const uint8_t> p_span(pkt.data.data(), pkt.length);
+          if (!parser->isControlPacket(p_span)) return false;
+        }
+        if (ad.opcode_offset < pkt.length) {
+          if (ad.query_opcode != 0 && pkt.data[ad.opcode_offset] == ad.query_opcode) return false;
+          if (ad.ack_opcode != 0 && pkt.data[ad.opcode_offset] == ad.ack_opcode) return false;
+        }
       } else {
-        span<const uint8_t> p_span(pkt.data.data(), pkt.length);
-        if (!parser->isControlPacket(p_span)) return false;
-      }
-      if (ad.opcode_offset < pkt.length) {
-        if (ad.query_opcode != 0 && pkt.data[ad.opcode_offset] == ad.query_opcode) return false;
-        if (ad.ack_opcode != 0 && pkt.data[ad.opcode_offset] == ad.ack_opcode) return false;
+        // 단발성 이벤트 패킷은 QRY(조회)만 아니면 제어 골격으로 수용
+        if (ad.opcode_offset < pkt.length && ad.query_opcode != 0) {
+          if (pkt.data[ad.opcode_offset] == ad.query_opcode) return false;
+        }
       }
     }
     return true;
@@ -1106,6 +1115,7 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
     if (!grp->coverage.power_on_seen) {
       grp->power_slot.on_val = cmd_val;
       grp->coverage.power_on_seen = true;
+      grp->coverage.call_seen = true; // 단발성 호출(MOMENTARY) 기기 커버리지도 함께 충족
     } else if (!grp->coverage.power_off_seen) {
       // 1차 제어값(ON)과 다른 새로운 제어값이 들어왔을 때만 2차 제어값(OFF)으로 확정 (중복 재전송 패킷 완벽 무시)
       if (cmd_val != grp->power_slot.on_val) {
@@ -1203,6 +1213,27 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
             grp->ack_slots.valve_state_offset = k;
             grp->ack_slots.discovered = true;
             break;
+          }
+        }
+      }
+
+      // [THERMOSTAT / AIRCON] 전원 컨텍스트(0x46 등) 패킷 내 온도 슬롯(현재온도, 설정온도) 자율 탐색
+      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT || grp->coverage.dev_class == DeviceClass::AIRCON) {
+        // 1) 현재온도 [AT] 탐색: 페이로드 내 유효 환경온도 범위 (10~45C)
+        for (size_t k = ack_payload_start; k < ack_payload_end; ++k) {
+          if (isFixedAckField(k)) continue;
+          if (k == grp->power_slot.ack_state_offset || k == grp->ack_slots.power_offset) continue;
+          if (k == grp->sub1_offset || k == grp->sub2_offset || k == cat_off || k == act_off) continue;
+          uint8_t val = ack_after.data[k];
+          if (val >= 10 && val <= 45) {
+            if (grp->power_slot.ack_telemetry_offset == 0xFF) {
+              grp->power_slot.ack_telemetry_offset = k;
+              if (grp->ack_slots.current_temp_offset == 0xFF) grp->ack_slots.current_temp_offset = k;
+            } else if (k != grp->power_slot.ack_telemetry_offset && grp->power_slot.ack_target_offset == 0xFF) {
+              // 두 번째 유효 온도는 설정온도 [TT] (예: #9=현재 29C, #10=설정 19C)
+              grp->power_slot.ack_target_offset = k;
+              break;
+            }
           }
         }
       }
@@ -1324,24 +1355,26 @@ void ControlTemplateRegistry::onControlTransaction(const StaticPacket &ctl,
           grp->ack_slots.target_temp_offset = 0xFF;
         }
 
-        // (3) 현재온도 텔레메트리 슬롯 [AT]
-        if (grp->ack_slots.current_temp_offset == 0xFF) {
-          for (size_t k = ack_payload_start; k < ack_payload_end; ++k) {
-            if (isFixedAckField(k)) continue;
-            if (k == grp->ack_slots.power_offset || k == grp->ack_slots.target_temp_offset) continue;
-            if (k == grp->sub1_offset || k == grp->sub2_offset || k == cat_off) continue;
-            if (k < ack_before.length && ack_before.data[k] == ack_after.data[k]) {
-              uint8_t env_val = ack_after.data[k];
-              if (grp->power_slot.discovered) {
-                if (env_val == grp->power_slot.on_val || env_val == grp->power_slot.off_val) continue;
-                if (grp->coverage.away_mode_seen && env_val == grp->away_mode_token) continue;
-              }
-              if (env_val >= 10 && env_val <= 35) {
-                grp->ack_slots.current_temp_offset = k;
-                grp->temp_slot.telemetry_offset = k;
-                grp->ack_slots.discovered = true;
-                break;
-              }
+        // (3) 현재온도 및 설정온도 텔레메트리 슬롯 [AT / TT]
+        for (size_t k = ack_payload_start; k < ack_payload_end; ++k) {
+          if (isFixedAckField(k)) continue;
+          if (k == grp->ack_slots.power_offset || k == grp->power_slot.ack_state_offset) continue;
+          if (k == grp->sub1_offset || k == grp->sub2_offset || k == cat_off) continue;
+          uint8_t env_val = ack_after.data[k];
+          if (grp->power_slot.discovered) {
+            if (env_val == grp->power_slot.on_val || env_val == grp->power_slot.off_val) continue;
+            if (grp->coverage.away_mode_seen && env_val == grp->away_mode_token) continue;
+          }
+          if (env_val >= 10 && env_val <= 45) {
+            if (grp->ack_slots.current_temp_offset == 0xFF) {
+              grp->ack_slots.current_temp_offset = k;
+              grp->temp_slot.telemetry_offset = k;
+              grp->ack_slots.discovered = true;
+            }
+            if (grp->power_slot.ack_telemetry_offset == 0xFF) {
+              grp->power_slot.ack_telemetry_offset = k;
+            } else if (k != grp->power_slot.ack_telemetry_offset && grp->power_slot.ack_target_offset == 0xFF) {
+              grp->power_slot.ack_target_offset = k;
             }
           }
         }

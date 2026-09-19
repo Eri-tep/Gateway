@@ -5,11 +5,13 @@ components:
     capabilities:
       - id: switch
         version: 1
-      - id: momentary
-        version: 1
       - id: digituniverse06711.history
         version: 1
       - id: refresh
         version: 1
     categories:
       - name: Elevator
+
+metadata:
+  vid: "0a4298c9-b1ea-3403-a6f8-c330491a5399"
+  mnmn: "SmartThingsCommunity"

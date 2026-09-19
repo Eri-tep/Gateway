@@ -568,17 +568,48 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
 
       if (grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
         t_temp = dev->last_target_temp > 0 ? dev->last_target_temp : 22;
-        if (grp->ack_slots.target_temp_offset != 0xFF && grp->ack_slots.target_temp_offset < ack.length) {
-          uint8_t b = ack.data[grp->ack_slots.target_temp_offset];
+        c_temp = dev->last_current_temp > 0 ? dev->last_current_temp : t_temp;
+
+        // 컨텍스트 채널 분기별 독립 슬롯 참조 (Zero-Hardcoding / Blueprint Driven)
+        uint8_t cat_val = 0;
+        if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < ack.length) {
+          cat_val = ack.data[grp->temp_slot.category_offset];
+        } else if (grp->power_slot.category_offset != 0xFF && grp->power_slot.category_offset < ack.length) {
+          cat_val = ack.data[grp->power_slot.category_offset];
+        }
+
+        uint8_t target_off = 0xFF;
+        uint8_t current_off = 0xFF;
+
+        if (grp->temp_slot.category_val != 0 && cat_val == grp->temp_slot.category_val) {
+          // [TEMP Context: 0x45 등] 온도 제어 응답 채널
+          target_off = (grp->temp_slot.ack_target_offset != 0xFF) ? grp->temp_slot.ack_target_offset : grp->ack_slots.target_temp_offset;
+          current_off = (grp->temp_slot.ack_telemetry_offset != 0xFF) ? grp->temp_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
+        } else if (grp->power_slot.category_val != 0 && cat_val == grp->power_slot.category_val) {
+          // [POWER Context: 0x46 등] 전원/상태 주기적 응답 채널
+          target_off = (grp->power_slot.ack_target_offset != 0xFF) ? grp->power_slot.ack_target_offset : 0xFF;
+          current_off = (grp->power_slot.ack_telemetry_offset != 0xFF) ? grp->power_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
+        } else {
+          // 기본 fallback 슬롯
+          target_off = grp->ack_slots.target_temp_offset;
+          current_off = grp->ack_slots.current_temp_offset;
+        }
+
+        // 외출 모드(pwr == 2) 시 외출 고정 온도로 왜곡되지 않도록 보호
+        if (pwr != 2 && target_off != 0xFF && target_off < ack.length) {
+          uint8_t b = ack.data[target_off];
           if (b >= 5 && b <= 35) {
             t_temp = b;
             dev->last_target_temp = b;
           }
         }
-        c_temp = t_temp; // 설정온도로 기본 대체
-        if (grp->ack_slots.current_temp_offset != 0xFF && grp->ack_slots.current_temp_offset < ack.length) {
-          uint8_t b = ack.data[grp->ack_slots.current_temp_offset];
-          if (b >= 5 && b <= 50) c_temp = b;
+
+        if (current_off != 0xFF && current_off < ack.length) {
+          uint8_t b = ack.data[current_off];
+          if (b >= 5 && b <= 50) {
+            c_temp = b;
+            dev->last_current_temp = b;
+          }
         }
       } else if (grp->coverage.dev_class == DeviceClass::VENT) {
         spd = 1;
@@ -728,39 +759,49 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
     return g_device_repo.copyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
   }
 
-  if (parser->isControlPacket(frame)) {
-    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+  bool is_ctl = parser->isControlPacket(frame);
+  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+  bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+  const GroupControlTemplate *grp = (has_key && dev_id != 0) ? g_control_registry.findGroup(dev_id) : nullptr;
 
+  // [무사전지식] 프로파일 기본 ctrl_op(0x02 등)뿐만 아니라,
+  // 런타임에 청사진으로 학습된 패킷의 Opcode(엘리베이터 0x04 등)도 제어 패킷으로 인식
+  if (!is_ctl && grp && grp->frame_len > 4 && frame.size() >= grp->frame_len) {
+    VendorProfileDescriptor desc;
+    ProfileRepository::getActiveProfile(desc);
+    uint8_t op_off = (desc.opcode_offset < frame.size()) ? desc.opcode_offset : 4;
+    if (frame[op_off] == grp->raw_template[op_off]) {
+      is_ctl = true;
+    }
+  }
+
+  if (is_ctl) {
     // [보안 4.2] 외부/CH6 제어 패킷 유효 범위 검증 및 인젝션/가스열기 방어
-    if (has_key && dev_id != 0) {
-      const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
-      if (grp) {
-        // 1) 가스 밸브 열기 방어: GAS 장치에 대해 close 토큰이 아닌 값이 주입되면 차단
-        if (grp->coverage.dev_class == DeviceClass::GAS) {
-          if (grp->close_slot.discovered && grp->close_slot.action_offset < req.length) {
-            uint8_t val = req.data[grp->close_slot.action_offset];
-            if (val != grp->close_slot.off_val) {
-              g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
-              return false;
-            }
+    if (grp) {
+      // 1) 가스 밸브 열기 방어: GAS 장치에 대해 close 토큰이 아닌 값이 주입되면 차단
+      if (grp->coverage.dev_class == DeviceClass::GAS) {
+        if (grp->close_slot.discovered && grp->close_slot.action_offset < req.length) {
+          uint8_t val = req.data[grp->close_slot.action_offset];
+          if (val != grp->close_slot.off_val) {
+            g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
+            return false;
           }
         }
-        // 2) 난방 온도 범위 방어: 희망온도(SET_TEMP) 카테고리 패킷일 때만 온도 유효 범위(5~35C) 검증
-        if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->temp_slot.discovered &&
-            grp->temp_slot.action_offset < req.length) {
-          bool is_temp = false;
-          // 카테고리 슬롯이 학습되어 있다면 temp_slot의 카테고리 값과 일치할 때만 온도 패킷으로 판정
-          if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < req.length) {
-            is_temp = (req.data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
-          }
+      }
+      // 2) 난방 온도 범위 방어: 희망온도(SET_TEMP) 카테고리 패킷일 때만 온도 유효 범위(5~35C) 검증
+      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->temp_slot.discovered &&
+          grp->temp_slot.action_offset < req.length) {
+        bool is_temp = false;
+        // 카테고리 슬롯이 학습되어 있다면 temp_slot의 카테고리 값과 일치할 때만 온도 패킷으로 판정
+        if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < req.length) {
+          is_temp = (req.data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
+        }
 
-          if (is_temp) {
-            uint8_t t_val = req.data[grp->temp_slot.action_offset];
-            if (t_val < 5 || t_val > 35) {
-              g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
-              return false;
-            }
+        if (is_temp) {
+          uint8_t t_val = req.data[grp->temp_slot.action_offset];
+          if (t_val < 5 || t_val > 35) {
+            g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
+            return false;
           }
         }
       }

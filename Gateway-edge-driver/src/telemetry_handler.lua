@@ -497,10 +497,13 @@ function TelemetryHandler.handle_device_state_event(driver, event_data)
       log.info(string.format("📡 [DEVICE STATE] %s (%s) State Update: Power=%s",
                              dev.label, target_key, tostring(event_data.power)))
 
-      -- 1. Switch (단, momentary 엘리베이터는 도착 시에만 자동 꺼짐 제어)
-      if d_cls ~= "momentary" and event_data.power ~= nil and capabilities.switch then
-        local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
-        dev:emit_event(sw_evt)
+      -- 1. Switch (엘리베이터의 경우 도착 전 조기 OFF 덮어쓰기 방지)
+      if event_data.power ~= nil and capabilities.switch then
+        if d_cls ~= "momentary" then
+          local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+          sw_evt.state_change = true
+          dev:emit_event(sw_evt)
+        end
       end
 
       -- 2. Outlet (실시간 전력량 W & 누적 전력량 kWh, 매월 1일 자동 리셋)
@@ -538,64 +541,32 @@ function TelemetryHandler.handle_device_state_event(driver, event_data)
         end
       end
 
-      -- 3. Elevator (Momentary: 호출 후 실시간 층수 추적 & 도착 시 자동 꺼짐)
+      -- 3. Elevator (Momentary: 수동 호출 및 수동 끄기 - 자동 간섭 제거)
       if d_cls == "momentary" then
-        local floor = tonumber(event_data.floor) or 1
-        local dir = tonumber(event_data.direction) or 0 -- 1: 상승, 2: 하강, 0: 정지/도착
-        local cap_hist = capabilities["digituniverse06711.history"]
-        local ev_active = dev:get_field("ev_active")
-
-        if ev_active then
-          if dir == 1 then
-            if cap_hist then
-              dev:emit_event(cap_hist.history({ value = string.format("%d층 상승 중", floor) }))
-            end
-          elseif dir == 2 then
-            if cap_hist then
-              dev:emit_event(cap_hist.history({ value = string.format("%d층 하강 중", floor) }))
-            end
-          elseif dir == 0 then
-            -- 도착 / 정지 ➔ 스위치 자동 OFF 및 도착 이력 표시
-            if cap_hist then
-              dev:emit_event(cap_hist.history({ value = string.format("%d층 도착", floor) }))
-            end
-            if capabilities.switch then
-              dev:emit_event(capabilities.switch.switch.off())
-            end
-            dev:set_field("ev_active", false)
-            log.info(string.format("🛗 [ELEVATOR] Arrived at %dF! Auto Switch OFF", floor))
-          end
-        else
-          if cap_hist then
-            local status_text = "대기"
-            if dir == 1 then
-              status_text = string.format("%d층 (상승)", floor)
-            elseif dir == 2 then
-              status_text = string.format("%d층 (하강)", floor)
-            elseif floor > 0 then
-              status_text = string.format("%d층 대기", floor)
-            end
-            dev:emit_event(cap_hist.history({ value = status_text }))
-          end
-        end
+        -- 수동 조작 방식: 버스의 임의 정지/이동 패킷에 의해 꺼지지 않도록 텔레메트리 자동 변경 없음
       end
 
       -- 4. Thermostat (난방/외출/꺼짐 3모드 & 현재온도 부재 시 설정온도로 대체)
       if d_cls == "thermostat" then
+        local is_away = (event_data.power == 2)
         if event_data.power ~= nil and capabilities.thermostatMode then
           local mode_str = "off"
           if event_data.power == 1 then
             mode_str = "heat"
-          elseif event_data.power == 2 then
+          elseif is_away then
             mode_str = "away"
           end
           dev:emit_event(capabilities.thermostatMode.thermostatMode(mode_str))
         end
 
         local saved_temp = dev:get_field("last_thermo_temp") or 22
-        local target_temp = (event_data.target_temp and event_data.target_temp > 0) and event_data.target_temp or saved_temp
-        if target_temp > 0 then
-          dev:set_field("last_thermo_temp", target_temp, { persist = true })
+        -- 외출 중에는 토큰값(7도 등)으로 원래 사용자 설정온도를 오염시키지 않음 (10도 이상 유효 온도일 때만 저장)
+        local target_temp = saved_temp
+        if event_data.target_temp and event_data.target_temp >= 10 and event_data.target_temp <= 35 then
+          target_temp = event_data.target_temp
+          if not is_away then
+            dev:set_field("last_thermo_temp", target_temp, { persist = true })
+          end
         end
 
         local current_temp = (event_data.current_temp and event_data.current_temp > 0) and event_data.current_temp or target_temp
@@ -614,7 +585,9 @@ function TelemetryHandler.handle_device_state_event(driver, event_data)
 
       -- 5. Vent (약풍/중풍/강풍 드롭다운 & 팬 속도 동기화)
       if d_cls == "vent" then
-        if event_data.fan_speed and event_data.fan_speed > 0 then
+        if event_data.power == 0 and capabilities.fanSpeed then
+          dev:emit_event(capabilities.fanSpeed.fanSpeed(0))
+        elseif event_data.fan_speed and event_data.fan_speed > 0 then
           local spd = tonumber(event_data.fan_speed) or 1
           local mode_str = (spd == 2) and "medium" or (spd >= 3 and "high" or "low")
           local cap_vent = capabilities["digituniverse06711.ventmode"]

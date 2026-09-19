@@ -1,0 +1,12 @@
+﻿{
+    "tag": "ko",
+    "label": "상태",
+    "attributes": {
+        "history": {
+            "label": "상태",
+            "displayTemplate": "{{value}}",
+            "i18n": {}
+        }
+    },
+    "commands": {}
+}

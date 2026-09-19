@@ -170,7 +170,7 @@ namespace TimeUtils {
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.5";
+constexpr const char *FIRMWARE_VERSION = "v1.1.6";
 } // namespace Config
 
 namespace Config::Task {
@@ -1211,6 +1211,7 @@ struct DeviceStateEntry {
   std::array<uint8_t, 64> last_ack_data;
   uint8_t last_ack_len{0};
   uint8_t last_target_temp{0};
+  uint8_t last_current_temp{0};
   uint32_t last_updated_ms{0};
   mutable uint32_t last_stale_poll_ms{0};
   uint8_t timeout_count{0};

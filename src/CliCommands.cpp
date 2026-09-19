@@ -2313,14 +2313,27 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     char ack_summary[128]{0};
     size_t a_off = 0;
     if (cov.dev_class == DeviceClass::THERMOSTAT && grp->power_slot.discovered && grp->temp_slot.discovered) {
-      // 듀얼 컨텍스트 채널 분기 표기
-      a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off,
-                        "[Pwr/0x%02X] State=[AS](#%u) | [Temp/0x%02X] Target=[TT](#%u) Ambient=[AT](#%u)",
-                        grp->power_slot.category_val ? grp->power_slot.category_val : 0x46,
-                        (grp->power_slot.ack_state_offset != 0xFF) ? grp->power_slot.ack_state_offset : grp->ack_slots.power_offset,
-                        grp->temp_slot.category_val ? grp->temp_slot.category_val : 0x45,
-                        (grp->temp_slot.ack_target_offset != 0xFF) ? grp->temp_slot.ack_target_offset : grp->ack_slots.target_temp_offset,
-                        (grp->temp_slot.ack_telemetry_offset != 0xFF) ? grp->temp_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset);
+      // 듀얼 컨텍스트 채널 분기 표기 (컨텍스트별 슬롯 명세 분리)
+      uint8_t pwr_cat = grp->power_slot.category_val ? grp->power_slot.category_val : 0x46;
+      uint8_t pwr_as  = (grp->power_slot.ack_state_offset != 0xFF) ? grp->power_slot.ack_state_offset : grp->ack_slots.power_offset;
+      uint8_t pwr_tt  = (grp->power_slot.ack_target_offset != 0xFF) ? grp->power_slot.ack_target_offset : 0xFF;
+      uint8_t pwr_at  = (grp->power_slot.ack_telemetry_offset != 0xFF) ? grp->power_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
+
+      uint8_t tmp_cat = grp->temp_slot.category_val ? grp->temp_slot.category_val : 0x45;
+      uint8_t tmp_tt  = (grp->temp_slot.ack_target_offset != 0xFF) ? grp->temp_slot.ack_target_offset : grp->ack_slots.target_temp_offset;
+      uint8_t tmp_at  = (grp->temp_slot.ack_telemetry_offset != 0xFF) ? grp->temp_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
+
+      if (pwr_tt != 0xFF) {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off,
+                          "[Pwr/0x%02X] State=[AS](#%u) Ambient=[AT](#%u) Target=[TT](#%u) | [Temp/0x%02X] Target=[TT](#%u) Ambient=[AT](#%u)",
+                          pwr_cat, pwr_as, pwr_at, pwr_tt,
+                          tmp_cat, tmp_tt, tmp_at);
+      } else {
+        a_off += snprintf(ack_summary + a_off, sizeof(ack_summary) - a_off,
+                          "[Pwr/0x%02X] CmdEcho=[CE](#%u) State=[AS](#%u) | [Temp/0x%02X] Target=[TT](#%u) Ambient=[AT](#%u)",
+                          pwr_cat, grp->power_slot.action_offset, pwr_as,
+                          tmp_cat, tmp_tt, tmp_at);
+      }
     } else if (cov.dev_class == DeviceClass::VENT) {
       uint8_t pwr_ack = (grp->power_slot.ack_state_offset != 0xFF) ? grp->power_slot.ack_state_offset : grp->ack_slots.power_offset;
       uint8_t spd_ack = (grp->speed_slot.ack_target_offset != 0xFF) ? grp->speed_slot.ack_target_offset : grp->ack_slots.fan_speed_offset;
