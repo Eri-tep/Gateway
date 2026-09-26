@@ -122,9 +122,8 @@ local function device_init(driver, device)
   if device.preferences and device.preferences.logLevel then
     apply_log_level(device.preferences.logLevel)
   end
-  if not device:get_field("ota_channel") then
-    device:set_field("ota_channel", device.preferences.otaChannel or "main")
-  end
+  local init_ch = tostring(device.preferences and device.preferences.otaChannel or device:get_field("ota_channel") or "main"):lower()
+  device:set_field("ota_channel", (init_ch == "beta") and "beta" or "main")
 
   -- deviceManager 초기 상태 idle 설정
   local comp_main = device.profile.components["main"]
@@ -183,7 +182,10 @@ local function device_info_changed(driver, device, event, args)
 
   -- 0. OTA Release Channel change
   if new_prefs.otaChannel then
-    device:set_field("ota_channel", new_prefs.otaChannel)
+    local ch = tostring(new_prefs.otaChannel):lower()
+    local branch = (ch == "beta") and "beta" or "main"
+    device:set_field("ota_channel", branch)
+    log.info(string.format("⚙️ [Config] Synced OTA Release Channel: %s", branch))
   end
 
   -- 1. Wallpad Profile Slot change

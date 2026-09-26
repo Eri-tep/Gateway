@@ -29,7 +29,7 @@ struct HttpOtaState {
 
 extern HttpOtaState g_http_ota_state;
 
-static constexpr const char *DEFAULT_CLOUD_OTA_URL = "https://raw.githubusercontent.com/Eri-tep/Gateway/beta/bin/firmware.bin";
+static constexpr const char *DEFAULT_CLOUD_OTA_URL = "https://raw.githubusercontent.com/Eri-tep/Gateway/main/bin/firmware.bin";
 void Mgmt_StartHttpOta(const char *url);
 
 // ============================================================================

@@ -263,11 +263,14 @@ end
 function CommandHandlers.handle_start_ota(driver, device, command)
   local ip, port = get_connection_info(device)
   local repo = device.preferences.githubRepo or "Eri-tep/Gateway"
-  local channel = (device.preferences.otaChannel or device:get_field("ota_channel") or "beta"):lower()
-  local branch = (channel == "main") and "main" or "beta"
+  local pref_channel = device.preferences.otaChannel
+  local channel = (pref_channel and pref_channel ~= "" and pref_channel or device:get_field("ota_channel") or "main"):lower()
+  local branch = (channel == "beta") and "beta" or "main"
+  device:set_field("ota_channel", branch)
 
   -- [핵심] 설정의 githubRepo 및 otaChannel을 참조하여 실제 유효한 GitHub Raw 바이너리 전체 HTTPS URL 생성 및 전송
   local ota_url = string.format("https://raw.githubusercontent.com/%s/%s/bin/firmware.bin", repo, branch)
+  log.info(string.format("🚀 [OTA] Selected Release Channel: %s (Branch: %s) -> Target URL: %s", channel, branch, ota_url))
 
   -- OTA 시작 UI 즉시 업데이트 (Downloading...)
   local comp_ota = device.profile.components["ota"]
