@@ -53,7 +53,7 @@ int Hub_AcceptClient(int slot_idx, int server_fd) {
   int sockbuf = Config::TCP::SOCKET_BUFFER_SIZE;
   setsockopt(new_sock, SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
   setsockopt(new_sock, SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
-  Tcp_EnableKeepalive(new_sock, Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
+  Tcp_EnableKeepalive(new_sock, 10,
                       Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
                       Config::TCP::DEFAULT_KEEPALIVE_CNT);
 

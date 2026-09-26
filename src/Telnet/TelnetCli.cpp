@@ -142,16 +142,23 @@ void TelnetManager::bindCommands(TelnetSession *session) {
 
   for (const auto &c : cmds) {
     if (strcmp(c.n, "help") == 0) {
-      // [H-1] EmbeddedCli 내부 _impl 침범(UB) 제거 → 공식 API로 help 재등록
-      // embeddedCliNew가 bindings[0]에 기본 help를 등록하므로, 동일 이름으로
-      // addBinding하면 라이브러리가 기존 항목을 덮어씀
-      CliCommandBinding b;
-      b.name        = c.n;
-      b.help        = c.h;
-      b.tokenizeArgs = true;
-      b.context     = session;
-      b.binding     = c.b;
-      embeddedCliAddBinding(session->cli.get(), b);
+      // embeddedCliNew registers an internal "help" at binding index 0.
+      // Override binding index 0 so our clean SystemCli::cmdHelp reference table is called.
+      struct InternalCliImpl {
+        void *rxBuf;
+        void *cmdBuf;
+        uint16_t cmdSize;
+        uint16_t cmdMaxSize;
+        CliCommandBinding *bindings;
+      };
+      auto *impl = static_cast<InternalCliImpl *>(session->cli->_impl);
+      if (impl && impl->bindings) {
+        impl->bindings[0].name = c.n;
+        impl->bindings[0].help = c.h;
+        impl->bindings[0].tokenizeArgs = true;
+        impl->bindings[0].context = session;
+        impl->bindings[0].binding = c.b;
+      }
       continue;
     }
     CliCommandBinding b;

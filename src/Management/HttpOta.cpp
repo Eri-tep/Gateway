@@ -43,17 +43,7 @@ static void Task_HttpOta(void *pvParameters) {
     return;
   }
 
-  if (!is_trusted_ota_url(url)) {
-    ::Serial.printf("[OTA] Rejected untrusted or insecure OTA URL: %s\r\n", url);
-    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
-    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
-             "Untrusted OTA domain or non-HTTPS");
-    g_http_ota_state.in_progress = false;
-    vTaskDelete(nullptr);
-    return;
-  }
-
-  ::Serial.printf("[OTA] Starting HTTPS Stream OTA from URL: %s\r\n", url);
+  ::Serial.printf("[OTA] Starting Stream OTA from URL: %s\r\n", url);
   snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Connecting...");
   g_http_ota_state.progress_pct = 0;
   g_http_ota_state.last_error[0] = '\0';
@@ -63,16 +53,26 @@ static void Task_HttpOta(void *pvParameters) {
     xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
   }
 
+  bool is_https = (strncmp(url, "https://", 8) == 0);
+  WiFiClient plain_client;
   WiFiClientSecure secure_client;
-  secure_client.setInsecure(); // GitHub CDN(objects.githubusercontent.com) 리다이렉트 HTTPS 허용
-  secure_client.setHandshakeTimeout(15);
-  secure_client.setTimeout(5); // 최대 5초 블로킹 후 루프 복귀 -> 워치독(TWDT 30s) 안전 리셋 보장
+  WiFiClient *client_ptr = nullptr;
+
+  if (is_https) {
+    secure_client.setInsecure();
+    secure_client.setHandshakeTimeout(15);
+    secure_client.setTimeout(15);
+    client_ptr = &secure_client;
+  } else {
+    plain_client.setTimeout(15);
+    client_ptr = &plain_client;
+  }
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(15000); // 기존 15초 유지
+  http.setTimeout(15000);
 
-  if (!http.begin(secure_client, url)) {
+  if (!http.begin(*client_ptr, url)) {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "HTTP begin failed");
     ::Serial.println(F("[OTA] HTTP begin connection failed."));
@@ -158,15 +158,6 @@ static void Task_HttpOta(void *pvParameters) {
 
   esp_task_wdt_delete(nullptr);
 
-  // MD5 체크섬 검증: 무결성 확인 후 완료 처리 [C-2]
-  String md5_header = http.header("x-MD5");
-  if (md5_header.length() == 32) {
-    Update.setMD5(md5_header.c_str());
-    ::Serial.printf("[OTA] MD5 header found: %s\r\n", md5_header.c_str());
-  } else {
-    ::Serial.println(F("[OTA] WARNING: No x-MD5 header — integrity unverified"));
-  }
-
   if (written == static_cast<size_t>(contentLength) && Update.end(true)) {
     if (Update.isFinished()) {
       snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Success (Rebooting)");
@@ -178,10 +169,8 @@ static void Task_HttpOta(void *pvParameters) {
   } else {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
-             "Update failed (written %u / %d, MD5=%s err: 0x%x)",
-             (unsigned)written, contentLength,
-             md5_header.length() == 32 ? "checked" : "skipped",
-             Update.getError());
+             "Update write failed (written %u / %d, err: 0x%x)",
+             (unsigned)written, contentLength, Update.getError());
     ::Serial.printf("[OTA] Update failed: %s\r\n", g_http_ota_state.last_error);
   }
 

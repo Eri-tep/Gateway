@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "TelnetCli.h"
+#include "MgmtRpc.h"
 #include "esp_ota_ops.h"
 #include "esp_core_dump.h"
 #include "esp_wifi.h"
@@ -156,16 +157,29 @@ void System_CheckOtaHealth() {
   // [H-2] 실질 헬스체크 3조건 모두 충족 시에만 Rollback 취소
   // 1. Wi-Fi 연결, 2. Hub(CH6) TCP 연결, 3. RS-485 최근 5초 내 패킷 수신
   bool wifi_ok  = (WiFi.status() == WL_CONNECTED);
-  // Hub(CH6) 슬롯 중 하나라도 연결된 상태인지 확인
-  bool hub_ok   = false;
-  for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
-    if (g_hub_slots[i].is_connected) { hub_ok = true; break; }
+  // Hub(CH6 SmartThings Mgmt) 세션 연결 여부 확인 (CH5 EW11이 아님)
+  bool hub_ok = false;
+  {
+    MutexLocker lock(g_mgmt_mutex);
+    for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; ++i) {
+      if (g_mgmt_sessions[i].sock >= 0) { hub_ok = true; break; }
+    }
   }
-  bool rs485_ok = (millis() - g_ch1_bus_ms.load(std::memory_order_relaxed) < 5000);
+  // EW11 슬롯도 함께 점검
+  if (!hub_ok) {
+    MutexLocker lock(g_ch5_mutex);
+    for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
+      if (g_hub_slots[i].is_connected) { hub_ok = true; break; }
+    }
+  }
+
+  bool rs485_ok = (millis() - g_ch1_bus_ms.load(std::memory_order_relaxed) < 15000);
   bool time_ok  = TimeUtils::isElapsed(g_boot_start_ms,
                                         Config::Timing::OTA_VALIDATION_PERIOD_MS);
 
-  if (!time_ok || !wifi_ok || !hub_ok || !rs485_ok) {
+  // 허브가 아직 폴링하지 않더라도 부팅 60초 경과 및 Wi-Fi + RS485 정상이면 롤백 취소 허용
+  bool extended_time_ok = TimeUtils::isElapsed(g_boot_start_ms, 60000);
+  if (!time_ok || !wifi_ok || (!hub_ok && !extended_time_ok) || !rs485_ok) {
     return; // 조건 미충족 — 다음 주기에 재확인
   }
 
