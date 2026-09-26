@@ -6,6 +6,34 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <lwip/sockets.h>
+#include <IPAddress.h>
+
+static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
+
+static IPAddress get_client_ip(int sock) {
+  struct sockaddr_in peer;
+  socklen_t len = sizeof(peer);
+  if (getpeername(sock, reinterpret_cast<struct sockaddr *>(&peer), &len) == 0) {
+    const uint8_t *b = reinterpret_cast<const uint8_t *>(&peer.sin_addr.s_addr);
+    return IPAddress(b[0], b[1], b[2], b[3]);
+  }
+  return IPAddress(0, 0, 0, 0);
+}
+
+static bool is_dangerous_command(const char *cmd) {
+  static const char *const DANGEROUS_CMDS[] = {
+      "control", "doorphone_action", "system_reboot", "start_ota",
+      "set_wifi", "set_uart", "clear_logs", "clear_coredump",
+      "cache_purge_rescan", "wallpad_reset", "set_profile",
+      "save_auto_to_slot", "set_timing", "cache_sync"
+  };
+  for (const auto *d_cmd : DANGEROUS_CMDS) {
+    if (strcasecmp(cmd, d_cmd) == 0)
+      return true;
+  }
+  return false;
+}
 
 RuntimeTimingConfig g_timing_config{};
 MgmtSession g_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
@@ -176,6 +204,20 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   }
 
   long req_id = findJsonIntValue(json_str, "id", -1);
+  IPAddress client_ip = get_client_ip(sock);
+
+  // SmartThings Edge Driver가 주기적으로 telemetry 요청 시 허브 IP 자동 학습 및 갱신
+  if (strcasecmp(cmd, "get_telemetry") == 0 && client_ip != IPAddress(0, 0, 0, 0)) {
+    s_trusted_hub_ip = client_ip;
+  }
+
+  // 위험 제어/설정 명령은 허브 IP가 이미 등록된 경우 허브 IP만 허용 (타 LAN 기기 403 차단)
+  if (is_dangerous_command(cmd)) {
+    if (s_trusted_hub_ip != IPAddress(0, 0, 0, 0) && client_ip != s_trusted_hub_ip) {
+      sendRpcResponse(sock, req_id, "error", "403 Access Denied: Unauthorized client IP");
+      return;
+    }
+  }
 
   if (strcasecmp(cmd, "get_telemetry") == 0) {
     static char tel_buf[3072];
@@ -373,8 +415,13 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   if (strcasecmp(cmd, "start_ota") == 0) {
     char url[256] = {0};
     findJsonStringValue(json_str, "url", url, sizeof(url));
-    Mgmt_StartHttpOta(url[0] ? url : DEFAULT_CLOUD_OTA_URL);
-    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Cloud HTTP OTA started in background\"}\n";
+    const char *target_url = url[0] ? url : DEFAULT_CLOUD_OTA_URL;
+    if (strncmp(target_url, "https://", 8) != 0 || strlen(target_url) < 10) {
+      sendRpcResponse(sock, req_id, "error", "Invalid OTA URL: Only HTTPS allowed");
+      return;
+    }
+    Mgmt_StartHttpOta(target_url);
+    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Cloud HTTPS OTA started in background\"}\n";
     send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
     return;
   }
@@ -411,13 +458,25 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     bool has_ssid = findJsonStringValue(json_str, "ssid", new_ssid, sizeof(new_ssid));
     bool has_pass = findJsonStringValue(json_str, "password", new_pass, sizeof(new_pass));
 
-    if (!has_ssid || strlen(new_ssid) == 0) {
-      sendRpcResponse(sock, req_id, "error", "Missing or empty SSID");
+    if (!has_ssid || strlen(new_ssid) == 0 || strlen(new_ssid) > 32) {
+      sendRpcResponse(sock, req_id, "error", "Invalid SSID length (1-32 chars)");
       return;
     }
 
-    if (has_pass && strlen(new_pass) > 0 && strlen(new_pass) < 8) {
-      sendRpcResponse(sock, req_id, "error", "Wi-Fi password must be at least 8 characters (or empty for open network)");
+    auto has_bad_chars = [](const char *str) {
+      for (size_t i = 0; str[i] != '\0'; i++) {
+        unsigned char c = static_cast<unsigned char>(str[i]);
+        if (c < 32 || c == 127 || c == '\r' || c == '\n') return true;
+      }
+      return false;
+    };
+    if (has_bad_chars(new_ssid) || (has_pass && has_bad_chars(new_pass))) {
+      sendRpcResponse(sock, req_id, "error", "SSID or password contains invalid control characters");
+      return;
+    }
+
+    if (has_pass && strlen(new_pass) > 0 && (strlen(new_pass) < 8 || strlen(new_pass) > 63)) {
+      sendRpcResponse(sock, req_id, "error", "Wi-Fi password must be between 8 and 63 characters (or empty for open network)");
       return;
     }
 

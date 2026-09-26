@@ -9,6 +9,32 @@ HttpOtaState g_http_ota_state{};
 
 static char s_ota_target_url[256] = {0};
 
+static bool is_trusted_ota_url(const char *url) {
+  if (!url || strncmp(url, "https://", 8) != 0)
+    return false;
+
+  const char *host_start = url + 8;
+  const char *slash = strchr(host_start, '/');
+  size_t host_len = slash ? static_cast<size_t>(slash - host_start) : strlen(host_start);
+  char host[128] = {0};
+  if (host_len == 0 || host_len >= sizeof(host))
+    return false;
+  memcpy(host, host_start, host_len);
+  host[host_len] = '\0';
+
+  static const char *const TRUSTED_DOMAINS[] = {
+      "raw.githubusercontent.com",
+      "objects.githubusercontent.com",
+      "github.com",
+      "github-releases.githubusercontent.com"
+  };
+  for (const auto *domain : TRUSTED_DOMAINS) {
+    if (strcasecmp(host, domain) == 0)
+      return true;
+  }
+  return false;
+}
+
 static void Task_HttpOta(void *pvParameters) {
   const char *url = static_cast<const char *>(pvParameters);
   if (!url || strlen(url) == 0) {
@@ -17,7 +43,17 @@ static void Task_HttpOta(void *pvParameters) {
     return;
   }
 
-  ::Serial.printf("[OTA] Starting HTTP(S) Stream OTA from URL: %s\r\n", url);
+  if (!is_trusted_ota_url(url)) {
+    ::Serial.printf("[OTA] Rejected untrusted or insecure OTA URL: %s\r\n", url);
+    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
+    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+             "Untrusted OTA domain or non-HTTPS");
+    g_http_ota_state.in_progress = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  ::Serial.printf("[OTA] Starting HTTPS Stream OTA from URL: %s\r\n", url);
   snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Connecting...");
   g_http_ota_state.progress_pct = 0;
   g_http_ota_state.last_error[0] = '\0';
@@ -27,26 +63,16 @@ static void Task_HttpOta(void *pvParameters) {
     xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
   }
 
-  bool is_https = (strncmp(url, "https://", 8) == 0);
-  WiFiClient plain_client;
   WiFiClientSecure secure_client;
-  WiFiClient *client_ptr = nullptr;
-
-  if (is_https) {
-    secure_client.setInsecure(); // GitHub CDN(objects.githubusercontent.com) 리다이렉트 HTTPS 허용
-    secure_client.setHandshakeTimeout(15);
-    secure_client.setTimeout(5); // 최대 5초 블로킹 후 루프 복귀 -> 워치독(TWDT 30s) 안전 리셋 보장
-    client_ptr = &secure_client;
-  } else {
-    plain_client.setTimeout(5);
-    client_ptr = &plain_client;
-  }
+  secure_client.setInsecure(); // GitHub CDN(objects.githubusercontent.com) 리다이렉트 HTTPS 허용
+  secure_client.setHandshakeTimeout(15);
+  secure_client.setTimeout(5); // 최대 5초 블로킹 후 루프 복귀 -> 워치독(TWDT 30s) 안전 리셋 보장
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setTimeout(15000); // 기존 15초 유지
 
-  if (!http.begin(*client_ptr, url)) {
+  if (!http.begin(secure_client, url)) {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "HTTP begin failed");
     ::Serial.println(F("[OTA] HTTP begin connection failed."));
