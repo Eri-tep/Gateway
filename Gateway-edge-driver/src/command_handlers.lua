@@ -152,87 +152,98 @@ function CommandHandlers.handle_switch_on(driver, device, command)
   end
 
   local cosock = require "cosock"
-  if comp_id == "wallpad" then
-    log.info("🔄 [CMD] Auto-Probing Reset triggered from Wallpad switch!")
-    cosock.spawn(function()
-      gateway_client.cache_purge_rescan(ip, port)
-      CommandHandlers.refresh_telemetry(driver, device)
-    end, "wallpad_reset_task")
-  elseif comp_id == "diagnostics" then
-    log.warn("⚠️  [CMD] System Remote Reboot triggered from Diagnostics switch!")
-    cosock.spawn(function()
-      gateway_client.system_reboot(ip, port, "ST Diagnostics Switch")
-    end, "system_reboot_task")
-  elseif comp_id == "logs" then
-    log.info("🧹 [CMD] Clear Logs triggered from Logs switch!")
-    local cap_hist = capabilities["digituniverse06711.history"]
-    if cap_hist then
-      device:emit_component_event(comp, cap_hist.history({ value = "Empty Log" }))
-      telemetry_handler.register_ticker(device, comp, cap_hist, "history", "history", { "Empty Log", "Empty Crash" }, true)
-    end
-    cosock.spawn(function()
-      gateway_client.clear_reboot_logs(ip, port)
-      gateway_client.clear_coredump(ip, port)
-    end, "clear_logs_task")
-  elseif comp_id == "network" then
-    log.info("📶 [CMD] Wi-Fi Scan triggered from Network switch!")
-    local cap_scan = capabilities["digituniverse06711.scan"]
-    if cap_scan then
-      device:emit_component_event(comp, cap_scan.scanResult({ value = "Scanning..." }))
-    end
-
-    -- 스캔 중에는 마스터 틱 레지스트리에서 scan 항목 임시 제거
-    local reg = device:get_field("ticker_registry") or {}
-    reg["scan"] = nil
-    device:set_field("ticker_registry", reg)
-
-    cosock.spawn(function()
-      local res, err = gateway_client.wifi_scan(ip, port)
-      local valid_aps = {}
-
-      if res and res.aps and #res.aps > 0 then
-        for _, item in ipairs(res.aps) do
-          local raw_s = item.ssid or ""
-          local s = raw_s:match("^%s*(.-)%s*$")
-          if s and s ~= "" then
-            local pct = tonumber(item.pct) or 70
-            table.insert(valid_aps, { ssid = s, pct = pct })
-          end
-        end
+  local COMPONENT_SWITCH_HANDLERS = {
+    wallpad = function()
+      log.info("🔄 [CMD] Auto-Probing Reset triggered from Wallpad switch!")
+      cosock.spawn(function()
+        gateway_client.cache_purge_rescan(ip, port)
+        CommandHandlers.refresh_telemetry(driver, device)
+      end, "wallpad_reset_task")
+    end,
+    diagnostics = function()
+      log.warn("⚠️  [CMD] System Remote Reboot triggered from Diagnostics switch!")
+      cosock.spawn(function()
+        gateway_client.system_reboot(ip, port, "ST Diagnostics Switch")
+      end, "system_reboot_task")
+    end,
+    logs = function()
+      log.info("🧹 [CMD] Clear Logs triggered from Logs switch!")
+      local cap_hist = capabilities["digituniverse06711.history"]
+      if cap_hist then
+        device:emit_component_event(comp, cap_hist.history({ value = "Empty Log" }))
+        telemetry_handler.register_ticker(device, comp, cap_hist, "history", "history", { "Empty Log", "Empty Crash" }, true)
+      end
+      cosock.spawn(function()
+        gateway_client.clear_reboot_logs(ip, port)
+        gateway_client.clear_coredump(ip, port)
+      end, "clear_logs_task")
+    end,
+    network = function()
+      log.info("📶 [CMD] Wi-Fi Scan triggered from Network switch!")
+      local cap_scan = capabilities["digituniverse06711.scan"]
+      if cap_scan then
+        device:emit_component_event(comp, cap_scan.scanResult({ value = "Scanning..." }))
       end
 
-      if #valid_aps > 0 then
-        local scan_items = {}
-        for _, ap in ipairs(valid_aps) do
-          table.insert(scan_items, string.format("%s (%d%%)", ap.ssid, ap.pct))
-        end
-        device:set_field("last_scan_result", scan_items[1])
-        device:set_field("scan_items", scan_items)
-        telemetry_handler.register_ticker(device, comp, cap_scan, "scanResult", "scan", scan_items, true)
-      else
-        device:set_field("scan_items", nil)
-        local fail_text = "No Networks"
-        if err then
-          if err == "Connection closed" or err == "Gateway connection not ready" then
-            log.warn("⚠️ [CMD] Wi-Fi Scan cancelled or interrupted by gateway reconnect: " .. tostring(err))
-            fail_text = "Ready"
-          else
-            log.error("❌ [CMD] Wi-Fi Scan RPC error: " .. tostring(err))
-            fail_text = "Scan Timeout"
+      -- 스캔 중에는 마스터 틱 레지스트리에서 scan 항목 임시 제거
+      local reg = device:get_field("ticker_registry") or {}
+      reg["scan"] = nil
+      device:set_field("ticker_registry", reg)
+
+      cosock.spawn(function()
+        local res, err = gateway_client.wifi_scan(ip, port)
+        local valid_aps = {}
+
+        if res and res.aps and #res.aps > 0 then
+          for _, item in ipairs(res.aps) do
+            local raw_s = item.ssid or ""
+            local s = raw_s:match("^%s*(.-)%s*$")
+            if s and s ~= "" then
+              local pct = tonumber(item.pct) or 70
+              table.insert(valid_aps, { ssid = s, pct = pct })
+            end
           end
-        elseif res and res.msg then
-          fail_text = res.msg
         end
-        if cap_scan then
-          device:emit_component_event(comp, cap_scan.scanResult({ value = fail_text }))
-          device:set_field("last_scan_result", fail_text)
+
+        if #valid_aps > 0 then
+          local scan_items = {}
+          for _, ap in ipairs(valid_aps) do
+            table.insert(scan_items, string.format("%s (%d%%)", ap.ssid, ap.pct))
+          end
+          device:set_field("last_scan_result", scan_items[1])
+          device:set_field("scan_items", scan_items)
+          telemetry_handler.register_ticker(device, comp, cap_scan, "scanResult", "scan", scan_items, true)
+        else
+          device:set_field("scan_items", nil)
+          local fail_text = "No Networks"
+          if err then
+            if err == "Connection closed" or err == "Gateway connection not ready" then
+              log.warn("⚠️ [CMD] Wi-Fi Scan cancelled or interrupted by gateway reconnect: " .. tostring(err))
+              fail_text = "Ready"
+            else
+              log.error("❌ [CMD] Wi-Fi Scan RPC error: " .. tostring(err))
+              fail_text = "Scan Timeout"
+            end
+          elseif res and res.msg then
+            fail_text = res.msg
+          end
+          if cap_scan then
+            device:emit_component_event(comp, cap_scan.scanResult({ value = fail_text }))
+            device:set_field("last_scan_result", fail_text)
+          end
         end
-      end
-      CommandHandlers.refresh_telemetry(driver, device)
-    end, "wifi_scan_task")
-  elseif comp_id == "ota" then
-    log.info("🚀 [CMD] Cloud OTA Update triggered from OTA switch!")
-    CommandHandlers.handle_start_ota(driver, device, command)
+        CommandHandlers.refresh_telemetry(driver, device)
+      end, "wifi_scan_task")
+    end,
+    ota = function()
+      log.info("🚀 [CMD] Cloud OTA Update triggered from OTA switch!")
+      CommandHandlers.handle_start_ota(driver, device, command)
+    end,
+  }
+
+  local switch_handler = COMPONENT_SWITCH_HANDLERS[comp_id]
+  if switch_handler then
+    switch_handler()
   end
 
   -- 1.5초 후 스위치 OFF 자동 원복 (원터치 펄스 스위치)
@@ -311,6 +322,14 @@ end
 
 local CHILD_FRONT_KEY = "doorphone_front"
 local CHILD_LOBBY_KEY = "doorphone_lobby"
+
+local CLASS_TO_PROFILE = {
+  outlet = "child-outlet",
+  thermostat = "child-thermostat",
+  vent = "child-vent",
+  gas = "child-gas",
+  momentary = "child-momentary",
+}
 
 function CommandHandlers.handle_child_device_action(driver, device, command)
   local action = (command.args and (command.args.action or command.args[1])) or "idle"
@@ -393,18 +412,7 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
         end
 
         if not exists then
-          local prof = "child-switch"
-          if d_cls == "outlet" then
-            prof = "child-outlet"
-          elseif d_cls == "thermostat" then
-            prof = "child-thermostat"
-          elseif d_cls == "vent" then
-            prof = "child-vent"
-          elseif d_cls == "gas" then
-            prof = "child-gas"
-          elseif d_cls == "momentary" then
-            prof = "child-momentary"
-          end
+          local prof = CLASS_TO_PROFILE[d_cls] or "child-switch"
 
           log.info(string.format("✨ [CHILD] Creating Device '%s' (%s) with key '%s' [Profile: %s]...",
                                  d_name, d_cls, child_key, prof))

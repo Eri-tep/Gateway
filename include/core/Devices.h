@@ -23,7 +23,7 @@ struct TimestampedPacket {
 
 template <size_t Capacity = 8> class TimestampedPacketQueue {
 private:
-  TimestampedPacket _elements[Capacity];
+  TimestampedPacket _elements[Capacity]{};
   size_t _head = 0;
   size_t _tail = 0;
   size_t _size = 0;
@@ -202,8 +202,8 @@ struct WallpadChannelConfig {
 class DeviceRepository {
 private:
   static constexpr size_t MAX_DEVICES = 64;
-  DeviceStateEntry cache[MAX_DEVICES];
-  int8_t dev_lookup_map[256];
+  DeviceStateEntry cache[MAX_DEVICES]{};
+  int8_t dev_lookup_map[256]{};
   size_t device_count = 0;
   SemaphoreHandle_t _cache_mutex = nullptr;
 

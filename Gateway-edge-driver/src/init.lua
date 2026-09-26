@@ -52,6 +52,12 @@ local function schedule_polling_timer(driver, device)
   log.info(string.format("Scheduled gateway telemetry polling timer every %d seconds", interval))
 end
 
+local EVENT_HANDLERS = {
+  doorphone = telemetry_handler.handle_doorphone_event,
+  device_state = telemetry_handler.handle_device_state_event,
+  devices_updated = telemetry_handler.handle_devices_updated_event,
+}
+
 local function device_init(driver, device)
   log.info("Initializing Device: " .. tostring(device.label) .. " (Type: " .. tostring(device.type) .. ")")
 
@@ -141,12 +147,9 @@ local function device_init(driver, device)
     local ip = device.preferences.gatewayIp or "172.30.1.3"
     local port = tonumber(device.preferences.gatewayPort) or 8900
     gateway_client.start_event_listener(driver, ip, port, function(d, event_data)
-      if event_data.event == "doorphone" then
-        telemetry_handler.handle_doorphone_event(d, event_data)
-      elseif event_data.event == "device_state" then
-        telemetry_handler.handle_device_state_event(d, event_data)
-      elseif event_data.event == "devices_updated" then
-        telemetry_handler.handle_devices_updated_event(d, event_data)
+      local handler = event_data and EVENT_HANDLERS[event_data.event]
+      if handler then
+        handler(d, event_data)
       end
     end)
   end

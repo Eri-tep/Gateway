@@ -99,18 +99,18 @@ public:
   static constexpr size_t BUCKETS_24H = 96;
 
 private:
-  MetricSample _ring15[SAMPLES_15M];
+  MetricSample _ring15[SAMPLES_15M]{};
   size_t _ring15_head = 0;
   size_t _ring15_count = 0;
 
-  MetricBucket _ring24[BUCKETS_24H];
+  MetricBucket _ring24[BUCKETS_24H]{};
   size_t _ring24_head = 0;
   size_t _ring24_count = 0;
 
-  MetricBucket _cur_bucket;
+  MetricBucket _cur_bucket{};
   uint16_t _bucket_sample_count = 0;
 
-  MetricSample _current;
+  MetricSample _current{};
   uint16_t _cached_flash_kb{0};
   mutable SemaphoreHandle_t _metrics_mutex = nullptr;
 

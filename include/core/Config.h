@@ -9,7 +9,7 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.5";
+constexpr const char *FIRMWARE_VERSION = "v1.1.6";
 } // namespace Config
 
 namespace Config::Task {
@@ -308,7 +308,8 @@ struct FramingTracker {
 
   inline static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
                                      size_t max_len) noexcept {
-    snprintf(out_ns, max_len, "dp_frame_p%u", prof_idx & 0x03);
+    snprintf(out_ns, max_len, "dp_frame_p%u",
+             static_cast<unsigned int>(prof_idx & 0x03));
   }
 
   void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",

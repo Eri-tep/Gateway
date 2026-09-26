@@ -76,6 +76,14 @@ end
 
 local register_ticker = TelemetryHandler.register_ticker
 
+local REBOOT_REASON_MAP = {
+  { pattern = "Low Heap", label = "Low Heap" },
+  { pattern = "Software Restart", label = "Software Restart" },
+  { pattern = "Remote Reboot", label = "Remote Reboot" },
+  { pattern = "Power", label = "Power On" },
+  { pattern = "CPU Panic", label = "CPU Panic" },
+}
+
 function TelemetryHandler.handle_telemetry(driver, device, data)
   if not data or data.res ~= "ok" then
     log.warn("Invalid telemetry payload received from gateway")
@@ -281,17 +289,13 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   local log_display = "Empty Log"
   if data.diagnostics and data.diagnostics.reboot_logs and #data.diagnostics.reboot_logs > 0 then
     local top = data.diagnostics.reboot_logs[1]
-    local reason_short = top.reason or "Unknown"
-    if reason_short:match("Low Heap") then
-      reason_short = "Low Heap"
-    elseif reason_short:match("Software Restart") then
-      reason_short = "Software Restart"
-    elseif reason_short:match("Remote Reboot") then
-      reason_short = "Remote Reboot"
-    elseif reason_short:match("Power") then
-      reason_short = "Power On"
-    elseif reason_short:match("CPU Panic") then
-      reason_short = "CPU Panic"
+    local raw_reason = top.reason or "Unknown"
+    local reason_short = raw_reason
+    for _, item in ipairs(REBOOT_REASON_MAP) do
+      if raw_reason:match(item.pattern) then
+        reason_short = item.label
+        break
+      end
     end
     log_display = reason_short
   end
