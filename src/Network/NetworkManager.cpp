@@ -124,7 +124,6 @@ void Task_Network(void *pvParameters) {
       if (sfd >= 0) {
         int opt = 1;
         setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
         int flags = fcntl(sfd, F_GETFL, 0);
         fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
