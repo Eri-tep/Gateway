@@ -14,7 +14,7 @@ void System_Sha256ToHex(const char *input, char *output) {
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
   mbedtls_sha256_starts_ret(&ctx, 0);
-  mbedtls_sha256_update_ret(&ctx, (const unsigned char *)input, strlen(input));
+  mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char *>(input), strlen(input));
   mbedtls_sha256_finish_ret(&ctx, hash);
   mbedtls_sha256_free(&ctx);
 

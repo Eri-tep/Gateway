@@ -471,7 +471,42 @@ local ELEVATOR_DIR_FORMAT = {
   [3] = "%d호 도착 (%dF)",
 }
 
-local function schedule_elevator_idle(dev, delay_sec)
+local ELEVATOR_FSM = {
+  [1] = { -- Calling 상태 (pwr == 1)
+    target_state = "calling",
+    emit = function(dev)
+      if capabilities.switch then
+        local on_evt = capabilities.switch.switch.on()
+        on_evt.state_change = true
+        dev:emit_event(on_evt)
+      end
+      local cap_hist = capabilities["digituniverse06711.history"]
+      if cap_hist then
+        local h_evt = cap_hist.history({ value = "호출 중" })
+        h_evt.state_change = true
+        dev:emit_event(h_evt)
+      end
+    end
+  },
+  [0] = { -- Idle 상태 (pwr == 0)
+    target_state = "idle",
+    emit = function(dev)
+      if capabilities.switch then
+        local off_sw = capabilities.switch.switch.off()
+        off_sw.state_change = true
+        dev:emit_event(off_sw)
+      end
+      local cap_hist = capabilities["digituniverse06711.history"]
+      if cap_hist then
+        local off_evt = cap_hist.history({ value = "대기 중" })
+        off_evt.state_change = true
+        dev:emit_event(off_evt)
+      end
+    end
+  }
+}
+
+local function transition_elevator_state(dev, target_pwr, delay_sec)
   local timer_key = "ev_arrival_timer"
   local existing = dev:get_field(timer_key)
   if existing then
@@ -479,23 +514,23 @@ local function schedule_elevator_idle(dev, delay_sec)
     dev:set_field(timer_key, nil)
   end
 
-  local function apply_idle()
+  local fsm_entry = ELEVATOR_FSM[target_pwr]
+  if not fsm_entry then return end
+
+  local function apply_transition()
     dev:set_field(timer_key, nil)
-    local off_sw = capabilities.switch.switch.off()
-    off_sw.state_change = true
-    dev:emit_event(off_sw)
-    local cap_hist = capabilities["digituniverse06711.history"]
-    if cap_hist then
-      local off_evt = cap_hist.history({ value = "대기 중" })
-      off_evt.state_change = true
-      dev:emit_event(off_evt)
+    local current_state = dev:get_field("ev_state_cache")
+    if current_state == fsm_entry.target_state then
+      return -- 상태 변화가 없으면 중복 이벤트 차단 (Event Flood 원천 방지)
     end
+    dev:set_field("ev_state_cache", fsm_entry.target_state)
+    fsm_entry.emit(dev)
   end
 
-  if delay_sec <= 0 then
-    apply_idle()
+  if not delay_sec or delay_sec <= 0 then
+    apply_transition()
   else
-    local t = dev.thread:call_with_delay(delay_sec, apply_idle, timer_key)
+    local t = dev.thread:call_with_delay(delay_sec, apply_transition, timer_key)
     dev:set_field(timer_key, t)
   end
 end
@@ -511,24 +546,7 @@ local DEVICE_TELEMETRY_HANDLERS = {
 
   ["momentary"] = function(dev, event_data)
     local pwr = tonumber(event_data.power) or 0
-    local cap_hist = capabilities["digituniverse06711.history"]
-
-    if pwr == 1 then
-      -- 호출 중: 스위치 ON 및 상태 이력 "호출 중"
-      if capabilities.switch then
-        local on_evt = capabilities.switch.switch.on()
-        on_evt.state_change = true
-        dev:emit_event(on_evt)
-      end
-      if cap_hist then
-        local h_evt = cap_hist.history({ value = "호출 중" })
-        h_evt.state_change = true
-        dev:emit_event(h_evt)
-      end
-    else
-      -- 도착 또는 대기 복귀: 스위치 OFF 및 상태 이력 "대기 중"
-      schedule_elevator_idle(dev, 0)
-    end
+    transition_elevator_state(dev, pwr)
   end,
 
   ["outlet"] = function(dev, event_data)

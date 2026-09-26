@@ -335,14 +335,10 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       s.trim();
       if (s.length() == 0) continue;
 
-      bool duplicate = false;
-      for (const auto &item : top_aps) {
-        if (item.ssid == s) {
-          duplicate = true;
-          break;
-        }
+      if (std::any_of(top_aps.begin(), top_aps.end(),
+                      [&s](const auto &item) { return item.ssid == s; })) {
+        continue;
       }
-      if (duplicate) continue;
 
       int rssi = WiFi.RSSI(idx);
       int pct = std::min(100, std::max(0, 2 * (rssi + 100)));
@@ -609,7 +605,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 
     // 현대통신 환기 장치(0x2B) 전원 ON 시 게이트웨이가 자체적으로 0x43 운전 모드 조회 패킷을 연계 주입
     if (dev_id == 0x2B && act == ControlActionType::POWER && val == 1) {
-      auto *parser = WallpadParserFactory::getActiveParser();
+      const auto *const parser = WallpadParserFactory::getActiveParser();
       StaticPacket qry_req{};
       qry_req.channel_id = 6;
       qry_req.length = 11;

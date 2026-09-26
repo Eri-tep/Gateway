@@ -74,16 +74,12 @@ void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
   s_last_ch23_pkts.store(cur_ch23, std::memory_order_relaxed);
   s_last_tcp_pkts.store(cur_tcp, std::memory_order_relaxed);
 
-  uint32_t tcp_pps = (elapsed_ms > 0)
-                         ? static_cast<uint32_t>((static_cast<uint64_t>(delta_tcp) * 1000) / elapsed_ms)
-                         : 0;
+  uint32_t tcp_pps = static_cast<uint32_t>((static_cast<uint64_t>(delta_tcp) * 1000) / elapsed_ms);
   uint32_t load0 = CPU0_BASE_LOAD + (tcp_pps / CPU0_PPS_DIVISOR);
   if (WiFi.isConnected()) load0 += 1;
   if (g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed)) load0 += 1;
 
-  uint32_t uart_pps = (elapsed_ms > 0)
-                          ? static_cast<uint32_t>((static_cast<uint64_t>(delta_ch1 + delta_ch23) * 1000) / elapsed_ms)
-                          : 0;
+  uint32_t uart_pps = static_cast<uint32_t>((static_cast<uint64_t>(delta_ch1 + delta_ch23) * 1000) / elapsed_ms);
   uint32_t load1 = CPU1_BASE_LOAD + (uart_pps / CPU1_PPS_DIVISOR);
 
   cpu0_out = static_cast<uint8_t>(std::min(load0, 99U));
