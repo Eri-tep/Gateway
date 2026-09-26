@@ -234,7 +234,11 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     long slot = findJsonIntValue(json_str, "slot", -1);
     if (slot >= 0 && slot < static_cast<long>(ProfileRepository::MAX_PROFILES)) {
       ProfileRepository::setActiveProfileIndex(static_cast<size_t>(slot));
-      g_config.wallpad_profile = static_cast<uint8_t>(slot);
+      {
+        std::unique_lock lock(g_config_rw);
+        g_config.wallpad_profile = static_cast<uint8_t>(slot);
+      }
+      Config_Save();
       sendRpcResponse(sock, req_id, "ok", "Profile updated");
     } else {
       sendRpcResponse(sock, req_id, "error", "Invalid profile slot (0~3)");

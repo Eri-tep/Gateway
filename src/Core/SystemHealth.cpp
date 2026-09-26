@@ -152,25 +152,38 @@ void System_CheckOtaHealth() {
   if (s_ota_validated.load(std::memory_order_relaxed)) {
     return;
   }
-  if (WiFi.status() == WL_CONNECTED &&
-      TimeUtils::isElapsed(g_boot_start_ms,
-                           Config::Timing::OTA_VALIDATION_PERIOD_MS)) {
-    s_ota_validated.store(true, std::memory_order_release);
-    rtc_crash_counter = 0;
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    if (running) {
-      esp_ota_img_states_t ota_state;
-      if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
-          ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-        if (err == ESP_OK) {
-          Serial.println(
-              F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
-          g_telnet_tracer.trace(
-              "[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
-        } else {
-          Serial.printf("[OTA] Failed to mark app valid: 0x%x\r\n", err);
-        }
+
+  // [H-2] 실질 헬스체크 3조건 모두 충족 시에만 Rollback 취소
+  // 1. Wi-Fi 연결, 2. Hub(CH6) TCP 연결, 3. RS-485 최근 5초 내 패킷 수신
+  bool wifi_ok  = (WiFi.status() == WL_CONNECTED);
+  // Hub(CH6) 슬롯 중 하나라도 연결된 상태인지 확인
+  bool hub_ok   = false;
+  for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
+    if (g_hub_slots[i].is_connected) { hub_ok = true; break; }
+  }
+  bool rs485_ok = (millis() - g_ch1_bus_ms.load(std::memory_order_relaxed) < 5000);
+  bool time_ok  = TimeUtils::isElapsed(g_boot_start_ms,
+                                        Config::Timing::OTA_VALIDATION_PERIOD_MS);
+
+  if (!time_ok || !wifi_ok || !hub_ok || !rs485_ok) {
+    return; // 조건 미충족 — 다음 주기에 재확인
+  }
+
+  s_ota_validated.store(true, std::memory_order_release);
+  rtc_crash_counter = 0;
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (running) {
+    esp_ota_img_states_t ota_state;
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+        ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+      esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+      if (err == ESP_OK) {
+        Serial.println(
+            F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
+        g_telnet_tracer.trace(
+            "[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
+      } else {
+        Serial.printf("[OTA] Failed to mark app valid: 0x%x\r\n", err);
       }
     }
   }

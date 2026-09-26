@@ -38,16 +38,28 @@ void TelnetManager::onClientConnect(int new_sock,
     }
 
     if (emptySlot == -1) {
-      uint32_t oldest_time = 0xFFFFFFFF;
-      int oldest_idx = 0;
+      // [H-5] 세션 축출 DoS 방어: 미인증(AWAITING_PASSWORD) 세션 우선 축출.
+      // 모든 세션이 AUTHENTICATED 상태이면 관리자 세션을 보호하고 신규 연결 거절.
+      int victim_idx = -1;
+      uint32_t oldest_unauth_time = 0xFFFFFFFF;
       for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
-        if (_sessions[i].connected_at_ms < oldest_time) {
-          oldest_time = _sessions[i].connected_at_ms;
-          oldest_idx = i;
+        if (_sessions[i].sessionState == AWAITING_PASSWORD) {
+          if (_sessions[i].connected_at_ms < oldest_unauth_time) {
+            oldest_unauth_time = _sessions[i].connected_at_ms;
+            victim_idx = i;
+          }
         }
       }
-      _sessions[oldest_idx].reset();
-      emptySlot = oldest_idx;
+
+      if (victim_idx >= 0) {
+        _sessions[victim_idx].reset();
+        emptySlot = victim_idx;
+      } else {
+        const char *busy_msg = "\r\n[SYSTEM] Server busy: Maximum authenticated sessions reached.\r\n";
+        send(new_sock, busy_msg, strlen(busy_msg), 0);
+        close(new_sock);
+        return;
+      }
     }
 
     _sessions[emptySlot].reset();
@@ -95,6 +107,9 @@ void TelnetManager::shutdownForReboot() {
 void TelnetManager::startServer() {
   if (!_cli_mutex)
     _cli_mutex = xSemaphoreCreateMutex();
+
+  if (!g_telnet_tx_sem)
+    g_telnet_tx_sem = xSemaphoreCreateMutex();
 
   if (_server_fd < 0) {
     _server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -185,7 +200,10 @@ void TelnetManager::tick() {
     if (s.sock < 0)
       continue;
 
-    if (TimeUtils::isElapsed(s.last_activity_ms, Config::TCP::TELNET_SESSION_TIMEOUT_MS)) {
+    uint32_t session_timeout = (s.sessionState == AWAITING_PASSWORD)
+                                   ? 30000
+                                   : Config::TCP::TELNET_SESSION_TIMEOUT_MS;
+    if (TimeUtils::isElapsed(s.last_activity_ms, session_timeout)) {
       sendTelnetMsg(s.sock, "\r\n[SYSTEM] Disconnected due to inactivity.\r\n");
       handleClientDisconnect(&s);
       continue;

@@ -80,5 +80,8 @@ All source files are encapsulated across 8 domain subdirectories following the S
 2. **Mutexes (`SemaphoreHandle_t`)**:
    - Use `MutexLocker` for TCP socket transmission and shared buffer synchronization.
    - Lock acquisition timeout must not exceed `Config::Timing::MAX_LOCK_HOLD_MS`.
-3. **NVS Persistence Policy**:
+3. **Read/Write Shared State (`std::shared_mutex`)**:
+   - For globally accessed configurations (`g_config`) with frequent multi-task reads and rare writes, use `std::shared_mutex g_config_rw`.
+   - Readers acquire `std::shared_lock`, writers acquire `std::unique_lock`. Avoid `portMUX_TYPE` for operations involving NVS or config persistence.
+4. **NVS Persistence Policy**:
    - Debounce runtime template updates and configuration writes (`Config::Timing::WARM_CACHE_NVS_DEBOUNCE_MS`) to protect flash memory endurance.

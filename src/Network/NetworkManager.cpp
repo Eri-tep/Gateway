@@ -11,6 +11,8 @@ constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 EventGroupHandle_t g_wifi_event_group = nullptr;
 static uint32_t s_wifi_disconnect_count = 0;
 static uint32_t s_last_sta_retry_ms = 0;
+static uint32_t s_sta_retry_interval_ms = Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
+constexpr uint32_t kMaxStaRetryIntervalMs = 60000;
 
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
@@ -195,24 +197,30 @@ void Task_Network(void *pvParameters) {
           Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed to connect within 15s! "
                         "Reverting to '%s'...\r\n",
                         g_config.wifi_ssid, g_wifi_guard.prev_ssid);
-          strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid,
-                  sizeof(g_config.wifi_ssid) - 1);
-          strncpy(g_config.wifi_password, g_wifi_guard.prev_pass,
-                  sizeof(g_config.wifi_password) - 1);
+          {
+            std::unique_lock lock(g_config_rw);
+            strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid,
+                    sizeof(g_config.wifi_ssid) - 1);
+            strncpy(g_config.wifi_password, g_wifi_guard.prev_pass,
+                    sizeof(g_config.wifi_password) - 1);
+          }
           WiFi.disconnect(false);
           vTaskDelay(pdMS_TO_TICKS(100));
           WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
         }
       }
 
+      if (bits & WIFI_BIT_CONNECTED) {
+        s_sta_retry_interval_ms = Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
+      }
+
       if (bits & WIFI_BIT_DISCONNECTED) {
-        if (TimeUtils::isElapsed(
-                s_last_sta_retry_ms,
-                Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS)) {
+        if (TimeUtils::isElapsed(s_last_sta_retry_ms, s_sta_retry_interval_ms)) {
           s_last_sta_retry_ms = millis();
-          Serial.println(F("[WIFI] Event: DISCONNECTED. Background STA "
-                           "reconnection attempt..."));
+          Serial.printf("[WIFI] Event: DISCONNECTED. Background STA reconnection attempt (interval: %u ms)...\r\n",
+                        static_cast<unsigned>(s_sta_retry_interval_ms));
           esp_wifi_connect();
+          s_sta_retry_interval_ms = std::min(s_sta_retry_interval_ms * 2, kMaxStaRetryIntervalMs);
         }
       }
     }

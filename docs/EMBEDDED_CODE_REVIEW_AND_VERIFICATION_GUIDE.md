@@ -151,7 +151,9 @@ All findings during audit and review must be categorized using this objective im
 ### ⚖️ Universal Embedded Trade-off Rules
 1. **Stack vs. Static vs. Heap**:
    * Size $\le 256$ bytes: Prefer stack allocation.
-   * Size $> 256$ bytes (Task-Specific): Prefer task-owned static buffers.
+   * Size $> 256$ bytes (Task-Specific / Serial Execution): Prefer **function-scope `static` buffers (BSS)** or task-owned static slots.
+     * In strictly serialized, single-task execution environments (e.g., CLI commands within `Task_Telnet`), function-scope `static char buf[2048]` eliminates stack overhead completely without introducing mutex contention or deadlock risk.
+     * Before removing or refactoring existing `static` buffers (e.g., `tel_buf[3072]`), verify single-task ownership. If only one task accesses the buffer, retain static allocation; add mutex protection only when multi-task access is confirmed.
    * Temporary Large Payloads: Permit dynamic allocation exclusively in Cold Paths with strict RAII lifetimes, freeing immediately upon completion.
 2. **Pass-by-Value vs. Pass-by-Reference (Zero-Copy)**:
    * Data crossing concurrency/thread boundaries: Enforce value-copy snapshots to eliminate race conditions.
@@ -217,3 +219,58 @@ Before signing off on any code modification, verify that every item evaluates to
 - [ ] Is retention/RTC SRAM minimized to ensure adequate safety margins?
 - [ ] Do external client/driver fallback defaults strictly match canonical firmware initialization rules?
 - [ ] Does the final build compile with **0 errors and 0 warnings**, with documented memory deltas?
+
+---
+
+## 7. Defect Severity Matrix
+
+Audit findings must be categorized according to their **real-world runtime and hardware impact**:
+
+| Severity | Operational & Hardware Impact Criteria | Canonical Project Examples |
+|:---:|---|---|
+| **🔴 CRITICAL** | 1. Direct system crash or FreeRTOS kernel panic (Double-Give, unowned mutex release)<br>2. Permanent firmware brick risk (OTA update finalized without checksum verification)<br>3. Accelerated Flash ROM physical wear-out (O(N) Shift writes, unconditional NVS commits on state change)<br>4. Complete authentication lockout bypass (insufficient tracking slots leading to unverified access)<br>5. Stack frame bloat with severe risk of runtime stack overflow (>256B limit violation, 2KB local stack buffers)<br>6. Memory corruption or buffer overrun/underrun (`snprintf` truncation causing `size_t` integer underrun) | • Mutex Double-Give (`TxSemGuard` + `xSemaphoreGive`)<br>• OTA MD5 unverified `Update.end(true)`<br>• NVS Log Shift writes accelerating flash wear<br>• Lockout bypass when connection count exceeds 4 IP slots<br>• `char buf[2048]` declared on 9KB task stack<br>• `snprintf` truncation index arithmetic underrun |
+| **🟠 HIGH** | 1. Undefined Behavior (UB) under compiler optimization or porting (`reinterpret_cast` across library internals)<br>2. Broken rollback protection (cancelling rollback before network/RS-485 operational verification)<br>3. Multi-task Race Conditions (`g_config` writes without mutex protection)<br>4. Massive recompilation cascade and architectural coupling (large I/O implementations inlined in core headers)<br>5. Denial of Service (DoS) vulnerability (new unauthenticated connections evicting active authenticated sessions)<br>6. Driver/Task permanent hangs (unbounded half-open TCP receive loops) or unhandled runtime exceptions (`json.encode` crash) | • EmbeddedCli `_impl` `reinterpret_cast`<br>• Rollback cancelled without verifying Wi-Fi, TCP, and RS-485 activity<br>• Multi-task writes to `g_config` without mutex<br>• 180-line `FramingTracker` NVS/IO logic inlined in `Config.h`<br>• Telnet session eviction DoS<br>• Lua unhandled exceptions on malformed RPC tables<br>• Unbounded blocking on half-open TCP sockets |
+| **🟡 MEDIUM** | 1. Excessive network/AP thrashing (missing exponential backoff on reconnection)<br>2. Latent concurrency hazards (unverified task-scope static buffer access)<br>3. Struct padding waste and sub-optimal memory alignment<br>4. O(N) iterative string comparison chains in dispatch paths<br>5. Inefficient data structures (Lua O(N²) device linear scans without index caching)<br>6. Ignored system call or FreeRTOS API return values (unhandled `xQueueSend` failures)<br>7. Signedness comparison bugs (`signed char` vs `uint8_t` dropping valid UTF-8/extended ASCII bytes) | • Missing exponential backoff on background Wi-Fi reconnection<br>• Unverified concurrent access to static buffers<br>• Struct boolean flag padding waste<br>• Multi-line `strcasecmp` if-else chains<br>• Lua `driver:get_devices()` repeated linear lookups<br>• Dropped bytes due to `signed char` 0x80+ filtering<br>• Unchecked string buffer termination (`strncpy` boundary trap) |
+| **🟢 LOW** | 1. Unused modern C++17/20 opportunities (`constexpr`, structured bindings, `std::string_view`)<br>2. Dead code (forward declarations without implementation, obsolete CLI commands)<br>3. Magic numbers scattered across translation units (timing, buffer capacities requiring central definitions)<br>4. Release build debug logging overhead<br>5. Redundant NVS commits when configuration values remain unchanged (missing dirty flags)<br>6. Terminal compatibility issues (Unicode emojis causing misalignment in standard ASCII telnet clients) | • Legacy C-style loops and arrays<br>• Orphaned declarations (`printSystemOverview`)<br>• Scattered hardcoded delay and buffer constants<br>• Unfiltered high-frequency debug logging in release binaries<br>• NVS writes executed without checking if value changed<br>• Non-standard ANSI or emoji decorations in CLI output |
+
+---
+
+## 8. 2-Tier Full-Stack Review Methodology
+
+Localized single-module inspection cannot uncover multi-task race conditions or distributed Flash wear-out. All audits must cross-validate findings across two complementary axes:
+
+```
+┌────────────────────────────────────────────────────────┐
+│  Tier 1: 5-Domain Parallel Expert Team Inspection     │
+│  - FreeRTOS / RTOS Task Topology & Hot-Path Zero Heap  │
+│  - Modern C++17 Architecture & Table-Driven Dispatch   │
+│  - Network Stack, JSON-RPC & NVS Lifecycle             │
+│  - SmartThings Edge Driver (Lua / Cosock Coroutines)   │
+│  - CLI / Telnet Session Management & Terminal Buffers   │
+└──────────────────────────┬─────────────────────────────┘
+                           │ Cross-Check
+┌──────────────────────────▼─────────────────────────────┐
+│  Tier 2: 7 Cross-Cutting Architectural Audits          │
+│  1. Global Variable Thread Safety Matrix (Read/Write)  │
+│  2. Linker-Level Dead Code Analysis (Decl vs Impl)     │
+│  3. Comprehensive NVS/Flash Write Path Mapping         │
+│  4. Codebase-Wide Magic Number & Constant Census       │
+│  5. Dynamic Heap Allocation Path Tracing               │
+│  6. FreeRTOS / ESP-IDF Return Value Error Handling     │
+│  7. IWYU Header Dependency & Recompilation Cascades    │
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 9. Pragmatic Resolution Rules for Rule Conflicts
+
+When formal guideline constraints conflict with practical runtime optimizations, resolve them using these three principles and update the canonical documents:
+
+1. **Toolchain Reality Check (Verification over Speculation)**:
+   - When a guideline questions toolchain support for a modern standard (e.g. `std::shared_mutex`), verify against the compiler headers (`__GTHREADS`) and test builds. If fully supported, adopt the modern C++ standard immediately.
+2. **Adhere to the Spirit of the Law**:
+   - For example, the `strcasecmp` rule mandates case-insensitive handling, not O(N) chained comparisons. Normalize input strings to lowercase once, then dispatch via a `constexpr` table with exact matching to achieve both intent and O(1) performance.
+3. **Context-Driven Buffer & Stack Allocation**:
+   - Forcing a shared global buffer (`g_scratch_buf`) to protect the stack can introduce mutex lock contention and I/O deadlocks.
+   - In strictly serialized, single-task environments (such as CLI processing in `Task_Telnet`), **function-scope `static char buf[2048]` (BSS allocation)** provides the safest zero-overhead solution.

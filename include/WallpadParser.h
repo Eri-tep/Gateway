@@ -54,20 +54,19 @@ struct VendorProfileDescriptor {
 // ============================================================================
 
 struct PollingTargetEntry {
+  uint32_t last_requested_ms{0};
+  uint32_t last_interval_ms{0};
+  uint32_t restored_ms{0};
+  uint16_t hit_count{0};
   uint8_t dev_id{0};
   uint8_t sub1{0};
   uint8_t sub2{0};
-  uint32_t last_requested_ms{0};
-  uint32_t last_interval_ms{0};
   uint8_t source_channels{0}; // Bitmask: bit 2=CH2, bit 3=CH3, bit 6=CH6
-  uint16_t hit_count{0};
-  bool is_active{false};
-  bool is_verified{
-      true}; // False if restored from warm cache until ACK/request seen
-  uint32_t restored_ms{0};
   uint8_t raw_query_len{0};
-  std::array<uint8_t, 64> raw_query_data{};
   uint8_t raw_ack_len{0};
+  bool is_active{false};
+  bool is_verified{true}; // False if restored from warm cache until ACK/request seen
+  std::array<uint8_t, 64> raw_query_data{};
   std::array<uint8_t, 64> raw_ack_data{};
 };
 

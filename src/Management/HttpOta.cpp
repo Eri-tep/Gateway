@@ -158,6 +158,15 @@ static void Task_HttpOta(void *pvParameters) {
 
   esp_task_wdt_delete(nullptr);
 
+  // MD5 체크섬 검증: 무결성 확인 후 완료 처리 [C-2]
+  String md5_header = http.header("x-MD5");
+  if (md5_header.length() == 32) {
+    Update.setMD5(md5_header.c_str());
+    ::Serial.printf("[OTA] MD5 header found: %s\r\n", md5_header.c_str());
+  } else {
+    ::Serial.println(F("[OTA] WARNING: No x-MD5 header — integrity unverified"));
+  }
+
   if (written == static_cast<size_t>(contentLength) && Update.end(true)) {
     if (Update.isFinished()) {
       snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Success (Rebooting)");
@@ -169,8 +178,10 @@ static void Task_HttpOta(void *pvParameters) {
   } else {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
-             "Update write failed (written %u / %d, err: 0x%x)",
-             (unsigned)written, contentLength, Update.getError());
+             "Update failed (written %u / %d, MD5=%s err: 0x%x)",
+             (unsigned)written, contentLength,
+             md5_header.length() == 32 ? "checked" : "skipped",
+             Update.getError());
     ::Serial.printf("[OTA] Update failed: %s\r\n", g_http_ota_state.last_error);
   }
 

@@ -6,17 +6,26 @@ This document defines official guidelines for memory safety, type safety, real-t
 
 ## 1. String & Protocol Key Comparison Standard
 
-- Keys and profile identifiers that may be case-insensitive or originate from CLI/NVS inputs must be compared using **`strcasecmp`**.
-- Protocol engine checks (e.g. `"auto"`) must be encapsulated inside an inline helper function (`isAutoProfile(desc)`) as a single source of truth.
+- Keys and profile identifiers that may be case-insensitive or originate from CLI/NVS inputs must be compared case-insensitively.
+- **Single Identifier Check**: Encapsulate inside an inline helper function (`isAutoProfile(desc)`) using `strcasecmp`.
+- **Multi-Branch Dispatch (No strcasecmp Chains)**: When dispatching across multiple string commands or device classes, **normalize input to lowercase in-place/stack buffer once**, then dispatch via a `constexpr` lookup table with `std::string_view` exact matching. Do NOT chain `strcasecmp` calls.
 
 ```cpp
-// ❌ BAD: Mixed strcmp and strcasecmp across different call sites
-if (strcmp(desc.key, "auto") == 0) { ... }
-if (strcasecmp(desc.key, "auto") == 0) { ... }
+// ❌ BAD: Chained strcasecmp calls (O(N) string comparisons with high branch penalty)
+if (strcasecmp(cls, "light") == 0) { ... }
+else if (strcasecmp(cls, "thermo") == 0) { ... }
 
-// ✅ GOOD: Unified via dedicated helper
-inline bool isAutoProfile(const VendorProfileDescriptor &desc) const {
-  return strcasecmp(desc.key, "auto") == 0;
+// ✅ GOOD: Lowercase normalization + constexpr table dispatch
+struct ClassEntry { std::string_view key; DeviceClass cls; const char *def_name; };
+static constexpr ClassEntry kTable[] = {
+    {"light",  DeviceClass::SWITCH,     "Light"},
+    {"thermo", DeviceClass::THERMOSTAT, "Thermo"},
+};
+char lower[32];
+toLowerCopy(cls, lower, sizeof(lower));
+std::string_view sv{lower};
+for (const auto &entry : kTable) {
+  if (entry.key == sv) { ...; break; }
 }
 ```
 
@@ -179,4 +188,14 @@ private:
 - **No String Chains**: Never use `strcmp`/`strcasecmp` chains in telemetry or state serialization. Dispatch via compile-time `enum class` and `switch`.
 - **No Blocking in Sequences**: Never spawn tasks using `vTaskDelay` for sequential control. Use state machines or asynchronous timers.
 - **Hot-Path Parser Modularization**: Decompose monolithic packet parsers into inline single-purpose helper functions per device class.
+
+---
+
+## 10. Multi-Thread Synchronization: Read-Heavy Shared State
+
+- In ESP-IDF / Xtensa toolchains (GCC 8.4+, `__GTHREADS=1`), `std::shared_mutex` is fully supported.
+- For globally shared state with frequent multi-task reads and rare writes (such as `g_config`), prefer **`std::shared_mutex`**:
+  - **Read path**: Use `std::shared_lock<std::shared_mutex>` allowing concurrent reads across tasks without contention.
+  - **Write path**: Use `std::unique_lock<std::shared_mutex>` for exclusive modification.
+- Critical sections (`portMUX_TYPE` / `taskENTER_CRITICAL`) are reserved exclusively for ISR-safety or microsecond-level atomic operations and MUST NOT enclose blocking I/O or NVS writes.
 

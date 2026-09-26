@@ -15,9 +15,9 @@ void LogManager::writeRebootLog(const char *reason) {
   if (!p.begin("logs", false))
     return;
 
-  size_t count = p.getUInt("count", 0);
-  if (count > MAX_LOG_ENTRIES)
-    count = MAX_LOG_ENTRIES;
+  // Ring Buffer: head 인덱스만 순환, 슬롯 고정 위치에 덮어쓰기 [C-3]
+  // 기존 Shift(N회 Write) → 2회 Write (슬롯 1 + head 1)로 Flash 수명 보호
+  uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
 
   LogEntry entry = {};
   entry.timestamp = time(nullptr);
@@ -25,28 +25,22 @@ void LogManager::writeRebootLog(const char *reason) {
   System_TakeSnapshot(entry.stats_snapshot, entry.hw_snapshot,
                       entry.stack_snapshot, entry.packet_stats_snapshot);
 
-  char key[16];
-  for (size_t i = count; i > 0; --i) {
-    if (i < MAX_LOG_ENTRIES) {
-      char old_k[16], new_k[16];
-      snprintf(old_k, sizeof(old_k), "log_%zu", i - 1);
-      snprintf(new_k, sizeof(new_k), "log_%zu", i);
-      static NvsEnvelope<LogEntry> env;
-      if (p.getBytes(old_k, &env, sizeof(env)) == sizeof(env)) {
-        p.putBytes(new_k, &env, sizeof(env));
-      }
-    }
-  }
-
   static NvsEnvelope<LogEntry> new_env;
   new_env.payload = entry;
   new_env.seal();
-  p.putBytes("log_0", &new_env, sizeof(new_env));
 
+  char key[16];
+  snprintf(key, sizeof(key), "log_%u", (unsigned)head);
+  p.putBytes(key, &new_env, sizeof(new_env));        // Write 1: 슬롯
+
+  head = (head + 1) % MAX_LOG_ENTRIES;
+  p.putUInt("log_head", head);                       // Write 2: head 인덱스
+
+  // count는 MAX_LOG_ENTRIES 도달 후 고정 (슬롯이 꽉 찬 상태)
+  uint32_t count = p.getUInt("count", 0);
   if (count < MAX_LOG_ENTRIES) {
-    count++;
+    p.putUInt("count", count + 1);
   }
-  p.putUInt("count", static_cast<uint32_t>(count));
   p.end();
 }
 
@@ -72,8 +66,13 @@ bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) {
     return false;
   }
 
+  // Ring Buffer: head에서 역순으로 idx번째 슬롯 계산 [C-3]
+  // idx=0 → 가장 최근, idx=count-1 → 가장 오래된
+  uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
+  uint32_t slot = (head + MAX_LOG_ENTRIES - 1 - idx) % MAX_LOG_ENTRIES;
+
   char key[16];
-  snprintf(key, sizeof(key), "log_%zu", idx);
+  snprintf(key, sizeof(key), "log_%u", (unsigned)slot);
   static NvsEnvelope<LogEntry> env;
   size_t len = p.getBytesLength(key);
   if (len == sizeof(env) && p.getBytes(key, &env, sizeof(env)) == sizeof(env)) {

@@ -290,3 +290,175 @@ bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format) {
   ::Serial.printf("[UART] CH%u reconfigured: %u bps, %s\r\n", ch, baud, format);
   return true;
 }
+
+namespace Config::Doorphone {
+
+void FramingTracker::clearNvs(const char *nvs_ns, const char *tag) noexcept {
+  reset();
+  Preferences prefs;
+  if (prefs.begin(nvs_ns, false)) {
+    prefs.clear();
+    prefs.end();
+    ::Serial.printf("[%s] Cleared framing NVS storage (%s).\r\n", tag, nvs_ns);
+  }
+}
+
+void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
+                                  const char *nvs_ns, const char *tag) noexcept {
+  if (is_custom_fixed.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  FramingStatus cur = status.load(std::memory_order_relaxed);
+
+  if (stx == 0x7F && etx == 0xEE && (len == 0 || len == 5)) {
+    setFixedLock(0x7F, 0xEE, 5);
+    saveToNvs(nvs_ns, tag);
+    return;
+  }
+
+  if (cur == FramingStatus::WAITING) {
+    candidate_stx.store(stx, std::memory_order_relaxed);
+    candidate_etx.store(etx, std::memory_order_relaxed);
+    if (len > 0)
+      candidate_len.store(len, std::memory_order_relaxed);
+    consecutive_matches.store(1, std::memory_order_relaxed);
+    consecutive_mismatches.store(0, std::memory_order_relaxed);
+    status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
+    return;
+  }
+
+  uint8_t cand_s = candidate_stx.load(std::memory_order_relaxed);
+  uint8_t cand_e = candidate_etx.load(std::memory_order_relaxed);
+
+  if (stx == cand_s && etx == cand_e) {
+    if (len > 0)
+      candidate_len.store(len, std::memory_order_relaxed);
+    consecutive_mismatches.store(0, std::memory_order_relaxed);
+    uint8_t m = consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (m >= 3) {
+      status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
+      saveToNvs(nvs_ns, tag);
+    } else {
+      status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
+    }
+  } else {
+    consecutive_matches.store(0, std::memory_order_relaxed);
+    uint8_t m = consecutive_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (cur == FramingStatus::LOCKED) {
+      if (m >= 10) {
+        status.store(FramingStatus::WAITING, std::memory_order_relaxed);
+        consecutive_mismatches.store(0, std::memory_order_relaxed);
+      }
+    } else {
+      if (m >= 5) {
+        candidate_stx.store(stx, std::memory_order_relaxed);
+        candidate_etx.store(etx, std::memory_order_relaxed);
+        if (len > 0)
+          candidate_len.store(len, std::memory_order_relaxed);
+        consecutive_matches.store(1, std::memory_order_relaxed);
+        consecutive_mismatches.store(0, std::memory_order_relaxed);
+        status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
+      }
+    }
+  }
+}
+
+void FramingTracker::restoreFromNvs(const char *nvs_ns, const char *tag) noexcept {
+  if (!nvs_ns)
+    nvs_ns = "dp_frame_p0";
+
+  Preferences prefs;
+  bool found = false;
+  if (prefs.begin(nvs_ns, true)) {
+    if (prefs.isKey("stx") && prefs.isKey("etx")) {
+      found = true;
+    }
+    prefs.end();
+  }
+
+  if (!found && strcmp(nvs_ns, "dp_frame") != 0) {
+    Preferences leg;
+    if (leg.begin("dp_frame", true)) {
+      if (leg.isKey("stx") && leg.isKey("etx")) {
+        uint8_t ls = leg.getUChar("stx", 0);
+        uint8_t le = leg.getUChar("etx", 0);
+        uint8_t ll = leg.getUChar("len", 0);
+        bool llocked = leg.getBool("locked", false);
+        bool lfixed = leg.getBool("fixed", false);
+        leg.end();
+
+        if (llocked && ls != 0 && le != 0) {
+          Preferences dest;
+          if (dest.begin(nvs_ns, false)) {
+            dest.putUChar("stx", ls);
+            dest.putUChar("etx", le);
+            dest.putUChar("len", (ls == 0x7F && le == 0xEE) ? 5 : ll);
+            dest.putBool("locked", true);
+            dest.putBool("fixed", (ls == 0x7F && le == 0xEE) ? true : lfixed);
+            dest.end();
+            ::Serial.printf("[%s] Migrated legacy dp_frame to %s\r\n", tag, nvs_ns);
+          }
+        }
+      } else {
+        leg.end();
+      }
+    }
+  }
+
+  if (prefs.begin(nvs_ns, true)) {
+    uint8_t s = prefs.getUChar("stx", 0);
+    uint8_t e = prefs.getUChar("etx", 0);
+    uint8_t l = prefs.getUChar("len", 0);
+    bool locked = prefs.getBool("locked", false);
+    bool fixed = prefs.getBool("fixed", false);
+    prefs.end();
+    if (locked && s != 0 && e != 0) {
+      if (s == 0x7F && e == 0xEE && l != 5) {
+        l = 5;
+        fixed = true;
+        Preferences wr_pref;
+        if (wr_pref.begin(nvs_ns, false)) {
+          wr_pref.putUChar("len", 5);
+          wr_pref.putBool("fixed", true);
+          wr_pref.end();
+        }
+      }
+      candidate_stx.store(s, std::memory_order_relaxed);
+      candidate_etx.store(e, std::memory_order_relaxed);
+      candidate_len.store(l, std::memory_order_relaxed);
+      consecutive_matches.store(3, std::memory_order_relaxed);
+      is_custom_fixed.store(fixed, std::memory_order_relaxed);
+      status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
+      ::Serial.printf("[%s] Restored framing from NVS (%s): STX 0x%02X, "
+                      "ETX 0x%02X, Len %u%s\r\n",
+                      tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
+    }
+  }
+}
+
+void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
+  if (!nvs_ns)
+    nvs_ns = "dp_frame_p0";
+
+  uint8_t s = candidate_stx.load(std::memory_order_relaxed);
+  uint8_t e = candidate_etx.load(std::memory_order_relaxed);
+  uint8_t l = candidate_len.load(std::memory_order_relaxed);
+  bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
+  if (s == 0 || e == 0)
+    return;
+  Preferences prefs;
+  if (prefs.begin(nvs_ns, false)) {
+    prefs.putUChar("stx", s);
+    prefs.putUChar("etx", e);
+    prefs.putUChar("len", l);
+    prefs.putBool("locked", true);
+    prefs.putBool("fixed", fixed);
+    prefs.end();
+    ::Serial.printf("[%s] Saved framing to NVS (%s): STX 0x%02X, ETX "
+                    "0x%02X, Len %u%s\r\n",
+                    tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
+  }
+}
+
+} // namespace Config::Doorphone

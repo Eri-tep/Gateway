@@ -5,7 +5,7 @@
 #include <cstring>
 #include <cstdio>
 
-static const VendorProfileDescriptor s_default_profiles[ProfileRepository::MAX_PROFILES] = {
+static constexpr VendorProfileDescriptor s_default_profiles[ProfileRepository::MAX_PROFILES] = {
     {"Auto", "Universal Auto-Probing", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     {"Custom1", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},
     {"Custom2", "[Empty Custom Slot]", 0xF7, 0xEE, 3, 64, ChecksumAlgo::XOR_ALL, 4, 0x01, 0x00, 0x04, 3, 5, 6, 0, 2, 0x01, 11, 0xFF, 0, 0xFF, 0xFF, {0}, 0},

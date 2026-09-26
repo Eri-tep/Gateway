@@ -215,6 +215,15 @@ bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
   MutexLocker lock(g_ch5_mutex);
   auto &slot = g_hub_slots[slot_idx];
 
+  bool changed = (slot.enabled != enabled) ||
+                 (strcmp(slot.target_ip, ip ? ip : "") != 0) ||
+                 (port > 0 && slot.target_port != port) ||
+                 (name && strlen(name) > 0 && strcmp(slot.name, name) != 0);
+
+  if (!changed) {
+    return true; // 변경 사항 없음
+  }
+
   bool reconnect_needed = false;
   if (slot.enabled != enabled || strcmp(slot.target_ip, ip ? ip : "") != 0 ||
       slot.target_port != port) {

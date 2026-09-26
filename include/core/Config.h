@@ -9,7 +9,7 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.1.8";
+constexpr const char *FIRMWARE_VERSION = "v1.1.9";
 } // namespace Config
 
 namespace Config::Task {
@@ -223,88 +223,11 @@ struct FramingTracker {
   }
 
   void clearNvs(const char *nvs_ns = "dp_frame",
-                const char *tag = "DOORPHONE") noexcept {
-    reset();
-    Preferences prefs;
-    if (prefs.begin(nvs_ns, false)) {
-      prefs.clear();
-      prefs.end();
-      ::Serial.printf("[%s] Cleared framing NVS storage (%s).\r\n", tag,
-                      nvs_ns);
-    }
-  }
+                const char *tag = "DOORPHONE") noexcept;
 
   void processFrame(uint8_t stx, uint8_t etx, uint8_t len = 0,
                     const char *nvs_ns = "dp_frame",
-                    const char *tag = "DOORPHONE") noexcept {
-    if (is_custom_fixed.load(std::memory_order_relaxed)) {
-      // Custom 고정 락 모드: 노이즈나 외래 패킷으로 인한 상태 변경 불가 (영구
-      // 락)
-      return;
-    }
-
-    FramingStatus cur = status.load(std::memory_order_relaxed);
-
-    // 도어폰 전용 1-Shot 카탈로그 즉시 잠금: STX=0x7F, ETX=0xEE 5바이트 프레임
-    // 1회 감지 즉시 LOCKED
-    if (stx == 0x7F && etx == 0xEE && (len == 0 || len == 5)) {
-      setFixedLock(0x7F, 0xEE, 5);
-      saveToNvs(nvs_ns, tag);
-      return;
-    }
-
-    if (cur == FramingStatus::WAITING) {
-      candidate_stx.store(stx, std::memory_order_relaxed);
-      candidate_etx.store(etx, std::memory_order_relaxed);
-      if (len > 0)
-        candidate_len.store(len, std::memory_order_relaxed);
-      consecutive_matches.store(1, std::memory_order_relaxed);
-      consecutive_mismatches.store(0, std::memory_order_relaxed);
-      status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
-      return;
-    }
-
-    uint8_t cand_s = candidate_stx.load(std::memory_order_relaxed);
-    uint8_t cand_e = candidate_etx.load(std::memory_order_relaxed);
-
-    if (stx == cand_s && etx == cand_e) {
-      if (len > 0)
-        candidate_len.store(len, std::memory_order_relaxed);
-      consecutive_mismatches.store(0, std::memory_order_relaxed);
-      uint8_t m =
-          consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
-      if (m >= 3) {
-        status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-        saveToNvs(nvs_ns, tag);
-      } else {
-        status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
-      }
-    } else {
-      consecutive_matches.store(0, std::memory_order_relaxed);
-      uint8_t m =
-          consecutive_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
-      if (cur == FramingStatus::LOCKED) {
-        // Auto 프로파일 상태: 연속 10회 이상 새로운 프레임 패턴이 지속될 때만
-        // 안전하게 자동 언락
-        if (m >= 10) {
-          status.store(FramingStatus::WAITING, std::memory_order_relaxed);
-          consecutive_mismatches.store(0, std::memory_order_relaxed);
-        }
-        // 단발성 노이즈(m < 10)에서는 LOCKED 상태 유지 (NOISY 등으로 강등 금지)
-      } else {
-        // LEARNING 상태: 불일치 5회 누적 시 새 후보로 교체
-        if (m >= 5) {
-          candidate_stx.store(stx, std::memory_order_relaxed);
-          candidate_etx.store(etx, std::memory_order_relaxed);
-          if (len > 0)
-            candidate_len.store(len, std::memory_order_relaxed);
-          consecutive_matches.store(1, std::memory_order_relaxed);
-          consecutive_mismatches.store(0, std::memory_order_relaxed);
-          status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
-        }
-      }
-    }
-  }
+                    const char *tag = "DOORPHONE") noexcept;
 
   inline static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
                                      size_t max_len) noexcept {
@@ -313,105 +236,10 @@ struct FramingTracker {
   }
 
   void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",
-                      const char *tag = "DOORPHONE") noexcept {
-    if (!nvs_ns)
-      nvs_ns = "dp_frame_p0";
-
-    Preferences prefs;
-    bool found = false;
-    if (prefs.begin(nvs_ns, true)) {
-      if (prefs.isKey("stx") && prefs.isKey("etx")) {
-        found = true;
-      }
-      prefs.end();
-    }
-
-    // 레거시 "dp_frame" 1회 마이그레이션 (슬롯 네임스페이스가 아직 비어있을 때)
-    if (!found && strcmp(nvs_ns, "dp_frame") != 0) {
-      Preferences leg;
-      if (leg.begin("dp_frame", true)) {
-        if (leg.isKey("stx") && leg.isKey("etx")) {
-          uint8_t ls = leg.getUChar("stx", 0);
-          uint8_t le = leg.getUChar("etx", 0);
-          uint8_t ll = leg.getUChar("len", 0);
-          bool llocked = leg.getBool("locked", false);
-          bool lfixed = leg.getBool("fixed", false);
-          leg.end();
-
-          if (llocked && ls != 0 && le != 0) {
-            Preferences dest;
-            if (dest.begin(nvs_ns, false)) {
-              dest.putUChar("stx", ls);
-              dest.putUChar("etx", le);
-              dest.putUChar("len", (ls == 0x7F && le == 0xEE) ? 5 : ll);
-              dest.putBool("locked", true);
-              dest.putBool("fixed", (ls == 0x7F && le == 0xEE) ? true : lfixed);
-              dest.end();
-              ::Serial.printf("[%s] Migrated legacy dp_frame to %s\r\n", tag,
-                              nvs_ns);
-            }
-          }
-        } else {
-          leg.end();
-        }
-      }
-    }
-
-    if (prefs.begin(nvs_ns, true)) {
-      uint8_t s = prefs.getUChar("stx", 0);
-      uint8_t e = prefs.getUChar("etx", 0);
-      uint8_t l = prefs.getUChar("len", 0);
-      bool locked = prefs.getBool("locked", false);
-      bool fixed = prefs.getBool("fixed", false);
-      prefs.end();
-      if (locked && s != 0 && e != 0) {
-        if (s == 0x7F && e == 0xEE && l != 5) {
-          l = 5;
-          fixed = true;
-          Preferences wr_pref;
-          if (wr_pref.begin(nvs_ns, false)) {
-            wr_pref.putUChar("len", 5);
-            wr_pref.putBool("fixed", true);
-            wr_pref.end();
-          }
-        }
-        candidate_stx.store(s, std::memory_order_relaxed);
-        candidate_etx.store(e, std::memory_order_relaxed);
-        candidate_len.store(l, std::memory_order_relaxed);
-        consecutive_matches.store(3, std::memory_order_relaxed);
-        is_custom_fixed.store(fixed, std::memory_order_relaxed);
-        status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-        ::Serial.printf("[%s] Restored framing from NVS (%s): STX 0x%02X, "
-                        "ETX 0x%02X, Len %u%s\r\n",
-                        tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
-      }
-    }
-  }
+                      const char *tag = "DOORPHONE") noexcept;
 
   void saveToNvs(const char *nvs_ns = "dp_frame_p0",
-                 const char *tag = "DOORPHONE") noexcept {
-    if (!nvs_ns)
-      nvs_ns = "dp_frame_p0";
-
-    uint8_t s = candidate_stx.load(std::memory_order_relaxed);
-    uint8_t e = candidate_etx.load(std::memory_order_relaxed);
-    uint8_t l = candidate_len.load(std::memory_order_relaxed);
-    bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
-    if (s == 0 || e == 0)
-      return;
-    Preferences prefs;
-    if (prefs.begin(nvs_ns, false)) {
-      prefs.putUChar("stx", s);
-      prefs.putUChar("etx", e);
-      prefs.putUChar("len", l);
-      prefs.putBool("locked", true);
-      prefs.putBool("fixed", fixed);
-      prefs.end();
-      ::Serial.printf("[%s] Saved framing to NVS (%s): STX 0x%02X, ETX "
-                      "0x%02X, Len %u%s\r\n",
-                      tag, nvs_ns, s, e, l, fixed ? " (FIXED)" : "");
-    }
-  }
+                 const char *tag = "DOORPHONE") noexcept;
 
   [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept {
     FramingStatus cur = status.load(std::memory_order_relaxed);

@@ -176,8 +176,9 @@ void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
   // --------------------------------------------------------------------------
   // Slot 1~4: 시스템 에어컨 (1~4호) 독자 프로토콜 처리
   // --------------------------------------------------------------------------
-  // 에어컨 패킷 파싱 및 스마트싱스 상태 텔레메트리 연동
+#if CONFIG_LOG_DEFAULT_LEVEL >= ESP_LOG_DEBUG
   ESP_LOGD(TAG, "EW11 Slot %d RX len=%u", slot_idx, (unsigned)pkt_len);
+#endif
 }
 
 void processStream(int slot_idx, HubClientSlot *slot) {

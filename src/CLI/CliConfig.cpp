@@ -66,14 +66,15 @@ static const ConfigParamDef PARAM_TABLE[] = {
 static const size_t PARAM_COUNT = sizeof(PARAM_TABLE) / sizeof(ConfigParamDef);
 
 void printConfig(int sock) {
-  char buf[2048];
+  // BSS 영역 고정 배치 — Task_Telnet 단일 직렬 실행, mutex 불필요 [C-5]
+  static char buf[2048];
   AppendBuf out{buf, sizeof(buf)};
 
   char f1[8], f2[8], f3[8], f4[8];
-  strncpy(f1, formatFramingStr(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits), sizeof(f1));
-  strncpy(f2, formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits), sizeof(f2));
-  strncpy(f3, formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits), sizeof(f3));
-  strncpy(f4, formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits), sizeof(f4));
+  snprintf(f1, sizeof(f1), "%s", formatFramingStr(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits));
+  snprintf(f2, sizeof(f2), "%s", formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits));
+  snprintf(f3, sizeof(f3), "%s", formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits));
+  snprintf(f4, sizeof(f4), "%s", formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits));
 
   const char *prof_name = "Auto Detect (Slot 0)";
   if (g_config.wallpad_profile == 1) prof_name = "Custom Slot 1";
@@ -109,7 +110,7 @@ void printConfig(int sock) {
 }
 
 void printConfigHelp(int sock) {
-  char buf[2048];
+  static char buf[2048]; // BSS 영역 고정 배치 [C-5]
   AppendBuf out{buf, sizeof(buf)};
 
   out.append("\r\n");
@@ -478,7 +479,7 @@ void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
   static DeviceRouteEntry entries[DeviceRouteRegistry::MAX_ROUTES];
   size_t count = g_route_registry.getRoutes(entries, DeviceRouteRegistry::MAX_ROUTES);
 
-  char buf[2048];
+  static char buf[2048]; // BSS 영역 고정 배치 [C-5]
   AppendBuf out{buf, sizeof(buf)};
   out.append("\r\n");
   out.append(Fmt::DIV80EQ);

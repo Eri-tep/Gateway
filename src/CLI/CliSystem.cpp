@@ -48,21 +48,21 @@ void printSystemOverview(AppendBuf &out) {
   auto *active = WallpadParserFactory::getActiveParser();
   auto desc = g_auto_probing_engine.getDescriptor();
   char wp_status_buf[80];
+  const char *catalog_vendor = active ? active->getVendorName() : "Unknown";
+
   if (g_config.wallpad_profile == 0) {
     if (desc.is_locked) {
-      snprintf(wp_status_buf, sizeof(wp_status_buf), "Auto [STX 0x%02X ETX 0x%02X / %s] (ID: 0) [LOCKED]",
-               desc.stx, desc.etx, AutoProbingEngine::getAlgoName(desc.checksum_algo));
+      snprintf(wp_status_buf, sizeof(wp_status_buf), "Auto Detect (%s)", catalog_vendor);
     } else {
-      snprintf(wp_status_buf, sizeof(wp_status_buf), "Auto (Learning...) (ID: 0) [LEARNING]");
+      snprintf(wp_status_buf, sizeof(wp_status_buf), "Auto Detect (Learning...)");
     }
   } else {
     VendorProfileDescriptor cur_p;
     if (ProfileRepository::getActiveProfile(cur_p)) {
-      snprintf(wp_status_buf, sizeof(wp_status_buf), "%s (ID: %u) [SAVED]",
-               cur_p.key, static_cast<unsigned>(g_config.wallpad_profile));
+      snprintf(wp_status_buf, sizeof(wp_status_buf), "%s (%s)",
+               cur_p.name[0] ? cur_p.name : cur_p.key, catalog_vendor);
     } else {
-      snprintf(wp_status_buf, sizeof(wp_status_buf), "%s (ID: %u)",
-               active ? active->getVendorName() : "Custom", static_cast<unsigned>(g_config.wallpad_profile));
+      snprintf(wp_status_buf, sizeof(wp_status_buf), "%s", catalog_vendor);
     }
   }
 
@@ -253,7 +253,7 @@ void cmdCoreDump(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  char buf[2048];
+  static char buf[2048]; // BSS 영역 고정 배치 [C-5]
   int pos = 0;
 
   pos += snprintf(

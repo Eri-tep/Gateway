@@ -87,7 +87,8 @@ void TelnetManager::writeCharToClient(EmbeddedCli *cli, char c) {
 
   // Drop all remaining non-printable control chars except CR, LF, and TAB (\t).
   // EmbeddedCli uses \t for help command description indentation.
-  if ((c < 0x20 && c != '\r' && c != '\n' && c != '\t') || c == 0x7F) {
+  uint8_t uc = static_cast<uint8_t>(c);
+  if ((uc < 0x20 && c != '\r' && c != '\n' && c != '\t') || uc == 0x7F) {
     return;
   }
 
@@ -141,23 +142,16 @@ void TelnetManager::bindCommands(TelnetSession *session) {
 
   for (const auto &c : cmds) {
     if (strcmp(c.n, "help") == 0) {
-      // embeddedCliNew registers an internal "help" at binding index 0.
-      // Override binding index 0 so our full SystemCli::cmdHelp reference is called.
-      struct InternalCliImpl {
-        void *rxBuf;
-        void *cmdBuf;
-        uint16_t cmdSize;
-        uint16_t cmdMaxSize;
-        CliCommandBinding *bindings;
-      };
-      auto *impl = static_cast<InternalCliImpl *>(session->cli->_impl);
-      if (impl && impl->bindings) {
-        impl->bindings[0].name = c.n;
-        impl->bindings[0].help = c.h;
-        impl->bindings[0].tokenizeArgs = true;
-        impl->bindings[0].context = session;
-        impl->bindings[0].binding = c.b;
-      }
+      // [H-1] EmbeddedCli 내부 _impl 침범(UB) 제거 → 공식 API로 help 재등록
+      // embeddedCliNew가 bindings[0]에 기본 help를 등록하므로, 동일 이름으로
+      // addBinding하면 라이브러리가 기존 항목을 덮어씀
+      CliCommandBinding b;
+      b.name        = c.n;
+      b.help        = c.h;
+      b.tokenizeArgs = true;
+      b.context     = session;
+      b.binding     = c.b;
+      embeddedCliAddBinding(session->cli.get(), b);
       continue;
     }
     CliCommandBinding b;

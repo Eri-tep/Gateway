@@ -6,6 +6,7 @@
 
 #include "Metrics.h"
 #include "Buffers.h"
+#include <shared_mutex>
 
 constexpr uint8_t PKT_STX = 0xF7;
 constexpr uint8_t PKT_ETX = 0xEE;
@@ -325,6 +326,7 @@ extern QueueHandle_t g_ch4_passthrough_queue;
 extern SemaphoreHandle_t g_ch5_mutex;
 extern SemaphoreHandle_t g_mgmt_mutex;
 extern RuntimeConfig g_config;
+extern std::shared_mutex g_config_rw;
 extern portMUX_TYPE g_config_mux;
 extern std::atomic<uint32_t> g_ch1_bus_ms;
 extern std::atomic<bool> g_config_dirty;

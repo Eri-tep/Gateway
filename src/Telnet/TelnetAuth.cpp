@@ -38,7 +38,8 @@ TelnetManager::AuthResult TelnetManager::evaluateAuth(
   }
 
 #ifdef DEFAULT_TELNET_PASS
-  if (!auth_ok && strcasecmp(clean_pw, DEFAULT_TELNET_PASS) == 0) {
+  // 대소문자 구분 비교로 보안 엔트로피 강화 [C-4]
+  if (!auth_ok && strcmp(clean_pw, DEFAULT_TELNET_PASS) == 0) {
     auth_ok = true;
     {
       CriticalSectionLocker lock(&g_config_mux);
@@ -71,6 +72,7 @@ bool TelnetManager::handlePassword(TelnetSession *session,
   IPAddress clientIp = session->clientIp;
 
   AuthBlockEntry *blk = nullptr;
+  // 기존 IP 검색
   for (int i = 0; i < 4; ++i) {
     if (_authBlocks[i].ip == clientIp) {
       blk = &_authBlocks[i];
@@ -78,17 +80,18 @@ bool TelnetManager::handlePassword(TelnetSession *session,
     }
   }
 
+  // 슬롯 없으면 LRU(가장 오래된 슬롯) 재사용 — null blk로 인한 락아웃 bypass 차단 [C-4]
   if (!blk) {
-    for (int i = 0; i < 4; ++i) {
-      if (_authBlocks[i].failedCount == 0 ||
-          (now - _authBlocks[i].lastFailedMs > 60000)) {
-        blk = &_authBlocks[i];
-        blk->ip = clientIp;
-        blk->failedCount = 0;
-        blk->lastFailedMs = 0;
-        break;
+    AuthBlockEntry *oldest = &_authBlocks[0];
+    for (int i = 1; i < 4; ++i) {
+      if (_authBlocks[i].lastFailedMs < oldest->lastFailedMs) {
+        oldest = &_authBlocks[i];
       }
     }
+    oldest->ip = clientIp;
+    oldest->failedCount = 0;
+    oldest->lastFailedMs = 0;
+    blk = oldest;
   }
 
   char clean_pw[64] = {0};

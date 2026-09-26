@@ -407,30 +407,44 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
       const char *cls_str = embeddedCliGetToken(args, 3);
       const char *custom_name = (argc >= 4) ? embeddedCliGetToken(args, 4) : nullptr;
+      struct DeviceClassEntry {
+        std::string_view key;
+        DeviceClass cls;
+        const char *def_name;
+      };
+      static constexpr DeviceClassEntry kDeviceClassTable[] = {
+          {"light",      DeviceClass::SWITCH,     "Light"},
+          {"switch",     DeviceClass::SWITCH,     "Light"},
+          {"outlet",     DeviceClass::SWITCH,     "Outlet"},
+          {"vent",       DeviceClass::VENT,       "Vent"},
+          {"fan",        DeviceClass::VENT,       "Vent"},
+          {"thermo",     DeviceClass::THERMOSTAT, "Thermo"},
+          {"thermostat", DeviceClass::THERMOSTAT, "Thermo"},
+          {"heat",       DeviceClass::THERMOSTAT, "Thermo"},
+          {"gas",        DeviceClass::GAS,        "Gas"},
+          {"aircon",     DeviceClass::AIRCON,     "Aircon"},
+          {"ac",         DeviceClass::AIRCON,     "Aircon"},
+          {"ev",         DeviceClass::MOMENTARY,  "Elevator"},
+          {"elevator",   DeviceClass::MOMENTARY,  "Elevator"},
+      };
+
+      char lower_cls[32] = {0};
+      size_t c_len = 0;
+      while (cls_str[c_len] && c_len < sizeof(lower_cls) - 1) {
+        lower_cls[c_len] = static_cast<char>(tolower(static_cast<unsigned char>(cls_str[c_len])));
+        c_len++;
+      }
+      lower_cls[c_len] = '\0';
+
       DeviceClass cls = DeviceClass::UNKNOWN;
       const char *def_name = cls_str;
-
-      if (strcasecmp(cls_str, "light") == 0 || strcasecmp(cls_str, "switch") == 0) {
-        cls = DeviceClass::SWITCH;
-        def_name = "Light";
-      } else if (strcasecmp(cls_str, "outlet") == 0) {
-        cls = DeviceClass::SWITCH;
-        def_name = "Outlet";
-      } else if (strcasecmp(cls_str, "vent") == 0 || strcasecmp(cls_str, "fan") == 0) {
-        cls = DeviceClass::VENT;
-        def_name = "Vent";
-      } else if (strcasecmp(cls_str, "thermo") == 0 || strcasecmp(cls_str, "thermostat") == 0 || strcasecmp(cls_str, "heat") == 0) {
-        cls = DeviceClass::THERMOSTAT;
-        def_name = "Thermo";
-      } else if (strcasecmp(cls_str, "gas") == 0) {
-        cls = DeviceClass::GAS;
-        def_name = "Gas";
-      } else if (strcasecmp(cls_str, "aircon") == 0 || strcasecmp(cls_str, "ac") == 0) {
-        cls = DeviceClass::AIRCON;
-        def_name = "Aircon";
-      } else if (strcasecmp(cls_str, "ev") == 0 || strcasecmp(cls_str, "elevator") == 0) {
-        cls = DeviceClass::MOMENTARY;
-        def_name = "Elevator";
+      std::string_view sv{lower_cls};
+      for (const auto &entry : kDeviceClassTable) {
+        if (entry.key == sv) {
+          cls = entry.cls;
+          def_name = entry.def_name;
+          break;
+        }
       }
 
       if (dev_id == 0 || cls == DeviceClass::UNKNOWN) {

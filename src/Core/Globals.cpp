@@ -61,6 +61,11 @@ std::atomic<uint32_t> g_ch1_bus_ms{0};
 SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
                   g_uart2_mutex = nullptr, g_tracer_sem = nullptr;
 Ch1StateMetrics g_ch1_state_metrics;
+// [H-3] g_config R/W 보호: portMUX_TYPE(ISR critical, blocking 금지) →
+// std::shared_mutex(다중 태스크 동시 읽기 허용, 쓰기 exclusive).
+// ESP32S3 GCC8.4 __GTHREADS=1 실측 지원 확인.
+std::shared_mutex g_config_rw;
+// 하위 호환: g_config_mux는 ISR 컨텍스트 전용으로만 유지 (비ISR 사이트는 g_config_rw로 전환)
 portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> g_config_dirty{false}, g_ota_in_progress{false},
     g_initial_caching_complete{false}, g_probe_convergence_reset{false};

@@ -319,9 +319,17 @@ void TelnetTracer::flushToClient() {
         snprintf(line_buf, sizeof(line_buf), "%02d:%02d:%02d.%03ld   ",
                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
                  entry.tv.tv_usec / 1000);
+    // snprintf truncation 시 size_t 언더플로우 차단 [C-6]
+    if (idx >= sizeof(line_buf)) idx = sizeof(line_buf) - 1;
 
     if (entry.type == TraceType::MSG) {
-      idx += snprintf(line_buf + idx, sizeof(line_buf) - idx, "[SYSTEM MSG]  ");
+      // snprintf clamp 헬퍼: truncation 시 idx가 cap을 넘지 않도록 보장 [C-6]
+      auto safe_append = [&](const char *fmt, auto... args) {
+        if (idx >= sizeof(line_buf)) return;
+        int n = snprintf(line_buf + idx, sizeof(line_buf) - idx, fmt, args...);
+        if (n > 0) idx = std::min(idx + (size_t)n, sizeof(line_buf) - 1);
+      };
+      safe_append("[SYSTEM MSG]  ");
       if (idx < sizeof(line_buf) - entry.len) {
         memcpy(line_buf + idx, entry.data.data(), entry.len);
         idx += entry.len;
@@ -371,8 +379,7 @@ void TelnetTracer::flushToClient() {
     send(c_fd, line_buf, idx, MSG_DONTWAIT);
   }
 
-  if (g_telnet_tx_sem) {
-    xSemaphoreGive(g_telnet_tx_sem);
-  }
+  // NOTE: g_telnet_tx_sem은 위의 TxSemGuard RAII 소멸자가 자동 반환.
+  // 명시적 xSemaphoreGive 제거 — Double-Give 방지 [C-1]
 }
 

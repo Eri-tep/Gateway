@@ -355,8 +355,10 @@ void Task_Ch4(void *pvParameters) {
           Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
 
           if (dp_spec && pkt_stx == dp_spec->stx && pkt_etx == dp_spec->etx && packet.length >= 5) {
-            g_doorphone_tracker.setFixedLock(dp_spec->stx, dp_spec->etx, dp_spec->len);
-            g_doorphone_tracker.saveToNvs(cur_dp_ns);
+            if (prev_status != Config::Doorphone::FramingStatus::LOCKED) {
+              g_doorphone_tracker.setFixedLock(dp_spec->stx, dp_spec->etx, dp_spec->len);
+              g_doorphone_tracker.saveToNvs(cur_dp_ns);
+            }
           } else {
             g_doorphone_tracker.processFrame(pkt_stx, pkt_etx, packet.length, cur_dp_ns);
             Config::Doorphone::FramingStatus status = g_doorphone_tracker.status.load(std::memory_order_relaxed);

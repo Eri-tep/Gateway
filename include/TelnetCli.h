@@ -105,8 +105,6 @@ private:
   AuthBlockEntry _authBlocks[4];
   uint32_t _nextSessionId = 1;
 
-  void printSystemOverview(AppendBuf &out);
-
   enum class AuthResult : uint8_t {
     OK,
     WRONG_PASSWORD,
