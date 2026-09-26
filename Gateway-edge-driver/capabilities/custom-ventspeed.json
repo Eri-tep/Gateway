@@ -1,0 +1,45 @@
+{
+  "name": "ventSpeed",
+  "attributes": {
+    "ventSpeed": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "value"
+        ]
+      },
+      "setter": "setVentSpeed",
+      "enumCommands": []
+    }
+  },
+  "commands": {
+    "setVentSpeed": {
+      "name": "setVentSpeed",
+      "arguments": [
+        {
+          "name": "speed",
+          "optional": false,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

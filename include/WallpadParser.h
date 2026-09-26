@@ -50,18 +50,6 @@ struct VendorProfileDescriptor {
 };
 
 // ============================================================================
-// PROFILE INDEX ENUM (4 SLOTS: AUTO + CUSTOM1~3)
-// ============================================================================
-
-enum class WallpadProfileIndex : uint8_t {
-  ADAPTIVE = 0,
-  CUSTOM1 = 1,
-  CUSTOM2 = 2,
-  CUSTOM3 = 3,
-  COUNT = 4
-};
-
-// ============================================================================
 // 1ST TIER CACHE: POLLING TARGET REGISTRY
 // ============================================================================
 
@@ -138,7 +126,7 @@ struct AutoProbeDescriptor {
   uint8_t dev_id_offset{3};   // DevType 위치 (QUERY 기준 / swap 없으면 ACK도 동일)
   uint8_t sub1_offset{5};
   uint8_t sub2_offset{6};
-  uint8_t payload_offset{7};
+  uint8_t payload_offset{8};
   bool is_swapped_addr{false};
   bool offsets_locked{false};
   // ★ swap 구조 보완 필드 (DA/SA 교차 프로토콜 지원)
@@ -178,13 +166,13 @@ public:
   void initFromNvs();
   void feedFrame(span<const uint8_t> raw_frame);
   void feedOpcodePair(span<const uint8_t> req, span<const uint8_t> ack);
-  void feedControlPair(span<const uint8_t> ctrl_req,
-                       span<const uint8_t> ack_res);
+  void feedControlFrame(span<const uint8_t> ctrl_frame);
   bool isLocked() const;
   bool isOffsetsLocked() const;
-  bool analyzeCacheMatrix();
   AutoProbeDescriptor getDescriptor() const;
   void reset();
+  void injectControlSpec(uint8_t ctrl_op, uint8_t ctrl_len);
+  bool analyzeCacheMatrix();
   uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
                             size_t len) const;
   static const char *getAlgoName(ChecksumAlgo algo);

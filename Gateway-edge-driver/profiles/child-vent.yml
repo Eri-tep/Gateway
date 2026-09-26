@@ -1,0 +1,15 @@
+name: child-vent
+components:
+  - id: main
+    label: "전열교환기"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: digituniverse06711.ventmode
+        version: 1
+      - id: digituniverse06711.ventspeed
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Vent

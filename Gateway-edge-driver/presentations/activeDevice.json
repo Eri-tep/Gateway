@@ -1,0 +1,20 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{deviceHealth.value}}"
+      }
+    ],
+    "actions": [],
+    "panelItems": []
+  },
+  "detailView": [
+    {
+      "label": "Device",
+      "displayType": "state",
+      "state": {
+        "label": "{{deviceHealth.value}}"
+      }
+    }
+  ]
+}

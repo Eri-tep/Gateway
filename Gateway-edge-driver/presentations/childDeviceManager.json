@@ -9,7 +9,7 @@
   },
   "detailView": [
     {
-      "label": "Child Devices",
+      "label": "Device Manager",
       "displayType": "list",
       "list": {
         "command": {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Common.h"
+#include <lwip/sockets.h>
 
 // ============================================================================
 // 3대 핵심 런타임 타이밍 구조체 (NVS 영구 보관)
@@ -28,6 +29,7 @@ struct HttpOtaState {
 
 extern HttpOtaState g_http_ota_state;
 
+static constexpr const char *DEFAULT_CLOUD_OTA_URL = "https://raw.githubusercontent.com/Eri-tep/Gateway/beta/bin/firmware.bin";
 void Mgmt_StartHttpOta(const char *url);
 
 // ============================================================================
@@ -35,7 +37,7 @@ void Mgmt_StartHttpOta(const char *url);
 // ============================================================================
 struct MgmtSession {
   int sock{-1};
-  uint8_t buffer[512];
+  uint8_t buffer[Config::TCP::MGMT_BUFFER_SIZE];
   size_t len{0};
   uint32_t connected_at_ms{0};
 };
@@ -47,6 +49,16 @@ extern MgmtSession g_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
 // ============================================================================
 void Mgmt_Init();
 void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len);
-void Mgmt_SerializeTelemetry(AppendBuf &out);
+void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id = -1);
+void Mgmt_SerializeLockedDevices(AppendBuf &out);
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str);
+enum class DeviceClass : uint8_t;
+
 void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell);
+void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                               DeviceClass dev_class, int power,
+                               int target_temp = 0, int current_temp = 0,
+                               int speed = 0, const char *valve_state = nullptr,
+                               float power_w = 0.0f, int floor = 0, int direction = 0,
+                               int ho = 0, int vent_mode = 1);
+void Mgmt_BroadcastDevicesUpdated();

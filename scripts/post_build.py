@@ -14,15 +14,20 @@ def after_build(source, target, env):
     shutil.copyfile(bin_path, dest_bin)
     print(f"[POST-BUILD] Successfully updated: {dest_bin}")
     
-    # Extract FIRMWARE_VERSION from include/Common.h
-    common_h = os.path.join(project_dir, "include", "Common.h")
-    version = "v2.7.5"
-    if os.path.exists(common_h):
-        with open(common_h, "r", encoding="utf-8") as f:
-            content = f.read()
-            m = re.search(r'FIRMWARE_VERSION\s*=\s*"([^"]+)"', content)
-            if m:
-                version = m.group(1)
+    # Extract FIRMWARE_VERSION from include/core/Config.h (fallback: include/Common.h)
+    version = "unknown"
+    search_files = [
+        os.path.join(project_dir, "include", "core", "Config.h"),
+        os.path.join(project_dir, "include", "Common.h")
+    ]
+    for h_file in search_files:
+        if os.path.exists(h_file):
+            with open(h_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                m = re.search(r'FIRMWARE_VERSION\s*=\s*"([^"]+)"', content)
+                if m:
+                    version = m.group(1)
+                    break
                 
     # Save bin/version.txt
     dest_ver = os.path.join(bin_dir, "version.txt")

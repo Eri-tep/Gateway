@@ -1,20 +1,32 @@
-{
-  "dashboard": {
-    "states": [
-      {
-        "label": "{{history.value}}"
-      }
-    ],
-    "actions": [],
-    "panelItems": []
-  },
-  "detailView": [
-    {
-      "label": "History",
-      "displayType": "state",
-      "state": {
-        "label": "{{history.value}}"
-      }
-    }
-  ]
+﻿{
+    "dashboard": {
+        "states": [
+            {
+                "label": "{{history.value}}",
+                "alternatives": [
+                    {
+                        "key": "대기",
+                        "value": "대기",
+                        "type": "inactive"
+                    },
+                    {
+                        "key": "15층 도착",
+                        "value": "15층 도착",
+                        "type": "inactive"
+                    }
+                ]
+            }
+        ],
+        "actions": [],
+        "panelItems": []
+    },
+    "detailView": [
+        {
+            "label": "상태",
+            "displayType": "state",
+            "state": {
+                "label": "{{history.value}}"
+            }
+        }
+    ]
 }

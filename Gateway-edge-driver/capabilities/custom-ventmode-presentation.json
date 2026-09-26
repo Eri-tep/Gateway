@@ -1,0 +1,102 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{ventMode.value}}",
+        "alternatives": [
+          {
+            "key": "normal",
+            "value": "일반 환기",
+            "type": "active"
+          },
+          {
+            "key": "bypass",
+            "value": "자연 환기",
+            "type": "active"
+          },
+          {
+            "key": "clean",
+            "value": "공기 청정",
+            "type": "active"
+          },
+          {
+            "key": "auto",
+            "value": "자동 환기",
+            "type": "active"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "panelItems": []
+  },
+  "detailView": [
+    {
+      "label": "팬 모드",
+      "displayType": "state",
+      "state": {
+        "label": "{{ventMode.value}}",
+        "alternatives": [
+          {
+            "key": "normal",
+            "value": "일반 환기",
+            "type": "active"
+          },
+          {
+            "key": "bypass",
+            "value": "자연 환기",
+            "type": "active"
+          },
+          {
+            "key": "clean",
+            "value": "공기 청정",
+            "type": "active"
+          },
+          {
+            "key": "auto",
+            "value": "자동 환기",
+            "type": "active"
+          }
+        ]
+      }
+    }
+  ],
+  "automation": {
+    "conditions": [
+      {
+        "label": "팬 모드",
+        "displayType": "list",
+        "list": {
+          "alternatives": [
+            {
+              "key": "normal",
+              "value": "일반 환기",
+              "type": "active"
+            },
+            {
+              "key": "bypass",
+              "value": "자연 환기",
+              "type": "active"
+            },
+            {
+              "key": "clean",
+              "value": "공기 청정",
+              "type": "active"
+            },
+            {
+              "key": "auto",
+              "value": "자동 환기",
+              "type": "active"
+            }
+          ],
+          "value": "ventMode.value",
+          "valueType": "string",
+          "multiSelectable": false
+        }
+      }
+    ],
+    "actions": []
+  },
+  "id": "digituniverse06711.ventmode",
+  "version": 1
+}

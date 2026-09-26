@@ -1,0 +1,17 @@
+name: child-momentary
+components:
+  - id: main
+    label: "엘리베이터"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: digituniverse06711.history
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Elevator
+
+metadata:
+  vid: "f9c3f0a0-4c5b-3659-8314-44792c4d539c"
+  mnmn: "SmartThingsCommunity"

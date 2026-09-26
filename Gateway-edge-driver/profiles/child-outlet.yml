@@ -1,0 +1,15 @@
+name: child-outlet
+components:
+  - id: main
+    label: "콘센트"
+    capabilities:
+      - id: switch
+        version: 1
+      - id: powerMeter
+        version: 1
+      - id: energyMeter
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: SmartPlug

@@ -1,0 +1,50 @@
+{
+  "tag": "en",
+  "label": "Vent Mode",
+  "attributes": {
+    "ventMode": {
+      "label": "Vent Mode",
+      "displayTemplate": "{{attribute}} of {{device.label}} is {{value}}",
+      "i18n": {
+        "value": {
+          "normal": {
+            "label": "Normal"
+          },
+          "bypass": {
+            "label": "Bypass"
+          },
+          "clean": {
+            "label": "Clean"
+          },
+          "auto": {
+            "label": "Auto"
+          }
+        }
+      }
+    }
+  },
+  "commands": {
+    "setVentMode": {
+      "label": "Set Vent Mode",
+      "arguments": {
+        "mode": {
+          "i18n": {
+            "normal": {
+              "label": "Normal"
+            },
+            "bypass": {
+              "label": "Bypass"
+            },
+            "clean": {
+              "label": "Clean"
+            },
+            "auto": {
+              "label": "Auto"
+            }
+          },
+          "label": "Mode"
+        }
+      }
+    }
+  }
+}

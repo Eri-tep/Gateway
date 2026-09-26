@@ -82,6 +82,12 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     return
   end
 
+  -- 자식 기기 오염 방지: 게이트웨이 기기가 아닌 경우 즉시 리턴
+  if device.device_network_id ~= "esp32_wallpad_gateway_ctrl" then
+    log.warn("Attempted to run gateway telemetry report on non-gateway device: " .. tostring(device.label))
+    return
+  end
+
   local comp_main = device.profile.components["main"]
   local comp_wallpad = device.profile.components["wallpad"] or comp_main
   local comp_diag = device.profile.components["diagnostics"] or comp_main
@@ -97,19 +103,19 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   log.info("📊 ══════════════ [ESP32 GATEWAY 6-CARD TELEMETRY REPORT] ══════════════")
 
   -- ═══════════════════════════════════════════════════════════════════════════
-  -- CARD 1: Devices (최상단 단독 카드 - 23 / 23 Online)
+  -- CARD 1: Devices (최상단 단독 카드 - 23/23)
   -- ═══════════════════════════════════════════════════════════════════════════
   if data.cache then
     local total = data.cache.total_devices or 0
     local active = data.cache.online_devices or 0
-    local health_str = string.format("%d / %d Online", active, total)
-    local cap_health = capabilities["digituniverse06711.activeDevice"]
+    local health_str = string.format("%d/%d", active, total)
+    local cap_health = capabilities["digituniverse06711.device"]
     if cap_health then
       emit_event(device, comp_main, cap_health.deviceHealth({ value = health_str }))
     end
   end
 
-  local cap_mgr = capabilities["digituniverse06711.childDeviceManager"]
+  local cap_mgr = capabilities["digituniverse06711.deviceManager"]
   if cap_mgr then
     emit_event(device, comp_main, cap_mgr.action({ value = "idle" }))
   end
@@ -132,52 +138,30 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   else
     label_key = (raw_key and raw_key ~= "" and not raw_key:match("^Custom")) and raw_key or "Custom " .. tostring(slot)
   end
+  -- 2-1. Protocol Profile Name (Auto Detect)
+  local final_profile_str = label_key
+
   local cap_pname = capabilities["digituniverse06711.profile"]
   if cap_pname then
-    emit_event(device, comp_wallpad, cap_pname.profileName({ value = label_key }))
+    emit_event(device, comp_wallpad, cap_pname.profileName({ value = final_profile_str }))
   end
 
-  -- 2-2. Frame: F7 [LN] [SA] [DT] [OC] [CD] [ID] [PL] [CS] EE
   local prof = data.profile or {}
-  local stx_raw = prof.stx or prof.header or prof.start_byte or prof.stx_hex or (data.packet and data.packet.stx)
-  local stx = stx_raw and tostring(stx_raw):gsub("^0x", ""):upper() or "F7"
-  local etx_raw = prof.etx or prof.footer or prof.end_byte or prof.etx_hex or (data.packet and data.packet.etx)
-  local etx = etx_raw and tostring(etx_raw):gsub("^0x", ""):upper() or "EE"
 
-  local sig_str = string.format("%s [LN] [SA] [DT] [OC] [CD] [ID] [PL] [CS] %s", stx, etx)
-  local cap_frame = capabilities["digituniverse06711.frame"]
-  if cap_frame then
-    emit_event(device, comp_wallpad, cap_frame.frame({ value = sig_str }))
+  -- 2-2. Catalog Match (Hyundai HT)
+  local cat_match = prof.catalog_match or "None"
+  cat_match = cat_match:gsub("%s*%b()", "") -- "(6 Devices)" 제거
+  local cap_match = capabilities["digituniverse06711.catalogMatch"]
+  if cap_match then
+    emit_event(device, comp_wallpad, cap_match.match({ value = cat_match }))
   end
 
-  -- 2-3. Checksum (<Type> (<Range>))
-  local cs_type = prof.checksum or prof.checksum_type or prof.crc or (data.packet and data.packet.checksum)
-  local cs_str = "XOR (0 ... [n-3])"
-  if cs_type and cs_type ~= "" then
-    if tostring(cs_type):match("%(") then
-      cs_str = tostring(cs_type)
-    else
-      cs_str = string.format("%s (0 ... [n-3])", tostring(cs_type):upper())
-    end
-  end
-  local cap_cs = capabilities["digituniverse06711.checksum"]
-  if cap_cs then
-    emit_event(device, comp_wallpad, cap_cs.checksum({ value = cs_str }))
-  end
-
-  -- 2-4. Opcodes (Qry(01), Cmd(02), Ack(04))
-  local q_op = "01"
-  local c_op = "02"
-  local a_op = "04"
-  if prof.opcodes then
-    q_op = tostring(prof.opcodes.query or prof.opcodes.qry or "01"):gsub("^0x", ""):upper()
-    c_op = tostring(prof.opcodes.control or prof.opcodes.cmd or "02"):gsub("^0x", ""):upper()
-    a_op = tostring(prof.opcodes.ack or "04"):gsub("^0x", ""):upper()
-  end
-  local opcodes_str = string.format("Qry(%s), Cmd(%s), Ack(%s)", q_op, c_op, a_op)
-  local cap_opcodes = capabilities["digituniverse06711.opcodes"]
-  if cap_opcodes then
-    emit_event(device, comp_wallpad, cap_opcodes.opcodes({ value = opcodes_str }))
+  -- 2-3. Blueprints (6 Groups)
+  local bp_status = prof.blueprints or "0 Groups"
+  bp_status = bp_status:gsub("%s*%b()", "") -- "(Locked)", "(Learning)" 제거
+  local cap_bp = capabilities["digituniverse06711.blueprints"]
+  if cap_bp then
+    emit_event(device, comp_wallpad, cap_bp.status({ value = bp_status }))
   end
 
   -- ═══════════════════════════════════════════════════════════════════════════
@@ -432,7 +416,7 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- 실시간 도어폰 이벤트 핸들러 (CH7 Server Push 즉시 처리)
+-- 실시간 도어폰 이벤트 핸들러 (CH6 Server Push 즉시 처리)
 -- ═══════════════════════════════════════════════════════════════════════════
 function TelemetryHandler.handle_doorphone_event(driver, event_data)
   if not event_data then return end
@@ -473,5 +457,233 @@ function TelemetryHandler.handle_doorphone_event(driver, event_data)
   end
 end
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 장치 클래스별 텔레메트리 디스패치 테이블 및 핸들러 (Table-Driven Pattern)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local ELEVATOR_DIR_FORMAT = {
+  [1] = "%d호 상승 (%dF)",
+  [2] = "%d호 하강 (%dF)",
+  [3] = "%d호 도착 (%dF)",
+}
+
+local function schedule_elevator_idle(dev, delay_sec)
+  local timer_key = "ev_arrival_timer"
+  local existing = dev:get_field(timer_key)
+  if existing then
+    dev.thread:cancel_timer(existing)
+    dev:set_field(timer_key, nil)
+  end
+
+  local function apply_idle()
+    dev:set_field(timer_key, nil)
+    local off_sw = capabilities.switch.switch.off()
+    off_sw.state_change = true
+    dev:emit_event(off_sw)
+    local cap_hist = capabilities["digituniverse06711.history"]
+    if cap_hist then
+      local off_evt = cap_hist.history({ value = "대기 중" })
+      off_evt.state_change = true
+      dev:emit_event(off_evt)
+    end
+  end
+
+  if delay_sec <= 0 then
+    apply_idle()
+  else
+    local t = dev.thread:call_with_delay(delay_sec, apply_idle, timer_key)
+    dev:set_field(timer_key, t)
+  end
+end
+
+local DEVICE_TELEMETRY_HANDLERS = {
+  ["switch"] = function(dev, event_data)
+    if event_data.power ~= nil and capabilities.switch then
+      local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+      sw_evt.state_change = true
+      dev:emit_event(sw_evt)
+    end
+  end,
+
+  ["momentary"] = function(dev, event_data)
+    local pwr = tonumber(event_data.power) or 0
+    local cap_hist = capabilities["digituniverse06711.history"]
+
+    if pwr == 1 then
+      -- 호출 중: 스위치 ON 및 상태 이력 "호출 중"
+      if capabilities.switch then
+        local on_evt = capabilities.switch.switch.on()
+        on_evt.state_change = true
+        dev:emit_event(on_evt)
+      end
+      if cap_hist then
+        local h_evt = cap_hist.history({ value = "호출 중" })
+        h_evt.state_change = true
+        dev:emit_event(h_evt)
+      end
+    else
+      -- 도착 또는 대기 복귀: 스위치 OFF 및 상태 이력 "대기 중"
+      schedule_elevator_idle(dev, 0)
+    end
+  end,
+
+  ["outlet"] = function(dev, event_data)
+    if event_data.power ~= nil and capabilities.switch then
+      local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+      sw_evt.state_change = true
+      dev:emit_event(sw_evt)
+    end
+
+    local cur_month = os.date("%Y-%m")
+    local last_month = dev:get_field("last_energy_month")
+    local monthly_kwh = dev:get_field("monthly_energy_kwh") or 0.0
+
+    if last_month ~= cur_month then
+      monthly_kwh = 0.0
+      dev:set_field("monthly_energy_kwh", 0.0, { persist = true })
+      dev:set_field("last_energy_month", cur_month, { persist = true })
+      log.info(string.format("📅 [OUTLET] New month (%s) detected! Reset monthly energy to 0.0 kWh", cur_month))
+    end
+
+    if event_data.power_w ~= nil then
+      local p_w = tonumber(event_data.power_w) or 0.0
+      local now_ts = os.time()
+      local last_ts = dev:get_field("last_power_ts") or now_ts
+      local dt = math.max(0, now_ts - last_ts)
+
+      -- 30초 이상 연결 단절 후 첫 수신이거나, 전원이 꺼져있거나, 대기전력 미만이면 누적하지 않고 타임스탬프만 동기화
+      local is_power_on = (event_data.power == 1) or (event_data.power == nil and p_w > 0.5)
+      if dt > 0 and dt <= 30 and p_w > 0.5 and is_power_on then
+        monthly_kwh = monthly_kwh + (p_w * dt / 3600000.0)
+        dev:set_field("monthly_energy_kwh", monthly_kwh, { persist = true })
+      end
+      dev:set_field("last_power_ts", now_ts, { persist = true })
+
+      if capabilities.powerMeter then
+        dev:emit_event(capabilities.powerMeter.power({ value = p_w, unit = "W" }))
+      end
+      if capabilities.energyMeter then
+        local kwh_val = math.floor(monthly_kwh * 1000 + 0.5) / 1000
+        dev:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
+      end
+    end
+  end,
+
+  ["thermostat"] = function(dev, event_data)
+    local is_away = (event_data.power == 2)
+    if event_data.power ~= nil and capabilities.thermostatMode then
+      local mode_str = (event_data.power == 1) and "heat" or (is_away and "away" or "off")
+      dev:emit_event(capabilities.thermostatMode.thermostatMode(mode_str))
+    end
+
+    local saved_temp = dev:get_field("last_thermo_temp") or 22
+    local target_temp = saved_temp
+    if event_data.target_temp and event_data.target_temp >= 10 and event_data.target_temp <= 35 then
+      target_temp = event_data.target_temp
+      if not is_away then
+        dev:set_field("last_thermo_temp", target_temp, { persist = true })
+      end
+    end
+
+    local current_temp = (event_data.current_temp and event_data.current_temp > 0) and event_data.current_temp or target_temp
+
+    if capabilities.thermostatHeatingSetpoint then
+      local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = target_temp, unit = "C" })
+      sp_evt.state_change = true
+      dev:emit_event(sp_evt)
+    end
+    if capabilities.temperatureMeasurement then
+      local cur_evt = capabilities.temperatureMeasurement.temperature({ value = current_temp, unit = "C" })
+      cur_evt.state_change = true
+      dev:emit_event(cur_evt)
+    end
+  end,
+
+  ["vent"] = function(dev, event_data)
+    local has_fan_speed = capabilities.fanSpeed and dev:supports_capability_by_id(capabilities.fanSpeed.ID)
+    local cap_vent = capabilities["digituniverse06711.ventmode"]
+    local cap_speed = capabilities["digituniverse06711.ventspeed"]
+
+    if event_data.power == 0 then
+      if capabilities.switch then
+        local sw_off = capabilities.switch.switch.off()
+        sw_off.state_change = true
+        dev:emit_event(sw_off)
+      end
+      if has_fan_speed then
+        dev:emit_event(capabilities.fanSpeed.fanSpeed(0))
+      end
+    else
+      if capabilities.switch then
+        local sw_on = capabilities.switch.switch.on()
+        sw_on.state_change = true
+        dev:emit_event(sw_on)
+      end
+
+      -- 1. 풍량 상태 (ventspeed: low, medium, high / fanSpeed: 1~3)
+      local spd = tonumber(event_data.fan_speed) or 1
+      if spd < 1 or spd > 3 then spd = 1 end
+      local spd_map = { [1] = "low", [2] = "medium", [3] = "high" }
+      local spd_str = spd_map[spd] or "low"
+      if cap_speed and dev:supports_capability_by_id(cap_speed.ID) then
+        dev:emit_event(cap_speed.ventSpeed(spd_str))
+      end
+      if has_fan_speed then
+        dev:emit_event(capabilities.fanSpeed.fanSpeed(spd))
+      end
+
+      -- 2. 운전 모드 상태 (1: normal, 2: bypass, 3: auto, 4: clean)
+      local mode_num = tonumber(event_data.vent_mode) or 1
+      local mode_map = { [1] = "normal", [2] = "bypass", [3] = "auto", [4] = "clean" }
+      local mode_str = mode_map[mode_num] or "normal"
+      if cap_vent and dev:supports_capability_by_id(cap_vent.ID) then
+        pcall(function()
+          dev:emit_event(cap_vent.ventMode({ value = mode_str }))
+        end)
+      end
+    end
+  end,
+
+  ["gas"] = function(dev, event_data)
+    if capabilities.valve then
+      local v_evt = (event_data.valve == "closed") and capabilities.valve.valve.closed() or capabilities.valve.valve.open()
+      dev:emit_event(v_evt)
+    end
+  end
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 실시간 기기 상태 이벤트 핸들러 (CH6 Server Push)
+-- ═══════════════════════════════════════════════════════════════════════════
+function TelemetryHandler.handle_device_state_event(driver, event_data)
+  if not event_data then return end
+  local d_id = tonumber(event_data.dev_id)
+  local s1 = tonumber(event_data.sub1)
+  local s2 = tonumber(event_data.sub2)
+  if not d_id or not s1 or not s2 then return end
+
+  local target_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+  local d_cls = event_data.class or "switch"
+
+  for _, dev in ipairs(driver:get_devices()) do
+    if dev.parent_assigned_child_key == target_key then
+      log.info(string.format("📡 [DEVICE STATE] %s (%s) State Update: Power=%s, Class=%s",
+                             dev.label, target_key, tostring(event_data.power), d_cls))
+
+      local handler = DEVICE_TELEMETRY_HANDLERS[d_cls] or DEVICE_TELEMETRY_HANDLERS["switch"]
+      handler(dev, event_data)
+      break
+    end
+  end
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 기기 락 변경 이벤트 핸들러 (CH6 Server Push)
+-- ═══════════════════════════════════════════════════════════════════════════
+function TelemetryHandler.handle_devices_updated_event(driver, event_data)
+  log.info("🔔 [DEVICES UPDATED] Gateway reports new device LOCKED! Click 'Add' on Child Device Manager to sync.")
+end
+
 return TelemetryHandler
+
 

@@ -5,20 +5,8 @@
 #include <cstddef>
 #include <cstring>
 #include "Common.h"
-#include "WallpadParser.h"
 
-// ============================================================================
-// ACK SLOT HINT (Wizard Semantic Hint)
-// 위저드가 현재 단계의 의미를 onControlTransaction()에 전달하는 타입.
-// 어떤 제조사/기기도 가정하지 않음 — 순수 의미론적 분류.
-// ============================================================================
-
-enum class AckSlotHint : uint8_t {
-  NONE  = 0,   // 일반 패시브 스니핑 (위저드 밖, 기존 추론 로직 유지)
-  POWER,       // 전원 ON / OFF / Away — power_offset 탐색 우선
-  TEMP,        // 희망온도 변경 — target_temp_offset 탐색 우선
-  SPEED,       // 풍량 변경 — fan_speed_offset 탐색 우선
-};
+struct AutoProbeDescriptor;
 
 // ============================================================================
 // CONTROL ACTION TYPES & SLOTS
@@ -30,6 +18,7 @@ enum class ControlActionType : uint8_t {
   FAN_SPEED,    // 풍량 변경 (환기/에어컨)
   VALVE_CLOSE,  // 밸브 닫기 (가스)
   MOMENTARY_TRIGGER, // 순간 호출 (엘리베이터 등)
+  VENT_MODE,    // 운전 모드 변경 (환기: 일반 0x01, 바이패스 0x02, 자동 0x03)
   UNKNOWN = 0xFF
 };
 
@@ -43,13 +32,12 @@ struct ActionSlot {
   uint8_t off_val{0x02};         // OFF / Inactive 토큰
   uint8_t min_val{0};            // 최소값 (온도 15℃, 풍량 1 등)
   uint8_t max_val{0};            // 최대값 (온도 30℃, 풍량 3 등)
-  uint8_t level_tokens[4]{0};    // 동적 관측된 이산 단계별 토큰 (예: 풍량 L1/L2/L3 등)
+  uint8_t level_tokens[4]{0};    // 이산 단계별 토큰 (예: 풍량 L1/L2/L3 등)
   uint8_t level_count{0};        // 등록된 이산 단계 토큰 개수
-  // ★ 컨텍스트 채널 분기별 독립 ACK 상태 슬롯 (Channel-Isolated ACK State Slots)
   uint8_t ack_state_offset{0xFF};     // 이 컨텍스트 채널 ACK 내 운전/가동 상태 오프셋
   uint8_t ack_target_offset{0xFF};    // 이 컨텍스트 채널 ACK 내 설정/제어값 오프셋
   uint8_t ack_telemetry_offset{0xFF}; // 이 컨텍스트 채널 ACK 내 환경 센서(현재온도 등) 오프셋
-  uint16_t sample_count{0};      // 관측/검증 횟수
+  uint16_t sample_count{0};
 };
 
 // ============================================================================
@@ -58,47 +46,17 @@ struct ActionSlot {
 
 enum class DeviceClass : uint8_t {
   UNKNOWN = 0,
-  SWITCH,     // 지속 릴레이 (ON/OFF) - 조명, 콘센트, 일괄소등
+  SWITCH,     // 지속 릴레이 (ON/OFF) - 조명, 일괄소등
+  OUTLET,     // 스마트 콘센트 (대기전력/소비전력 모니터링 포함)
   GAS,        // 차단 밸브 (단방향 닫기 / 차단) - 가스 밸브
   MOMENTARY,  // 단방향 순간 펄스 트리거 (호출) - 엘리베이터 호출, 현관문 열림
-  THERMOSTAT, // 연속 희망온도 파라미터 (14~36℃ 2개 슬롯) - 난방
-  VENT,       // 이산 다단계 풍량 파라미터 (1~3단) - 환기
+  THERMOSTAT, // 연속 희망온도 파라미터 - 난방
+  VENT,       // 이산 다단계 풍량 파라미터 - 환기
   AIRCON      // 온도 + 풍량 복합 파라미터 - 에어컨
 };
 
 struct SlotCoverage {
   DeviceClass dev_class{DeviceClass::UNKNOWN};
-  bool power_on_seen{false};
-  bool power_off_seen{false};
-  bool temp_set_seen{false};
-  bool away_mode_seen{false};
-  // ── 복합 상태 슬롯 (THERMOSTAT 전용, 필수)
-  bool temp_ready_on{false};         // 전원 OFF 후 온도 조작을 위해 다시 켠 상태
-  bool temp_while_off_seen{false};   // 꺼진 상태 온도 변경 → 켜기+온도 복합 패턴
-  bool temp_while_away_seen{false};  // 외출 모드 온도 변경 → 제조사별 상이한 응답 패턴
-  bool temp_recall_seen{false};      // 전원 OFF 후 Re-ON 시 직전 설정온도 복원 검증 완료
-  // ── 환기 / 에어컨 풍량
-  bool speed_ready_on{false};        // 전원 OFF 후 풍량 조작을 위해 다시 켠 상태
-  bool speed_l1_seen{false};
-  bool speed_l2_seen{false};
-  bool speed_l3_seen{false};
-  // ── 순간 펄스 (엘리베이터)
-  bool call_seen{false};
-  // ── 가스 / 차단
-  bool valve_close_seen{false};
-  // ── 콘센트
-  bool telemetry_masked{false};    // 전력량 오프셋 마스킹 완료
-  uint8_t observation_count{0};    // 총 관측 횟수
-
-  static DeviceClass classify(uint8_t dev_id, const AutoProbeDescriptor &ad);
-  bool isFullyCovered() const;
-};
-
-enum class ThermoOffTempBehavior : uint8_t {
-  UNKNOWN = 0,
-  AUTO_POWER_ON,    // 꺼진 상태에서 온도 변경 시 자동으로 전원이 켜짐
-  PASSIVE_MEMORY,   // 꺼진 상태로 온도가 메모리에만 저장됨
-  LOCKED_IGNORE     // 꺼진 상태에서는 조작 불가 (패킷 미발생)
 };
 
 // ============================================================================
@@ -118,17 +76,25 @@ struct AckStateSlots {
   uint8_t fan_speed_offset{0xFF};    // ACK 내 풍량 상태 위치 [FS]
   uint8_t valve_state_offset{0xFF};  // ACK 내 밸브 차단 상태 위치 [VS]
   uint8_t sample_count{0};
-  // ★ 교차 트랜잭션 변화 마스크 (Cross-Transaction Change Mask)
-  // POWER hint 트랜잭션에서 변한 ACK 바이트 위치를 비트맵으로 기록.
-  // TEMP/SPEED hint 탐색 시, 이 마스크에 등록된 위치(전원 종속 바이트)를 제외하면
-  // 어떤 제조사에서도 에코/전원 바이트를 사전지식 없이 자동 배제할 수 있다.
-  uint32_t power_changed_mask{0};    // bit N = ACK Byte #N이 POWER 트랜잭션에서 변함
+  uint32_t power_changed_mask{0};
+};
+
+struct QueryStateSlots {
+  bool discovered{false};
+  uint8_t expected_len{0};          // 쿼리 응답 패킷 길이 (예: 콘센트 18B, 난방 18B 등)
+  uint8_t power_offset{0xFF};       // 평상시 전원/가동 상태 바이트 오프셋 [AS]
+  uint8_t target_temp_offset{0xFF}; // 희망 설정온도 오프셋 [TT]
+  uint8_t current_temp_offset{0xFF};// 현재 환경온도 오프셋 [AT]
+  uint8_t fan_speed_offset{0xFF};   // 환기 풍량 오프셋 [FS]
+  uint8_t power_w_offset{0xFF};     // 콘센트 실시간 소비전력(W) 오프셋
+  uint8_t valve_state_offset{0xFF}; // 가스 차단 상태 오프셋 [VS]
+  bool is_bitmap_power{false};      // 다채널 비트맵 전원 여부
 };
 
 struct GroupControlTemplate {
   uint8_t dev_id{0x00};          // 기기 그룹 코드 (예: 0x19 조명, 0x18 난방 등)
   char group_name[16]{"Unknown"};// 그룹 명칭 ("Light", "Thermo", "Vent" 등)
-  uint8_t frame_len{0};          // 제어 패킷 프레임 길이 (11, 12, 21 등)
+  uint8_t frame_len{0};          // 제어 패킷 프레임 길이 (11, 13 등)
   uint8_t raw_template[32]{0};   // 기본 제어 프레임 골격
   
   // 주소 마스킹 오프셋
@@ -140,51 +106,121 @@ struct GroupControlTemplate {
   ActionSlot power_slot;         // 전원 제어 슬롯
   ActionSlot temp_slot;          // 온도 제어 슬롯 (난방)
   ActionSlot speed_slot;         // 풍량 제어 슬롯 (환기)
-  ActionSlot mode_slot;          // 운전 모드 슬롯 (환기 자연환기 0x42, 에어컨 냉방/제습 등)
+  ActionSlot mode_slot;          // 운전 모드 슬롯
   ActionSlot close_slot;         // 닫기 제어 슬롯 (가스)
   
-  SlotCoverage coverage;         // 슬롯 완전성 매트릭스
-  uint8_t volatile_mask[32]{0};  // 콘센트 텔레메트리 마스킹 비트맵
-  uint8_t away_temp_behavior{0}; // 0: 미정, 1: 해제+온도 복합, 2: 외출유지 예약, 3: 무시
-  uint8_t away_fixed_temp{0xFF}; // 외출 시 고정되는 설정온도 (예: 10℃)
-  uint8_t away_mode_token{0xFF}; // 외출 시 전원/모드 바이트에 실리는 코드 (예: 0x07, 0x02)
-  bool away_has_dedicated_temp{false}; // 외출 시 특정 온도로 고정 여부
-  bool temp_recall_verified{false};    // 켜기/외출해제 시 저장된 온도로 자동 복원 검증 완료
-  ThermoOffTempBehavior off_temp_behavior{ThermoOffTempBehavior::UNKNOWN};
-  uint8_t off_temp_unchanged_count{0}; // 꺼진 상태 온도 조작 시 ACK 무반응 횟수 추적 (3회 이상 시 LOCKED_IGNORE)
+  SlotCoverage coverage;         // 슬롯 매핑 정보
+  uint8_t away_mode_token{0xFF}; // 외출 시 전원/모드 바이트 코드 (현대: 0x07)
 
-  // 3-단계 순환 트랜잭션 캡처 버퍼 (시간순: [0] T-2, [1] T-1, [2] T_current)
-  PacketSnapshot ctl_hist[3];
-  PacketSnapshot ack_hist[3];
-  uint8_t hist_count{0};
-
-  // ACK 전용 자율 발견 상태 슬롯
+  // ACK 상태 슬롯 (제어 트랜잭션 응답)
   AckStateSlots ack_slots;
 
-  // 레거시 호환 단일/쌍 버퍼
-  uint8_t ctl_before_len{0};
-  uint8_t ctl_before_raw[32]{0};
-  uint8_t ctl_after_len{0};
-  uint8_t ctl_after_raw[32]{0};
-  uint8_t last_ctl_len{0};
-  uint8_t last_ctl_raw[32]{0};
-  uint8_t last_ack_before_len{0};
-  uint8_t last_ack_before_raw[32]{0};
-  uint8_t last_ack_after_len{0};
-  uint8_t last_ack_after_raw[32]{0};
+  // 쿼리 상태 슬롯 (수기/명세 주입)
+  QueryStateSlots query_slots;
 
-  // 학습 진행 상태
-  enum class Status : uint8_t {
-    EMPTY = 0,     // 기기 미등록
-    WAITING,       // 기기 그룹 등록됨, 제어 패킷 대기 중
-    CAPTURING,     // 제어 패킷 관측 시작
-    PARTIAL,       // ACK_before 없어 골격만 부분 학습
-    PROBING,       // 능동 검증(Active Probing) 진행 중
-    VERIFIED,      // 슬롯 완전 검증 완료
-    LOCKED         // 사용자 수동 잠금 (패킷 유입에 의한 변형 절대 불가, NVS 영구 보존)
-  } status{Status::EMPTY};
+  // ── 통합 슬롯 접근자 ──
+  inline uint8_t getPowerOffset(uint8_t pkt_len = 0) const {
+    if (pkt_len > 0) {
+      if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered && ack_slots.power_offset != 0xFF) {
+        return ack_slots.power_offset;
+      }
+      if (query_slots.discovered && query_slots.power_offset != 0xFF) {
+        return query_slots.power_offset;
+      }
+    }
+    if (ack_slots.discovered && ack_slots.power_offset != 0xFF) return ack_slots.power_offset;
+    if (query_slots.discovered && query_slots.power_offset != 0xFF) return query_slots.power_offset;
+    if (power_slot.discovered && power_slot.ack_state_offset != 0xFF) return power_slot.ack_state_offset;
+    return 0xFF;
+  }
 
-  uint32_t last_learned_ms{0};   // 마지막 학습 시각
+  inline uint8_t getTargetTempOffset(uint8_t pkt_len = 0) const {
+    if (pkt_len > 0) {
+      if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered && ack_slots.target_temp_offset != 0xFF) {
+        return ack_slots.target_temp_offset;
+      }
+      if (query_slots.discovered && query_slots.target_temp_offset != 0xFF) {
+        return query_slots.target_temp_offset;
+      }
+    }
+    if (query_slots.discovered && query_slots.target_temp_offset != 0xFF) return query_slots.target_temp_offset;
+    if (ack_slots.discovered && ack_slots.target_temp_offset != 0xFF) return ack_slots.target_temp_offset;
+    return 0xFF;
+  }
+
+  inline uint8_t getCurrentTempOffset(uint8_t pkt_len = 0) const {
+    if (pkt_len > 0) {
+      if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered && ack_slots.current_temp_offset != 0xFF) {
+        return ack_slots.current_temp_offset;
+      }
+      if (query_slots.discovered && query_slots.current_temp_offset != 0xFF) {
+        return query_slots.current_temp_offset;
+      }
+    }
+    if (query_slots.discovered && query_slots.current_temp_offset != 0xFF) return query_slots.current_temp_offset;
+    if (ack_slots.discovered && ack_slots.current_temp_offset != 0xFF) return ack_slots.current_temp_offset;
+    return 0xFF;
+  }
+
+  inline uint8_t getFanSpeedOffset(uint8_t pkt_len = 0) const {
+    if (pkt_len > 0) {
+      if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered && ack_slots.fan_speed_offset != 0xFF) {
+        return ack_slots.fan_speed_offset;
+      }
+      if (query_slots.discovered && query_slots.fan_speed_offset != 0xFF) {
+        return query_slots.fan_speed_offset;
+      }
+    }
+    if (query_slots.discovered && query_slots.fan_speed_offset != 0xFF) return query_slots.fan_speed_offset;
+    if (ack_slots.discovered && ack_slots.fan_speed_offset != 0xFF) return ack_slots.fan_speed_offset;
+    return 0xFF;
+  }
+
+  inline uint8_t decodeFanSpeed(uint8_t raw_token) const {
+    if (speed_slot.level_count > 0) {
+      for (uint8_t i = 0; i < speed_slot.level_count; ++i) {
+        if (speed_slot.level_tokens[i] == raw_token) {
+          return static_cast<uint8_t>(i + 1);
+        }
+      }
+    }
+    // 레벨 토큰 매핑 실패 또는 미설정 시 기본 1~3단 및 레거시/실측 토큰 호환
+    // 실측 토큰: 0x11 (1단), 0x13 (2단), 0x17 (3단), 0x10 (자동/가변)
+    if (raw_token == 0x11 || raw_token == 0x01) return 1;
+    if (raw_token == 0x13 || raw_token == 0x03 || raw_token == 2) return 2;
+    if (raw_token == 0x17 || raw_token == 0x07 || raw_token == 3) return 3;
+    if (raw_token == 0x10) return 1; // 자동 가변 풍량 시 기본 1단 매핑
+    if (raw_token >= 1 && raw_token <= 3) return raw_token;
+    return 1;
+  }
+
+  inline uint8_t decodeVentMode(uint8_t raw_byte) const {
+    // Byte #8 운전 모드 토큰 (1:일반, 2:바이패스, 3:자동, 4:공기청정, 0x81:Reject)
+    if (raw_byte >= 1 && raw_byte <= 4) return raw_byte;
+    uint8_t nibble_mode = (raw_byte >> 4) & 0x0F;
+    if (nibble_mode >= 1 && nibble_mode <= 4) return nibble_mode;
+    return 1; // 기본 일반 환기 (0x01)
+  }
+
+  inline uint8_t getValveStateOffset(uint8_t pkt_len = 0) const {
+    if (pkt_len > 0) {
+      if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered && ack_slots.valve_state_offset != 0xFF) {
+        return ack_slots.valve_state_offset;
+      }
+      if (query_slots.discovered && query_slots.valve_state_offset != 0xFF) {
+        return query_slots.valve_state_offset;
+      }
+    }
+    if (query_slots.discovered && query_slots.valve_state_offset != 0xFF) return query_slots.valve_state_offset;
+    if (ack_slots.discovered && ack_slots.valve_state_offset != 0xFF) return ack_slots.valve_state_offset;
+    return 0xFF;
+  }
+
+  inline uint8_t getWattageOffset(uint8_t pkt_len = 0) const {
+    if (pkt_len > 0 && pkt_len < 16) return 0xFF;
+    if (query_slots.discovered && query_slots.power_w_offset != 0xFF) return query_slots.power_w_offset;
+    return 0xFF;
+  }
 };
 
 // ============================================================================
@@ -200,7 +236,7 @@ public:
   void init();
   void clear();
 
-  // 수렴 완료 시점 자동 골격 합성
+  // 수렴 완료 시점 자동 골격 합성 (ProfileMatcher 연계)
   void synthesizeFromConvergedCache();
 
   // 그룹 등록 및 조회
@@ -212,15 +248,6 @@ public:
   bool resetGroup(uint8_t dev_id, bool full_reset = false);
   bool setGroupName(uint8_t dev_id, const char *name);
   bool setGroupClass(uint8_t dev_id, DeviceClass cls, const char *name = nullptr);
-  bool lockGroup(uint8_t dev_id, bool lock_all = false);
-  bool unlockGroup(uint8_t dev_id, bool unlock_all = false);
-
-  // 순수 이벤트 구동형 삼각 차분 분석 (Triplet Differential Sniffer)
-  // hint: 위저드가 알고 있는 이번 트랜잭션의 의미론적 목적 (POWER/TEMP/SPEED/NONE)
-  void onControlTransaction(const StaticPacket &ctl,
-                            const StaticPacket &ack_before,
-                            const StaticPacket &ack_after,
-                            AckSlotHint hint = AckSlotHint::NONE);
 
   // 제어 패킷 조립 (스마트싱스 및 외부 연동 공용)
   bool buildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
@@ -243,3 +270,14 @@ private:
 };
 
 extern ControlTemplateRegistry g_control_registry;
+
+namespace ControlTemplateUtils {
+inline void getControlNamespace(char *out_ns, size_t max_len, uint8_t prof_idx) {
+  snprintf(out_ns, max_len, "ctl_p%u", prof_idx);
+}
+
+inline uint8_t getCurrentProfileIndex() {
+  CriticalSectionLocker lock(&g_config_mux);
+  return g_config.wallpad_profile;
+}
+} // namespace ControlTemplateUtils

@@ -1,0 +1,8 @@
+{
+  "platformio-ide.useBuiltinPIOCore": true,
+  "platformio-ide.customPATH": "C:\\pio\\penv\\Scripts",
+  "git.autoRepositoryDetection": "sub",
+  "git.ignoredRepositories": [
+    "/Users/eri/Library/CloudStorage/OneDrive-개인/Home/SmartThings"
+  ]
+}

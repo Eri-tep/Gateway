@@ -9,7 +9,7 @@
   },
   "detailView": [
     {
-      "label": "\u200b",
+      "label": "Catalog Match",
       "displayType": "state",
       "state": {
         "label": "{{signature.value}}"

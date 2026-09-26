@@ -1,0 +1,50 @@
+{
+  "tag": "ko",
+  "label": "팬 모드",
+  "attributes": {
+    "ventMode": {
+      "label": "팬 모드",
+      "displayTemplate": "{{attribute}} of {{device.label}} is {{value}}",
+      "i18n": {
+        "value": {
+          "normal": {
+            "label": "일반 환기"
+          },
+          "bypass": {
+            "label": "자연 환기"
+          },
+          "clean": {
+            "label": "공기 청정"
+          },
+          "auto": {
+            "label": "자동 환기"
+          }
+        }
+      }
+    }
+  },
+  "commands": {
+    "setVentMode": {
+      "label": "팬 모드 설정",
+      "arguments": {
+        "mode": {
+          "i18n": {
+            "normal": {
+              "label": "일반 환기"
+            },
+            "bypass": {
+              "label": "자연 환기"
+            },
+            "clean": {
+              "label": "공기 청정"
+            },
+            "auto": {
+              "label": "자동 환기"
+            }
+          },
+          "label": "모드"
+        }
+      }
+    }
+  }
+}

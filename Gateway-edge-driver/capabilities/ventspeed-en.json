@@ -1,0 +1,44 @@
+{
+  "tag": "en",
+  "label": "Fan Speed",
+  "attributes": {
+    "ventSpeed": {
+      "label": "Fan Speed",
+      "displayTemplate": "{{attribute}} of {{device.label}} is {{value}}",
+      "i18n": {
+        "value": {
+          "low": {
+            "label": "Low"
+          },
+          "medium": {
+            "label": "Medium"
+          },
+          "high": {
+            "label": "High"
+          }
+        }
+      }
+    }
+  },
+  "commands": {
+    "setVentSpeed": {
+      "label": "Set Fan Speed",
+      "arguments": {
+        "speed": {
+          "i18n": {
+            "low": {
+              "label": "Low"
+            },
+            "medium": {
+              "label": "Medium"
+            },
+            "high": {
+              "label": "High"
+            }
+          },
+          "label": "Speed"
+        }
+      }
+    }
+  }
+}

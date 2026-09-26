@@ -1,0 +1,137 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "label": "{{ventSpeed.value}}",
+        "alternatives": [
+          {
+            "key": "low",
+            "value": "약풍",
+            "type": "active"
+          },
+          {
+            "key": "medium",
+            "value": "중풍",
+            "type": "active"
+          },
+          {
+            "key": "high",
+            "value": "강풍",
+            "type": "active"
+          }
+        ]
+      }
+    ],
+    "actions": [],
+    "panelItems": []
+  },
+  "detailView": [
+    {
+      "label": "팬 속도",
+      "displayType": "list",
+      "list": {
+        "command": {
+          "name": "setVentSpeed",
+          "alternatives": [
+            {
+              "key": "low",
+              "value": "약풍",
+              "type": "active"
+            },
+            {
+              "key": "medium",
+              "value": "중풍",
+              "type": "active"
+            },
+            {
+              "key": "high",
+              "value": "강풍",
+              "type": "active"
+            }
+          ],
+          "argumentType": "string"
+        },
+        "state": {
+          "value": "ventSpeed.value",
+          "valueType": "string",
+          "alternatives": [
+            {
+              "key": "low",
+              "value": "약풍",
+              "type": "active"
+            },
+            {
+              "key": "medium",
+              "value": "중풍",
+              "type": "active"
+            },
+            {
+              "key": "high",
+              "value": "강풍",
+              "type": "active"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "automation": {
+    "conditions": [
+      {
+        "label": "팬 속도",
+        "displayType": "list",
+        "list": {
+          "alternatives": [
+            {
+              "key": "low",
+              "value": "약풍",
+              "type": "active"
+            },
+            {
+              "key": "medium",
+              "value": "중풍",
+              "type": "active"
+            },
+            {
+              "key": "high",
+              "value": "강풍",
+              "type": "active"
+            }
+          ],
+          "value": "ventSpeed.value",
+          "valueType": "string",
+          "multiSelectable": false
+        }
+      }
+    ],
+    "actions": [
+      {
+        "label": "팬 속도",
+        "displayType": "list",
+        "list": {
+          "alternatives": [
+            {
+              "key": "low",
+              "value": "약풍",
+              "type": "active"
+            },
+            {
+              "key": "medium",
+              "value": "중풍",
+              "type": "active"
+            },
+            {
+              "key": "high",
+              "value": "강풍",
+              "type": "active"
+            }
+          ],
+          "command": "setVentSpeed",
+          "argumentType": "string"
+        }
+      }
+    ]
+  },
+  "id": "digituniverse06711.ventspeed",
+  "version": 1
+}

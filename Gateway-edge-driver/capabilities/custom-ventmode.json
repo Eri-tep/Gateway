@@ -1,0 +1,26 @@
+{
+  "name": "ventMode",
+  "attributes": {
+    "ventMode": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "bypass",
+              "clean",
+              "auto"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "value"
+        ]
+      }
+    }
+  },
+  "commands": {}
+}

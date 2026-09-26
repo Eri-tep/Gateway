@@ -3,9 +3,9 @@ components:
   - id: main
     label: "Devices"
     capabilities:
-      - id: digituniverse06711.activeDevice
+      - id: digituniverse06711.device
         version: 1
-      - id: digituniverse06711.childDeviceManager
+      - id: digituniverse06711.deviceManager
         version: 1
       - id: refresh
         version: 1
@@ -19,11 +19,9 @@ components:
         version: 1
       - id: digituniverse06711.profile
         version: 1
-      - id: digituniverse06711.frame
+      - id: digituniverse06711.catalogMatch
         version: 1
-      - id: digituniverse06711.checksum
-        version: 1
-      - id: digituniverse06711.opcodes
+      - id: digituniverse06711.blueprints
         version: 1
     categories:
       - name: Hub
@@ -77,10 +75,61 @@ components:
       - name: Hub
 
 preferences:
+  # ==========================================
+  # Group 1: Wi-Fi 관련 설정 (최상단)
+  # ==========================================
+  - preferenceId: wifiOperationMode
+    name: wifiOperationMode
+    title: "Wi-Fi Mode"
+    description: "Operating Mode"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        "STA": "STA"
+        "AP_STA": "AP_STA"
+      default: "STA"
+
+  - preferenceId: newWifiSsid
+    name: newWifiSsid
+    title: "Wi-Fi SSID"
+    description: "Network Name"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 0
+      maxLength: 32
+      default: ""
+
+  - preferenceId: newWifiPassword
+    name: newWifiPassword
+    title: "Wi-Fi Password"
+    description: "Network Password"
+    required: false
+    preferenceType: string
+    definition:
+      stringType: password
+      minLength: 0
+      maxLength: 64
+      default: ""
+
+  - preferenceId: applyWifiConfig
+    name: applyWifiConfig
+    title: "Wi-Fi Apply"
+    description: "Apply Credentials"
+    required: false
+    preferenceType: boolean
+    definition:
+      default: false
+
+  # ==========================================
+  # Group 2: 게이트웨이 연동 IP / Port
+  # ==========================================
   - preferenceId: gatewayIp
     name: gatewayIp
-    title: "Gateway IP Address"
-    description: "ESP32 Gateway IPv4 Address"
+    title: "Gateway IP"
+    description: "IPv4 Address"
     required: true
     preferenceType: string
     definition:
@@ -92,7 +141,7 @@ preferences:
   - preferenceId: gatewayPort
     name: gatewayPort
     title: "Gateway Port"
-    description: "JSON-RPC Management Port (Default: 8900)"
+    description: "Management Port"
     required: true
     preferenceType: integer
     definition:
@@ -100,36 +149,36 @@ preferences:
       maximum: 65535
       default: 8900
 
-  - preferenceId: wallpadProfileSlot
-    name: wallpadProfileSlot
-    title: "Wallpad Profile"
-    description: "Select RS-485 Wallpad Protocol Profile"
+  - preferenceId: pollingInterval
+    name: pollingInterval
+    title: "Gateway Interval"
+    description: "Refresh Rate (sec)"
     required: true
-    preferenceType: enumeration
+    preferenceType: integer
     definition:
-      options:
-        0: "Auto Detect"
-        1: "The_Astin (Slot 1)"
-        2: "Custom 2 (Slot 2)"
-        3: "Custom 3 (Slot 3)"
-      default: 1
+      minimum: 5
+      maximum: 300
+      default: 30
 
-  - preferenceId: wifiOperationMode
-    name: wifiOperationMode
-    title: "Wi-Fi Mode"
-    description: "Gateway Wi-Fi Operating Mode"
+  # ==========================================
+  # Group 3: Git 및 펌웨어 업데이트 경로
+  # ==========================================
+  - preferenceId: githubRepo
+    name: githubRepo
+    title: "GitHub Repository"
+    description: "Owner/Repository"
     required: true
-    preferenceType: enumeration
+    preferenceType: string
     definition:
-      options:
-        "STA": "STA (Station Mode)"
-        "AP_STA": "AP_STA (Concurrent Mode)"
-      default: "STA"
+      stringType: text
+      minLength: 3
+      maxLength: 64
+      default: "Eri-tep/Gateway"
 
   - preferenceId: otaChannel
     name: otaChannel
-    title: "OTA Release Channel"
-    description: "Select Firmware OTA Update Channel"
+    title: "Release Channel"
+    description: "Firmware Channel"
     required: true
     preferenceType: enumeration
     definition:
@@ -138,10 +187,41 @@ preferences:
         "beta": "Beta"
       default: "main"
 
+  - preferenceId: wallpadProfileSlot
+    name: wallpadProfileSlot
+    title: "Wallpad Profile"
+    description: "Protocol Slot"
+    required: true
+    preferenceType: enumeration
+    definition:
+      options:
+        0: "Auto Detect"
+        1: "Custom 1"
+        2: "Custom 2"
+        3: "Custom 3"
+      default: 0
+
+  - preferenceId: logLevel
+    name: logLevel
+    title: "Log Level"
+    description: "Logcat Verbosity"
+    required: false
+    preferenceType: enumeration
+    definition:
+      options:
+        "DEBUG": "DEBUG"
+        "INFO": "INFO"
+        "WARN": "WARN"
+        "ERROR": "ERROR"
+      default: "INFO"
+
+  # ==========================================
+  # Group 4: 채널별 주기 및 지연 설정
+  # ==========================================
   - preferenceId: ch1PollInterval
     name: ch1PollInterval
-    title: "CH1 Master Polling Interval (ms)"
-    description: "Device status polling interval (Default: 1000ms)"
+    title: "CH1 Query Delay"
+    description: "Polling Interval (ms)"
     required: true
     preferenceType: integer
     definition:
@@ -151,8 +231,8 @@ preferences:
 
   - preferenceId: ch2AckDelay
     name: ch2AckDelay
-    title: "CH2 Main Wallpad ACK Delay (ms)"
-    description: "Virtual ACK delay for main wallpad (Default: 30ms)"
+    title: "CH2 Ack Delay"
+    description: "Virtual ACK (ms)"
     required: true
     preferenceType: integer
     definition:
@@ -162,174 +242,12 @@ preferences:
 
   - preferenceId: ch3AckDelay
     name: ch3AckDelay
-    title: "CH3 Sub Wallpad ACK Delay (ms)"
-    description: "Virtual ACK delay for sub wallpad (Default: 240ms)"
+    title: "CH3 Ack Delay"
+    description: "Virtual ACK (ms)"
     required: true
     preferenceType: integer
     definition:
       minimum: 0
       maximum: 500
       default: 240
-
-  - preferenceId: pollingInterval
-    name: pollingInterval
-    title: "Telemetry Polling Interval (sec)"
-    description: "System health and status refresh interval in seconds"
-    required: true
-    preferenceType: integer
-    definition:
-      minimum: 5
-      maximum: 300
-      default: 30
-
-  - preferenceId: githubRepo
-    name: githubRepo
-    title: "GitHub Repository (Owner/Repo)"
-    description: "GitHub Release Repository (Default: Eri-tep/Gateway)"
-    required: true
-    preferenceType: string
-    definition:
-      stringType: text
-      minLength: 3
-      maxLength: 64
-      default: "Eri-tep/Gateway"
-
-  # Wi-Fi Network Credentials
-  - preferenceId: newWifiSsid
-    name: newWifiSsid
-    title: "Target Wi-Fi SSID"
-    description: "Enter Wi-Fi network name (SSID) to connect"
-    required: false
-    preferenceType: string
-    definition:
-      stringType: text
-      minLength: 0
-      maxLength: 32
-      default: ""
-
-  - preferenceId: newWifiPassword
-    name: newWifiPassword
-    title: "Target Wi-Fi Password"
-    description: "Enter Wi-Fi password (leave blank for open network)"
-    required: false
-    preferenceType: string
-    definition:
-      stringType: password
-      minLength: 0
-      maxLength: 64
-      default: ""
-
-  - preferenceId: applyWifiConfig
-    name: applyWifiConfig
-    title: "Apply Wi-Fi (ON to Commit)"
-    description: "Enter Target SSID & Password above, then turn ON to apply and reconnect"
-    required: false
-    preferenceType: boolean
-    definition:
-      default: false
-
-  # RS-485 Serial UART Settings
-  - preferenceId: ch1Baudrate
-    name: ch1Baudrate
-    title: "CH1 RS-485 Baudrate (Wallpad)"
-    description: "CH1 baudrate (Range: 1200 ~ 115200, Default: 9600)"
-    required: true
-    preferenceType: integer
-    definition:
-      minimum: 1200
-      maximum: 115200
-      default: 9600
-
-  - preferenceId: ch1Framing
-    name: ch1Framing
-    title: "CH1 RS-485 Framing"
-    description: "Data bits, Parity, Stop bits"
-    required: true
-    preferenceType: enumeration
-    definition:
-      options:
-        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
-        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
-        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
-        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
-      default: "8N1"
-
-  - preferenceId: ch2Baudrate
-    name: ch2Baudrate
-    title: "CH2 RS-485 Baudrate (Sub 1)"
-    description: "CH2 baudrate (Range: 1200 ~ 115200, Default: 9600)"
-    required: true
-    preferenceType: integer
-    definition:
-      minimum: 1200
-      maximum: 115200
-      default: 9600
-
-  - preferenceId: ch2Framing
-    name: ch2Framing
-    title: "CH2 RS-485 Framing"
-    description: "Data bits, Parity, Stop bits"
-    required: true
-    preferenceType: enumeration
-    definition:
-      options:
-        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
-        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
-        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
-        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
-      default: "8N1"
-
-  - preferenceId: ch3Baudrate
-    name: ch3Baudrate
-    title: "CH3 RS-485 Baudrate (Sub 2)"
-    description: "CH3 baudrate (Range: 1200 ~ 115200, Default: 9600)"
-    required: true
-    preferenceType: integer
-    definition:
-      minimum: 1200
-      maximum: 115200
-      default: 9600
-
-  - preferenceId: ch3Framing
-    name: ch3Framing
-    title: "CH3 RS-485 Framing"
-    description: "Data bits, Parity, Stop bits"
-    required: true
-    preferenceType: enumeration
-    definition:
-      options:
-        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
-        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
-        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
-        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
-      default: "8N1"
-
-  - preferenceId: ch4Baudrate
-    name: ch4Baudrate
-    title: "CH4 RS-485 Baudrate (Doorphone)"
-    description: "CH4 baudrate (Range: 1200 ~ 115200, Default: 3860)"
-    required: true
-    preferenceType: integer
-    definition:
-      minimum: 1200
-      maximum: 115200
-      default: 3860
-
-  - preferenceId: ch4Framing
-    name: ch4Framing
-    title: "CH4 RS-485 Framing"
-    description: "Data bits, Parity, Stop bits"
-    required: true
-    preferenceType: enumeration
-    definition:
-      options:
-        "8N1": "8-N-1 (None Parity, 1 Stop Bit)"
-        "8E1": "8-E-1 (Even Parity, 1 Stop Bit)"
-        "8O1": "8-O-1 (Odd Parity, 1 Stop Bit)"
-        "8N2": "8-N-2 (None Parity, 2 Stop Bits)"
-      default: "8E1"
-
-metadata:
-  vid: "49ab1b3e-0d78-30e3-a20d-7df30bb4f651"
-  mnmn: "SmartThingsCommunity"
 

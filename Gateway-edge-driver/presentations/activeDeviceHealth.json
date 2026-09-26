@@ -9,7 +9,7 @@
   },
   "detailView": [
     {
-      "label": "\u200b",
+      "label": "Blueprints",
       "displayType": "state",
       "state": {
         "label": "{{deviceHealth.value}}"

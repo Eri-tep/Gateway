@@ -1,0 +1,11 @@
+name: child-gas
+components:
+  - id: main
+    label: "가스 밸브"
+    capabilities:
+      - id: valve
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Valve
