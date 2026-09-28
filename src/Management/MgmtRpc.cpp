@@ -611,11 +611,12 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
-  if (strcasecmp(cmd, "get_locked_devices") == 0 || strcasecmp(cmd, "gld") == 0) {
+  if (strcasecmp(cmd, "get_devices") == 0 || strcasecmp(cmd, "gd") == 0 ||
+      strcasecmp(cmd, "get_locked_devices") == 0 || strcasecmp(cmd, "gld") == 0) {
     static char dev_buf[4096];
     dev_buf[0] = '\0';
     AppendBuf ab{dev_buf, sizeof(dev_buf)};
-    Mgmt_SerializeLockedDevices(ab);
+    Mgmt_SerializeDevices(ab, req_id);
     send(sock, ab.buf, ab.offset, MSG_DONTWAIT);
     g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     return;

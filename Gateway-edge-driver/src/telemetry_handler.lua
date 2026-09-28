@@ -715,7 +715,7 @@ end
 -- 기기 락 변경 이벤트 핸들러 (CH6 Server Push)
 -- ═══════════════════════════════════════════════════════════════════════════
 function TelemetryHandler.handle_devices_updated_event(driver, event_data)
-  log.info("🔔 [DEVICES UPDATED] Gateway reports new device LOCKED! Click 'Add' on Child Device Manager to sync.")
+  log.info("🔔 [DEVICES UPDATED] Gateway reports device list updated. Click 'Add' on Child Device Manager to sync.")
 end
 
 return TelemetryHandler

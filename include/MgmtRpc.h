@@ -50,7 +50,7 @@ extern MgmtSession g_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
 void Mgmt_Init();
 void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len);
 void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id = -1);
-void Mgmt_SerializeLockedDevices(AppendBuf &out);
+void Mgmt_SerializeDevices(AppendBuf &out, long req_id = -1);
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str);
 enum class DeviceClass : uint8_t;
 

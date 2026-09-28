@@ -1,6 +1,7 @@
 local gateway_client = require "gateway_client"
 local telemetry_handler = require "telemetry_handler"
 local capabilities = require "st.capabilities"
+local cosock = require "cosock"
 local log = require "log"
 
 local CommandHandlers = {}
@@ -81,7 +82,7 @@ function CommandHandlers.handle_refresh(driver, device, command)
     -- 게이트웨이에서 최신 실제 기기 상태 조회하여 즉시 동기화
     local ip, port = get_gateway_ip_port(driver)
     device.thread:call_with_delay(0.1, function()
-      local res, _ = gateway_client.get_locked_devices(ip, port)
+      local res, _ = gateway_client.get_devices(ip, port)
       if res and res.devices then
         for _, ldev in ipairs(res.devices) do
           local d_id = tonumber(ldev.dev_id) or 0
@@ -344,113 +345,126 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
   end
 
   if action == "add" then
-    local front_exists = false
-    local lobby_exists = false
-
-    for _, dev in ipairs(driver:get_devices()) do
-      local p_key = dev.parent_assigned_child_key
-      if p_key == CHILD_FRONT_KEY or dev.label == "세대 도어 (현관)" then
-        front_exists = true
-      elseif p_key == CHILD_LOBBY_KEY or dev.label == "로비 도어 (공동현관)" then
-        lobby_exists = true
-      end
+    if device:get_field("sync_in_progress") then
+      log.warn("⚠️ [CHILD] Child device sync already in progress, ignoring duplicate action")
+      return
     end
+    device:set_field("sync_in_progress", true)
 
-    if not front_exists then
-      log.info("🚪 [CHILD] Creating '세대 도어' Child Device...")
-      local success, err = driver:try_create_device({
-        type = "EDGE_CHILD",
-        label = "세대 도어",
-        profile = "single-door-device",
-        parent_device_id = device.id,
-        parent_assigned_child_key = CHILD_FRONT_KEY
-      })
-      if not success then
-        log.error("❌ [CHILD] Failed to create front door child: " .. tostring(err))
-      end
-    else
-      log.info("ℹ️ [CHILD] Front door child device already exists")
-    end
+    cosock.spawn(function()
+      local front_exists = false
+      local lobby_exists = false
 
-    if not lobby_exists then
-      log.info("🚪 [CHILD] Creating '로비 도어' Child Device...")
-      local success, err = driver:try_create_device({
-        type = "EDGE_CHILD",
-        label = "로비 도어",
-        profile = "single-door-device",
-        parent_device_id = device.id,
-        parent_assigned_child_key = CHILD_LOBBY_KEY
-      })
-      if not success then
-        log.error("❌ [CHILD] Failed to create lobby door child: " .. tostring(err))
-      end
-    else
-      log.info("ℹ️ [CHILD] Lobby door child device already exists")
-    end
-
-    -- ★ 게이트웨이에서 학습 및 LOCK된 기기 목록 동적 조회 및 자동 생성
-    local ip = device.preferences.gatewayIp or "172.30.1.3"
-    local port = tonumber(device.preferences.gatewayPort) or 8900
-    log.info(string.format("🔍 [CHILD] Fetching LOCKED devices from Gateway %s:%d...", ip, port))
-    local res, err = gateway_client.get_locked_devices(ip, port)
-
-    if res and res.devices and #res.devices > 0 then
-      log.info(string.format("📦 [CHILD] Found %d LOCKED devices on Gateway! Syncing...", #res.devices))
-      for _, ldev in ipairs(res.devices) do
-        local d_id = tonumber(ldev.dev_id) or 0
-        local s1 = tonumber(ldev.sub1) or 0
-        local s2 = tonumber(ldev.sub2) or 0
-        local d_cls = ldev.class or "switch"
-        local d_name = ldev.name or string.format("Device %02X-%d-%d", d_id, s1, s2)
-        local child_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
-
-        local exists = false
-        for _, ex_dev in ipairs(driver:get_devices()) do
-          if ex_dev.parent_assigned_child_key == child_key then
-            exists = true
-            break
-          end
+      for _, dev in ipairs(driver:get_devices()) do
+        local p_key = dev.parent_assigned_child_key
+        if p_key == CHILD_FRONT_KEY or dev.label == "세대 도어 (현관)" then
+          front_exists = true
+        elseif p_key == CHILD_LOBBY_KEY or dev.label == "로비 도어 (공동현관)" then
+          lobby_exists = true
         end
+      end
 
-        if not exists then
-          local prof = CLASS_TO_PROFILE[d_cls] or "child-switch"
-
-          log.info(string.format("✨ [CHILD] Creating Device '%s' (%s) with key '%s' [Profile: %s]...",
-                                 d_name, d_cls, child_key, prof))
-          local success, c_err = driver:try_create_device({
-            type = "EDGE_CHILD",
-            label = d_name,
-            profile = prof,
-            parent_device_id = device.id,
-            parent_assigned_child_key = child_key
-          })
-          if not success then
-            log.error(string.format("❌ [CHILD] Failed to create child device '%s': %s", d_name, tostring(c_err)))
-          end
+      if not front_exists then
+        log.info("🚪 [CHILD] Creating '세대 도어' Child Device...")
+        local success, err = driver:try_create_device({
+          type = "EDGE_CHILD",
+          label = "세대 도어",
+          profile = "single-door-device",
+          parent_device_id = device.id,
+          parent_assigned_child_key = CHILD_FRONT_KEY
+        })
+        if not success then
+          log.error("❌ [CHILD] Failed to create front door child: " .. tostring(err))
         else
-          log.info(string.format("ℹ️ [CHILD] Device '%s' (%s) already exists", child_key, d_name))
+          cosock.socket.sleep(0.5)
         end
+      else
+        log.info("ℹ️ [CHILD] Front door child device already exists")
       end
 
-      -- 자식 기기 생성 및 등록 후 게이트웨이의 최신 실제 상태를 즉시 동기화
-      device.thread:call_with_delay(0.8, function()
+      if not lobby_exists then
+        log.info("🚪 [CHILD] Creating '로비 도어' Child Device...")
+        local success, err = driver:try_create_device({
+          type = "EDGE_CHILD",
+          label = "로비 도어",
+          profile = "single-door-device",
+          parent_device_id = device.id,
+          parent_assigned_child_key = CHILD_LOBBY_KEY
+        })
+        if not success then
+          log.error("❌ [CHILD] Failed to create lobby door child: " .. tostring(err))
+        else
+          cosock.socket.sleep(0.5)
+        end
+      else
+        log.info("ℹ️ [CHILD] Lobby door child device already exists")
+      end
+
+      -- ★ 게이트웨이에서 활성 기기 목록 동적 조회 및 자동 생성 (현대화된 get_devices RPC)
+      local ip = device.preferences.gatewayIp or "172.30.1.3"
+      local port = tonumber(device.preferences.gatewayPort) or 8900
+      log.info(string.format("🔍 [CHILD] Fetching active devices from Gateway %s:%d...", ip, port))
+      local res, err = gateway_client.get_devices(ip, port)
+
+      if res and res.devices and #res.devices > 0 then
+        log.info(string.format("📦 [CHILD] Found %d active devices on Gateway! Syncing...", #res.devices))
+        for _, ldev in ipairs(res.devices) do
+          local d_id = tonumber(ldev.dev_id) or 0
+          local s1 = tonumber(ldev.sub1) or 0
+          local s2 = tonumber(ldev.sub2) or 0
+          local d_cls = ldev.class or "switch"
+          local d_name = ldev.name or string.format("Device %02X-%d-%d", d_id, s1, s2)
+          local child_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+
+          local exists = false
+          for _, ex_dev in ipairs(driver:get_devices()) do
+            if ex_dev.parent_assigned_child_key == child_key then
+              exists = true
+              break
+            end
+          end
+
+          if not exists then
+            local prof = CLASS_TO_PROFILE[d_cls] or "child-switch"
+
+            log.info(string.format("✨ [CHILD] Creating Device '%s' (%s) with key '%s' [Profile: %s]...",
+                                   d_name, d_cls, child_key, prof))
+            local success, c_err = driver:try_create_device({
+              type = "EDGE_CHILD",
+              label = d_name,
+              profile = prof,
+              parent_device_id = device.id,
+              parent_assigned_child_key = child_key
+            })
+            if not success then
+              log.error(string.format("❌ [CHILD] Failed to create child device '%s': %s", d_name, tostring(c_err)))
+            else
+              -- 기기 생성 간 0.5초 대기로 허브 이벤트 루프 과부하 방지
+              cosock.socket.sleep(0.5)
+            end
+          else
+            log.info(string.format("ℹ️ [CHILD] Device '%s' (%s) already exists", child_key, d_name))
+          end
+        end
+
+        -- 자식 기기 생성 및 등록 후 SmartThings 플랫폼 초기화 완료를 위한 1.5초 대기 (Race condition 방지)
+        cosock.socket.sleep(1.5)
         log.info("🔄 [CHILD] Applying initial states for all child devices from Gateway...")
         for _, ldev in ipairs(res.devices) do
           telemetry_handler.handle_device_state_event(driver, ldev)
         end
-      end)
-    elseif err then
-      log.error("❌ [CHILD] Failed to fetch locked devices: " .. tostring(err))
-    else
-      log.info("ℹ️ [CHILD] No LOCKED devices found on Gateway yet.")
-    end
+      elseif err then
+        log.error("❌ [CHILD] Failed to fetch devices from Gateway: " .. tostring(err))
+      else
+        log.info("ℹ️ [CHILD] No active devices found on Gateway yet.")
+      end
 
-    -- 2.0초 후 자동으로 Idle 복귀
-    device.thread:call_with_delay(2.0, function()
+      -- 동기화 완료 후 락 해제 및 Idle 복귀
+      device:set_field("sync_in_progress", nil)
       if cap_mgr and comp_main then
         device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
       end
-    end)
+    end, "child_device_add_worker")
   elseif action == "remove" then
     log.info("🗑️ [CHILD] Removing All Child Devices...")
     local targets = {}

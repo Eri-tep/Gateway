@@ -224,8 +224,12 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
   out.append("}}");
 }
 
-void Mgmt_SerializeLockedDevices(AppendBuf &out) {
-  out.append("{\"res\":\"ok\",\"devices\":[");
+void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
+  if (req_id != -1) {
+    out.appendFormat("{\"id\":%ld,\"res\":\"ok\",\"devices\":[", req_id);
+  } else {
+    out.append("{\"res\":\"ok\",\"devices\":[");
+  }
   size_t count = g_device_repo.count();
   size_t locked_count = 0;
 

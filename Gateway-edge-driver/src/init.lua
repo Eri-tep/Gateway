@@ -61,37 +61,37 @@ local EVENT_HANDLERS = {
 local function device_init(driver, device)
   log.info("Initializing Device: " .. tostring(device.label) .. " (Type: " .. tostring(device.type) .. ")")
 
-  -- 자식 기기(도어폰 - 세대 도어 / 로비 도어 / 레거시)인 경우 초기 상태 설정
+  -- ★ 자식 기기 전체 분기 가드: p_key가 존재하면 절대 부모 영역으로 fallthrough되지 않음
   local p_key = device.parent_assigned_child_key or ""
-  if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
-    local cap_motion = capabilities.motionSensor
-    local comp_main = device.profile.components["main"]
-    if comp_main then
-      device:emit_component_event(comp_main, capabilities.switch.switch.off())
-      if cap_motion then
-        device:emit_component_event(comp_main, cap_motion.motion.inactive())
+  if p_key ~= "" then
+    -- 1) 도어폰 초기화
+    if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
+      local cap_motion = capabilities.motionSensor
+      local comp_main = device.profile.components["main"]
+      if comp_main then
+        device:emit_component_event(comp_main, capabilities.switch.switch.off())
+        if cap_motion then
+          device:emit_component_event(comp_main, cap_motion.motion.inactive())
+        end
       end
-    end
-    local comp_lobby = device.profile.components["lobby"]
-    if comp_lobby then
-      device:emit_component_event(comp_lobby, capabilities.switch.switch.off())
-      if cap_motion then
-        device:emit_component_event(comp_lobby, cap_motion.motion.inactive())
+      local comp_lobby = device.profile.components["lobby"]
+      if comp_lobby then
+        device:emit_component_event(comp_lobby, capabilities.switch.switch.off())
+        if cap_motion then
+          device:emit_component_event(comp_lobby, cap_motion.motion.inactive())
+        end
       end
+      return
     end
-    return
-  end
 
-  -- ★ 동적 자식 기기 (LOCKED 조명/콘센트/난방/환기/가스/엘리베이터)인 경우 초기 상태 설정
-  if p_key:match("^dev_") then
-    -- 자식 기기에 혹시 남아있을 수 있는 롤링 타이머/레지스트리 완전 제거
+    -- 2) 동적 자식 기기 (조명/콘센트/난방/환기/가스/엘리베이터 등)
     if device:get_field("master_roll_timer") then
       device.thread:cancel_timer(device:get_field("master_roll_timer"))
       device:set_field("master_roll_timer", nil)
     end
     device:set_field("ticker_registry", nil)
 
-    -- 1. Outlet 초기화 (월초 리셋 검사 & 누적 전력량 복원)
+    -- Outlet 초기화
     if device:supports_capability_by_id(capabilities.energyMeter.ID) then
       local cur_month = os.date("%Y-%m")
       local last_month = device:get_field("last_energy_month")
@@ -107,17 +107,17 @@ local function device_init(driver, device)
       device:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
     end
 
-    -- 2. Thermostat 초기화 (지원 모드 메타데이터만 등록, 기존 상태는 보존)
+    -- Thermostat 초기화
     if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
       device:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
     end
 
-    -- 2-1. Air Conditioner 초기화
+    -- Air Conditioner 초기화
     if device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
       device:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "dry", "wind", "auto", "heat" }))
     end
 
-    -- 3. Elevator 초기화 (상태 이력: 대기 중)
+    -- Elevator 초기화
     local cap_hist = capabilities["digituniverse06711.history"]
     if cap_hist and p_key:match("^dev_34_") then
       local ev = cap_hist.history({ value = "대기 중" })
@@ -125,6 +125,7 @@ local function device_init(driver, device)
       device:emit_event(ev)
     end
 
+    log.info(string.format("Child Device initialized successfully: %s", p_key))
     return
   end
 
@@ -169,8 +170,14 @@ local function device_init(driver, device)
 end
 
 local function device_added(driver, device)
+  local p_key = device.parent_assigned_child_key or ""
+  if p_key ~= "" then
+    log.info(string.format("Child Device added to SmartThings: %s", p_key))
+    return
+  end
   log.info("ESP32 Gateway Device added to SmartThings")
-  device:set_field("ota_channel", device.preferences.otaChannel or "main")
+  local prefs = device.preferences or {}
+  device:set_field("ota_channel", prefs.otaChannel or "main")
 end
 
 local function device_info_changed(driver, device, event, args)
@@ -268,7 +275,17 @@ local function device_info_changed(driver, device, event, args)
 end
 
 local function device_removed(driver, device)
-  log.info("Device removed, canceling timers")
+  local p_key = device.parent_assigned_child_key or ""
+  if p_key ~= "" then
+    log.info(string.format("Child Device removed: %s", p_key))
+    if device:get_field("master_roll_timer") then
+      device.thread:cancel_timer(device:get_field("master_roll_timer"))
+      device:set_field("master_roll_timer", nil)
+    end
+    return
+  end
+
+  log.info("Parent Gateway Device removed, canceling timers and closing socket")
   if device:get_field("poll_timer") then
     device.thread:cancel_timer(device:get_field("poll_timer"))
     device:set_field("poll_timer", nil)
@@ -276,6 +293,12 @@ local function device_removed(driver, device)
   if device:get_field("master_roll_timer") then
     device.thread:cancel_timer(device:get_field("master_roll_timer"))
     device:set_field("master_roll_timer", nil)
+  end
+
+  local sock = device:get_field("tcp_client")
+  if sock then
+    pcall(function() sock:close() end)
+    device:set_field("tcp_client", nil)
   end
 end
 

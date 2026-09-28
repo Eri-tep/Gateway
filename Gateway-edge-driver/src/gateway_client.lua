@@ -159,10 +159,14 @@ function GatewayClient.doorphone_action(ip, port, action)
   })
 end
 
-function GatewayClient.get_locked_devices(ip, port)
+function GatewayClient.get_devices(ip, port)
   return GatewayClient.send_rpc(ip, port, {
-    cmd = "get_locked_devices"
+    cmd = "get_devices"
   })
+end
+
+function GatewayClient.get_locked_devices(ip, port)
+  return GatewayClient.get_devices(ip, port)
 end
 
 function GatewayClient.device_control(ip, port, dev_id, sub1, sub2, action, value)
