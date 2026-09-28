@@ -326,6 +326,7 @@ local CHILD_LOBBY_KEY = "doorphone_lobby"
 local CLASS_TO_PROFILE = {
   outlet = "child-outlet",
   thermostat = "child-thermostat",
+  aircon = "child-aircon",
   vent = "child-vent",
   gas = "child-gas",
   momentary = "child-momentary",
@@ -653,6 +654,41 @@ function CommandHandlers.handle_child_set_thermostat_mode(driver, device, comman
   end
 
   gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
+end
+
+function CommandHandlers.handle_child_set_cooling_setpoint(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local raw_temp = (command.args and command.args.setpoint) or 24
+  local temp = math.floor((tonumber(raw_temp) or 24) + 0.5)
+  local ip, port = get_gateway_ip_port(driver)
+  log.info(string.format("❄️ [AIRCON CMD] %s SetCoolingTemp -> %dC (DevID 0x%02X %d-%d)", device.label, temp, d_id, s1, s2))
+
+  local sp_evt = capabilities.thermostatCoolingSetpoint.coolingSetpoint({ value = temp, unit = "C" })
+  sp_evt.state_change = true
+  device:emit_event(sp_evt)
+
+  device:set_field("last_aircon_temp", temp, { persist = true })
+  gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
+end
+
+function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local mode = (command.args and command.args.mode) or "cool"
+  local mode_code = 1 -- cool
+  if mode == "cool" then mode_code = 1
+  elseif mode == "dry" then mode_code = 2
+  elseif mode == "wind" or mode == "fan" then mode_code = 3
+  elseif mode == "auto" then mode_code = 4
+  elseif mode == "heat" then mode_code = 5
+  end
+
+  local ip, port = get_gateway_ip_port(driver)
+  log.info(string.format("❄️ [AIRCON CMD] %s SetAirconMode -> %s (%d, DevID 0x%02X %d-%d)", device.label, mode, mode_code, d_id, s1, s2))
+  device:emit_event(capabilities.airConditionerMode.airConditionerMode(mode))
+
+  gateway_client.device_control(ip, port, d_id, s1, s2, "mode", mode_code)
 end
 
 local VENT_MODE_MAP = {

@@ -245,6 +245,38 @@ inline void parseMomentaryState(uint8_t dev_id, const StaticPacket &ack, DeviceS
   }
 }
 
+inline void parseAirconState(const StaticPacket &ack, DeviceStateEntry *dev,
+                             int &b_pwr, int &b_vent_mode, int &b_spd, int &b_c_temp, int &b_t_temp) {
+  size_t state_idx = (ack.length == 14) ? 7 : 8;
+  if (state_idx + 4 >= ack.length) return;
+
+  uint8_t raw_state = ack.data[state_idx];
+  uint8_t raw_mode  = ack.data[state_idx + 1];
+  uint8_t raw_spd   = ack.data[state_idx + 2];
+  uint8_t raw_amb   = ack.data[state_idx + 3];
+  uint8_t raw_tgt   = ack.data[state_idx + 4];
+
+  b_pwr = ((raw_state & 0x7F) == 0x01) ? 1 : 0;
+
+  if (raw_mode >= 1 && raw_mode <= 5) {
+    b_vent_mode = raw_mode;
+  }
+  if (raw_spd >= 1 && raw_spd <= 4) {
+    b_spd = raw_spd;
+  } else if (raw_spd == 0) {
+    b_spd = 4;
+  }
+  if (raw_amb >= 5 && raw_amb <= 50) {
+    b_c_temp = raw_amb;
+    dev->last_current_temp = raw_amb;
+  }
+  uint8_t t_int = raw_tgt & 0x7F;
+  if (t_int >= 5 && t_int <= 35) {
+    b_t_temp = t_int;
+    dev->last_target_temp = t_int;
+  }
+}
+
 } // anonymous namespace
 
 void DeviceRepository::updateFromBus(StaticPacket &ack) {
@@ -255,6 +287,34 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
 
   if (UNLIKELY(ack.length < 5))
     return;
+
+  // 구형(Legacy) 34B 난방 브로드캐스트 처리 (Packet[1]==0x22 && Dev==0x18 && Opcode==0x04)
+  if (ack.length == 34 && ack.data[3] == 0x18 && ack.data[4] == 0x04) {
+    for (uint8_t r = 1; r <= 8; ++r) {
+      size_t base = 8 + (r - 1) * 3;
+      uint8_t r_state = ack.data[base];
+      uint8_t r_amb   = ack.data[base + 1];
+      uint8_t r_tgt   = ack.data[base + 2];
+      if (r_state == 0x00) continue;
+
+      uint8_t r_sub1 = 0x10 + r;
+      int r_pwr = (r_state == 0x01) ? 1 : ((r_state == 0x07) ? 2 : 0);
+      {
+        MutexLocker lock(_cache_mutex);
+        DeviceStateEntry *r_dev = findMutable(0x18, r_sub1, 0, true);
+        if (r_dev) {
+          r_dev->last_updated_ms = millis();
+          r_dev->timeout_count = 0;
+          r_dev->is_online = true;
+          r_dev->last_current_temp = r_amb;
+          r_dev->last_target_temp = r_tgt;
+        }
+      }
+      Mgmt_BroadcastDeviceState(0x18, r_sub1, 0, DeviceClass::THERMOSTAT, r_pwr, r_tgt, r_amb, 0, "closed", 0.0f, 1, 0, 0, 1);
+    }
+    return;
+  }
+
   auto *parser = WallpadParserFactory::getActiveParser();
   if (!parser)
     return;
@@ -363,6 +423,7 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
               parseMomentaryState(dev_id, ack, dev, b_pwr, b_floor, b_direction, b_ho);
               break;
             case DeviceClass::AIRCON:
+              parseAirconState(ack, dev, b_pwr, b_vent_mode, b_spd, b_c_temp, b_t_temp);
               break;
             case DeviceClass::OUTLET:
               parseOutletState(grp, ack, b_power_w);
@@ -433,7 +494,26 @@ void Ch1_BuildQueryPacket(StaticPacket &out, uint8_t dev_id, uint8_t sub1,
   }
 }
 } // namespace PacketBuilder
+static std::atomic<uint32_t> s_last_ch1_tx_ms{0};
+
+void Ch1_RecordTxFinish() {
+  s_last_ch1_tx_ms.store(millis(), std::memory_order_release);
+}
+
 void Ch1_WaitBusIdle(uint32_t silence_ms) {
+  // 1. 연속 제어 명령 간 120ms Guard Interval 보장
+  uint32_t last_tx = s_last_ch1_tx_ms.load(std::memory_order_acquire);
+  if (last_tx > 0) {
+    uint32_t now_tx = millis();
+    constexpr uint32_t kGuardIntervalMs = 120;
+    if (now_tx - last_tx < kGuardIntervalMs) {
+      uint32_t rem_tx = kGuardIntervalMs - (now_tx - last_tx);
+      if (rem_tx > 0) {
+        vTaskDelay(pdMS_TO_TICKS(rem_tx) > 0 ? pdMS_TO_TICKS(rem_tx) : 1);
+      }
+    }
+  }
+
   uint32_t last_act = g_ch1_bus_ms.load(std::memory_order_acquire);
   uint32_t now_ms = millis();
 
@@ -479,6 +559,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     uart_write_bytes(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
     uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
     g_ch1_bus_ms.store(millis(), std::memory_order_release);
+    Ch1_RecordTxFinish();
     g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
   }
 

@@ -112,6 +112,11 @@ local function device_init(driver, device)
       device:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
     end
 
+    -- 2-1. Air Conditioner 초기화
+    if device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
+      device:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "dry", "wind", "auto", "heat" }))
+    end
+
     -- 3. Elevator 초기화 (상태 이력: 대기 중)
     local cap_hist = capabilities["digituniverse06711.history"]
     if cap_hist and p_key:match("^dev_34_") then
@@ -310,8 +315,14 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     [capabilities.thermostatHeatingSetpoint.ID] = {
       [capabilities.thermostatHeatingSetpoint.commands.setHeatingSetpoint.NAME] = command_handlers.handle_child_set_heating_setpoint
     },
+    [capabilities.thermostatCoolingSetpoint.ID] = {
+      [capabilities.thermostatCoolingSetpoint.commands.setCoolingSetpoint.NAME] = command_handlers.handle_child_set_cooling_setpoint
+    },
     [capabilities.thermostatMode.ID] = {
       [capabilities.thermostatMode.commands.setThermostatMode.NAME] = command_handlers.handle_child_set_thermostat_mode
+    },
+    [capabilities.airConditionerMode.ID] = {
+      [capabilities.airConditionerMode.commands.setAirConditionerMode.NAME] = command_handlers.handle_child_set_aircon_mode
     },
     [capabilities.fanSpeed.ID] = {
       [capabilities.fanSpeed.commands.setFanSpeed.NAME] = command_handlers.handle_child_set_fan_speed

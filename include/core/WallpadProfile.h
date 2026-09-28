@@ -115,6 +115,13 @@ constexpr DeviceSpec kHyundaiDevices[] = {
     11, 7, 0x06, 0x00, 0xFF,
     13, 8, 0xFF, 0xFF, 0xFF, false, 0xFF, 0xFF, 0xFF,
     11, 7, 8, 0xFF
+  },
+  // 0x1C 시스템 에어컨 / FCU (Aircon)
+  {
+    0x1C, DeviceClass::AIRCON, "Aircon",
+    11, 7, 0x01, 0x02, 0xFF,
+    15, 8, 12, 11, 10, true, 9, 0xFF, 0xFF,
+    11, 7, 8, 0xFF
   }
 };
 

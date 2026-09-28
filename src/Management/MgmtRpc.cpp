@@ -553,6 +553,19 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       s_dp_fsm.op_open = op_open;
       s_dp_fsm.op_end = op_end;
 
+      // 50ms Pre-Guard Time: 벨 수신 직후 3840 bps 반이중 버스 충돌 방지용 Line Silent 대기
+      uint32_t last_bell = g_doorphone_state.last_bell_ms.load(std::memory_order_acquire);
+      if (last_bell > 0) {
+        uint32_t now_ms = millis();
+        constexpr uint32_t kDpPreGuardMs = 50;
+        if (now_ms - last_bell < kDpPreGuardMs) {
+          uint32_t rem_ms = kDpPreGuardMs - (now_ms - last_bell);
+          if (rem_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(rem_ms) > 0 ? pdMS_TO_TICKS(rem_ms) : 1);
+          }
+        }
+      }
+
       sendDpPacket(dp_stx, op_call, dp_etx);
       esp_timer_start_once(s_dp_fsm.timer, 350000); // 350ms 후 문열림 패킷 전송
 
