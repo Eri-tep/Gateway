@@ -134,13 +134,13 @@ void Task_Ch4(void *pvParameters) {
   esp_task_wdt_add(nullptr);
   StaticPacket packet_to_tx;
 
-  static uint8_t buf[128] = {0};
-  static size_t buf_len = 0;
-  static uint32_t last_byte_ms = 0;  // 마지막 수신 바이트 타임스탬프
-  static StaticPacket last_tx_pkt{};
-  static uint32_t last_tx_ms = 0;
-  static StaticPacket last_pkt{};
-  static uint32_t last_pkt_ms = 0;
+  uint8_t buf[128] = {0};
+  size_t buf_len = 0;
+  uint32_t last_byte_ms = 0;  // 마지막 수신 바이트 타임스탬프
+  StaticPacket last_tx_pkt{};
+  uint32_t last_tx_ms = 0;
+  StaticPacket last_pkt{};
+  uint32_t last_pkt_ms = 0;
 
   if (g_system_event_group) {
     xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);

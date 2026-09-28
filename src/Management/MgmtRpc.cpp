@@ -84,10 +84,10 @@ namespace {
 struct DoorphoneFsm {
   enum class Step : uint8_t { IDLE = 0, CALL_SENT, OPEN_SENT };
   std::atomic<Step> step{Step::IDLE};
-  uint8_t c_stx{0x7F};
-  uint8_t c_etx{0xEE};
-  uint8_t op_open{0};
-  uint8_t op_end{0};
+  std::atomic<uint8_t> c_stx{0x7F};
+  std::atomic<uint8_t> c_etx{0xEE};
+  std::atomic<uint8_t> op_open{0};
+  std::atomic<uint8_t> op_end{0};
   esp_timer_handle_t timer{nullptr};
 };
 
@@ -109,11 +109,15 @@ static void onDoorphoneTimer(void *arg) {
   (void)arg;
   DoorphoneFsm::Step cur = s_dp_fsm.step.load(std::memory_order_acquire);
   if (cur == DoorphoneFsm::Step::CALL_SENT) {
-    sendDpPacket(s_dp_fsm.c_stx, s_dp_fsm.op_open, s_dp_fsm.c_etx);
+    sendDpPacket(s_dp_fsm.c_stx.load(std::memory_order_acquire),
+                 s_dp_fsm.op_open.load(std::memory_order_acquire),
+                 s_dp_fsm.c_etx.load(std::memory_order_acquire));
     s_dp_fsm.step.store(DoorphoneFsm::Step::OPEN_SENT, std::memory_order_release);
     esp_timer_start_once(s_dp_fsm.timer, 750000); // 750ms 후 종료 패킷 전송
   } else if (cur == DoorphoneFsm::Step::OPEN_SENT) {
-    sendDpPacket(s_dp_fsm.c_stx, s_dp_fsm.op_end, s_dp_fsm.c_etx);
+    sendDpPacket(s_dp_fsm.c_stx.load(std::memory_order_acquire),
+                 s_dp_fsm.op_end.load(std::memory_order_acquire),
+                 s_dp_fsm.c_etx.load(std::memory_order_acquire));
     g_doorphone_state.front_bell.store(false, std::memory_order_release);
     g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
     s_dp_fsm.step.store(DoorphoneFsm::Step::IDLE, std::memory_order_release);
@@ -173,21 +177,25 @@ static inline long findJsonIntValue(const char *json, const char *key, long defa
 }
 
 static void sendRpcResponse(int sock, long req_id, const char *res, const char *msg = nullptr) {
-  char buf[160];
+  if (sock < 0) return;
+  char buf[384];
+  int len = 0;
   if (req_id >= 0) {
     if (msg) {
-      snprintf(buf, sizeof(buf), "{\"res\":\"%s\",\"msg\":\"%s\",\"id\":%ld}\n", res, msg, req_id);
+      len = snprintf(buf, sizeof(buf), "{\"res\":\"%s\",\"msg\":\"%s\",\"id\":%ld}\n", res, msg, req_id);
     } else {
-      snprintf(buf, sizeof(buf), "{\"res\":\"%s\",\"id\":%ld}\n", res, req_id);
+      len = snprintf(buf, sizeof(buf), "{\"res\":\"%s\",\"id\":%ld}\n", res, req_id);
     }
   } else {
     if (msg) {
-      snprintf(buf, sizeof(buf), "{\"res\":\"%s\",\"msg\":\"%s\"}\n", res, msg);
+      len = snprintf(buf, sizeof(buf), "{\"res\":\"%s\",\"msg\":\"%s\"}\n", res, msg);
     } else {
-      snprintf(buf, sizeof(buf), "{\"res\":\"%s\"}\n", res);
+      len = snprintf(buf, sizeof(buf), "{\"res\":\"%s\"}\n", res);
     }
   }
-  send(sock, buf, strlen(buf), MSG_DONTWAIT);
+  if (len > 0 && static_cast<size_t>(len) < sizeof(buf)) {
+    send(sock, buf, len, MSG_DONTWAIT);
+  }
 }
 
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
@@ -548,10 +556,10 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
         return;
       }
 
-      s_dp_fsm.c_stx = dp_stx;
-      s_dp_fsm.c_etx = dp_etx;
-      s_dp_fsm.op_open = op_open;
-      s_dp_fsm.op_end = op_end;
+      s_dp_fsm.c_stx.store(dp_stx, std::memory_order_release);
+      s_dp_fsm.c_etx.store(dp_etx, std::memory_order_release);
+      s_dp_fsm.op_open.store(op_open, std::memory_order_release);
+      s_dp_fsm.op_end.store(op_end, std::memory_order_release);
 
       // 50ms Pre-Guard Time: 벨 수신 직후 3840 bps 반이중 버스 충돌 방지용 Line Silent 대기
       uint32_t last_bell = g_doorphone_state.last_bell_ms.load(std::memory_order_acquire);
@@ -673,10 +681,10 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     g_control_dispatcher.dispatch(req, dummy);
 
     if (act == ControlActionType::SET_TEMP) {
-      DeviceStateEntry *dev = g_device_repo.findMutable(static_cast<uint8_t>(dev_id), static_cast<uint8_t>(sub1), static_cast<uint8_t>(sub2), false);
-      if (dev) {
-        dev->last_target_temp = static_cast<uint8_t>(val);
-      }
+      g_device_repo.setTargetTemp(static_cast<uint8_t>(dev_id),
+                                  static_cast<uint8_t>(sub1),
+                                  static_cast<uint8_t>(sub2),
+                                  static_cast<uint8_t>(val));
     }
 
     // 현대통신 환기 장치(0x2B) 전원 ON 시 게이트웨이가 자체적으로 0x43 운전 모드 조회 패킷을 연계 주입

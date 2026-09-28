@@ -78,9 +78,9 @@ const DeviceStateEntry *DeviceRepository::getAt(size_t index) const noexcept {
 
 bool DeviceRepository::getSnapshot(size_t index,
                                    DeviceStateEntry &out_copy) noexcept {
+  MutexLocker lock(_cache_mutex);
   if (index >= device_count)
     return false;
-  MutexLocker lock(_cache_mutex);
   out_copy.dev_id = cache[index].dev_id;
   out_copy.sub1 = cache[index].sub1;
   out_copy.sub2 = cache[index].sub2;
@@ -94,6 +94,17 @@ bool DeviceRepository::getSnapshot(size_t index,
   out_copy.timeout_count = cache[index].timeout_count;
   out_copy.is_online = cache[index].is_online;
   return true;
+}
+
+bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                     uint8_t temp) noexcept {
+  MutexLocker lock(_cache_mutex);
+  auto *dev = findMutable(dev_id, sub1, sub2, false);
+  if (dev) {
+    dev->last_target_temp = temp;
+    return true;
+  }
+  return false;
 }
 
 bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,

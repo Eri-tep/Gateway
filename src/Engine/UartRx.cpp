@@ -44,8 +44,9 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
             continue;
           }
 
-          out.length = static_cast<uint8_t>(stream_len);
-          memcpy(out.data.data(), stream, stream_len);
+          size_t copy_len = std::min(stream_len, out.data.size());
+          out.length = static_cast<uint8_t>(copy_len);
+          memcpy(out.data.data(), stream, copy_len);
           stream_len = 0;
           last_rx_ms = 0;
           return UartRxStatus::SUCCESS;
@@ -173,8 +174,9 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
     g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
     if (!(echo_match && echo_match->length == stream_len &&
           memcmp(echo_match->data.data(), stream, stream_len) == 0)) {
-      out.length = static_cast<uint8_t>(stream_len);
-      memcpy(out.data.data(), stream, stream_len);
+      size_t copy_len = std::min(stream_len, out.data.size());
+      out.length = static_cast<uint8_t>(copy_len);
+      memcpy(out.data.data(), stream, copy_len);
       return UartRxStatus::SUCCESS;
     }
   }

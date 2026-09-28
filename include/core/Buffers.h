@@ -32,15 +32,17 @@ inline void FormatHex(const uint8_t *data, size_t len, char *out,
 
 inline void FormatElapsed(uint32_t now, uint32_t timestamp, char *out,
                           size_t out_len) noexcept {
-  if (timestamp == 0) {
-    snprintf(out, out_len, "Never");
-  } else {
-    float el = (now - timestamp) / 1000.0f;
-    if (el < 60.0f)
-      snprintf(out, out_len, "%.1fs", el);
-    else
-      snprintf(out, out_len, "%lum", static_cast<unsigned long>(el / 60));
+  if (timestamp == 0 || out_len == 0) {
+    if (out_len > 0)
+      snprintf(out, out_len, "Never");
+    return;
   }
+  uint32_t el_ms = (now >= timestamp) ? (now - timestamp) : 0;
+  float el = el_ms / 1000.0f;
+  if (el < 60.0f)
+    snprintf(out, out_len, "%.1fs", el);
+  else
+    snprintf(out, out_len, "%lum", static_cast<unsigned long>(el / 60));
 }
 } // namespace Fmt
 

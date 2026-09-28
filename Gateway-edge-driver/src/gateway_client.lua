@@ -250,12 +250,14 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
           end
 
           is_alive = false
-          persistent_tcp = nil
+          if persistent_tcp == tcp then
+            persistent_tcp = nil
+          end
           pcall(function() tcp:close() end)
           -- 남아있는 대기열 Fail-safe 언락
           for req_id, ch in pairs(pending_requests) do
             pending_requests[req_id] = nil
-            ch:send({ error = "Connection closed" })
+            pcall(function() ch:send({ error = "Connection closed" }) end)
           end
         else
           tcp:close()

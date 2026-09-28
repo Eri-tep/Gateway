@@ -223,6 +223,8 @@ public:
   void setLastStalePollMs(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                           uint32_t ms) noexcept;
   void setLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept;
+  bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                     uint8_t temp) noexcept;
   void updateFromBus(StaticPacket &ack);
   void handlePollingTimeout(const DeviceStateEntry *dev);
   void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);

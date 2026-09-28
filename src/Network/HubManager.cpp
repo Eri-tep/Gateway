@@ -128,10 +128,24 @@ void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
   slot->last_rx_ms = millis();
 
   if (slot->rx_len + len > sizeof(slot->rx_buf)) {
-    slot->rx_len = 0;
+    uint8_t stx = slot->tracker.candidate_stx.load(std::memory_order_relaxed);
+    if (stx == 0)
+      stx = PKT_STX;
+    size_t stx_pos = 0;
+    while (stx_pos < slot->rx_len && slot->rx_buf[stx_pos] != stx) {
+      stx_pos++;
+    }
+    if (stx_pos > 0 && stx_pos < slot->rx_len) {
+      memmove(slot->rx_buf, slot->rx_buf + stx_pos, slot->rx_len - stx_pos);
+      slot->rx_len -= stx_pos;
+    } else if (stx_pos >= slot->rx_len) {
+      slot->rx_len = 0;
+    }
   }
-  std::copy(data, data + len, slot->rx_buf + slot->rx_len);
-  slot->rx_len += len;
+
+  size_t copy_len = std::min(len, sizeof(slot->rx_buf) - slot->rx_len);
+  std::copy(data, data + copy_len, slot->rx_buf + slot->rx_len);
+  slot->rx_len += copy_len;
 
   int slot_idx = static_cast<int>(slot - g_hub_slots);
   Ew11Manager::processStream(slot_idx, slot);

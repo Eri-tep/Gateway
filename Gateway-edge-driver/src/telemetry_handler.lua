@@ -109,6 +109,11 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   end
 
   log.info("📊 ══════════════ [ESP32 GATEWAY 6-CARD TELEMETRY REPORT] ══════════════")
+  data.system = data.system or {}
+  data.wifi = data.wifi or {}
+  data.ota = data.ota or {}
+  data.profile = data.profile or {}
+  data.cache = data.cache or {}
 
   -- ═══════════════════════════════════════════════════════════════════════════
   -- CARD 1: Devices (최상단 단독 카드 - 23/23)
