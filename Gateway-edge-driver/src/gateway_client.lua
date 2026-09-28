@@ -165,10 +165,6 @@ function GatewayClient.get_devices(ip, port)
   })
 end
 
-function GatewayClient.get_locked_devices(ip, port)
-  return GatewayClient.get_devices(ip, port)
-end
-
 function GatewayClient.device_control(ip, port, dev_id, sub1, sub2, action, value)
   local payload = {
     c = "ctl",

@@ -663,7 +663,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 
     const GroupControlTemplate *grp = g_control_registry.findGroup(static_cast<uint8_t>(dev_id));
     if (!grp) {
-      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Device is not registered in blueprint registry\"}\n";
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Device is not registered in ctl_spec registry\"}\n";
       send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
       return;
     }
@@ -673,7 +673,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
                                               static_cast<uint8_t>(sub1),
                                               static_cast<uint8_t>(sub2),
                                               act, static_cast<int>(val), req)) {
-      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Failed to build control packet (blueprint missing or forbidden action)\"}\n";
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Failed to build control packet (ctl_spec missing or forbidden action)\"}\n";
       send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
       return;
     }

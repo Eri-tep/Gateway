@@ -101,19 +101,12 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
   char cat_match_buf[64] = "None";
   const auto *matched_p = ProfileMatcher::getActiveProfile();
   if (matched_p) {
-    snprintf(cat_match_buf, sizeof(cat_match_buf), "%s (%u Devices)",
-             matched_p->vendor_name, static_cast<unsigned>(matched_p->device_count));
+    snprintf(cat_match_buf, sizeof(cat_match_buf), "%s", matched_p->vendor_name);
   }
 
   size_t grp_cnt = g_control_registry.getGroupCount();
   char bp_buf[64];
-  if (auto_desc.offsets_locked && grp_cnt >= 6) {
-    snprintf(bp_buf, sizeof(bp_buf), "%u Groups (Locked)", static_cast<unsigned>(grp_cnt));
-  } else if (grp_cnt > 0) {
-    snprintf(bp_buf, sizeof(bp_buf), "%u Groups (Learning)", static_cast<unsigned>(grp_cnt));
-  } else {
-    snprintf(bp_buf, sizeof(bp_buf), "0 Groups (Waiting)");
-  }
+  snprintf(bp_buf, sizeof(bp_buf), "%u Groups", static_cast<unsigned>(grp_cnt));
 
   bool fully_locked = (g_config.wallpad_profile != 0) ||
                       (auto_desc.is_locked && auto_desc.opcodes_locked && auto_desc.offsets_locked);

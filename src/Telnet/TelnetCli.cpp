@@ -127,7 +127,7 @@ void TelnetManager::bindCommands(TelnetSession *session) {
       {"wifi", "Manage WiFi STA connection [status|scan|connect|disconnect]", WifiCli::cmdWifi},
       {"trace", "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]", WallpadCli::cmdTrace},
       {"wallpad", "Wallpad protocol & auto-probing [status|list|set|save|delete|auto|reset]", WallpadCli::cmdWallpad},
-      {"ctl", "Device control blueprints & view [view|send|reset]", WallpadCli::cmdCtl},
+      {"ctl", "Device control specs [view|reset|name|class]", WallpadCli::cmdCtl},
       {"config", "View or modify runtime configuration [set|reset]", ConfigCli::cmdConfig},
       {"save", "Save current runtime configuration to NVS flash", ConfigCli::cmdSave},
       {"ew11", "CH5 EW11 multi-client hub config [list|set|enable|disable]", ConfigCli::cmdEw11},

@@ -161,17 +161,17 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
 
   local prof = data.profile or {}
 
-  -- 2-2. Catalog Match (Hyundai HT)
+  -- 2-2. Catalog Match (e.g. "Hyundai HT")
   local cat_match = prof.catalog_match or "None"
-  cat_match = cat_match:gsub("%s*%b()", "") -- "(6 Devices)" 제거
+  cat_match = cat_match:gsub("%s*%b()", "")
   local cap_match = capabilities["digituniverse06711.catalogMatch"]
   if cap_match then
     emit_event(device, comp_wallpad, cap_match.match({ value = cat_match }))
   end
 
-  -- 2-3. Blueprints (6 Groups)
+  -- 2-3. Control Specs (e.g. "6 Groups")
   local bp_status = prof.blueprints or "0 Groups"
-  bp_status = bp_status:gsub("%s*%b()", "") -- "(Locked)", "(Learning)" 제거
+  bp_status = bp_status:gsub("%s*%b()", "")
   local cap_bp = capabilities["digituniverse06711.blueprints"]
   if cap_bp then
     emit_event(device, comp_wallpad, cap_bp.status({ value = bp_status }))

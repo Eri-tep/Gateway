@@ -9,7 +9,7 @@
   },
   "detailView": [
     {
-      "label": "Blueprints",
+      "label": "Control Specs",
       "displayType": "state",
       "state": {
         "label": "{{deviceHealth.value}}"
