@@ -265,11 +265,6 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
         prefs.clear();
         prefs.end();
       }
-      Preferences leg;
-      if (leg.begin("ctl_tmpls", false)) {
-        leg.clear();
-        leg.end();
-      }
       synthesizeFromConvergedCache();
     } else {
       saveToNvs();
@@ -476,22 +471,15 @@ void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
   getControlNamespace(ns, sizeof(ns), prof_idx);
 
   Preferences prefs;
-  bool is_legacy_migration = false;
-
   if (!prefs.begin(ns, true) || prefs.getUChar("cnt", 0) == 0) {
     prefs.end();
-    if (prefs.begin("ctl_tmpls", true) && prefs.getUChar("cnt", 0) > 0) {
-      is_legacy_migration = true;
-    } else {
-      prefs.end();
-      taskENTER_CRITICAL(&_mux);
-      _group_count = 0;
-      for (size_t i = 0; i < MAX_GROUPS; ++i) {
-        _groups[i] = GroupControlTemplate{};
-      }
-      taskEXIT_CRITICAL(&_mux);
-      return;
+    taskENTER_CRITICAL(&_mux);
+    _group_count = 0;
+    for (size_t i = 0; i < MAX_GROUPS; ++i) {
+      _groups[i] = GroupControlTemplate{};
     }
+    taskEXIT_CRITICAL(&_mux);
+    return;
   }
 
   uint8_t cnt = prefs.getUChar("cnt", 0);
@@ -543,15 +531,6 @@ void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
     }
   }
   prefs.end();
-
-  if (is_legacy_migration) {
-    saveToNvsForProfile(prof_idx);
-    Preferences leg;
-    if (leg.begin("ctl_tmpls", false)) {
-      leg.clear();
-      leg.end();
-    }
-  }
 }
 
 void ControlTemplateRegistry::onProfileChanged(uint8_t old_prof_idx, uint8_t new_prof_idx) {

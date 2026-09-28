@@ -205,52 +205,10 @@ public:
 };
 
 // ============================================================================
-// MODULAR WALLPAD PARSER INTERFACE & DATA-DRIVEN UNIVERSAL ENGINE
+// WALLPAD PROTOCOL ENGINE
 // ============================================================================
 
-class IWallpadParser {
-public:
-  virtual ~IWallpadParser() = default;
-
-  virtual const char *getVendorName() const = 0;
-  virtual const char *getProfileKey() const = 0;
-
-  // Frame validation (STX, ETX, length, checksum)
-  virtual bool validatePacket(span<const uint8_t> frame) const = 0;
-
-  // Packet classification
-  virtual bool isQueryPacket(span<const uint8_t> frame) const = 0;
-  virtual bool isControlPacket(span<const uint8_t> frame) const = 0;
-  virtual bool isAckPacket(span<const uint8_t> frame) const = 0;
-
-  // Device key extraction
-  virtual bool extractDeviceKey(span<const uint8_t> frame, uint8_t &dev_id,
-                                uint8_t &sub1, uint8_t &sub2) const = 0;
-
-  // Polling query frame builder
-  virtual bool buildQueryPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                StaticPacket &out) const = 0;
-
-  // Checksum calculation
-  virtual uint8_t calculateChecksum(const uint8_t *data, size_t len) const = 0;
-
-  // Framing characteristics
-  virtual uint8_t getStx() const = 0;
-  virtual uint8_t getEtx() const = 0;
-  virtual uint8_t getMinPacketLen() const = 0;
-  virtual uint8_t getMaxPacketLen() const = 0;
-  virtual bool isLocked() const = 0;
-  virtual bool isAutoMode() const = 0;
-
-  // Stream packet length extraction:
-  // > 0 : Full packet length extracted
-  //   0 : Incomplete packet in stream (need more bytes)
-  //  -1 : Invalid framing at stx_idx (skip STX)
-  virtual int extractPacketLength(const uint8_t *stream, size_t stream_len,
-                                  size_t stx_idx) const = 0;
-};
-
-class UniversalProtocolEngine : public IWallpadParser {
+class UniversalProtocolEngine {
 private:
   inline VendorProfileDescriptor activeProfile() const {
     VendorProfileDescriptor d;
@@ -262,38 +220,38 @@ private:
   }
 
 public:
-  const char *getVendorName() const override;
-  const char *getProfileKey() const override;
+  const char *getVendorName() const;
+  const char *getProfileKey() const;
 
-  bool isLocked() const override {
+  bool isLocked() const {
     VendorProfileDescriptor d = activeProfile();
     if (isAutoProfile(d)) {
       return g_auto_probing_engine.isLocked();
     }
     return true;
   }
-  bool isAutoMode() const override {
+  bool isAutoMode() const {
     VendorProfileDescriptor d = activeProfile();
     return isAutoProfile(d);
   }
 
-  bool validatePacket(span<const uint8_t> frame) const override;
-  bool isQueryPacket(span<const uint8_t> frame) const override;
-  bool isControlPacket(span<const uint8_t> frame) const override;
-  bool isAckPacket(span<const uint8_t> frame) const override;
+  bool validatePacket(span<const uint8_t> frame) const;
+  bool isQueryPacket(span<const uint8_t> frame) const;
+  bool isControlPacket(span<const uint8_t> frame) const;
+  bool isAckPacket(span<const uint8_t> frame) const;
 
   bool extractDeviceKey(span<const uint8_t> frame, uint8_t &dev_id,
-                        uint8_t &sub1, uint8_t &sub2) const override;
+                        uint8_t &sub1, uint8_t &sub2) const;
   bool buildQueryPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                        StaticPacket &out) const override;
+                        StaticPacket &out) const;
 
-  uint8_t calculateChecksum(const uint8_t *data, size_t len) const override;
-  uint8_t getStx() const override;
-  uint8_t getEtx() const override;
-  uint8_t getMinPacketLen() const override;
-  uint8_t getMaxPacketLen() const override;
+  uint8_t calculateChecksum(const uint8_t *data, size_t len) const;
+  uint8_t getStx() const;
+  uint8_t getEtx() const;
+  uint8_t getMinPacketLen() const;
+  uint8_t getMaxPacketLen() const;
   int extractPacketLength(const uint8_t *stream, size_t stream_len,
-                          size_t stx_idx) const override;
+                          size_t stx_idx) const;
 };
 
 // ============================================================================
@@ -303,6 +261,6 @@ public:
 class WallpadParserFactory {
 public:
   static void init();
-  static IWallpadParser *getActiveParser();
+  static UniversalProtocolEngine *getActiveParser();
   static bool setProfile(uint8_t index);
 };

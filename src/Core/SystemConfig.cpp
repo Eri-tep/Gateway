@@ -369,43 +369,6 @@ void FramingTracker::restoreFromNvs(const char *nvs_ns, const char *tag) noexcep
     nvs_ns = "dp_frame_p0";
 
   Preferences prefs;
-  bool found = false;
-  if (prefs.begin(nvs_ns, true)) {
-    if (prefs.isKey("stx") && prefs.isKey("etx")) {
-      found = true;
-    }
-    prefs.end();
-  }
-
-  if (!found && strcmp(nvs_ns, "dp_frame") != 0) {
-    Preferences leg;
-    if (leg.begin("dp_frame", true)) {
-      if (leg.isKey("stx") && leg.isKey("etx")) {
-        uint8_t ls = leg.getUChar("stx", 0);
-        uint8_t le = leg.getUChar("etx", 0);
-        uint8_t ll = leg.getUChar("len", 0);
-        bool llocked = leg.getBool("locked", false);
-        bool lfixed = leg.getBool("fixed", false);
-        leg.end();
-
-        if (llocked && ls != 0 && le != 0) {
-          Preferences dest;
-          if (dest.begin(nvs_ns, false)) {
-            dest.putUChar("stx", ls);
-            dest.putUChar("etx", le);
-            dest.putUChar("len", (ls == 0x7F && le == 0xEE) ? 5 : ll);
-            dest.putBool("locked", true);
-            dest.putBool("fixed", (ls == 0x7F && le == 0xEE) ? true : lfixed);
-            dest.end();
-            ::Serial.printf("[%s] Migrated legacy dp_frame to %s\r\n", tag, nvs_ns);
-          }
-        }
-      } else {
-        leg.end();
-      }
-    }
-  }
-
   if (prefs.begin(nvs_ns, true)) {
     uint8_t s = prefs.getUChar("stx", 0);
     uint8_t e = prefs.getUChar("etx", 0);

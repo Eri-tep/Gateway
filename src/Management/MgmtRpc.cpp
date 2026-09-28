@@ -322,8 +322,10 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   }
 
   if (strcasecmp(cmd, "cache_purge_rescan") == 0) {
+    char dp_ns[16];
+    Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
     g_auto_probing_engine.reset();
-    g_doorphone_tracker.clearNvs();
+    g_doorphone_tracker.clearNvs(dp_ns);
     g_polling_targets.clear();
     g_device_repo.clear();
     g_probe_convergence_reset.store(true, std::memory_order_release);
@@ -332,8 +334,10 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   }
 
   if (strcasecmp(cmd, "wallpad_reset") == 0) {
+    char dp_ns[16];
+    Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
     g_auto_probing_engine.reset();
-    g_doorphone_tracker.clearNvs();
+    g_doorphone_tracker.clearNvs(dp_ns);
     g_polling_targets.clear();
     g_device_repo.clear();
     g_probe_convergence_reset.store(true, std::memory_order_release);

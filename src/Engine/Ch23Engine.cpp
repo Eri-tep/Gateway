@@ -141,6 +141,8 @@ void Task_Ch4(void *pvParameters) {
   uint32_t last_tx_ms = 0;
   StaticPacket last_pkt{};
   uint32_t last_pkt_ms = 0;
+  char cur_dp_ns[16];
+  Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
 
   if (g_system_event_group) {
     xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);
@@ -169,7 +171,8 @@ void Task_Ch4(void *pvParameters) {
 
     if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx, 0) == pdTRUE) {
       if (packet_to_tx.length >= 3) {
-        g_doorphone_tracker.processFrame(packet_to_tx.data[0], packet_to_tx.data[packet_to_tx.length - 1], packet_to_tx.length);
+        Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
+        g_doorphone_tracker.processFrame(packet_to_tx.data[0], packet_to_tx.data[packet_to_tx.length - 1], packet_to_tx.length, cur_dp_ns);
       }
       g_telnet_tracer.trace(4, true, TraceType::RMT, packet_to_tx);
       last_tx_pkt = packet_to_tx;
@@ -398,7 +401,8 @@ void Task_Ch4(void *pvParameters) {
 
     if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
       if (packet_to_tx.length >= 3) {
-        g_doorphone_tracker.processFrame(packet_to_tx.data[0], packet_to_tx.data[packet_to_tx.length - 1], packet_to_tx.length);
+        Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
+        g_doorphone_tracker.processFrame(packet_to_tx.data[0], packet_to_tx.data[packet_to_tx.length - 1], packet_to_tx.length, cur_dp_ns);
       }
       g_telnet_tracer.trace(4, true, TraceType::RMT, packet_to_tx);
       g_doorphone_serial.write(packet_to_tx.data.data(), packet_to_tx.length);

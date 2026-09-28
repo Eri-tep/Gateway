@@ -292,7 +292,7 @@ void WallpadParserFactory::init() {
   ProfileRepository::init();
 }
 
-IWallpadParser *WallpadParserFactory::getActiveParser() {
+UniversalProtocolEngine *WallpadParserFactory::getActiveParser() {
   return &s_universal_engine;
 }
 

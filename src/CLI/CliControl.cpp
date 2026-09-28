@@ -276,13 +276,17 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsg(sock, "[ERROR] Usage: wallpad delete <id>\r\n");
     }
   } else if (strcasecmp(sub, "auto") == 0) {
+    char dp_ns[16];
+    Config::Doorphone::FramingTracker::getNvsNamespace(0, dp_ns, sizeof(dp_ns));
     ProfileRepository::setActiveProfileIndex(0);
     g_auto_probing_engine.reset();
-    g_doorphone_tracker.clearNvs();
+    g_doorphone_tracker.clearNvs(dp_ns);
     sendTelnetMsg(sock, "[OK] Switched to Universal Auto-Probing mode (Wallpad & Doorphone framing reset).\r\n");
   } else if (strcasecmp(sub, "reset") == 0) {
+    char dp_ns[16];
+    Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
     g_auto_probing_engine.reset();
-    g_doorphone_tracker.clearNvs();
+    g_doorphone_tracker.clearNvs(dp_ns);
     g_probe_convergence_reset.store(true, std::memory_order_release);
   } else if (strcasecmp(sub, "simulate") == 0) {
     if (argc < 2) {

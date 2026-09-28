@@ -9,7 +9,7 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.2.8";
+constexpr const char *FIRMWARE_VERSION = "v1.2.9";
 } // namespace Config
 
 namespace Config::Task {
@@ -222,11 +222,11 @@ struct FramingTracker {
     status.store(FramingStatus::WAITING, std::memory_order_relaxed);
   }
 
-  void clearNvs(const char *nvs_ns = "dp_frame",
+  void clearNvs(const char *nvs_ns,
                 const char *tag = "DOORPHONE") noexcept;
 
-  void processFrame(uint8_t stx, uint8_t etx, uint8_t len = 0,
-                    const char *nvs_ns = "dp_frame",
+  void processFrame(uint8_t stx, uint8_t etx, uint8_t len,
+                    const char *nvs_ns,
                     const char *tag = "DOORPHONE") noexcept;
 
   inline static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
