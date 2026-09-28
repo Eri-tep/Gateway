@@ -391,6 +391,30 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
     locked_count++;
   }
 
+  // ── CH5 FCU 슬롯(1~4) 활성 기기 직렬화 (SmartThings get_devices 자식 기기 목록 추가) ──
+  {
+    MutexLocker lock(g_ch5_mutex);
+    for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
+      const auto &slot = g_hub_slots[s];
+      const DeviceStateEntry *fcu_dev = g_device_repo.find(Config::FCU::DEV_ID, s, 0);
+
+      // 소켓 설정이 활성화되어 있거나 수신 이력이 있는 경우 노출
+      if (slot.enabled || (fcu_dev && fcu_dev->last_ack_len > 0)) {
+        if (locked_count > 0) out.append(",");
+        char name_buf[32];
+        snprintf(name_buf, sizeof(name_buf), "%s", slot.name[0] ? slot.name : "Air Conditioner");
+
+        int pwr = (fcu_dev && fcu_dev->last_ack_len >= 9 && fcu_dev->last_ack_data[8] != 0) ? 1 : 0;
+        int tgt = (fcu_dev && fcu_dev->last_target_temp > 0) ? fcu_dev->last_target_temp : 24;
+        int cur = (fcu_dev && fcu_dev->last_current_temp > 0) ? fcu_dev->last_current_temp : tgt;
+
+        out.appendFormat("{\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\",\"name\":\"%s\",\"channel\":5,\"power\":%d,\"target_temp\":%d,\"current_temp\":%d}",
+                         Config::FCU::DEV_ID, s, name_buf, pwr, tgt, cur);
+        locked_count++;
+      }
+    }
+  }
+
   out.appendFormat("],\"count\":%u}\n", static_cast<unsigned>(locked_count));
 }
 void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) {

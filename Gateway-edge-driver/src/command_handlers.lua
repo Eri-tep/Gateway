@@ -332,6 +332,7 @@ local CLASS_TO_PROFILE = {
   outlet = "child-outlet",
   thermostat = "child-thermostat",
   aircon = "child-aircon",
+  fcu = "child-fcu",
   vent = "child-vent",
   gas = "child-gas",
   momentary = "child-momentary",
