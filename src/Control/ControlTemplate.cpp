@@ -396,6 +396,9 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
     }
   } else if (action == ControlActionType::VALVE_CLOSE) {
     if (!grp->close_slot.discovered) return false;
+    if (grp->close_slot.category_offset < grp->frame_len) {
+      out.data[grp->close_slot.category_offset] = grp->close_slot.category_val;
+    }
     if (grp->close_slot.action_offset < grp->frame_len) {
       out.data[grp->close_slot.action_offset] = grp->close_slot.off_val;
     }
@@ -405,7 +408,8 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
       out.data[grp->mode_slot.category_offset] = grp->mode_slot.category_val;
     }
     if (grp->mode_slot.action_offset < grp->frame_len) {
-      uint8_t m_val = static_cast<uint8_t>(constrain(value, 1, 4));
+      uint8_t max_m = (grp->mode_slot.max_val > 0) ? grp->mode_slot.max_val : 5;
+      uint8_t m_val = static_cast<uint8_t>(constrain(value, 1, max_m));
       out.data[grp->mode_slot.action_offset] = m_val;
     }
   }

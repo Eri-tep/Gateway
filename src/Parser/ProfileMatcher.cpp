@@ -134,9 +134,43 @@ void injectProfile(const WallpadProfile *profile, ControlTemplateRegistry &regis
       grp->mode_slot.ack_state_offset = spec.ctl_ack_state_offset;
     } else if (spec.dev_class == DeviceClass::GAS) {
       grp->close_slot.discovered = true;
-      grp->close_slot.action_offset = spec.ctl_payload_offset;
-      grp->close_slot.off_val = spec.pwr_off_val;
+      grp->close_slot.category_offset = 5;
+      grp->close_slot.category_val = 0x43;
+      grp->close_slot.action_offset = spec.ctl_payload_offset; // Byte #7
+      grp->close_slot.off_val = spec.pwr_off_val;              // 0x02
       grp->close_slot.ack_state_offset = spec.ctl_ack_state_offset;
+    } else if (spec.dev_class == DeviceClass::AIRCON) {
+      // 시스템 에어컨 희망온도 (Cat 0x45)
+      grp->temp_slot.discovered = true;
+      grp->temp_slot.category_offset = 5;
+      grp->temp_slot.category_val = 0x45;
+      grp->temp_slot.action_offset = spec.ctl_payload_offset;
+      grp->temp_slot.min_val = 18;
+      grp->temp_slot.max_val = 30;
+      grp->temp_slot.ack_state_offset = spec.ctl_ack_state_offset;
+      grp->temp_slot.ack_target_offset = spec.ctl_ack_echo_offset;
+
+      // 시스템 에어컨 풍량 (Cat 0x42)
+      grp->speed_slot.discovered = true;
+      grp->speed_slot.category_offset = 5;
+      grp->speed_slot.category_val = 0x42;
+      grp->speed_slot.action_offset = spec.ctl_payload_offset;
+      grp->speed_slot.min_val = 1;
+      grp->speed_slot.max_val = 3;
+      grp->speed_slot.level_count = 3;
+      grp->speed_slot.level_tokens[0] = 0x01; // 미풍
+      grp->speed_slot.level_tokens[1] = 0x02; // 약풍
+      grp->speed_slot.level_tokens[2] = 0x03; // 강풍
+      grp->speed_slot.ack_state_offset = spec.ctl_ack_state_offset;
+
+      // 시스템 에어컨 운전 모드 (Cat 0x41: 1:냉방, 2:제습, 3:송풍, 4:자동, 5:난방)
+      grp->mode_slot.discovered = true;
+      grp->mode_slot.category_offset = 5;
+      grp->mode_slot.category_val = 0x41;
+      grp->mode_slot.action_offset = spec.ctl_payload_offset;
+      grp->mode_slot.min_val = 1;
+      grp->mode_slot.max_val = 5;
+      grp->mode_slot.ack_state_offset = spec.ctl_ack_state_offset;
     }
 
     // 제어 응답 슬롯(ack_slots) 명세 주입

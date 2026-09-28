@@ -652,10 +652,11 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     else if (strcasecmp(act_str, "fan_speed") == 0 || strcasecmp(act_str, "spd") == 0) act = ControlActionType::FAN_SPEED;
     else if (strcasecmp(act_str, "valve_close") == 0 || strcasecmp(act_str, "cls") == 0) act = ControlActionType::VALVE_CLOSE;
     else if (strcasecmp(act_str, "momentary") == 0 || strcasecmp(act_str, "mom") == 0) act = ControlActionType::MOMENTARY_TRIGGER;
-    else if (strcasecmp(act_str, "vent_mode") == 0 || strcasecmp(act_str, "vnt") == 0) act = ControlActionType::VENT_MODE;
+    else if (strcasecmp(act_str, "vent_mode") == 0 || strcasecmp(act_str, "vnt") == 0 ||
+             strcasecmp(act_str, "mode") == 0 || strcasecmp(act_str, "ac_mode") == 0) act = ControlActionType::VENT_MODE;
 
     if (act == ControlActionType::UNKNOWN) {
-      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid action (power/set_temp/fan_speed/valve_close/momentary/vent_mode)\"}\n";
+      const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid action (power/set_temp/fan_speed/valve_close/momentary/vent_mode/mode)\"}\n";
       send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
       return;
     }
