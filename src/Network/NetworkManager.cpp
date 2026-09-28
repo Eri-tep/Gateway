@@ -322,8 +322,12 @@ void Task_Network(void *pvParameters) {
               slot.sock = -1;
               slot.is_connected = false;
               slot.rx_len = 0;
-              ESP_LOGI("EW11", "[CH5] Slot %d (%s) disconnected by peer.", s, slot.name);
             }
+          }
+
+          // FCU 슬롯(1~4) 20초 독립 폴링 및 타임아웃 검사
+          if (s >= 1 && s < Config::TCP::MAX_EW11_SLOTS) {
+            Fcu::handleSlotLoop(static_cast<uint8_t>(s), &slot, millis());
           }
         }
       }

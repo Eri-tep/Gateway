@@ -6,6 +6,10 @@ local log = require "log"
 
 local CommandHandlers = {}
 
+local FCU_AC_MODE_TO_VAL  = { cool = 1, heat = 2, wind = 3 }
+local FCU_FAN_MODE_TO_VAL = { low = 1, medium = 2, high = 3, auto = 4 }
+local FCU_SWING_TO_VAL    = { fixed = 0, sweep = 2 }
+
 
 local function get_connection_info(device)
   local ip = device.preferences.gatewayIp or "172.30.1.3"
@@ -584,6 +588,11 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
 
   device:emit_event(capabilities.switch.switch.on())
 
+  if d_id == 0x2C then
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+    return
+  end
+
   local p_key = device.parent_assigned_child_key or ""
   if p_key:match("^dev_34_") or device:supports_capability_by_id(capabilities.momentary.ID) then
     handle_momentary_switch_on(device, ip, port, d_id, s1, s2)
@@ -613,6 +622,11 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
   log.info(string.format("💡 [CHILD CMD] %s OFF -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
 
   device:emit_event(capabilities.switch.switch.off())
+
+  if d_id == 0x2C then
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+    return
+  end
 
   local p_key = device.parent_assigned_child_key or ""
   if p_key:match("^dev_34_") or device:supports_capability_by_id(capabilities.momentary.ID) then
@@ -690,6 +704,15 @@ function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
   local mode = (command.args and command.args.mode) or "cool"
+
+  if d_id == 0x2C then
+    local val = FCU_AC_MODE_TO_VAL[mode] or 1
+    device:emit_event(capabilities.airConditionerMode.airConditionerMode(mode))
+    local ip, port = get_gateway_ip_port(driver)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "mode", val)
+    return
+  end
+
   local mode_code = 1 -- cool
   if mode == "cool" then mode_code = 1
   elseif mode == "dry" then mode_code = 2
@@ -703,6 +726,34 @@ function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
   device:emit_event(capabilities.airConditionerMode.airConditionerMode(mode))
 
   gateway_client.device_control(ip, port, d_id, s1, s2, "mode", mode_code)
+end
+
+function CommandHandlers.handle_child_set_ac_fan_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local fan_mode = (command.args and (command.args.fanMode or command.args.mode)) or "auto"
+
+  if d_id == 0x2C then
+    local val = FCU_FAN_MODE_TO_VAL[fan_mode] or 4
+    device:emit_event(capabilities.airConditionerFanMode.fanMode(fan_mode))
+    local ip, port = get_gateway_ip_port(driver)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", val)
+    return
+  end
+
+  if capabilities.airConditionerFanMode then
+    device:emit_event(capabilities.airConditionerFanMode.fanMode(fan_mode))
+  end
+end
+
+function CommandHandlers.handle_child_set_oscillation_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id or d_id ~= 0x2C then return end
+  local mode = (command.args and (command.args.mode or command.args.fanOscillationMode)) or "fixed"
+  local val = FCU_SWING_TO_VAL[mode] or 0
+  device:emit_event(capabilities.fanOscillationMode.fanOscillationMode(mode))
+  local ip, port = get_gateway_ip_port(driver)
+  gateway_client.device_control(ip, port, d_id, s1, s2, "swing", val)
 end
 
 local VENT_MODE_MAP = {

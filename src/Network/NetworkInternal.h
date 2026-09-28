@@ -5,6 +5,7 @@
 #include "TelnetCli.h"
 #include "WallpadParser.h"
 #include "ControlTemplate.h"
+#include "Ew11Manager.h"
 #include <lwip/ip.h>
 #include <lwip/tcp.h>
 #include <sys/socket.h>

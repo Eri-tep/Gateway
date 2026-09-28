@@ -233,56 +233,37 @@ void processStream(int slot_idx, HubClientSlot *slot) {
     return;
   }
 
-  // Slot 1~4 (에어컨): EW11 스트림 프레이밍 트래커
-  char ns[16], tag[16];
-  snprintf(ns, sizeof(ns), "e%d_frame", slot_idx);
-  snprintf(tag, sizeof(tag), "EW11_#%d", slot_idx);
-
-  uint8_t c_stx = slot->tracker.candidate_stx.load(std::memory_order_relaxed);
-  uint8_t c_etx = slot->tracker.candidate_etx.load(std::memory_order_relaxed);
-  uint8_t c_len = slot->tracker.candidate_len.load(std::memory_order_relaxed);
-
-  uint8_t target_stx = (c_stx != 0) ? c_stx : PKT_STX;
-  uint8_t target_etx = (c_etx != 0) ? c_etx : PKT_ETX;
-
+  // Slot 1~4 (FCU 시스템 에어컨): Modbus-RTU 19B 상태 응답 or 8B ACK 처리
+  // Modbus Slave는 0x01로 시작 (0x01 0x03 0x0E ... 19B 또는 0x01 0x06/0x10 ... 8B)
   size_t p = 0;
   while (p < slot->rx_len) {
-    if (slot->rx_buf[p] != target_stx) {
+    if (slot->rx_buf[p] != 0x01) {
       p++;
       continue;
     }
 
-    if (c_len >= 3 && (p + c_len) <= slot->rx_len) {
-      if (slot->rx_buf[p + c_len - 1] == target_etx) {
-        slot->tracker.processFrame(target_stx, target_etx, c_len, ns, tag);
-        Hub_ProcessPacket(slot, &slot->rx_buf[p], c_len);
-        p += c_len;
-        continue;
-      }
+    size_t rem = slot->rx_len - p;
+    // 19바이트 0x03 상태 응답
+    if (rem >= 19 && slot->rx_buf[p + 1] == 0x03 && slot->rx_buf[p + 2] == 0x0E) {
+      Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
+      p += 19;
+      continue;
     }
 
-    size_t end_idx = 0;
-    bool found_frame = false;
-    for (size_t k = p + 2; k < slot->rx_len && (k - p) < 64; ++k) {
-      if (slot->rx_buf[k] == target_etx) {
-        end_idx = k;
-        found_frame = true;
-        break;
-      }
+    // 8바이트 0x06/0x10 제어 ACK
+    if (rem >= 8 && (slot->rx_buf[p + 1] == 0x06 || slot->rx_buf[p + 1] == 0x10)) {
+      Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
+      p += 8;
+      continue;
     }
 
-    if (found_frame) {
-      uint8_t frame_len = static_cast<uint8_t>(end_idx - p + 1);
-      slot->tracker.processFrame(target_stx, target_etx, frame_len, ns, tag);
-      Hub_ProcessPacket(slot, &slot->rx_buf[p], frame_len);
-      p += frame_len;
-    } else {
-      if (slot->rx_len - p < 64) {
-        break;
-      } else {
-        p++;
-      }
+    // 아직 충분한 바이트가 도착하지 않은 경우 대기
+    if (rem < 19) {
+      break;
     }
+
+    // 0x01이지만 Modbus FC가 아닌 경우 다음 바이트로 이동
+    p++;
   }
 
   if (p > 0) {
@@ -294,3 +275,243 @@ void processStream(int slot_idx, HubClientSlot *slot) {
 }
 
 } // namespace Ew11Manager
+
+// ============================================================================
+// namespace Fcu 구현 (AP FCU Modbus-RTU 엔진)
+// ============================================================================
+namespace {
+
+// ── FCU 슬롯별 독립 런타임 (인덱스 0은 엘리베이터 슬롯이므로 미사용) ──
+static Fcu::SlotRuntime s_fcu_slots[Config::TCP::MAX_EW11_SLOTS]{};
+
+// §4.1 Modbus-RTU CRC16 계산 (Zero-Heap)
+static uint16_t Fcu_CalcCrc16(const uint8_t *buf, size_t len) {
+  uint16_t crc = 0xFFFF;
+  for (size_t pos = 0; pos < len; pos++) {
+    crc ^= static_cast<uint16_t>(buf[pos]);
+    for (int i = 8; i != 0; i--) {
+      if ((crc & 0x0001) != 0) {
+        crc >>= 1;
+        crc ^= 0xA001;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+// §4.1 상태 조회 쿼리 (8B, CRC 포함)
+static const uint8_t kFcuQueryPkt[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08};
+
+// §4.2 전원 OFF: 풍량(Reg 0x0002) = 0 (8B, CRC 포함)
+static const uint8_t kFcuPowerOff[8] = {0x01, 0x06, 0x00, 0x02, 0x00, 0x00, 0x28, 0x0A};
+
+// §4.2 전원 ON: Reg 0x0001(모드), 0x0002(풍량), 0x0003(스윙) 일괄 (15B 동적 생성)
+// 스윙은 기본 ON(0x0002)로 고정 (Reg0x0000 절대 보존 — IR 리모컨 공존)
+static size_t Fcu_BuildPowerOn(uint8_t *out_buf, uint16_t mode, uint16_t fan) {
+  out_buf[0] = 0x01; // Slave ID
+  out_buf[1] = 0x10; // FC 0x10 (Write Multiple Registers)
+  out_buf[2] = 0x00; out_buf[3] = 0x01; // 시작 번지 0x0001 (Reg0 절대 보존)
+  out_buf[4] = 0x00; out_buf[5] = 0x03; // 레지스터 개수 3개
+  out_buf[6] = 0x06;                     // 바이트 수 6바이트
+  out_buf[7] = static_cast<uint8_t>((mode >> 8) & 0xFF);
+  out_buf[8] = static_cast<uint8_t>(mode & 0xFF);
+  out_buf[9] = static_cast<uint8_t>((fan >> 8) & 0xFF);
+  out_buf[10] = static_cast<uint8_t>(fan & 0xFF);
+  out_buf[11] = 0x00; out_buf[12] = 0x02; // 스윙 ON=2 고정
+  uint16_t crc = Fcu_CalcCrc16(out_buf, 13);
+  out_buf[13] = static_cast<uint8_t>(crc & 0xFF);
+  out_buf[14] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+  return 15;
+}
+
+// §4.3~§4.6 단일 레지스터 쓰기 (8B 동적 생성)
+static size_t Fcu_BuildWriteSingle(uint8_t *out_buf, uint16_t reg, uint16_t val) {
+  out_buf[0] = 0x01; // Slave ID
+  out_buf[1] = 0x06; // FC 0x06 (Write Single Register)
+  out_buf[2] = static_cast<uint8_t>((reg >> 8) & 0xFF);
+  out_buf[3] = static_cast<uint8_t>(reg & 0xFF);
+  out_buf[4] = static_cast<uint8_t>((val >> 8) & 0xFF);
+  out_buf[5] = static_cast<uint8_t>(val & 0xFF);
+  uint16_t crc = Fcu_CalcCrc16(out_buf, 6);
+  out_buf[6] = static_cast<uint8_t>(crc & 0xFF);
+  out_buf[7] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+  return 8;
+}
+
+// 19B 응답 파싱 및 CRC 검증
+static bool Fcu_ParseQueryResponse(const uint8_t *data, size_t len, Fcu::Snapshot &out) {
+  if (len < 19 || data[0] != 0x01 || data[1] != 0x03 || data[2] != 0x0E) return false;
+
+  // CRC 검증: data[0..16] (17바이트) → CRC Little-Endian at data[17..18]
+  uint16_t calc_crc = Fcu_CalcCrc16(data, 17);
+  uint16_t pkt_crc = static_cast<uint16_t>(data[17]) | (static_cast<uint16_t>(data[18]) << 8);
+  if (calc_crc != pkt_crc) return false;
+
+  // 레지스터 언패킹 (Big-Endian)
+  uint16_t reg1 = (static_cast<uint16_t>(data[5]) << 8) | data[6];   // 운전 모드
+  uint16_t reg2 = (static_cast<uint16_t>(data[7]) << 8) | data[8];   // 풍량 (전원)
+  uint16_t reg3 = (static_cast<uint16_t>(data[9]) << 8) | data[10];  // 스윙
+  uint16_t reg4 = (static_cast<uint16_t>(data[11]) << 8) | data[12]; // 에러 코드
+  uint16_t reg5 = (static_cast<uint16_t>(data[13]) << 8) | data[14]; // 희망 설정 온도
+  uint16_t reg6 = (static_cast<uint16_t>(data[15]) << 8) | data[16]; // 실내 측정 온도
+
+  out.mode = (reg1 >= 1 && reg1 <= 3) ? static_cast<Fcu::Mode>(reg1) : Fcu::Mode::Cool;
+  out.fan_speed = (reg2 <= 4) ? static_cast<Fcu::FanSpeed>(reg2) : Fcu::FanSpeed::Off;
+  out.swing = (reg3 == 2) ? Fcu::Swing::On : Fcu::Swing::Off;
+  out.error_code = static_cast<uint8_t>(reg4 & 0xFF);
+  out.target_temp = static_cast<uint8_t>(reg5 & 0xFF);
+  out.room_temp = static_cast<uint8_t>(reg6 & 0xFF);
+  out.power = (out.fan_speed != Fcu::FanSpeed::Off);
+  return true;
+}
+
+// 슬롯 소켓에 직접 전송하는 내부 헬퍼 (g_ch5_mutex 획득 후 호출)
+static bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  MutexLocker lock(g_ch5_mutex);
+  HubClientSlot &slot = g_hub_slots[slot_idx];
+  if (!slot.enabled || slot.sock < 0 || !slot.is_connected) return false;
+  return send(slot.sock, pkt, len, MSG_DONTWAIT) == static_cast<ssize_t>(len);
+}
+
+} // namespace
+
+namespace Fcu {
+
+void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return;
+  auto &rt = s_fcu_slots[slot_idx];
+
+  // 제어 명령(0x06, 0x10) ACK 수신 확인 (8바이트 에코 응답)
+  if (len >= 8 && data[0] == 0x01 && (data[1] == 0x06 || data[1] == 0x10)) {
+    rt.waiting_response = false;
+    rt.timeout_count = 0;
+    rt.is_online = true;
+    return;
+  }
+
+  // 19바이트 0x03 상태 응답 처리
+  if (len >= 19 && data[0] == 0x01 && data[1] == 0x03 && data[2] == 0x0E) {
+    Fcu::Snapshot new_snap;
+    if (!Fcu_ParseQueryResponse(data, len, new_snap)) return; // CRC 불일치 시 무시
+
+    rt.waiting_response = false;
+    rt.timeout_count = 0;
+    rt.is_online = true;
+
+    // ── 2nd-Tier Cache: 기존 Ch1Engine 패턴과 동일 ──
+    DeviceStateEntry *dev = g_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
+    if (dev) {
+      bool byte_changed = (dev->last_ack_len != 19 ||
+                           memcmp(dev->last_ack_data.data(), data, 19) != 0);
+
+      if (byte_changed) {
+        memcpy(dev->last_ack_data.data(), data, 19);
+        dev->last_ack_len = 19;
+        dev->last_target_temp = new_snap.target_temp;
+        dev->last_current_temp = new_snap.room_temp;
+
+        rt.snap = new_snap; // SlotRuntime 스냅샷 갱신 (CLI 출력용)
+
+        // 상태 변경 감지 즉시 SmartThings로 이벤트 JSON 브로드캐스트 (표준 device_state 형식)
+        char json_buf[256];
+        snprintf(json_buf, sizeof(json_buf),
+                 "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\","
+                 "\"power\":%u,\"mode\":%u,\"fan_speed\":%u,\"swing\":%u,"
+                 "\"target_temp\":%u,\"room_temp\":%u,\"error\":%u}",
+                 static_cast<unsigned>(Config::FCU::DEV_ID), slot_idx,
+                 new_snap.power ? 1u : 0u,
+                 static_cast<unsigned>(new_snap.mode),
+                 static_cast<unsigned>(new_snap.fan_speed),
+                 static_cast<unsigned>(new_snap.swing),
+                 new_snap.target_temp,
+                 new_snap.room_temp,
+                 new_snap.error_code);
+        Mgmt_BroadcastRawJson(json_buf);
+      }
+    }
+  }
+}
+
+void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !slot) return;
+  auto &rt = s_fcu_slots[slot_idx];
+
+  if (!slot->enabled || slot->sock < 0 || !slot->is_connected) {
+    rt.is_online = false;
+    rt.waiting_response = false;
+    return;
+  }
+
+  // 1st-Tier Polling Target 등록 (미등록 시 자동 등록 / 갱신)
+  g_polling_targets.registerOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
+                                   kFcuQueryPkt, sizeof(kFcuQueryPkt));
+
+  // 응답 대기 중 타임아웃 검사 (300ms)
+  if (rt.waiting_response) {
+    if (now - rt.query_sent_ms >= Config::FCU::RX_TIMEOUT_MS) {
+      rt.waiting_response = false;
+      rt.timeout_count++;
+      if (rt.timeout_count >= Config::FCU::MAX_TIMEOUT_COUNT) {
+        rt.is_online = false;
+      }
+    }
+    return;
+  }
+
+  // 20초 주기 만료 검사 (슬롯별 독립 동작, 첫 진입 시 즉시 폴링)
+  if (rt.last_poll_ms == 0 || (now - rt.last_poll_ms >= Config::FCU::POLL_INTERVAL_MS)) {
+    rt.last_poll_ms = now;
+    rt.query_sent_ms = now;
+    rt.waiting_response = true;
+    send(slot->sock, kFcuQueryPkt, sizeof(kFcuQueryPkt), MSG_DONTWAIT);
+  }
+}
+
+bool SetPower(uint8_t slot_idx, bool on) {
+  if (on) {
+    uint8_t buf[15];
+    size_t len = Fcu_BuildPowerOn(buf,
+                   static_cast<uint16_t>(Fcu::Mode::Cool),
+                   static_cast<uint16_t>(Fcu::FanSpeed::High));
+    return Fcu_SendRaw(slot_idx, buf, len);
+  } else {
+    return Fcu_SendRaw(slot_idx, kFcuPowerOff, sizeof(kFcuPowerOff));
+  }
+}
+
+bool SetMode(uint8_t slot_idx, Mode m) {
+  uint8_t buf[8];
+  size_t len = Fcu_BuildWriteSingle(buf, 0x0001, static_cast<uint16_t>(m));
+  return Fcu_SendRaw(slot_idx, buf, len);
+}
+
+bool SetFanSpeed(uint8_t slot_idx, FanSpeed f) {
+  uint8_t buf[8];
+  size_t len = Fcu_BuildWriteSingle(buf, 0x0002, static_cast<uint16_t>(f));
+  return Fcu_SendRaw(slot_idx, buf, len);
+}
+
+bool SetSwing(uint8_t slot_idx, Swing s) {
+  uint8_t buf[8];
+  size_t len = Fcu_BuildWriteSingle(buf, 0x0003, static_cast<uint16_t>(s));
+  return Fcu_SendRaw(slot_idx, buf, len);
+}
+
+bool SetTargetTemp(uint8_t slot_idx, uint8_t temp_c) {
+  if (temp_c < Config::FCU::TEMP_MIN) temp_c = Config::FCU::TEMP_MIN;
+  if (temp_c > Config::FCU::TEMP_MAX) temp_c = Config::FCU::TEMP_MAX;
+  uint8_t buf[8];
+  size_t len = Fcu_BuildWriteSingle(buf, 0x0005, static_cast<uint16_t>(temp_c));
+  return Fcu_SendRaw(slot_idx, buf, len);
+}
+
+bool GetSlotRuntime(uint8_t slot_idx, SlotRuntime &out_rt) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  out_rt = s_fcu_slots[slot_idx];
+  return true;
+}
+
+} // namespace Fcu

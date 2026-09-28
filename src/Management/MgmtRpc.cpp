@@ -2,6 +2,7 @@
 #include "WallpadParser.h"
 #include "ControlTemplate.h"
 #include "ProfileMatcher.h"
+#include "Ew11Manager.h"
 #include "esp_core_dump.h"
 #include <algorithm>
 #include <cstring>
@@ -647,6 +648,39 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     if (dev_id <= 0 || dev_id > 255 || sub1 < 0 || sub1 > 255 || sub2 < 0 || sub2 > 255) {
       const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid or out-of-range device parameters\"}\n";
       send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+      return;
+    }
+
+    // ── FCU (0x2C) 전용 Modbus 제어 디스패치 (AGENTS.md & MODERN_CPP_GUIDELINES §1) ──
+    if (dev_id == Config::FCU::DEV_ID) {
+      uint8_t slot_idx = static_cast<uint8_t>(sub1);
+      if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) {
+        sendRpcResponse(sock, req_id, "error", "Invalid FCU slot (1-4)");
+        return;
+      }
+
+      using CmdFn = bool (*)(uint8_t, int);
+      struct CmdEntry { std::string_view key; CmdFn fn; };
+      static constexpr CmdEntry kFcuCmds[] = {
+        { "power",     [](uint8_t s, int v) { return Fcu::SetPower(s, v == 1); } },
+        { "mode",      [](uint8_t s, int v) { return Fcu::SetMode(s, static_cast<Fcu::Mode>(v)); } },
+        { "fan_speed", [](uint8_t s, int v) { return Fcu::SetFanSpeed(s, static_cast<Fcu::FanSpeed>(v)); } },
+        { "swing",     [](uint8_t s, int v) { return Fcu::SetSwing(s, static_cast<Fcu::Swing>(v)); } },
+        { "set_temp",  [](uint8_t s, int v) { return Fcu::SetTargetTemp(s, static_cast<uint8_t>(v)); } },
+      };
+
+      std::string_view sv{act_str};
+      for (const auto &e : kFcuCmds) {
+        if (e.key == sv) {
+          if (e.fn(slot_idx, val)) {
+            sendRpcResponse(sock, req_id, "ok");
+          } else {
+            sendRpcResponse(sock, req_id, "error", "Failed to send FCU Modbus packet to socket");
+          }
+          return;
+        }
+      }
+      sendRpcResponse(sock, req_id, "error", "Unknown FCU action (power/mode/fan_speed/swing/set_temp)");
       return;
     }
 

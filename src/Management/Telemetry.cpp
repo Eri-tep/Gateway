@@ -474,3 +474,20 @@ void Mgmt_BroadcastDevicesUpdated() {
     }
   }
 }
+
+void Mgmt_BroadcastRawJson(const char *json_payload) {
+  if (!json_payload || !g_mgmt_mutex) return;
+
+  char buf[256];
+  int len = snprintf(buf, sizeof(buf), "%s\n", json_payload);
+  if (len <= 0) return;
+
+  MutexLocker lock(g_mgmt_mutex);
+  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+    if (g_mgmt_sessions[i].sock >= 0) {
+      send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
+      g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+}
+

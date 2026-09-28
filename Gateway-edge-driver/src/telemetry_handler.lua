@@ -683,6 +683,48 @@ local DEVICE_TELEMETRY_HANDLERS = {
       local v_evt = (event_data.valve == "closed") and capabilities.valve.valve.closed() or capabilities.valve.valve.open()
       dev:emit_event(v_evt)
     end
+  end,
+
+  ["fcu"] = function(dev, event_data)
+    local FCU_VAL_TO_AC_MODE = { [1] = "cool", [2] = "heat", [3] = "wind" }
+    local FCU_VAL_TO_FAN_MODE = { [1] = "low", [2] = "medium", [3] = "high", [4] = "auto" }
+
+    -- 1. 전원 상태
+    if event_data.power == 1 then
+      dev:emit_event(capabilities.switch.switch.on())
+      -- 운전 모드 & 풍량 (전원 ON일 때만 유의미)
+      local mode_str = FCU_VAL_TO_AC_MODE[event_data.mode] or "cool"
+      dev:emit_event(capabilities.airConditionerMode.airConditionerMode(mode_str))
+
+      local fan_str = FCU_VAL_TO_FAN_MODE[event_data.fan_speed]
+      if fan_str then
+        dev:emit_event(capabilities.airConditionerFanMode.fanMode(fan_str))
+      end
+    else
+      dev:emit_event(capabilities.switch.switch.off())
+    end
+
+    -- 2. 바람 스윙
+    local swing_str = (event_data.swing == 2) and "sweep" or "fixed"
+    dev:emit_event(capabilities.fanOscillationMode.fanOscillationMode(swing_str))
+
+    -- 3. 희망 설정 온도
+    if event_data.target_temp then
+      local sp_evt = capabilities.thermostatCoolingSetpoint.coolingSetpoint({ value = event_data.target_temp, unit = "C" })
+      sp_evt.state_change = true
+      dev:emit_event(sp_evt)
+    end
+
+    -- 4. 실내 측정 온도
+    if event_data.room_temp then
+      local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.room_temp, unit = "C" })
+      cur_evt.state_change = true
+      dev:emit_event(cur_evt)
+    end
+
+    -- 5. 헬스 체크 (에러 0 = online)
+    local health = (event_data.error == 0) and "online" or "offline"
+    dev:emit_event(capabilities.healthCheck.healthStatus(health))
   end
 }
 

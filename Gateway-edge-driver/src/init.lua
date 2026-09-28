@@ -117,6 +117,19 @@ local function device_init(driver, device)
       device:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "dry", "wind", "auto", "heat" }))
     end
 
+    -- FCU 자식 기기 초기화 (p_key = "dev_2c_<slot>_0" 패턴)
+    if p_key:match("^dev_2c_") then
+      if device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
+        device:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "heat", "wind" }))
+      end
+      if device:supports_capability_by_id(capabilities.airConditionerFanMode.ID) then
+        device:emit_event(capabilities.airConditionerFanMode.supportedAcFanModes({ "low", "medium", "high", "auto" }))
+      end
+      if device:supports_capability_by_id(capabilities.fanOscillationMode.ID) then
+        device:emit_event(capabilities.fanOscillationMode.supportedFanOscillationModes({ "fixed", "sweep" }))
+      end
+    end
+
     -- Elevator 초기화
     local cap_hist = capabilities["digituniverse06711.history"]
     if cap_hist and p_key:match("^dev_34_") then
@@ -369,6 +382,9 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     },
     [capabilities.valve.ID] = {
       [capabilities.valve.commands.close.NAME] = command_handlers.handle_child_valve_close
+    },
+    [capabilities.fanOscillationMode.ID] = {
+      [capabilities.fanOscillationMode.commands.setFanOscillationMode.NAME] = command_handlers.handle_child_set_oscillation_mode
     }
   }
 })

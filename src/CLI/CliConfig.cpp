@@ -1,5 +1,6 @@
 #include "CliCommon.h"
 #include "MgmtRpc.h"
+#include "Ew11Manager.h"
 
 namespace ConfigCli {
 
@@ -297,7 +298,7 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   if (argc == 0 || (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "list") == 0) ||
       (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "status") == 0)) {
-    char buf[1024];
+    char buf[2048];
     AppendBuf out{buf, sizeof(buf)};
     out.append("\r\n");
     out.append(Fmt::DIV80EQ);
@@ -325,6 +326,50 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
       }
     }
     out.append(Fmt::DIV80);
+
+    // ── FCU Modbus 실시간 상태 테이블 ──
+    out.append("\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.append("                    CH5 FCU MODBUS DEVICE STATUS\r\n");
+    out.append(Fmt::DIV80EQ);
+    out.appendFormat("%-6s %-7s %-6s %-16s %-6s %-6s %-6s %-6s %-5s %-5s %s\r\n",
+                     "Slot", "Name", "Port", "Client IP",
+                     "Power", "Mode", "Fan", "Swing", "Tgt", "Room", "Err");
+    out.append(Fmt::DIV80);
+
+    {
+      MutexLocker lock(g_ch5_mutex);
+      for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
+        const HubClientSlot &slot = g_hub_slots[s];
+        Fcu::SlotRuntime rt;
+        Fcu::GetSlotRuntime(s, rt);
+
+        const char *pwr_str = rt.snap.power ? "ON" : "OFF";
+        const char *mode_str = (rt.snap.mode == Fcu::Mode::Cool) ? "Cool"
+                             : (rt.snap.mode == Fcu::Mode::Heat) ? "Heat"
+                             : (rt.snap.mode == Fcu::Mode::FanOnly) ? "Fan" : "-";
+        const char *fan_str = (rt.snap.fan_speed == Fcu::FanSpeed::Off) ? "OFF"
+                            : (rt.snap.fan_speed == Fcu::FanSpeed::Low) ? "Low"
+                            : (rt.snap.fan_speed == Fcu::FanSpeed::Mid) ? "Mid"
+                            : (rt.snap.fan_speed == Fcu::FanSpeed::High) ? "High"
+                            : (rt.snap.fan_speed == Fcu::FanSpeed::Auto) ? "Auto" : "-";
+        const char *swng_str = (rt.snap.swing == Fcu::Swing::On) ? "ON" : "OFF";
+        const char *err_str = (rt.snap.error_code == 0) ? "OK" : "ERR";
+
+        char tgt_str[8] = "-", room_str[8] = "-";
+        if (rt.is_online) {
+          snprintf(tgt_str, sizeof(tgt_str), "%u C", rt.snap.target_temp);
+          snprintf(room_str, sizeof(room_str), "%u C", rt.snap.room_temp);
+        }
+        const char *ip_str = (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
+        out.appendFormat("#%-5u %-7s %-6u %-16s %-6s %-6s %-6s %-6s %-5s %-5s %s\r\n",
+                         s, slot.name, slot.target_port, ip_str,
+                         pwr_str, mode_str, fan_str, swng_str, tgt_str, room_str, err_str);
+      }
+    }
+    out.append(Fmt::DIV80EQ);
+    out.append("\r\n");
+
     sendTelnetMsgLen(sock, out.buf, out.offset);
     return;
   }

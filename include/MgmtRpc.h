@@ -62,3 +62,4 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                float power_w = 0.0f, int floor = 0, int direction = 0,
                                int ho = 0, int vent_mode = 1);
 void Mgmt_BroadcastDevicesUpdated();
+void Mgmt_BroadcastRawJson(const char *json_payload);

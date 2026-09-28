@@ -142,9 +142,9 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
       const char *status_str = !tgt.is_active ? "OFFLINE" : (!tgt.is_verified ? "UNVERIF" : "ONLINE");
 
       out.appendFormat(
-          "%02u  %-7s  %-5s  %-7s  %s\r\n",
+          "%02u  %-7s  %-5s  %-7s  %s [%02X:%02X]\r\n",
           display_idx++, status_str, last_req_str,
-          src_buf, q_hex);
+          src_buf, q_hex, tgt.dev_id, tgt.sub1);
     }
   }
   out.append(Fmt::DIV80);
@@ -188,8 +188,9 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
 
       const char *status_str = dev.is_online ? "ONLINE" : "OFFLINE";
 
-      out.appendFormat("%02u  %-7s  %-5s  %s\r\n",
-                       static_cast<unsigned int>(i + 1), status_str, updated_str, ack_hex);
+      out.appendFormat("%02u  %-7s  %-5s  %s [%02X:%02X]\r\n",
+                       static_cast<unsigned int>(i + 1), status_str, updated_str, ack_hex,
+                       dev.dev_id, dev.sub1);
     }
   }
   out.append(Fmt::DIV80);
