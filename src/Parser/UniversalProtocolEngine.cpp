@@ -31,10 +31,6 @@ const char *UniversalProtocolEngine::getProfileKey() const {
   return buf;
 }
 
-uint8_t UniversalProtocolEngine::getVendorId() const {
-  return g_config.wallpad_profile;
-}
-
 static inline bool checkFramingPure(span<const uint8_t> frame, uint8_t stx,
                                     uint8_t etx, uint8_t min_len,
                                     uint8_t max_len, ChecksumAlgo algo) {
@@ -302,12 +298,4 @@ IWallpadParser *WallpadParserFactory::getActiveParser() {
 
 bool WallpadParserFactory::setProfile(uint8_t index) {
   return ProfileRepository::setActiveProfileIndex(index);
-}
-
-bool WallpadParserFactory::setProfileByKey(const char *key) {
-  return ProfileRepository::setActiveProfileByKey(key);
-}
-
-size_t WallpadParserFactory::getParserCount() {
-  return ProfileRepository::getProfileCount();
 }

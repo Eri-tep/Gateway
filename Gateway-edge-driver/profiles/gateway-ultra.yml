@@ -251,3 +251,7 @@ preferences:
       maximum: 500
       default: 240
 
+metadata:
+  vid: "c12db3a2-29f6-30b5-b3ec-9444125e9e9c"
+  mnmn: "SmartThingsCommunity"
+

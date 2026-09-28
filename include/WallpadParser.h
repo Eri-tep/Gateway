@@ -10,8 +10,8 @@ enum class ChecksumAlgo : uint8_t {
   UNKNOWN = 0,
   XOR_ALL = 1,         // XOR from 0 to N-3 (Hyundai HT, EzVille, etc.)
   XOR_NO_STX = 2,      // XOR from 1 to N-3 (Kocom)
-  SUM_ALL = 3,         // Sum 0 to N-3 modulo 256 (Commax Legacy)
-  SUM_NO_STX = 4,      // Sum 1 to N-3 modulo 256 (Commax Modern)
+  SUM_ALL = 3,         // Sum 0 to N-3 modulo 256
+  SUM_NO_STX = 4,      // Sum 1 to N-3 modulo 256
   TWOS_COMPLEMENT = 5, // (0x100 - Sum[1..N-3]) % 256 (Samsung SDS / EZON)
   ONES_COMPLEMENT = 6, // (~Sum[0..N-3]) % 256
   CRC8_MAXIM = 7,      // CRC-8 (poly 0x31, init 0x00)
@@ -214,7 +214,6 @@ public:
 
   virtual const char *getVendorName() const = 0;
   virtual const char *getProfileKey() const = 0;
-  virtual uint8_t getVendorId() const = 0;
 
   // Frame validation (STX, ETX, length, checksum)
   virtual bool validatePacket(span<const uint8_t> frame) const = 0;
@@ -265,7 +264,6 @@ private:
 public:
   const char *getVendorName() const override;
   const char *getProfileKey() const override;
-  uint8_t getVendorId() const override;
 
   bool isLocked() const override {
     VendorProfileDescriptor d = activeProfile();
@@ -307,6 +305,4 @@ public:
   static void init();
   static IWallpadParser *getActiveParser();
   static bool setProfile(uint8_t index);
-  static bool setProfileByKey(const char *key);
-  static size_t getParserCount();
 };
