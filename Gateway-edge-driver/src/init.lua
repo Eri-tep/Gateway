@@ -144,19 +144,27 @@ local function device_init(driver, device)
   end
 
   schedule_polling_timer(driver, device)
-  command_handlers.refresh_telemetry(driver, device)
+  -- 선행 refresh_telemetry 제거: 소켓이 연결되기 전에 호출하여 발생하는 "Gateway connection not ready" 에러 원천 차단
 
   -- CH6 실시간 푸시 이벤트 리스너 실행 (단 1회)
   if not device:get_field("listener_started") then
     device:set_field("listener_started", true)
     local ip = device.preferences.gatewayIp or "172.30.1.3"
     local port = tonumber(device.preferences.gatewayPort) or 8900
-    gateway_client.start_event_listener(driver, ip, port, function(d, event_data)
-      local handler = event_data and EVENT_HANDLERS[event_data.event]
-      if handler then
-        handler(d, event_data)
+    gateway_client.start_event_listener(
+      driver, ip, port,
+      function(d, event_data)
+        local handler = event_data and EVENT_HANDLERS[event_data.event]
+        if handler then
+          handler(d, event_data)
+        end
+      end,
+      function(d)
+        -- ★ TCP 소켓 연결 성공 즉시 1회 자동 텔레메트리 즉각 조회 (30초 공백 지연 0초로 단축)
+        log.info("🚀 [AUTO-SYNC] Connected to gateway! Querying telemetry immediately...")
+        command_handlers.refresh_telemetry(d, device)
       end
-    end)
+    )
   end
 end
 

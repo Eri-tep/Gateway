@@ -185,7 +185,7 @@ end
 
 
 --- CH6 (8900) 실시간 푸시 이벤트 리스너 (백그라운드 지속 소켓 + 클라이언트 Heartbeat Ping + RPC 공유)
-function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
+function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_connected_cb)
   if not ip or not port then return end
 
   local cosock = require "cosock"
@@ -202,6 +202,13 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
           log.info(string.format("✅ [CH6 PUSH] Connected to Gateway %s:%d (TCP_NODELAY Active)", ip, port))
           persistent_tcp = tcp
           local is_alive = true
+
+          -- [On-Connect Immediate Refresh] 연결 수립 즉시 텔레메트리 1회 즉시 동기화 트리거
+          if on_connected_cb then
+            cosock.spawn(function()
+              pcall(on_connected_cb, driver)
+            end, "on_connected_sync")
+          end
 
           -- [Heartbeat Ping Worker] 15초마다 게이트웨이로 Ping 전송하여 세션 활성화 유지 및 끊김 감지 (단축 포맷)
           cosock.spawn(function()
