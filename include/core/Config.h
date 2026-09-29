@@ -9,7 +9,7 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.3.8";
+constexpr const char *FIRMWARE_VERSION = "v1.3.9";
 } // namespace Config
 
 namespace Config::Task {
@@ -169,11 +169,15 @@ constexpr uint32_t DEFAULT_KEEPALIVE_CNT = 3;
 
 namespace Config::FCU {
 // [CH5 FCU] Modbus-RTU 폴링 및 제어 파라미터
-constexpr uint32_t POLL_INTERVAL_MS = 20000; // 슬롯별 독립 폴링 주기 (20초)
-constexpr uint32_t RX_TIMEOUT_MS = 300;      // 쿼리 응답 대기 타임아웃 (300ms)
-constexpr uint8_t MAX_TIMEOUT_COUNT = 3;     // 연속 타임아웃 허용 횟수
-constexpr uint8_t TEMP_MIN = 18;             // 최저 희망 설정 온도 (18℃)
-constexpr uint8_t TEMP_MAX = 30;             // 최고 희망 설정 온도 (30℃)
+constexpr uint32_t POLL_INTERVAL_MS =
+    1000; // 슬롯별 독립 폴링 주기 (1초, 실시간 상태 추적)
+constexpr uint32_t RX_TIMEOUT_MS =
+    500; // 쿼리 응답 대기 타임아웃 (TCP/WiFi 지터 방어 마진 포함 500ms)
+constexpr uint32_t INTER_PACKET_DELAY_MS =
+    50; // 버스 유휴 감지 및 안정 지연 (EW11 버퍼 플러시 확보 50ms)
+constexpr uint8_t MAX_TIMEOUT_COUNT = 3; // 연속 타임아웃 허용 횟수
+constexpr uint8_t TEMP_MIN = 18;         // 최저 희망 설정 온도 (18℃)
+constexpr uint8_t TEMP_MAX = 30;         // 최고 희망 설정 온도 (30℃)
 constexpr uint8_t DEV_ID = 0x2C; // ST 연동 디바이스 ID (에어컨/FCU 계열)
 } // namespace Config::FCU
 

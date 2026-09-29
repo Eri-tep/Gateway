@@ -365,6 +365,16 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
     bool is_vent_mode_ack = (dev_id == 0x2B && ack.length >= 6 && ack.data[5] == 0x43);
     bool ack_changed = false;
 
+    // 엘리베이터(0x34) 이전 상태 백업: memcpy로 dev->last_ack_data를 덮어쓰기 전에 반드시 수행
+    bool prev_pwr = false;
+    uint8_t prev_dir = 0;
+    uint8_t prev_ho = 0;
+    if (dev_id == 0x34) {
+      prev_pwr = (dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01) : false;
+      prev_dir = dev->last_target_temp;
+      prev_ho = (dev->last_ack_len > 1) ? dev->last_ack_data[1] : 0;
+    }
+
     if (!is_vent_mode_ack) {
       ack_changed = (dev->last_ack_len != ack.length || memcmp(dev->last_ack_data.data(), ack.data.data(), ack.length) != 0);
       dev->last_ack_len = ack.length;
@@ -381,11 +391,6 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
       if (dev_id == 0x34) {
         parseMomentaryState(dev_id, ack, dev, b_pwr, b_floor, b_direction, b_ho);
         // 엘리베이터 실질적 상태 변화가 있을 때만 브로드캐스트 (전원 변경, 방향/도착 변경, 호기 변경)
-        // last_target_temp를 이전 direction, last_current_temp를 이전 floor, last_stale_poll_ms를 이전 pwr/ho로 활용
-        bool prev_pwr = (dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01) : 0;
-        uint8_t prev_dir = dev->last_target_temp;
-        uint8_t prev_ho = (dev->last_ack_len > 1) ? dev->last_ack_data[1] : 0;
-
         bool ev_state_changed = (b_pwr != prev_pwr) || (b_direction != prev_dir) || (b_ho != prev_ho);
         if (ev_state_changed) {
           should_broadcast = true;

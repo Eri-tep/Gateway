@@ -372,9 +372,18 @@ static bool Fcu_ParseQueryResponse(const uint8_t *data, size_t len, Fcu::Snapsho
   return true;
 }
 
-// 슬롯 소켓에 직접 전송하는 내부 헬퍼 (g_ch5_mutex 획득 후 호출)
+// 슬롯 소켓에 직접 전송하거나, 선로 점유 중(waiting_response)이면 대기 큐에 보관 (Stop-and-Wait 규약)
 static bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !pkt || len == 0 || len > 16) return false;
+  auto &rt = s_fcu_slots[slot_idx];
+
+  // 선로가 응답 대기 중이거나 인터패킷 갭(15ms) 진행 중인 경우: 선로 충돌을 방지하기 위해 대기 큐에 보관 (Stop-and-Wait 규약)
+  if (rt.waiting_response || rt.has_pending_temp || (millis() < rt.next_tx_ms)) {
+    memcpy(rt.pending_cmd_buf, pkt, len);
+    rt.pending_cmd_len = static_cast<uint8_t>(len);
+    return true;
+  }
+
   MutexLocker lock(g_ch5_mutex);
   HubClientSlot &slot = g_hub_slots[slot_idx];
   if (!slot.enabled || slot.sock < 0 || !slot.is_connected) return false;
@@ -382,6 +391,9 @@ static bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
   if (ok) {
     slot.tx_pkts++;
     g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    rt.waiting_response = true;
+    rt.query_sent_ms = millis();
+    rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS; // CH1과 동일한 버스 인터패킷 안정 지연 (15ms)
   }
   return ok;
 }
@@ -399,6 +411,7 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
     rt.waiting_response = false;
     rt.timeout_count = 0;
     rt.is_online = true;
+    rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS; // ACK 수신 후 버스 유휴 안정 지연 (CH1 동일 15ms)
     return;
   }
 
@@ -469,7 +482,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
     return;
   }
 
-  // 120ms 논블로킹 가드타임 만료 시 대기 중인 목표 온도 패킷 송출
+  // RS-485 Stop-and-Wait: 인터패킷 갭(15ms) 만료 시 대기 중인 목표 온도 패킷 송출
   if (rt.has_pending_temp) {
     if (now >= rt.next_tx_ms) {
       rt.has_pending_temp = false;
@@ -478,9 +491,28 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
       if (send(slot->sock, buf, len, MSG_DONTWAIT) == static_cast<ssize_t>(len)) {
         slot->tx_pkts++;
         g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        rt.waiting_response = true;
+        rt.query_sent_ms = now;
+        rt.next_tx_ms = now + Config::FCU::INTER_PACKET_DELAY_MS;
       }
     }
-    return; // 120ms 가드타임 중에는 주기적 폴링을 억제하여 버스 간섭 완전 차단
+    return; // 인터패킷 갭 중에는 주기적 폴링을 억제하여 버스 간섭 완전 차단
+  }
+
+  // RS-485 Stop-and-Wait: 대기 중인 제어 명령 패킷 순차 방출 (CH1 규약과 동일)
+  if (rt.pending_cmd_len > 0) {
+    if (!rt.waiting_response && now >= rt.next_tx_ms) {
+      uint8_t len = rt.pending_cmd_len;
+      rt.pending_cmd_len = 0;
+      if (send(slot->sock, rt.pending_cmd_buf, len, MSG_DONTWAIT) == static_cast<ssize_t>(len)) {
+        slot->tx_pkts++;
+        g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        rt.waiting_response = true;
+        rt.query_sent_ms = now;
+        rt.next_tx_ms = now + Config::FCU::INTER_PACKET_DELAY_MS;
+      }
+    }
+    return;
   }
 
   // 응답 대기 중 타임아웃 검사 (300ms)
@@ -564,7 +596,7 @@ bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing,
   if (prev_temp != temp) {
     rt.has_pending_temp = true;
     rt.pending_temp = temp;
-    rt.next_tx_ms = millis() + 120;
+    rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS;
   }
   return true;
 }

@@ -892,14 +892,54 @@ function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
   gateway_client.device_control(ip, port, d_id, s1, s2, "mode", mode_code)
 end
 
+local function dispatch_fcu_unified_restore(driver, device, d_id, s1, s2)
+  local saved_mode = device:get_field("saved_fcu_mode") or "cool"
+  local val_map = { cool = 1, heat = 2, fanOnly = 3 }
+  local m_val = val_map[saved_mode] or 1
+
+  local saved_temp = device:get_field("saved_fcu_temp") or 24
+  if saved_temp < 18 or saved_temp > 30 then saved_temp = 24 end
+
+  local saved_fan = device:get_field("saved_fcu_fan") or "auto"
+  local f_val = FCU_FAN_MODE_TO_VAL[saved_fan] or 4
+
+  local saved_osc = device:get_field("saved_fcu_osc") or "fixed"
+  local o_val = (saved_osc == "swing") and 2 or 0
+
+  local ip, port = get_gateway_ip_port(driver)
+  local payload = {
+    c = "ctl",
+    d = d_id,
+    s1 = s1,
+    s2 = s2,
+    a = "power_restore",
+    mode = m_val,
+    fan = f_val,
+    swing = o_val,
+    temp = saved_temp
+  }
+  gateway_client.device_control_custom(ip, port, payload)
+end
+
+local function schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
+  local old_timer = device:get_field("fcu_cmd_timer")
+  if old_timer then
+    device.thread:cancel_timer(old_timer)
+    device:set_field("fcu_cmd_timer", nil)
+  end
+
+  local new_timer = device.thread:call_with_delay(0.3, function()
+    device:set_field("fcu_cmd_timer", nil)
+    dispatch_fcu_unified_restore(driver, device, d_id, s1, s2)
+  end)
+  device:set_field("fcu_cmd_timer", new_timer)
+end
+
 function CommandHandlers.handle_fcu_set_mode(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id or d_id ~= 0x2C then return end
   local mode = (command.args and command.args.mode) or "cool"
-  local val_map = { cool = 1, heat = 2, fanOnly = 3 }
-  local val = val_map[mode] or 1
 
-  -- 냉방 또는 난방일 때만 saved_fcu_mode로 즉시 영구 저장 (송풍 건조 모드 제외 유지)
   if mode == "cool" or mode == "heat" then
     device:set_field("saved_fcu_mode", mode, { persist = true })
   end
@@ -911,22 +951,18 @@ function CommandHandlers.handle_fcu_set_mode(driver, device, command)
     device:emit_event(evt)
   end
 
-  cosock.spawn(function()
-    local ip, port = get_gateway_ip_port(driver)
-    if ip and port then
-      gateway_client.device_control(ip, port, d_id, s1, s2, "mode", val)
-    end
-  end, "fcu_set_mode_task")
+  schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end
 
 function CommandHandlers.handle_fcu_set_fan_speed(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id or d_id ~= 0x2C then return end
   local fan_mode = (command.args and command.args.fanSpeed) or "auto"
-  local val_map = { low = 1, medium = 2, high = 3, auto = 4 }
-  local val = val_map[fan_mode] or 4
 
-  device:set_field("saved_fcu_fan", fan_mode, { persist = true })
+  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
+  if cur_mode == "cool" or cur_mode == "heat" then
+    device:set_field("saved_fcu_fan", fan_mode, { persist = true })
+  end
   device:set_field("last_fcu_fan", fan_mode, { persist = true })
   local cap = capabilities["digituniverse06711.fcuFanSpeed"]
   if cap then
@@ -935,21 +971,18 @@ function CommandHandlers.handle_fcu_set_fan_speed(driver, device, command)
     device:emit_event(evt)
   end
 
-  cosock.spawn(function()
-    local ip, port = get_gateway_ip_port(driver)
-    if ip and port then
-      gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", val)
-    end
-  end, "fcu_set_fan_task")
+  schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end
 
 function CommandHandlers.handle_fcu_set_oscillation(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id or d_id ~= 0x2C then return end
   local osc = (command.args and command.args.oscillation) or "fixed"
-  local val = (osc == "swing") and 2 or 0
 
-  device:set_field("saved_fcu_osc", osc, { persist = true })
+  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
+  if cur_mode == "cool" or cur_mode == "heat" then
+    device:set_field("saved_fcu_osc", osc, { persist = true })
+  end
   device:set_field("last_fcu_osc", osc, { persist = true })
   local cap = capabilities["digituniverse06711.fcuOscillation"]
   if cap then
@@ -958,26 +991,24 @@ function CommandHandlers.handle_fcu_set_oscillation(driver, device, command)
     device:emit_event(evt)
   end
 
-  cosock.spawn(function()
-    local ip, port = get_gateway_ip_port(driver)
-    if ip and port then
-      gateway_client.device_control(ip, port, d_id, s1, s2, "swing", val)
-    end
-  end, "fcu_set_osc_task")
+  schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end
 
 function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id or d_id ~= 0x2C then return end
 
-  -- 사용자가 슬라이더로 설정한 온도를 있는 그대로 게이트웨이로 전송 (임의 거부/원복 버그 완전 제거)
   local raw_temp = (command.args and command.args.setpoint) or 24
   local temp = math.floor((tonumber(raw_temp) or 24) + 0.5)
   if temp < 18 then temp = 18 end
   if temp > 30 then temp = 30 end
 
-  -- 1. 화면 UI 및 로컬 영구 저장은 0ms 즉시 갱신 (슬라이더 조작감 극대화)
-  device:set_field("saved_fcu_temp", temp, { persist = true })
+  -- 송풍(fanOnly) 중 조작한 온도는 냉방/난방 복원 저장소(saved_fcu_temp)를 오염시키지 않도록 엄격 차단
+  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
+  if cur_mode == "cool" or cur_mode == "heat" then
+    device:set_field("saved_fcu_temp", temp, { persist = true })
+  end
+
   local cap = capabilities["digituniverse06711.fcuSetpoint"]
   if cap then
     local evt = cap.setpoint({ value = temp, unit = "°C" })
@@ -985,21 +1016,7 @@ function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
     device:emit_event(evt)
   end
 
-  -- 2. 슬라이더 연속 드래그 시 버스 폭주를 방지하는 300ms 디바운스 (손가락 멈춘 최종값만 1회 전송)
-  local old_timer = device:get_field("fcu_temp_timer")
-  if old_timer then
-    device.thread:cancel_timer(old_timer)
-    device:set_field("fcu_temp_timer", nil)
-  end
-
-  local new_timer = device.thread:call_with_delay(0.3, function()
-    device:set_field("fcu_temp_timer", nil)
-    local ip, port = get_gateway_ip_port(driver)
-    if ip and port then
-      gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
-    end
-  end)
-  device:set_field("fcu_temp_timer", new_timer)
+  schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end
 
 function CommandHandlers.handle_child_set_ac_fan_mode(driver, device, command)

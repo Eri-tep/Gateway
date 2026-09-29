@@ -58,6 +58,8 @@ struct SlotRuntime {
   uint32_t next_tx_ms{0};                       // 120ms 논블로킹 가드타임 만료 시각
   uint8_t pending_temp{0};                      // 120ms 후 전송할 대기 목표온도
   bool has_pending_temp{false};                 // 온도 패킷 전송 대기 여부
+  uint8_t pending_cmd_buf[16]{};               // RS-485 Stop-and-Wait 대기 명령 버퍼
+  uint8_t pending_cmd_len{0};                  // 대기 중인 명령 패킷 길이
 };
 
 // ── 외부 공개 제어 API (MgmtRpc에서 호출, 스레드-세이프) ──
