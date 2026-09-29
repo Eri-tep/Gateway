@@ -184,8 +184,10 @@ function GatewayClient.device_control(ip, port, dev_id, sub1, sub2, action, valu
 end
 
 function GatewayClient.device_control_custom(ip, port, payload)
-  local sent = GatewayClient.send_fast_path(payload)
+  log.info(string.format("📡 [FCU SEND] Dispatching custom payload to %s:%d: %s", ip, port, json.encode(payload)))
+  local sent, err = GatewayClient.send_fast_path(payload)
   if sent then return true end
+  log.warn(string.format("⚠️ [FCU SEND] Fast path failed (%s), falling back to send_rpc", tostring(err)))
   return GatewayClient.send_rpc(ip, port, payload)
 end
 

@@ -483,10 +483,6 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
     return; // 120ms 가드타임 중에는 주기적 폴링을 억제하여 버스 간섭 완전 차단
   }
 
-  // 1st-Tier Polling Target 등록 (미등록 시 자동 등록 / 갱신)
-  g_polling_targets.registerOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
-                                   kFcuQueryPkt, sizeof(kFcuQueryPkt));
-
   // 응답 대기 중 타임아웃 검사 (300ms)
   if (rt.waiting_response) {
     if (now - rt.query_sent_ms >= Config::FCU::RX_TIMEOUT_MS) {
@@ -504,6 +500,11 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
     rt.last_poll_ms = now;
     rt.query_sent_ms = now;
     rt.waiting_response = true;
+
+    // 1st-Tier Polling Target 등록 (20초마다 갱신하여 스핀락 경합 100% 방지)
+    g_polling_targets.registerOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
+                                     kFcuQueryPkt, sizeof(kFcuQueryPkt));
+
     if (send(slot->sock, kFcuQueryPkt, sizeof(kFcuQueryPkt), MSG_DONTWAIT) == static_cast<ssize_t>(sizeof(kFcuQueryPkt))) {
       slot->tx_pkts++;
       g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
@@ -542,20 +543,6 @@ static void applyOptimisticState(uint8_t slot_idx, uint16_t mode, uint16_t fan, 
     dev->last_updated_ms   = millis();
     dev->is_online         = true;
   }
-
-  char json_buf[256];
-  snprintf(json_buf, sizeof(json_buf),
-           "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\","
-           "\"power\":%u,\"mode\":%u,\"fan_speed\":%u,\"swing\":%u,"
-           "\"target_temp\":%u,\"room_temp\":%u,\"error\":0}",
-           static_cast<unsigned>(Config::FCU::DEV_ID), slot_idx,
-           rt.snap.power ? 1u : 0u,
-           static_cast<unsigned>(rt.snap.mode),
-           static_cast<unsigned>(rt.snap.fan_speed),
-           static_cast<unsigned>(rt.snap.swing),
-           rt.snap.target_temp,
-           rt.snap.room_temp);
-  Mgmt_BroadcastRawJson(json_buf);
 }
 
 bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing, uint8_t temp) {

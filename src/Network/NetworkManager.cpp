@@ -174,17 +174,6 @@ void Task_Network(void *pvParameters) {
                         "to NVS.\r\n",
                         g_config.wifi_ssid);
         }
-        if (WiFi.getMode() == WIFI_MODE_APSTA ||
-            WiFi.getMode() == WIFI_MODE_AP) {
-          WiFi.softAPdisconnect(true);
-          WiFi.mode(WIFI_STA);
-          WiFi.setSleep(false);
-          Serial.println(F("[WIFI] Event: GOT_IP! Fallback SoftAP disabled, "
-                           "restored STA mode."));
-        }
-        configTime(0, 0, "pool.ntp.org", "asia.pool.ntp.org");
-        setenv("TZ", "KST-9", 1);
-        tzset();
       }
 
       if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
@@ -267,8 +256,16 @@ void Task_Network(void *pvParameters) {
       }
     }
 
-    struct timeval tv = {0, 10000}; // 10ms 커널 레벨 Event-Driven 블로킹 (소켓
-    int act = select(max_fd + 1, &readfds, &writefds, &errorfds, &tv);
+    int act = 0;
+    struct timeval tv = {0, 10000};
+    if (max_fd >= 0) {
+      act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    esp_task_wdt_reset();
+    g_wdt_monitor.feed(4);
 
     if (act > 0) {
       if (mgmt_server_fd >= 0 && FD_ISSET(mgmt_server_fd, &readfds)) {
@@ -319,11 +316,19 @@ void Task_Network(void *pvParameters) {
               slot.rx_len = 0;
             }
           }
+        }
+      }
+    }
 
-          // FCU 슬롯(1~4) 20초 독립 폴링 및 타임아웃 검사
-          if (s >= 1 && s < Config::TCP::MAX_EW11_SLOTS) {
-            Fcu::handleSlotLoop(static_cast<uint8_t>(s), &slot, millis());
-          }
+    // FCU 슬롯(1~4) 120ms 논블로킹 가드타임 및 20초 주기 폴링 처리
+    // select 수신 여부와 관계없이 매 10ms 루프마다 정확하게 실행되어야 함
+    if (!ota_now) {
+      uint32_t now_ms = millis();
+      MutexLocker lock(g_ch5_mutex);
+      for (int s = 1; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        auto &slot = g_hub_slots[s];
+        if (slot.sock >= 0 && slot.is_connected) {
+          Fcu::handleSlotLoop(static_cast<uint8_t>(s), &slot, now_ms);
         }
       }
     }
