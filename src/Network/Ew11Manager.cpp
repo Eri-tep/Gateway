@@ -245,6 +245,8 @@ void processStream(int slot_idx, HubClientSlot *slot) {
     size_t rem = slot->rx_len - p;
     // 19바이트 0x03 상태 응답
     if (rem >= 19 && slot->rx_buf[p + 1] == 0x03 && slot->rx_buf[p + 2] == 0x0E) {
+      slot->rx_pkts++;
+      g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
       p += 19;
       continue;
@@ -252,6 +254,8 @@ void processStream(int slot_idx, HubClientSlot *slot) {
 
     // 8바이트 0x06/0x10 제어 ACK
     if (rem >= 8 && (slot->rx_buf[p + 1] == 0x06 || slot->rx_buf[p + 1] == 0x10)) {
+      slot->rx_pkts++;
+      g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
       p += 8;
       continue;
@@ -374,7 +378,12 @@ static bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
   MutexLocker lock(g_ch5_mutex);
   HubClientSlot &slot = g_hub_slots[slot_idx];
   if (!slot.enabled || slot.sock < 0 || !slot.is_connected) return false;
-  return send(slot.sock, pkt, len, MSG_DONTWAIT) == static_cast<ssize_t>(len);
+  bool ok = (send(slot.sock, pkt, len, MSG_DONTWAIT) == static_cast<ssize_t>(len));
+  if (ok) {
+    slot.tx_pkts++;
+    g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+  }
+  return ok;
 }
 
 } // namespace
@@ -456,7 +465,22 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
   if (!slot->enabled || slot->sock < 0 || !slot->is_connected) {
     rt.is_online = false;
     rt.waiting_response = false;
+    rt.has_pending_temp = false;
     return;
+  }
+
+  // 120ms 논블로킹 가드타임 만료 시 대기 중인 목표 온도 패킷 송출
+  if (rt.has_pending_temp) {
+    if (now >= rt.next_tx_ms) {
+      rt.has_pending_temp = false;
+      uint8_t buf[8];
+      size_t len = Fcu_BuildWriteSingle(buf, 0x0005, rt.pending_temp);
+      if (send(slot->sock, buf, len, MSG_DONTWAIT) == static_cast<ssize_t>(len)) {
+        slot->tx_pkts++;
+        g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    return; // 120ms 가드타임 중에는 주기적 폴링을 억제하여 버스 간섭 완전 차단
   }
 
   // 1st-Tier Polling Target 등록 (미등록 시 자동 등록 / 갱신)
@@ -480,8 +504,82 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
     rt.last_poll_ms = now;
     rt.query_sent_ms = now;
     rt.waiting_response = true;
-    send(slot->sock, kFcuQueryPkt, sizeof(kFcuQueryPkt), MSG_DONTWAIT);
+    if (send(slot->sock, kFcuQueryPkt, sizeof(kFcuQueryPkt), MSG_DONTWAIT) == static_cast<ssize_t>(sizeof(kFcuQueryPkt))) {
+      slot->tx_pkts++;
+      g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    }
   }
+}
+
+static void applyOptimisticState(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing, uint8_t temp) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return;
+  auto &rt = s_fcu_slots[slot_idx];
+
+  rt.snap.power = (fan != 0);
+  if (mode >= 1 && mode <= 3) rt.snap.mode = static_cast<Mode>(mode);
+  if (fan <= 4) rt.snap.fan_speed = static_cast<FanSpeed>(fan);
+  if (swing == 0 || swing == 2) rt.snap.swing = static_cast<Swing>(swing);
+  if (temp >= Config::FCU::TEMP_MIN && temp <= Config::FCU::TEMP_MAX) {
+    rt.snap.target_temp = temp;
+  }
+  if (mode == 1 || mode == 2) {
+    rt.last_active_mode = rt.snap.mode;
+    rt.has_active_record = true;
+  }
+  if (fan != 0) {
+    rt.last_active_fan = rt.snap.fan_speed;
+  }
+  rt.last_active_swing = rt.snap.swing;
+
+  DeviceStateEntry *dev = g_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
+  if (dev) {
+    dev->last_ack_len = 19;
+    dev->last_ack_data[6]  = static_cast<uint8_t>(rt.snap.mode);
+    dev->last_ack_data[8]  = static_cast<uint8_t>(rt.snap.fan_speed);
+    dev->last_ack_data[10] = static_cast<uint8_t>(rt.snap.swing);
+    dev->last_ack_data[14] = rt.snap.target_temp;
+    dev->last_target_temp  = rt.snap.target_temp;
+    dev->last_updated_ms   = millis();
+    dev->is_online         = true;
+  }
+
+  char json_buf[256];
+  snprintf(json_buf, sizeof(json_buf),
+           "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\","
+           "\"power\":%u,\"mode\":%u,\"fan_speed\":%u,\"swing\":%u,"
+           "\"target_temp\":%u,\"room_temp\":%u,\"error\":0}",
+           static_cast<unsigned>(Config::FCU::DEV_ID), slot_idx,
+           rt.snap.power ? 1u : 0u,
+           static_cast<unsigned>(rt.snap.mode),
+           static_cast<unsigned>(rt.snap.fan_speed),
+           static_cast<unsigned>(rt.snap.swing),
+           rt.snap.target_temp,
+           rt.snap.room_temp);
+  Mgmt_BroadcastRawJson(json_buf);
+}
+
+bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing, uint8_t temp) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  auto &rt = s_fcu_slots[slot_idx];
+
+  if (mode != 1 && mode != 2 && mode != 3) mode = 1; // 기본 냉방
+  if (fan == 0 || fan > 4) fan = 4;                  // 기본 자동
+  if (swing != 0 && swing != 2) swing = 0;           // 기본 고정
+  if (temp < Config::FCU::TEMP_MIN || temp > Config::FCU::TEMP_MAX) temp = 24;
+
+  uint8_t buf[15];
+  size_t len = Fcu_BuildPowerOn(buf, mode, fan, swing);
+  if (!Fcu_SendRaw(slot_idx, buf, len)) return false;
+
+  uint8_t prev_temp = rt.snap.target_temp;
+  applyOptimisticState(slot_idx, mode, fan, swing, temp);
+
+  if (prev_temp != temp) {
+    rt.has_pending_temp = true;
+    rt.pending_temp = temp;
+    rt.next_tx_ms = millis() + 120;
+  }
+  return true;
 }
 
 bool SetPower(uint8_t slot_idx, bool on) {
@@ -489,11 +587,10 @@ bool SetPower(uint8_t slot_idx, bool on) {
   auto &rt = s_fcu_slots[slot_idx];
 
   if (on) {
-    Mode target_mode = rt.has_active_record ? rt.last_active_mode : Mode::FanOnly;
+    Mode target_mode = rt.has_active_record ? rt.last_active_mode : Mode::Cool;
     FanSpeed target_fan = rt.has_active_record ? rt.last_active_fan : FanSpeed::Low;
     Swing target_swing = rt.has_active_record ? rt.last_active_swing : Swing::Off;
 
-    // 만약 기억된 풍량이 Off(0)였다면 켤 때는 기본 약풍으로 보정
     if (target_fan == FanSpeed::Off) {
       target_fan = FanSpeed::Low;
     }
@@ -503,28 +600,60 @@ bool SetPower(uint8_t slot_idx, bool on) {
                    static_cast<uint16_t>(target_mode),
                    static_cast<uint16_t>(target_fan),
                    static_cast<uint16_t>(target_swing));
-    return Fcu_SendRaw(slot_idx, buf, len);
+    bool ok = Fcu_SendRaw(slot_idx, buf, len);
+    if (ok) {
+      applyOptimisticState(slot_idx, static_cast<uint16_t>(target_mode),
+                           static_cast<uint16_t>(target_fan),
+                           static_cast<uint16_t>(target_swing), rt.snap.target_temp);
+    }
+    return ok;
   } else {
-    return Fcu_SendRaw(slot_idx, kFcuPowerOff, sizeof(kFcuPowerOff));
+    bool ok = Fcu_SendRaw(slot_idx, kFcuPowerOff, sizeof(kFcuPowerOff));
+    if (ok) {
+      applyOptimisticState(slot_idx, static_cast<uint16_t>(rt.snap.mode), 0,
+                           static_cast<uint16_t>(rt.snap.swing), rt.snap.target_temp);
+    }
+    return ok;
   }
 }
 
 bool SetMode(uint8_t slot_idx, Mode m) {
   uint8_t buf[8];
   size_t len = Fcu_BuildWriteSingle(buf, 0x0001, static_cast<uint16_t>(m));
-  return Fcu_SendRaw(slot_idx, buf, len);
+  bool ok = Fcu_SendRaw(slot_idx, buf, len);
+  if (ok) {
+    auto &rt = s_fcu_slots[slot_idx];
+    applyOptimisticState(slot_idx, static_cast<uint16_t>(m),
+                         static_cast<uint16_t>(rt.snap.fan_speed),
+                         static_cast<uint16_t>(rt.snap.swing), rt.snap.target_temp);
+  }
+  return ok;
 }
 
 bool SetFanSpeed(uint8_t slot_idx, FanSpeed f) {
   uint8_t buf[8];
   size_t len = Fcu_BuildWriteSingle(buf, 0x0002, static_cast<uint16_t>(f));
-  return Fcu_SendRaw(slot_idx, buf, len);
+  bool ok = Fcu_SendRaw(slot_idx, buf, len);
+  if (ok) {
+    auto &rt = s_fcu_slots[slot_idx];
+    applyOptimisticState(slot_idx, static_cast<uint16_t>(rt.snap.mode),
+                         static_cast<uint16_t>(f),
+                         static_cast<uint16_t>(rt.snap.swing), rt.snap.target_temp);
+  }
+  return ok;
 }
 
 bool SetSwing(uint8_t slot_idx, Swing s) {
   uint8_t buf[8];
   size_t len = Fcu_BuildWriteSingle(buf, 0x0003, static_cast<uint16_t>(s));
-  return Fcu_SendRaw(slot_idx, buf, len);
+  bool ok = Fcu_SendRaw(slot_idx, buf, len);
+  if (ok) {
+    auto &rt = s_fcu_slots[slot_idx];
+    applyOptimisticState(slot_idx, static_cast<uint16_t>(rt.snap.mode),
+                         static_cast<uint16_t>(rt.snap.fan_speed),
+                         static_cast<uint16_t>(s), rt.snap.target_temp);
+  }
+  return ok;
 }
 
 bool SetTargetTemp(uint8_t slot_idx, uint8_t temp_c) {
@@ -532,7 +661,14 @@ bool SetTargetTemp(uint8_t slot_idx, uint8_t temp_c) {
   if (temp_c > Config::FCU::TEMP_MAX) temp_c = Config::FCU::TEMP_MAX;
   uint8_t buf[8];
   size_t len = Fcu_BuildWriteSingle(buf, 0x0005, static_cast<uint16_t>(temp_c));
-  return Fcu_SendRaw(slot_idx, buf, len);
+  bool ok = Fcu_SendRaw(slot_idx, buf, len);
+  if (ok) {
+    auto &rt = s_fcu_slots[slot_idx];
+    applyOptimisticState(slot_idx, static_cast<uint16_t>(rt.snap.mode),
+                         static_cast<uint16_t>(rt.snap.fan_speed),
+                         static_cast<uint16_t>(rt.snap.swing), temp_c);
+  }
+  return ok;
 }
 
 bool GetSlotRuntime(uint8_t slot_idx, SlotRuntime &out_rt) {

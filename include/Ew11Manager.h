@@ -51,14 +51,18 @@ struct SlotRuntime {
   uint8_t timeout_count{0};
   bool waiting_response{false};
   bool is_online{false};
-  Mode last_active_mode{Mode::FanOnly};         // 기록 없을 시 기본 송풍
+  Mode last_active_mode{Mode::Cool};            // 기록 없을 시 안전 기본 냉방
   FanSpeed last_active_fan{FanSpeed::Low};       // 기록 없을 시 기본 약풍
   Swing last_active_swing{Swing::Off};           // 기록 없을 시 기본 고정
   bool has_active_record{false};                // 냉방/난방 운전 이력 여부
+  uint32_t next_tx_ms{0};                       // 120ms 논블로킹 가드타임 만료 시각
+  uint8_t pending_temp{0};                      // 120ms 후 전송할 대기 목표온도
+  bool has_pending_temp{false};                 // 온도 패킷 전송 대기 여부
 };
 
 // ── 외부 공개 제어 API (MgmtRpc에서 호출, 스레드-세이프) ──
 bool SetPower(uint8_t slot_idx, bool on);
+bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing, uint8_t temp);
 bool SetMode(uint8_t slot_idx, Mode m);
 bool SetFanSpeed(uint8_t slot_idx, FanSpeed f);
 bool SetSwing(uint8_t slot_idx, Swing s);

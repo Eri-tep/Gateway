@@ -183,6 +183,12 @@ function GatewayClient.device_control(ip, port, dev_id, sub1, sub2, action, valu
   return GatewayClient.send_rpc(ip, port, payload)
 end
 
+function GatewayClient.device_control_custom(ip, port, payload)
+  local sent = GatewayClient.send_fast_path(payload)
+  if sent then return true end
+  return GatewayClient.send_rpc(ip, port, payload)
+end
+
 
 --- CH6 (8900) 실시간 푸시 이벤트 리스너 (백그라운드 지속 소켓 + 클라이언트 Heartbeat Ping + RPC 공유)
 function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_connected_cb)

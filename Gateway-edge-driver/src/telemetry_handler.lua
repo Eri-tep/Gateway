@@ -712,15 +712,15 @@ local DEVICE_TELEMETRY_HANDLERS = {
 
       -- 운전 모드 (digituniverse06711.fcuMode: cool/heat/fanOnly)
       local cap_mode = capabilities["digituniverse06711.fcuMode"]
-      if cap_mode then
-        local mode_str = FCU_VAL_TO_THERMO_MODE[event_data.mode] or "cool"
+      if cap_mode and event_data.mode ~= nil then
+        local mode_str = FCU_VAL_TO_THERMO_MODE[event_data.mode] or dev:get_field("saved_fcu_mode") or "cool"
         dev:emit_event(cap_mode.mode(mode_str))
       end
 
       -- 풍량 (digituniverse06711.fcuFanSpeed: auto/high/medium/low)
       local cap_fan = capabilities["digituniverse06711.fcuFanSpeed"]
-      if cap_fan then
-        local fan_str = FCU_VAL_TO_FAN_MODE[event_data.fan_speed] or "auto"
+      if cap_fan and event_data.fan_speed ~= nil then
+        local fan_str = FCU_VAL_TO_FAN_MODE[event_data.fan_speed] or dev:get_field("saved_fcu_fan") or "auto"
         dev:emit_event(cap_fan.fanSpeed(fan_str))
       end
     else
@@ -729,7 +729,7 @@ local DEVICE_TELEMETRY_HANDLERS = {
 
     -- 2. 바람 방향 (digituniverse06711.fcuOscillation: fixed / swing)
     local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
-    if cap_osc then
+    if cap_osc and event_data.swing ~= nil then
       local swing_str = (event_data.swing == 2) and "swing" or "fixed"
       local ev = cap_osc.oscillation(swing_str)
       ev.state_change = true

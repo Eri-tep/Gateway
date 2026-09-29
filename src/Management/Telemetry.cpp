@@ -405,11 +405,14 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
         snprintf(name_buf, sizeof(name_buf), "%s", slot.name[0] ? slot.name : "Air Conditioner");
 
         int pwr = (fcu_dev && fcu_dev->last_ack_len >= 9 && fcu_dev->last_ack_data[8] != 0) ? 1 : 0;
+        int mode = (fcu_dev && fcu_dev->last_ack_len >= 7) ? fcu_dev->last_ack_data[6] : 1;
+        int fan  = (fcu_dev && fcu_dev->last_ack_len >= 9) ? fcu_dev->last_ack_data[8] : 4;
+        int swg  = (fcu_dev && fcu_dev->last_ack_len >= 11) ? fcu_dev->last_ack_data[10] : 0;
         int tgt = (fcu_dev && fcu_dev->last_target_temp > 0) ? fcu_dev->last_target_temp : 24;
         int cur = (fcu_dev && fcu_dev->last_current_temp > 0) ? fcu_dev->last_current_temp : tgt;
 
-        out.appendFormat("{\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\",\"name\":\"%s\",\"channel\":5,\"power\":%d,\"target_temp\":%d,\"current_temp\":%d}",
-                         Config::FCU::DEV_ID, s, name_buf, pwr, tgt, cur);
+        out.appendFormat("{\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\",\"name\":\"%s\",\"channel\":5,\"power\":%d,\"mode\":%d,\"fan_speed\":%d,\"swing\":%d,\"target_temp\":%d,\"current_temp\":%d}",
+                         Config::FCU::DEV_ID, s, name_buf, pwr, mode, fan, swg, tgt, cur);
         locked_count++;
       }
     }

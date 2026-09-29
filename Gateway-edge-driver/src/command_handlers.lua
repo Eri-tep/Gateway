@@ -613,40 +613,43 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
   device:emit_event(capabilities.switch.switch.on())
 
   if d_id == 0x2C then
-    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+    -- [단일 복원 RPC 1회 전송] 전원 켤 때 마지막으로 저장된 냉방/난방 운전 상태를 단일 패킷으로 전달
+    local saved_mode = device:get_field("saved_fcu_mode") or "cool"
+    local val_map = { cool = 1, heat = 2, fanOnly = 3 }
+    local m_val = val_map[saved_mode] or 1
 
-    -- 전원 켤 때 마지막으로 저장된 정상 냉방/난방 운전 상태(모드, 온도, 풍량, 스윙)를 순차 복원
-    local saved_mode = device:get_field("saved_fcu_mode")
-    if saved_mode then
-      local val_map = { cool = 1, heat = 2, fanOnly = 3 }
-      local m_val = val_map[saved_mode] or 1
-      local cap_m = capabilities["digituniverse06711.fcuMode"]
-      if cap_m then device:emit_event(cap_m.mode(saved_mode)) end
-      gateway_client.device_control(ip, port, d_id, s1, s2, "mode", m_val)
-    end
+    local saved_temp = device:get_field("saved_fcu_temp") or 24
+    if saved_temp < 18 or saved_temp > 30 then saved_temp = 24 end
 
-    local saved_temp = device:get_field("saved_fcu_temp")
-    if saved_temp and saved_temp >= 18 and saved_temp <= 30 then
-      local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
-      if cap_sp then device:emit_event(cap_sp.setpoint({ value = saved_temp, unit = "°C" })) end
-      gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", saved_temp)
-    end
+    local saved_fan = device:get_field("saved_fcu_fan") or "auto"
+    local f_val = FCU_FAN_MODE_TO_VAL[saved_fan] or 4
 
-    local saved_fan = device:get_field("saved_fcu_fan")
-    if saved_fan then
-      local f_val = FCU_FAN_MODE_TO_VAL[saved_fan] or 4
-      local cap_f = capabilities["digituniverse06711.fcuFanSpeed"]
-      if cap_f then device:emit_event(cap_f.fanSpeed(saved_fan)) end
-      gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", f_val)
-    end
+    local saved_osc = device:get_field("saved_fcu_osc") or "fixed"
+    local o_val = (saved_osc == "swing") and 2 or 0
 
-    local saved_osc = device:get_field("saved_fcu_osc")
-    if saved_osc then
-      local o_val = (saved_osc == "swing") and 2 or 0
-      local cap_o = capabilities["digituniverse06711.fcuOscillation"]
-      if cap_o then device:emit_event(cap_o.oscillation(saved_osc)) end
-      gateway_client.device_control(ip, port, d_id, s1, s2, "swing", o_val)
-    end
+    -- UI 상태 즉시 선반영
+    local cap_m = capabilities["digituniverse06711.fcuMode"]
+    if cap_m then device:emit_event(cap_m.mode(saved_mode)) end
+    local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
+    if cap_sp then device:emit_event(cap_sp.setpoint({ value = saved_temp, unit = "°C" })) end
+    local cap_f = capabilities["digituniverse06711.fcuFanSpeed"]
+    if cap_f then device:emit_event(cap_f.fanSpeed(saved_fan)) end
+    local cap_o = capabilities["digituniverse06711.fcuOscillation"]
+    if cap_o then device:emit_event(cap_o.oscillation(saved_osc)) end
+
+    -- 단일 통합 RPC 발송
+    local payload = {
+      c = "ctl",
+      d = d_id,
+      s1 = s1,
+      s2 = s2,
+      a = "power_restore",
+      mode = m_val,
+      fan = f_val,
+      swing = o_val,
+      temp = saved_temp
+    }
+    gateway_client.device_control_custom(ip, port, payload)
     return
   end
 
@@ -790,7 +793,21 @@ function CommandHandlers.handle_child_set_heating_setpoint(driver, device, comma
     device:emit_event(cap_away.away("off"))
   end
 
-  gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
+  -- 슬라이더 연속 조작 시 월패드 버스 폭주를 방지하는 300ms 디바운스
+  local old_timer = device:get_field("heating_temp_timer")
+  if old_timer then
+    device.thread:cancel_timer(old_timer)
+    device:set_field("heating_temp_timer", nil)
+  end
+
+  local new_timer = device.thread:call_with_delay(0.3, function()
+    device:set_field("heating_temp_timer", nil)
+    local cur_ip, cur_port = get_gateway_ip_port(driver)
+    if cur_ip and cur_port then
+      gateway_client.device_control(cur_ip, cur_port, d_id, s1, s2, "set_temp", temp)
+    end
+  end)
+  device:set_field("heating_temp_timer", new_timer)
 end
 
 function CommandHandlers.handle_child_set_thermostat_mode(driver, device, command)
@@ -829,15 +846,28 @@ function CommandHandlers.handle_child_set_cooling_setpoint(driver, device, comma
   if not d_id then return end
   local raw_temp = (command.args and command.args.setpoint) or 24
   local temp = math.floor((tonumber(raw_temp) or 24) + 0.5)
-  local ip, port = get_gateway_ip_port(driver)
-  log.info(string.format("❄️ [AIRCON CMD] %s SetCoolingTemp -> %dC (DevID 0x%02X %d-%d)", device.label, temp, d_id, s1, s2))
 
   local sp_evt = capabilities.thermostatCoolingSetpoint.coolingSetpoint({ value = temp, unit = "C" })
   sp_evt.state_change = true
   device:emit_event(sp_evt)
 
   device:set_field("last_aircon_temp", temp, { persist = true })
-  gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
+
+  -- 슬라이더 연속 드래그 시 버스 폭주를 방지하는 300ms 디바운스
+  local old_timer = device:get_field("cooling_temp_timer")
+  if old_timer then
+    device.thread:cancel_timer(old_timer)
+    device:set_field("cooling_temp_timer", nil)
+  end
+
+  local new_timer = device.thread:call_with_delay(0.3, function()
+    device:set_field("cooling_temp_timer", nil)
+    local cur_ip, cur_port = get_gateway_ip_port(driver)
+    if cur_ip and cur_port then
+      gateway_client.device_control(cur_ip, cur_port, d_id, s1, s2, "set_temp", temp)
+    end
+  end)
+  device:set_field("cooling_temp_timer", new_timer)
 end
 
 function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
@@ -869,6 +899,10 @@ function CommandHandlers.handle_fcu_set_mode(driver, device, command)
   local val_map = { cool = 1, heat = 2, fanOnly = 3 }
   local val = val_map[mode] or 1
 
+  -- 냉방 또는 난방일 때만 saved_fcu_mode로 즉시 영구 저장 (송풍 건조 모드 제외 유지)
+  if mode == "cool" or mode == "heat" then
+    device:set_field("saved_fcu_mode", mode, { persist = true })
+  end
   device:set_field("last_fcu_mode", mode, { persist = true })
   local cap = capabilities["digituniverse06711.fcuMode"]
   if cap then
@@ -892,6 +926,7 @@ function CommandHandlers.handle_fcu_set_fan_speed(driver, device, command)
   local val_map = { low = 1, medium = 2, high = 3, auto = 4 }
   local val = val_map[fan_mode] or 4
 
+  device:set_field("saved_fcu_fan", fan_mode, { persist = true })
   device:set_field("last_fcu_fan", fan_mode, { persist = true })
   local cap = capabilities["digituniverse06711.fcuFanSpeed"]
   if cap then
@@ -914,6 +949,7 @@ function CommandHandlers.handle_fcu_set_oscillation(driver, device, command)
   local osc = (command.args and command.args.oscillation) or "fixed"
   local val = (osc == "swing") and 2 or 0
 
+  device:set_field("saved_fcu_osc", osc, { persist = true })
   device:set_field("last_fcu_osc", osc, { persist = true })
   local cap = capabilities["digituniverse06711.fcuOscillation"]
   if cap then
@@ -940,6 +976,8 @@ function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
   if temp < 18 then temp = 18 end
   if temp > 30 then temp = 30 end
 
+  -- 1. 화면 UI 및 로컬 영구 저장은 0ms 즉시 갱신 (슬라이더 조작감 극대화)
+  device:set_field("saved_fcu_temp", temp, { persist = true })
   local cap = capabilities["digituniverse06711.fcuSetpoint"]
   if cap then
     local evt = cap.setpoint({ value = temp, unit = "°C" })
@@ -947,12 +985,21 @@ function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
     device:emit_event(evt)
   end
 
-  cosock.spawn(function()
+  -- 2. 슬라이더 연속 드래그 시 버스 폭주를 방지하는 300ms 디바운스 (손가락 멈춘 최종값만 1회 전송)
+  local old_timer = device:get_field("fcu_temp_timer")
+  if old_timer then
+    device.thread:cancel_timer(old_timer)
+    device:set_field("fcu_temp_timer", nil)
+  end
+
+  local new_timer = device.thread:call_with_delay(0.3, function()
+    device:set_field("fcu_temp_timer", nil)
     local ip, port = get_gateway_ip_port(driver)
     if ip and port then
       gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
     end
-  end, "fcu_set_temp_task")
+  end)
+  device:set_field("fcu_temp_timer", new_timer)
 end
 
 function CommandHandlers.handle_child_set_ac_fan_mode(driver, device, command)
@@ -1085,7 +1132,6 @@ function CommandHandlers.handle_child_set_fan_speed(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
   local spd = tonumber(command.args.speed) or 1
-  local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🌀 [CHILD CMD] %s SetFanSpeed -> %d (DevID 0x%02X %d-%d)", device.label, spd, d_id, s1, s2))
 
   if capabilities.fanSpeed then
@@ -1096,7 +1142,21 @@ function CommandHandlers.handle_child_set_fan_speed(driver, device, command)
   sw_on.state_change = true
   device:emit_event(sw_on)
 
-  gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", spd)
+  -- 실링팬/팬속도 슬라이더 연속 조작 방지 300ms 디바운스
+  local old_timer = device:get_field("fan_speed_timer")
+  if old_timer then
+    device.thread:cancel_timer(old_timer)
+    device:set_field("fan_speed_timer", nil)
+  end
+
+  local new_timer = device.thread:call_with_delay(0.3, function()
+    device:set_field("fan_speed_timer", nil)
+    local cur_ip, cur_port = get_gateway_ip_port(driver)
+    if cur_ip and cur_port then
+      gateway_client.device_control(cur_ip, cur_port, d_id, s1, s2, "fan_speed", spd)
+    end
+  end)
+  device:set_field("fan_speed_timer", new_timer)
 end
 
 function CommandHandlers.handle_child_valve_close(driver, device, command)

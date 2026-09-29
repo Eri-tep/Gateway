@@ -659,6 +659,21 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
         return;
       }
 
+      std::string_view sv{act_str};
+      if (sv == "power_restore") {
+        long m = findJsonIntValue(json_str, "mode", 1);
+        long f = findJsonIntValue(json_str, "fan", 4);
+        long s = findJsonIntValue(json_str, "swing", 0);
+        long t = findJsonIntValue(json_str, "temp", 24);
+        if (Fcu::RestorePower(slot_idx, static_cast<uint16_t>(m), static_cast<uint16_t>(f),
+                              static_cast<uint16_t>(s), static_cast<uint8_t>(t))) {
+          sendRpcResponse(sock, req_id, "ok");
+        } else {
+          sendRpcResponse(sock, req_id, "error", "Failed to send FCU restore packet");
+        }
+        return;
+      }
+
       using CmdFn = bool (*)(uint8_t, int);
       struct CmdEntry { std::string_view key; CmdFn fn; };
       static constexpr CmdEntry kFcuCmds[] = {
@@ -669,7 +684,6 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
         { "set_temp",  [](uint8_t s, int v) { return Fcu::SetTargetTemp(s, static_cast<uint8_t>(v)); } },
       };
 
-      std::string_view sv{act_str};
       for (const auto &e : kFcuCmds) {
         if (e.key == sv) {
           if (e.fn(slot_idx, val)) {
@@ -680,7 +694,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
           return;
         }
       }
-      sendRpcResponse(sock, req_id, "error", "Unknown FCU action (power/mode/fan_speed/swing/set_temp)");
+      sendRpcResponse(sock, req_id, "error", "Unknown FCU action (power_restore/power/mode/fan_speed/swing/set_temp)");
       return;
     }
 
