@@ -211,17 +211,25 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_co
           end
 
           -- [Heartbeat Ping Worker] 15초마다 게이트웨이로 Ping 전송하여 세션 활성화 유지 및 끊김 감지 (단축 포맷)
+          -- OTA 중 일시적 Wi-Fi 블로킹에 의한 오탐 방지: 2회 연속 실패 시에만 세션 파기
           cosock.spawn(function()
+            local ping_fail_count = 0
             while is_alive do
               cosock.socket.sleep(15)
               if not is_alive or not persistent_tcp then break end
               local ping_sent, ping_err = persistent_tcp:send("{\"c\":\"ping\"}\n")
               if not ping_sent then
-                log.warn(string.format("⚠️ [CH6 PING] Ping failed: %s (closing socket)", tostring(ping_err)))
-                is_alive = false
-                pcall(function() persistent_tcp:close() end)
-                persistent_tcp = nil
-                break
+                ping_fail_count = ping_fail_count + 1
+                log.warn(string.format("⚠️ [CH6 PING] Ping failed (%d/3): %s", ping_fail_count, tostring(ping_err)))
+                if ping_fail_count >= 3 then
+                  log.warn("[CH6 PING] 3 consecutive ping failures, closing socket.")
+                  is_alive = false
+                  pcall(function() persistent_tcp:close() end)
+                  persistent_tcp = nil
+                  break
+                end
+              else
+                ping_fail_count = 0 -- 성공 시 카운터 리셋
               end
             end
           end, "ch6_heartbeat_ping")

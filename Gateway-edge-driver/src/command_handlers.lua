@@ -614,6 +614,39 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
 
   if d_id == 0x2C then
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+
+    -- 전원 켤 때 마지막으로 저장된 정상 냉방/난방 운전 상태(모드, 온도, 풍량, 스윙)를 순차 복원
+    local saved_mode = device:get_field("saved_fcu_mode")
+    if saved_mode then
+      local val_map = { cool = 1, heat = 2, fanOnly = 3 }
+      local m_val = val_map[saved_mode] or 1
+      local cap_m = capabilities["digituniverse06711.fcuMode"]
+      if cap_m then device:emit_event(cap_m.mode(saved_mode)) end
+      gateway_client.device_control(ip, port, d_id, s1, s2, "mode", m_val)
+    end
+
+    local saved_temp = device:get_field("saved_fcu_temp")
+    if saved_temp and saved_temp >= 18 and saved_temp <= 30 then
+      local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
+      if cap_sp then device:emit_event(cap_sp.setpoint({ value = saved_temp, unit = "°C" })) end
+      gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", saved_temp)
+    end
+
+    local saved_fan = device:get_field("saved_fcu_fan")
+    if saved_fan then
+      local f_val = FCU_FAN_MODE_TO_VAL[saved_fan] or 4
+      local cap_f = capabilities["digituniverse06711.fcuFanSpeed"]
+      if cap_f then device:emit_event(cap_f.fanSpeed(saved_fan)) end
+      gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", f_val)
+    end
+
+    local saved_osc = device:get_field("saved_fcu_osc")
+    if saved_osc then
+      local o_val = (saved_osc == "swing") and 2 or 0
+      local cap_o = capabilities["digituniverse06711.fcuOscillation"]
+      if cap_o then device:emit_event(cap_o.oscillation(saved_osc)) end
+      gateway_client.device_control(ip, port, d_id, s1, s2, "swing", o_val)
+    end
     return
   end
 
@@ -757,7 +790,6 @@ function CommandHandlers.handle_child_set_heating_setpoint(driver, device, comma
     device:emit_event(cap_away.away("off"))
   end
 
-  device:set_field("last_thermo_temp", temp, { persist = true })
   gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
 end
 
@@ -788,16 +820,6 @@ function CommandHandlers.handle_child_set_thermostat_mode(driver, device, comman
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (pwr=%d, DevID 0x%02X %d-%d)", device.label, mode, pwr, d_id, s1, s2))
   device:emit_event(capabilities.thermostatMode.thermostatMode(mode))
-
-  -- 난방(heat) 모드로 켤 때, 이전에 저장된 희망온도가 있으면 UI에 복원 방출
-  if mode == "heat" and capabilities.thermostatHeatingSetpoint then
-    local saved_temp = device:get_field("last_thermo_temp")
-    if saved_temp then
-      local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = saved_temp, unit = "C" })
-      sp_evt.state_change = true
-      device:emit_event(sp_evt)
-    end
-  end
 
   gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
 end
@@ -912,31 +934,13 @@ function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id or d_id ~= 0x2C then return end
 
-  local cap = capabilities["digituniverse06711.fcuSetpoint"]
-  local prev_temp = device:get_field("last_fcu_setpoint") or 24
-
-  -- 1. 전원 상태 및 현재 모드 검사
-  local sw_state = device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME)
-  local cur_mode = device:get_field("last_fcu_mode") or "cool"
-
-  if sw_state == "off" or cur_mode == "fanOnly" then
-    log.warn(string.format("⚠️ [FCU CMD] %s Setpoint rejected (Power=%s, Mode=%s). Spring-back to %d°C",
-                           device.label, tostring(sw_state), tostring(cur_mode), prev_temp))
-    if cap then
-      local revert_evt = cap.setpoint({ value = prev_temp, unit = "°C" })
-      revert_evt.state_change = true
-      device:emit_event(revert_evt)
-    end
-    return
-  end
-
-  -- 2. 유효한 냉방/난방 모드일 때 정상 반영
+  -- 사용자가 슬라이더로 설정한 온도를 있는 그대로 게이트웨이로 전송 (임의 거부/원복 버그 완전 제거)
   local raw_temp = (command.args and command.args.setpoint) or 24
   local temp = math.floor((tonumber(raw_temp) or 24) + 0.5)
   if temp < 18 then temp = 18 end
   if temp > 30 then temp = 30 end
 
-  device:set_field("last_fcu_setpoint", temp, { persist = true })
+  local cap = capabilities["digituniverse06711.fcuSetpoint"]
   if cap then
     local evt = cap.setpoint({ value = temp, unit = "°C" })
     evt.state_change = true

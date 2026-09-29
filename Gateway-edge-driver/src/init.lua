@@ -132,26 +132,6 @@ local function device_init(driver, device)
         away_ev.state_change = true
         device:emit_event(away_ev)
       end
-      local saved_temp = device:get_field("last_thermo_temp")
-      local comp_temp = device.profile.components["temperature"]
-      if saved_temp and device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
-        local sp_ev = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = saved_temp, unit = "C" })
-        sp_ev.state_change = true
-        if comp_temp then
-          device:emit_component_event(comp_temp, sp_ev)
-        else
-          device:emit_event(sp_ev)
-        end
-      end
-      if device:supports_capability_by_id(capabilities.temperatureMeasurement.ID) then
-        local cur_ev = capabilities.temperatureMeasurement.temperature({ value = saved_temp, unit = "C" })
-        cur_ev.state_change = true
-        if comp_temp then
-          device:emit_component_event(comp_temp, cur_ev)
-        else
-          device:emit_event(cur_ev)
-        end
-      end
       if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
         device:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
       end

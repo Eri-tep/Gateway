@@ -60,17 +60,17 @@ static void Task_HttpOta(void *pvParameters) {
 
   if (is_https) {
     secure_client.setInsecure();
-    secure_client.setHandshakeTimeout(15);
-    secure_client.setTimeout(15);
+    secure_client.setHandshakeTimeout(5);
+    secure_client.setTimeout(5);
     client_ptr = &secure_client;
   } else {
-    plain_client.setTimeout(15);
+    plain_client.setTimeout(5);
     client_ptr = &plain_client;
   }
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(15000);
+  http.setTimeout(5000);
 
   if (!http.begin(*client_ptr, url)) {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
@@ -132,7 +132,7 @@ static void Task_HttpOta(void *pvParameters) {
   size_t written = 0;
   uint32_t last_progress_time = millis();
 
-  while (http.connected() && (written < static_cast<size_t>(contentLength))) {
+  while (written < static_cast<size_t>(contentLength)) {
     esp_task_wdt_reset();
 
     size_t avail = stream->available();
@@ -140,7 +140,9 @@ static void Task_HttpOta(void *pvParameters) {
       size_t read_bytes = stream->readBytes(s_ota_buff, std::min(avail, sizeof(s_ota_buff)));
       if (read_bytes > 0) {
         Update.write(s_ota_buff, read_bytes);
+        taskYIELD(); // Flash 쓰기 직후 Wi-Fi 스택이 TCP ACK 송출할 수 있도록 협조적 양보
         written += read_bytes;
+        last_progress_time = millis(); // 데이터 수신 시 스톨 타이머 리셋
 
         int pct = (written * 100) / contentLength;
         g_http_ota_state.progress_pct = pct;
@@ -152,7 +154,12 @@ static void Task_HttpOta(void *pvParameters) {
         }
       }
     } else {
-      vTaskDelay(pdMS_TO_TICKS(5));
+      // 데이터 없음: 협조적 양보 후 스톨 감지
+      taskYIELD();
+      if (millis() - last_progress_time > 3000) {
+        ::Serial.println(F("[OTA] Read stall timeout (3s), aborting."));
+        break; // 3초간 데이터 없음 → 네트워크 단절로 처리
+      }
     }
   }
 
@@ -198,7 +205,7 @@ void Mgmt_StartHttpOta(const char *url) {
   strncpy(s_ota_target_url, target_url, sizeof(s_ota_target_url) - 1);
   s_ota_target_url[sizeof(s_ota_target_url) - 1] = '\0';
 
-  BaseType_t res = xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, s_ota_target_url, 15, nullptr, 1);
+  BaseType_t res = xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, s_ota_target_url, 10, nullptr, 1);
   if (res != pdPASS) {
     g_http_ota_state.in_progress = false;
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");

@@ -626,9 +626,6 @@ local DEVICE_TELEMETRY_HANDLERS = {
     -- 월패드에서 전달된 실제 target_temp 처리 (임의의 10도/22도 강제 주입 완전 배제)
     local target_temp = event_data.target_temp
     if target_temp and target_temp >= 10 and target_temp <= 35 then
-      if not is_away then
-        dev:set_field("last_thermo_temp", target_temp, { persist = true })
-      end
       if capabilities.thermostatHeatingSetpoint then
         local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = target_temp, unit = "C" })
         sp_evt.state_change = true
@@ -752,6 +749,25 @@ local DEVICE_TELEMETRY_HANDLERS = {
       local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.room_temp, unit = "C" })
       cur_evt.state_change = true
       dev:emit_event(cur_evt)
+    end
+
+    -- 5. 켜져 있고(power==1) 송풍(fanOnly) 외 유효한 냉방/난방 모드일 때만 '원복용 마지막 정상 상태' 격리 보존
+    local is_cool_heat = (event_data.mode == 1 or event_data.mode == 2)
+    if event_data.power == 1 and is_cool_heat then
+      local valid_mode = FCU_VAL_TO_THERMO_MODE[event_data.mode]
+      if valid_mode then
+        dev:set_field("saved_fcu_mode", valid_mode, { persist = true })
+      end
+      if event_data.target_temp and event_data.target_temp >= 18 and event_data.target_temp <= 30 then
+        dev:set_field("saved_fcu_temp", event_data.target_temp, { persist = true })
+      end
+      local valid_fan = FCU_VAL_TO_FAN_MODE[event_data.fan_speed]
+      if valid_fan then
+        dev:set_field("saved_fcu_fan", valid_fan, { persist = true })
+      end
+      if event_data.swing ~= nil then
+        dev:set_field("saved_fcu_osc", (event_data.swing == 2) and "swing" or "fixed", { persist = true })
+      end
     end
 
     -- 5. FCU 정보 및 에러 코드 모니터링 (digituniverse06711.fcuInfo)
