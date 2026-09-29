@@ -7,6 +7,14 @@ local log = require "log"
 local CommandHandlers = {}
 
 local FCU_AC_MODE_TO_VAL  = { cool = 1, heat = 2, wind = 3, fanOnly = 3 }
+local STANDARD_AC_MODE_TO_VAL = {
+  cool = 1,
+  dry  = 2,
+  wind = 3,
+  fan  = 3,
+  auto = 4,
+  heat = 5,
+}
 local FCU_FAN_MODE_TO_VAL = { low = 1, medium = 2, high = 3, auto = 4 }
 local FCU_SWING_TO_VAL    = { fixed = 0, all = 2, sweep = 2 }
 
@@ -55,11 +63,26 @@ function CommandHandlers.handle_refresh(driver, device, command)
 
   -- 자식 기기 새로고침 처리
   if p_key:match("^dev_") then
-    -- 난방인 경우 지원 모드 (난방, 외출, 꺼짐) 갱신
-    if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
-      local ev = capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" })
-      ev.state_change = true
-      device:emit_event(ev)
+    -- 난방인 경우 스위치, 외출 모드, 희망온도 갱신
+    if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+      local cap_away = capabilities["digituniverse06711.heatingAway"]
+      if cap_away and device:supports_capability_by_id(cap_away.ID) then
+        local cur_away = device:get_latest_state("main", cap_away.ID, cap_away.away.NAME) or "off"
+        local away_ev = cap_away.away(cur_away)
+        away_ev.state_change = true
+        device:emit_event(away_ev)
+      end
+      if device:supports_capability_by_id(capabilities.switch.ID) then
+        local cur_sw = device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) or "off"
+        local sw_ev = (cur_sw == "on") and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+        sw_ev.state_change = true
+        device:emit_event(sw_ev)
+      end
+      if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
+        local ev = capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" })
+        ev.state_change = true
+        device:emit_event(ev)
+      end
     end
 
     -- 콘센트인 경우 과거 오염된 누적 전력량 클리어 (비정상 수치 리셋)
@@ -595,6 +618,18 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
   end
 
   local p_key = device.parent_assigned_child_key or ""
+  if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+    -- 난방 전원 ON: 외출 모드 끄고 일반 난방(power=1) 가동
+    local cap_away = capabilities["digituniverse06711.heatingAway"]
+    if cap_away and device:supports_capability_by_id(cap_away.ID) then
+      local away_ev = cap_away.away("off")
+      away_ev.state_change = true
+      device:emit_event(away_ev)
+    end
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+    return
+  end
+
   if p_key:match("^dev_34_") or device:supports_capability_by_id(capabilities.momentary.ID) then
     handle_momentary_switch_on(device, ip, port, d_id, s1, s2)
   else
@@ -630,6 +665,16 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
   end
 
   local p_key = device.parent_assigned_child_key or ""
+  if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+    -- 난방 전원 OFF: 외출 모드 끄고 난방 끄기(power=0)
+    local cap_away = capabilities["digituniverse06711.heatingAway"]
+    if cap_away and device:supports_capability_by_id(cap_away.ID) then
+      device:emit_event(cap_away.away("off"))
+    end
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+    return
+  end
+
   if p_key:match("^dev_34_") or device:supports_capability_by_id(capabilities.momentary.ID) then
     handle_momentary_switch_off(device)
   else
@@ -640,6 +685,48 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
   end
 end
 
+function CommandHandlers.handle_child_set_heating_away(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+
+  local cmd_name = (command and command.command) or ""
+  local is_on = false
+  if cmd_name == "on" then
+    is_on = true
+  elseif cmd_name == "off" then
+    is_on = false
+  elseif cmd_name == "toggle" then
+    local cap_away = capabilities["digituniverse06711.heatingAway"]
+    local cur_state = "off"
+    if cap_away then
+      cur_state = device:get_latest_state("main", cap_away.ID, cap_away.away.NAME) or "off"
+    end
+    is_on = (cur_state == "off")
+  else
+    local raw_away = (command.args and command.args.away)
+    if not raw_away and command.positional_args and #command.positional_args > 0 then
+      raw_away = command.positional_args[1]
+    end
+    local away_str = tostring(raw_away or "off"):lower()
+    is_on = (away_str == "on" or away_str == "true")
+  end
+
+  local pwr = is_on and 2 or 1
+  local ip, port = get_gateway_ip_port(driver)
+  log.info(string.format("🔥 [CHILD CMD] %s SetHeatingAway -> %s (cmd=%s, pwr=%d, DevID 0x%02X %d-%d)",
+                         device.label, is_on and "on" or "off", cmd_name, pwr, d_id, s1, s2))
+
+  local cap_away = capabilities["digituniverse06711.heatingAway"]
+  if cap_away then
+    local away_ev = cap_away.away(is_on and "on" or "off")
+    away_ev.state_change = true
+    device:emit_event(away_ev)
+  end
+
+  -- 기기(월패드) 자체에서 power=2(외출) 수신 시 switch.on 및 설정온도(10도)를 자동으로 통보하므로 드라이버는 순수하게 power만 전달
+  gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
+end
+
 function CommandHandlers.handle_child_set_heating_setpoint(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
@@ -648,13 +735,27 @@ function CommandHandlers.handle_child_set_heating_setpoint(driver, device, comma
   if not raw_temp and command.positional_args and #command.positional_args > 0 then
     raw_temp = command.positional_args[1]
   end
-  local temp = math.floor((tonumber(raw_temp) or 22) + 0.5)
+  local num_temp = tonumber(raw_temp)
+  if not num_temp then return end
+  local temp = math.floor(num_temp + 0.5)
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🔥 [CHILD CMD] %s SetTemp -> %dC (DevID 0x%02X %d-%d)", device.label, temp, d_id, s1, s2))
 
   local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = temp, unit = "C" })
   sp_evt.state_change = true
-  device:emit_event(sp_evt)
+  local comp_temp = device.profile.components["temperature"]
+  if comp_temp then
+    device:emit_component_event(comp_temp, sp_evt)
+  else
+    device:emit_event(sp_evt)
+  end
+
+  -- 온도 조절 시 전원 켜짐 보장 및 외출 모드 자동 해제
+  device:emit_event(capabilities.switch.switch.on())
+  local cap_away = capabilities["digituniverse06711.heatingAway"]
+  if cap_away and device:supports_capability_by_id(cap_away.ID) then
+    device:emit_event(cap_away.away("off"))
+  end
 
   device:set_field("last_thermo_temp", temp, { persist = true })
   gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
@@ -688,12 +789,14 @@ function CommandHandlers.handle_child_set_thermostat_mode(driver, device, comman
   log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (pwr=%d, DevID 0x%02X %d-%d)", device.label, mode, pwr, d_id, s1, s2))
   device:emit_event(capabilities.thermostatMode.thermostatMode(mode))
 
-  -- 난방(heat) 모드로 켤 때, 이전에 저장된 희망온도를 즉시 UI에 복원 방출
+  -- 난방(heat) 모드로 켤 때, 이전에 저장된 희망온도가 있으면 UI에 복원 방출
   if mode == "heat" and capabilities.thermostatHeatingSetpoint then
-    local saved_temp = device:get_field("last_thermo_temp") or 22
-    local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = saved_temp, unit = "C" })
-    sp_evt.state_change = true
-    device:emit_event(sp_evt)
+    local saved_temp = device:get_field("last_thermo_temp")
+    if saved_temp then
+      local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = saved_temp, unit = "C" })
+      sp_evt.state_change = true
+      device:emit_event(sp_evt)
+    end
   end
 
   gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
@@ -728,13 +831,7 @@ function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
     return
   end
 
-  local mode_code = 1 -- cool
-  if mode == "cool" then mode_code = 1
-  elseif mode == "dry" then mode_code = 2
-  elseif mode == "wind" or mode == "fan" then mode_code = 3
-  elseif mode == "auto" then mode_code = 4
-  elseif mode == "heat" then mode_code = 5
-  end
+  local mode_code = STANDARD_AC_MODE_TO_VAL[mode] or 1
 
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("❄️ [AIRCON CMD] %s SetAirconMode -> %s (%d, DevID 0x%02X %d-%d)", device.label, mode, mode_code, d_id, s1, s2))

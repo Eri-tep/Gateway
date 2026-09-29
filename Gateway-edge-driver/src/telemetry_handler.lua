@@ -605,31 +605,51 @@ local DEVICE_TELEMETRY_HANDLERS = {
 
   ["thermostat"] = function(dev, event_data)
     local is_away = (event_data.power == 2)
-    if event_data.power ~= nil and capabilities.thermostatMode then
-      local mode_str = (event_data.power == 1) and "heat" or (is_away and "away" or "off")
-      dev:emit_event(capabilities.thermostatMode.thermostatMode(mode_str))
-    end
+    local is_on = (event_data.power == 1 or is_away)
 
-    local saved_temp = dev:get_field("last_thermo_temp") or 22
-    local target_temp = saved_temp
-    if event_data.target_temp and event_data.target_temp >= 10 and event_data.target_temp <= 35 then
-      target_temp = event_data.target_temp
-      if not is_away then
-        dev:set_field("last_thermo_temp", target_temp, { persist = true })
+    if event_data.power ~= nil then
+      if dev:supports_capability_by_id(capabilities.switch.ID) then
+        dev:emit_event(is_on and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+      end
+      local cap_away = capabilities["digituniverse06711.heatingAway"]
+      if cap_away and dev:supports_capability_by_id(cap_away.ID) then
+        dev:emit_event(cap_away.away(is_away and "on" or "off"))
+      end
+      if capabilities.thermostatMode and dev:supports_capability_by_id(capabilities.thermostatMode.ID) then
+        local mode_str = (event_data.power == 1) and "heat" or (is_away and "away" or "off")
+        dev:emit_event(capabilities.thermostatMode.thermostatMode(mode_str))
       end
     end
 
-    local current_temp = (event_data.current_temp and event_data.current_temp > 0) and event_data.current_temp or target_temp
+    local comp_temp = dev.profile.components["temperature"]
 
-    if capabilities.thermostatHeatingSetpoint then
-      local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = target_temp, unit = "C" })
-      sp_evt.state_change = true
-      dev:emit_event(sp_evt)
+    -- 월패드에서 전달된 실제 target_temp 처리 (임의의 10도/22도 강제 주입 완전 배제)
+    local target_temp = event_data.target_temp
+    if target_temp and target_temp >= 10 and target_temp <= 35 then
+      if not is_away then
+        dev:set_field("last_thermo_temp", target_temp, { persist = true })
+      end
+      if capabilities.thermostatHeatingSetpoint then
+        local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = target_temp, unit = "C" })
+        sp_evt.state_change = true
+        if comp_temp then
+          dev:emit_component_event(comp_temp, sp_evt)
+        else
+          dev:emit_event(sp_evt)
+        end
+      end
     end
-    if capabilities.temperatureMeasurement then
-      local cur_evt = capabilities.temperatureMeasurement.temperature({ value = current_temp, unit = "C" })
-      cur_evt.state_change = true
-      dev:emit_event(cur_evt)
+
+    if event_data.current_temp and event_data.current_temp > 0 then
+      if capabilities.temperatureMeasurement then
+        local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.current_temp, unit = "C" })
+        cur_evt.state_change = true
+        if comp_temp then
+          dev:emit_component_event(comp_temp, cur_evt)
+        else
+          dev:emit_event(cur_evt)
+        end
+      end
     end
   end,
 

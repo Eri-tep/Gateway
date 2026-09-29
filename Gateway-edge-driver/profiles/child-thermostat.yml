@@ -3,13 +3,21 @@ components:
   - id: main
     label: "난방"
     capabilities:
-      - id: thermostatMode
+      - id: switch
+        version: 1
+      - id: temperatureMeasurement
         version: 1
       - id: thermostatHeatingSetpoint
         version: 1
-      - id: temperatureMeasurement
+      - id: digituniverse06711.heatingAway
         version: 1
       - id: refresh
         version: 1
     categories:
       - name: Thermostat
+metadata:
+  deviceType: Thermostat
+  ocfDeviceType: oic.d.thermostat
+  deviceTypeId: Thermostat
+  mnmn: SmartThingsCommunity
+  vid: 8d19db17-e7ea-3e18-acdc-9b4af1640574

@@ -293,7 +293,7 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
     }
 
     if (grp && grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
-      target_temp = snap.last_target_temp > 0 ? snap.last_target_temp : 22;
+      target_temp = snap.last_target_temp;
       current_temp = snap.last_current_temp > 0 ? snap.last_current_temp : target_temp;
 
       uint8_t t_off = grp->getTargetTempOffset(snap.last_ack_len);
@@ -310,7 +310,7 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
         c_off = grp->ack_slots.current_temp_offset;
       }
 
-      if (power != 2 && t_off != 0xFF && t_off < snap.last_ack_len) {
+      if (t_off != 0xFF && t_off < snap.last_ack_len) {
         uint8_t b = snap.last_ack_data[t_off];
         if (b >= 5 && b <= 35) target_temp = b;
       }

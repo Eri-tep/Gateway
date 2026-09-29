@@ -10,29 +10,41 @@ local _orig_debug = log.debug
 local _orig_trace = log.trace
 local _orig_warn = log.warn
 
+local NOOP = function() end
+
+local LOG_LEVEL_CONFIGS = {
+  WARN = {
+    trace = NOOP,
+    debug = NOOP,
+    info  = NOOP,
+    warn  = _orig_warn,
+  },
+  ERROR = {
+    trace = NOOP,
+    debug = NOOP,
+    info  = NOOP,
+    warn  = NOOP,
+  },
+  DEBUG = {
+    trace = _orig_trace,
+    debug = _orig_debug,
+    info  = _orig_info,
+    warn  = _orig_warn,
+  },
+  INFO = {
+    trace = NOOP,
+    debug = NOOP,
+    info  = _orig_info,
+    warn  = _orig_warn,
+  },
+}
+
 local function apply_log_level(level)
-  level = level or "INFO"
-  if level == "WARN" then
-    log.trace = function() end
-    log.debug = function() end
-    log.info = function() end
-    log.warn = _orig_warn
-  elseif level == "ERROR" then
-    log.trace = function() end
-    log.debug = function() end
-    log.info = function() end
-    log.warn = function() end
-  elseif level == "DEBUG" then
-    log.trace = _orig_trace
-    log.debug = _orig_debug
-    log.info = _orig_info
-    log.warn = _orig_warn
-  else -- "INFO" (기본값: trace/debug 숨김, info/warn/error 출력)
-    log.trace = function() end
-    log.debug = function() end
-    log.info = _orig_info
-    log.warn = _orig_warn
-  end
+  local cfg = LOG_LEVEL_CONFIGS[level] or LOG_LEVEL_CONFIGS.INFO
+  log.trace = cfg.trace
+  log.debug = cfg.debug
+  log.info  = cfg.info
+  log.warn  = cfg.warn
 end
 
 local function schedule_polling_timer(driver, device)
@@ -107,9 +119,42 @@ local function device_init(driver, device)
       device:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
     end
 
-    -- Thermostat 초기화
-    if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
-      device:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
+    -- Thermostat 초기화 (신규 switch + heatingAway 및 기존 모드 호환)
+    if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+      if device:supports_capability_by_id(capabilities.switch.ID) then
+        local sw_ev = capabilities.switch.switch.off()
+        sw_ev.state_change = true
+        device:emit_event(sw_ev)
+      end
+      local cap_away = capabilities["digituniverse06711.heatingAway"]
+      if cap_away and device:supports_capability_by_id(cap_away.ID) then
+        local away_ev = cap_away.away("off")
+        away_ev.state_change = true
+        device:emit_event(away_ev)
+      end
+      local saved_temp = device:get_field("last_thermo_temp")
+      local comp_temp = device.profile.components["temperature"]
+      if saved_temp and device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+        local sp_ev = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = saved_temp, unit = "C" })
+        sp_ev.state_change = true
+        if comp_temp then
+          device:emit_component_event(comp_temp, sp_ev)
+        else
+          device:emit_event(sp_ev)
+        end
+      end
+      if device:supports_capability_by_id(capabilities.temperatureMeasurement.ID) then
+        local cur_ev = capabilities.temperatureMeasurement.temperature({ value = saved_temp, unit = "C" })
+        cur_ev.state_change = true
+        if comp_temp then
+          device:emit_component_event(comp_temp, cur_ev)
+        else
+          device:emit_event(cur_ev)
+        end
+      end
+      if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
+        device:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
+      end
     end
 
     -- Air Conditioner 초기화
@@ -382,6 +427,12 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     },
     ["digituniverse06711.deviceManager"] = {
       ["setAction"] = command_handlers.handle_child_device_action
+    },
+    ["digituniverse06711.heatingAway"] = {
+      ["setAway"] = command_handlers.handle_child_set_heating_away,
+      ["toggle"] = command_handlers.handle_child_set_heating_away,
+      ["on"] = command_handlers.handle_child_set_heating_away,
+      ["off"] = command_handlers.handle_child_set_heating_away
     },
     [capabilities.momentary.ID] = {
       [capabilities.momentary.commands.push.NAME] = command_handlers.handle_momentary_push

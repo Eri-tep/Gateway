@@ -157,7 +157,7 @@ namespace {
 inline void parseThermostatState(const GroupControlTemplate *grp, const StaticPacket &ack,
                                  DeviceStateEntry *dev, int b_pwr,
                                  int &b_t_temp, int &b_c_temp) {
-  b_t_temp = dev->last_target_temp > 0 ? dev->last_target_temp : 22;
+  b_t_temp = dev->last_target_temp;
   b_c_temp = dev->last_current_temp > 0 ? dev->last_current_temp : b_t_temp;
 
   uint8_t target_off = grp->getTargetTempOffset(ack.length);
@@ -180,7 +180,7 @@ inline void parseThermostatState(const GroupControlTemplate *grp, const StaticPa
     }
   }
 
-  if (b_pwr != 2 && target_off != 0xFF && target_off < ack.length) {
+  if (target_off != 0xFF && target_off < ack.length) {
     uint8_t b = ack.data[target_off];
     if (b >= 5 && b <= 35) {
       b_t_temp = b;
