@@ -169,10 +169,10 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_wallpad, cap_match.match({ value = cat_match }))
   end
 
-  -- 2-3. Control Specs (e.g. "6 Groups")
+  -- 2-3. Device Groups (e.g. "6 Groups")
   local bp_status = prof.blueprints or "0 Groups"
   bp_status = bp_status:gsub("%s*%b()", "")
-  local cap_bp = capabilities["digituniverse06711.blueprints"]
+  local cap_bp = capabilities["digituniverse06711.deviceGroups"]
   if cap_bp then
     emit_event(device, comp_wallpad, cap_bp.status({ value = bp_status }))
   end

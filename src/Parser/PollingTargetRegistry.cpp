@@ -30,11 +30,16 @@ void PollingTargetRegistry::registerOrTouch(uint8_t ch, uint8_t dev_id,
     for (size_t i = 0; i < _count; ++i) {
       bool match = false;
       if (dev_id != 0 || sub1 != 0 || sub2 != 0) {
-        match = (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
-                 _entries[i].sub2 == sub2);
-      }
-      if (!match && raw_pkt && raw_len > 0 && _entries[i].raw_query_len == raw_len) {
-        match = (memcmp(_entries[i].raw_query_data.data(), raw_pkt, raw_len) == 0);
+        if (_entries[i].dev_id != 0 || _entries[i].sub1 != 0 || _entries[i].sub2 != 0) {
+          match = (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
+                   _entries[i].sub2 == sub2);
+        } else if (raw_pkt && raw_len > 0 && _entries[i].raw_query_len == raw_len) {
+          match = (memcmp(_entries[i].raw_query_data.data(), raw_pkt, raw_len) == 0);
+        }
+      } else if (raw_pkt && raw_len > 0 && _entries[i].raw_query_len == raw_len) {
+        if (_entries[i].dev_id == 0 && _entries[i].sub1 == 0 && _entries[i].sub2 == 0) {
+          match = (memcmp(_entries[i].raw_query_data.data(), raw_pkt, raw_len) == 0);
+        }
       }
       if (match) {
         if (_entries[i].last_requested_ms > 0 && now > _entries[i].last_requested_ms) {
@@ -54,6 +59,11 @@ void PollingTargetRegistry::registerOrTouch(uint8_t ch, uint8_t dev_id,
           _entries[i].hit_count++;
         _entries[i].is_active = true;
         _entries[i].is_verified = true;
+        if (_entries[i].dev_id == 0 && (dev_id != 0 || sub1 != 0 || sub2 != 0)) {
+          _entries[i].dev_id = dev_id;
+          _entries[i].sub1 = sub1;
+          _entries[i].sub2 = sub2;
+        }
         if (raw_pkt && raw_len > 0 && raw_len <= 64) {
           _entries[i].raw_query_len = static_cast<uint8_t>(raw_len);
           memcpy(_entries[i].raw_query_data.data(), raw_pkt, raw_len);
