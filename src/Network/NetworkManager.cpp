@@ -156,13 +156,8 @@ void Task_Network(void *pvParameters) {
     esp_task_wdt_reset();
     g_wdt_monitor.feed(4);
     ArduinoOTA.handle();
-    if (g_ota_in_progress.load(std::memory_order_relaxed)) {
-      esp_task_wdt_reset();
-      g_wdt_monitor.feed(4);
-      ArduinoOTA.handle();
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
+
+    const bool ota_now = g_ota_in_progress.load(std::memory_order_relaxed);
 
     System_CheckOtaHealth();
     Cache_CheckNvsDebounce();
@@ -285,7 +280,7 @@ void Task_Network(void *pvParameters) {
       }
 
       for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-        if (ew11_server_fds[s] >= 0 && FD_ISSET(ew11_server_fds[s], &readfds)) {
+        if (!ota_now && ew11_server_fds[s] >= 0 && FD_ISSET(ew11_server_fds[s], &readfds)) {
           Hub_AcceptClient(s, ew11_server_fds[s]);
         }
       }
@@ -295,7 +290,7 @@ void Task_Network(void *pvParameters) {
                            Mgmt_Data(s, data, len);
                          });
 
-      {
+      if (!ota_now) {
         MutexLocker lock(g_ch5_mutex);
         for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
           auto &slot = g_hub_slots[s];
@@ -332,6 +327,7 @@ void Task_Network(void *pvParameters) {
         }
       }
     }
+
 
 
     uint32_t now = millis();

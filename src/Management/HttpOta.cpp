@@ -48,6 +48,21 @@ static void Task_HttpOta(void *pvParameters) {
   g_http_ota_state.progress_pct = 0;
   g_http_ota_state.last_error[0] = '\0';
 
+  // ── [Step 2] EW11 소켓 일시 해제 (lwIP pcb + 소켓 수신 버퍼 ~20KB 힙 즉시 확보) ──
+  {
+    MutexLocker lock(g_ch5_mutex);
+    for (int s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
+      auto &slot = g_hub_slots[s];
+      if (slot.sock >= 0) {
+        close(slot.sock);
+        slot.sock = -1;
+        slot.is_connected = false;
+        slot.rx_len = 0;
+        ::Serial.printf("[OTA] [CH5] Released EW11 Slot %d socket for OTA heap.\r\n", s);
+      }
+    }
+  }
+
   g_ota_in_progress.store(true, std::memory_order_release);
   if (g_system_event_group) {
     xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
@@ -70,7 +85,8 @@ static void Task_HttpOta(void *pvParameters) {
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(5000);
+  http.setConnectTimeout(15000); // TLS 연결(핸드셰이크 포함) 최대 15초
+  http.setTimeout(15000);        // 응답 헤더 수신 최대 15초
 
   if (!http.begin(*client_ptr, url)) {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
@@ -131,9 +147,18 @@ static void Task_HttpOta(void *pvParameters) {
   WiFiClient *stream = http.getStreamPtr();
   size_t written = 0;
   uint32_t last_progress_time = millis();
+  uint32_t last_log_time = millis();
+  const uint32_t download_start_ms = millis();
+  constexpr uint32_t HARD_DEADLINE_MS = 5UL * 60UL * 1000UL; // 5분 절대 하드 데드라인
 
   while (written < static_cast<size_t>(contentLength)) {
     esp_task_wdt_reset();
+
+    // 5분 절대 하드 데드라인: 느린 다운로드가 영원히 지속되는 경우 강제 중단
+    if (millis() - download_start_ms >= HARD_DEADLINE_MS) {
+      ::Serial.println(F("[OTA] Hard deadline exceeded (5min), aborting."));
+      break;
+    }
 
     size_t avail = stream->available();
     if (avail > 0) {
@@ -147,8 +172,8 @@ static void Task_HttpOta(void *pvParameters) {
         int pct = (written * 100) / contentLength;
         g_http_ota_state.progress_pct = pct;
 
-        if (millis() - last_progress_time >= 1000) {
-          last_progress_time = millis();
+        if (millis() - last_log_time >= 1000) {
+          last_log_time = millis();
           snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Downloading (%d%%)", pct);
           ::Serial.printf("[OTA] Progress: %d%% (%u / %d bytes)\r\n", pct, (unsigned)written, contentLength);
         }
@@ -156,14 +181,19 @@ static void Task_HttpOta(void *pvParameters) {
     } else {
       // 데이터 없음: 협조적 양보 후 스톨 감지
       taskYIELD();
-      if (millis() - last_progress_time > 3000) {
-        ::Serial.println(F("[OTA] Read stall timeout (3s), aborting."));
-        break; // 3초간 데이터 없음 → 네트워크 단절로 처리
+      if (millis() - last_progress_time > 30000) {
+        ::Serial.println(F("[OTA] Read stall timeout (30s), aborting."));
+        break; // 30초간 데이터 없음 → 네트워크 단절로 처리
       }
     }
   }
 
   esp_task_wdt_delete(nullptr);
+
+  size_t final_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  size_t min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+  ::Serial.printf("[OTA] Download loop finished. Heap: free=%uKB, min_watermark=%uKB\r\n",
+                  (unsigned)(final_free / 1024), (unsigned)(min_free / 1024));
 
   if (written == static_cast<size_t>(contentLength) && Update.end(true)) {
     if (Update.isFinished()) {
@@ -197,6 +227,17 @@ void Mgmt_StartHttpOta(const char *url) {
     return;
   }
 
+  constexpr size_t OTA_MIN_HEAP_BYTES = 80 * 1024;
+  size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  if (free_heap < OTA_MIN_HEAP_BYTES) {
+    g_http_ota_state.in_progress = false;
+    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
+    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+             "Low heap: %uKB < 80KB", (unsigned)(free_heap / 1024));
+    ::Serial.printf("[OTA] Aborted: free heap %u bytes < 80KB minimum.\r\n", (unsigned)free_heap);
+    return;
+  }
+
   g_http_ota_state.in_progress = true;
   snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Starting...");
   g_http_ota_state.progress_pct = 0;
@@ -205,7 +246,10 @@ void Mgmt_StartHttpOta(const char *url) {
   strncpy(s_ota_target_url, target_url, sizeof(s_ota_target_url) - 1);
   s_ota_target_url[sizeof(s_ota_target_url) - 1] = '\0';
 
-  BaseType_t res = xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, s_ota_target_url, 10, nullptr, 1);
+  BaseType_t res = xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 10240, s_ota_target_url,
+                                           3,       // Prio 3: RS-485 태스크(10~13) 보다 낮음 → 유휴 슬롯에서만 실행
+                                           nullptr,
+                                           1);      // Core 1 유지: Core 0 Network 부하와 완전 분리
   if (res != pdPASS) {
     g_http_ota_state.in_progress = false;
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
