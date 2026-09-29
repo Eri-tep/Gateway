@@ -119,14 +119,44 @@ local function device_init(driver, device)
 
     -- FCU 자식 기기 초기화 (p_key = "dev_2c_<slot>_0" 패턴)
     if p_key:match("^dev_2c_") then
-      if device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
-        device:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "heat", "wind" }))
+      local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
+      if cap_sp and device:supports_capability_by_id("digituniverse06711.fcuSetpoint") then
+        local saved_sp = device:get_field("last_fcu_setpoint") or 24
+        local ev = cap_sp.setpoint({ value = saved_sp, unit = "°C" })
+        ev.state_change = true
+        device:emit_event(ev)
       end
-      if device:supports_capability_by_id(capabilities.airConditionerFanMode.ID) then
-        device:emit_event(capabilities.airConditionerFanMode.supportedAcFanModes({ "low", "medium", "high", "auto" }))
+
+      local cap_mode = capabilities["digituniverse06711.fcuMode"]
+      if cap_mode and device:supports_capability_by_id("digituniverse06711.fcuMode") then
+        local saved_mode = device:get_field("last_fcu_mode") or "cool"
+        local ev = cap_mode.mode(saved_mode)
+        ev.state_change = true
+        device:emit_event(ev)
       end
-      if device:supports_capability_by_id(capabilities.fanOscillationMode.ID) then
-        device:emit_event(capabilities.fanOscillationMode.supportedFanOscillationModes({ "fixed", "sweep" }))
+
+      local cap_fan = capabilities["digituniverse06711.fcuFanSpeed"]
+      if cap_fan and device:supports_capability_by_id("digituniverse06711.fcuFanSpeed") then
+        local saved_fan = device:get_field("last_fcu_fan") or "auto"
+        local ev = cap_fan.fanSpeed(saved_fan)
+        ev.state_change = true
+        device:emit_event(ev)
+      end
+
+      local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
+      if cap_osc and device:supports_capability_by_id("digituniverse06711.fcuOscillation") then
+        local saved_osc = device:get_field("last_fcu_osc") or "fixed"
+        local ev = cap_osc.oscillation(saved_osc)
+        ev.state_change = true
+        device:emit_event(ev)
+      end
+
+      local cap_info = capabilities["digituniverse06711.fcuInfo"]
+      if cap_info and device:supports_capability_by_id("digituniverse06711.fcuInfo") then
+        local saved_info = device:get_field("last_fcu_info") or "정상"
+        local ev = cap_info.info(saved_info)
+        ev.state_change = true
+        device:emit_event(ev)
       end
     end
 
@@ -379,6 +409,18 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     },
     ["digituniverse06711.ventspeed"] = {
       ["setVentSpeed"] = command_handlers.handle_child_set_vent_speed
+    },
+    ["digituniverse06711.fcuSetpoint"] = {
+      ["setSetpoint"] = command_handlers.handle_fcu_set_setpoint
+    },
+    ["digituniverse06711.fcuMode"] = {
+      ["setMode"] = command_handlers.handle_fcu_set_mode
+    },
+    ["digituniverse06711.fcuFanSpeed"] = {
+      ["setFanSpeed"] = command_handlers.handle_fcu_set_fan_speed
+    },
+    ["digituniverse06711.fcuOscillation"] = {
+      ["setOscillation"] = command_handlers.handle_fcu_set_oscillation
     },
     [capabilities.valve.ID] = {
       [capabilities.valve.commands.close.NAME] = command_handlers.handle_child_valve_close

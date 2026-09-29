@@ -686,45 +686,73 @@ local DEVICE_TELEMETRY_HANDLERS = {
   end,
 
   ["fcu"] = function(dev, event_data)
-    local FCU_VAL_TO_AC_MODE = { [1] = "cool", [2] = "heat", [3] = "wind" }
+    local FCU_VAL_TO_THERMO_MODE = { [1] = "cool", [2] = "heat", [3] = "fanOnly" }
     local FCU_VAL_TO_FAN_MODE = { [1] = "low", [2] = "medium", [3] = "high", [4] = "auto" }
 
-    -- 1. 전원 상태
+    -- 1. 전원 상태 (main component)
     if event_data.power == 1 then
       dev:emit_event(capabilities.switch.switch.on())
-      -- 운전 모드 & 풍량 (전원 ON일 때만 유의미)
-      local mode_str = FCU_VAL_TO_AC_MODE[event_data.mode] or "cool"
-      dev:emit_event(capabilities.airConditionerMode.airConditionerMode(mode_str))
 
-      local fan_str = FCU_VAL_TO_FAN_MODE[event_data.fan_speed]
-      if fan_str then
-        dev:emit_event(capabilities.airConditionerFanMode.fanMode(fan_str))
+      -- 운전 모드 (digituniverse06711.fcuMode: cool/heat/fanOnly)
+      local cap_mode = capabilities["digituniverse06711.fcuMode"]
+      if cap_mode then
+        local mode_str = FCU_VAL_TO_THERMO_MODE[event_data.mode] or "cool"
+        dev:emit_event(cap_mode.mode(mode_str))
+      end
+
+      -- 풍량 (digituniverse06711.fcuFanSpeed: auto/high/medium/low)
+      local cap_fan = capabilities["digituniverse06711.fcuFanSpeed"]
+      if cap_fan then
+        local fan_str = FCU_VAL_TO_FAN_MODE[event_data.fan_speed] or "auto"
+        dev:emit_event(cap_fan.fanSpeed(fan_str))
       end
     else
       dev:emit_event(capabilities.switch.switch.off())
     end
 
-    -- 2. 바람 스윙
-    local swing_str = (event_data.swing == 2) and "sweep" or "fixed"
-    dev:emit_event(capabilities.fanOscillationMode.fanOscillationMode(swing_str))
+    -- 2. 바람 방향 (digituniverse06711.fcuOscillation: fixed / swing)
+    local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
+    if cap_osc then
+      local swing_str = (event_data.swing == 2) and "swing" or "fixed"
+      local ev = cap_osc.oscillation(swing_str)
+      ev.state_change = true
+      dev:emit_event(ev)
+    end
 
-    -- 3. 희망 설정 온도
-    if event_data.target_temp then
-      local sp_evt = capabilities.thermostatCoolingSetpoint.coolingSetpoint({ value = event_data.target_temp, unit = "C" })
+    -- 3. 희망 설정 온도 (digituniverse06711.fcuSetpoint)
+    local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
+    if event_data.target_temp and cap_sp then
+      local sp_evt = cap_sp.setpoint({ value = event_data.target_temp, unit = "°C" })
       sp_evt.state_change = true
       dev:emit_event(sp_evt)
     end
 
-    -- 4. 실내 측정 온도
-    if event_data.room_temp then
+    -- 4. 실내 측정 온도 (temperatureMeasurement)
+    if event_data.room_temp and capabilities.temperatureMeasurement then
       local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.room_temp, unit = "C" })
       cur_evt.state_change = true
       dev:emit_event(cur_evt)
     end
 
-    -- 5. 헬스 체크 (에러 0 = online)
-    local health = (event_data.error == 0) and "online" or "offline"
-    dev:emit_event(capabilities.healthCheck.healthStatus(health))
+    -- 5. FCU 정보 및 에러 코드 모니터링 (digituniverse06711.fcuInfo)
+    local cap_info = capabilities["digituniverse06711.fcuInfo"]
+    if cap_info and event_data.error ~= nil then
+      local FCU_ERR_MAP = {
+        [0] = "정상",
+        [1] = "실내센서 이상 (E1)",
+        [2] = "배관센서 이상 (E2)",
+        [3] = "드레인 수위 경보 (E3)",
+        [4] = "팬 모터 이상 (E4)",
+        [5] = "통신 이상 (E5)",
+        [6] = "동결 방지 보호 (E6)",
+      }
+      local code = tonumber(event_data.error) or 0
+      local info_str = FCU_ERR_MAP[code] or string.format("기타 이상 (Code %d)", code)
+      dev:set_field("last_fcu_info", info_str, { persist = true })
+      local ev = cap_info.info(info_str)
+      ev.state_change = true
+      dev:emit_event(ev)
+    end
   end
 }
 

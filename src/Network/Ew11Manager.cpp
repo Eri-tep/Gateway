@@ -308,8 +308,8 @@ static const uint8_t kFcuQueryPkt[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04
 static const uint8_t kFcuPowerOff[8] = {0x01, 0x06, 0x00, 0x02, 0x00, 0x00, 0x28, 0x0A};
 
 // §4.2 전원 ON: Reg 0x0001(모드), 0x0002(풍량), 0x0003(스윙) 일괄 (15B 동적 생성)
-// 스윙은 기본 ON(0x0002)로 고정 (Reg0x0000 절대 보존 — IR 리모컨 공존)
-static size_t Fcu_BuildPowerOn(uint8_t *out_buf, uint16_t mode, uint16_t fan) {
+// (Reg0x0000 절대 보존 — IR 리모컨 공존)
+static size_t Fcu_BuildPowerOn(uint8_t *out_buf, uint16_t mode, uint16_t fan, uint16_t swing) {
   out_buf[0] = 0x01; // Slave ID
   out_buf[1] = 0x10; // FC 0x10 (Write Multiple Registers)
   out_buf[2] = 0x00; out_buf[3] = 0x01; // 시작 번지 0x0001 (Reg0 절대 보존)
@@ -319,7 +319,8 @@ static size_t Fcu_BuildPowerOn(uint8_t *out_buf, uint16_t mode, uint16_t fan) {
   out_buf[8] = static_cast<uint8_t>(mode & 0xFF);
   out_buf[9] = static_cast<uint8_t>((fan >> 8) & 0xFF);
   out_buf[10] = static_cast<uint8_t>(fan & 0xFF);
-  out_buf[11] = 0x00; out_buf[12] = 0x02; // 스윙 ON=2 고정
+  out_buf[11] = static_cast<uint8_t>((swing >> 8) & 0xFF);
+  out_buf[12] = static_cast<uint8_t>(swing & 0xFF);
   uint16_t crc = Fcu_CalcCrc16(out_buf, 13);
   out_buf[13] = static_cast<uint8_t>(crc & 0xFF);
   out_buf[14] = static_cast<uint8_t>((crc >> 8) & 0xFF);
@@ -401,11 +402,24 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
     rt.timeout_count = 0;
     rt.is_online = true;
 
+    // 냉방 또는 난방 중일 때만 유효 운전 모드로 기억 (송풍 건조 자동화로 인한 덮어쓰기 방어)
+    if (new_snap.mode == Fcu::Mode::Cool || new_snap.mode == Fcu::Mode::Heat) {
+      rt.last_active_mode = new_snap.mode;
+      rt.has_active_record = true;
+    }
+    if (new_snap.fan_speed != Fcu::FanSpeed::Off) {
+      rt.last_active_fan = new_snap.fan_speed;
+    }
+    rt.last_active_swing = new_snap.swing;
+
     // ── 2nd-Tier Cache: 기존 Ch1Engine 패턴과 동일 ──
     DeviceStateEntry *dev = g_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
     if (dev) {
       bool byte_changed = (dev->last_ack_len != 19 ||
                            memcmp(dev->last_ack_data.data(), data, 19) != 0);
+
+      dev->last_updated_ms = millis();
+      dev->is_online = true;
 
       if (byte_changed) {
         memcpy(dev->last_ack_data.data(), data, 19);
@@ -471,11 +485,24 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
 }
 
 bool SetPower(uint8_t slot_idx, bool on) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  auto &rt = s_fcu_slots[slot_idx];
+
   if (on) {
+    Mode target_mode = rt.has_active_record ? rt.last_active_mode : Mode::FanOnly;
+    FanSpeed target_fan = rt.has_active_record ? rt.last_active_fan : FanSpeed::Low;
+    Swing target_swing = rt.has_active_record ? rt.last_active_swing : Swing::Off;
+
+    // 만약 기억된 풍량이 Off(0)였다면 켤 때는 기본 약풍으로 보정
+    if (target_fan == FanSpeed::Off) {
+      target_fan = FanSpeed::Low;
+    }
+
     uint8_t buf[15];
     size_t len = Fcu_BuildPowerOn(buf,
-                   static_cast<uint16_t>(Fcu::Mode::Cool),
-                   static_cast<uint16_t>(Fcu::FanSpeed::High));
+                   static_cast<uint16_t>(target_mode),
+                   static_cast<uint16_t>(target_fan),
+                   static_cast<uint16_t>(target_swing));
     return Fcu_SendRaw(slot_idx, buf, len);
   } else {
     return Fcu_SendRaw(slot_idx, kFcuPowerOff, sizeof(kFcuPowerOff));

@@ -6,9 +6,9 @@ local log = require "log"
 
 local CommandHandlers = {}
 
-local FCU_AC_MODE_TO_VAL  = { cool = 1, heat = 2, wind = 3 }
+local FCU_AC_MODE_TO_VAL  = { cool = 1, heat = 2, wind = 3, fanOnly = 3 }
 local FCU_FAN_MODE_TO_VAL = { low = 1, medium = 2, high = 3, auto = 4 }
-local FCU_SWING_TO_VAL    = { fixed = 0, sweep = 2 }
+local FCU_SWING_TO_VAL    = { fixed = 0, all = 2, sweep = 2 }
 
 
 local function get_connection_info(device)
@@ -664,6 +664,20 @@ function CommandHandlers.handle_child_set_thermostat_mode(driver, device, comman
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
   local mode = (command.args and command.args.mode) or "off"
+
+  if d_id == 0x2C then
+    local val = FCU_AC_MODE_TO_VAL[mode] or 1
+    local comp_mode = device.profile.components["mode"]
+    if comp_mode then
+      device:emit_component_event(comp_mode, capabilities.thermostatMode.thermostatMode(mode))
+    else
+      device:emit_event(capabilities.thermostatMode.thermostatMode(mode))
+    end
+    local ip, port = get_gateway_ip_port(driver)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "mode", val)
+    return
+  end
+
   local pwr = 0
   if mode == "heat" then
     pwr = 1
@@ -729,6 +743,117 @@ function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
   gateway_client.device_control(ip, port, d_id, s1, s2, "mode", mode_code)
 end
 
+function CommandHandlers.handle_fcu_set_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id or d_id ~= 0x2C then return end
+  local mode = (command.args and command.args.mode) or "cool"
+  local val_map = { cool = 1, heat = 2, fanOnly = 3 }
+  local val = val_map[mode] or 1
+
+  device:set_field("last_fcu_mode", mode, { persist = true })
+  local cap = capabilities["digituniverse06711.fcuMode"]
+  if cap then
+    local evt = cap.mode(mode)
+    evt.state_change = true
+    device:emit_event(evt)
+  end
+
+  cosock.spawn(function()
+    local ip, port = get_gateway_ip_port(driver)
+    if ip and port then
+      gateway_client.device_control(ip, port, d_id, s1, s2, "mode", val)
+    end
+  end, "fcu_set_mode_task")
+end
+
+function CommandHandlers.handle_fcu_set_fan_speed(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id or d_id ~= 0x2C then return end
+  local fan_mode = (command.args and command.args.fanSpeed) or "auto"
+  local val_map = { low = 1, medium = 2, high = 3, auto = 4 }
+  local val = val_map[fan_mode] or 4
+
+  device:set_field("last_fcu_fan", fan_mode, { persist = true })
+  local cap = capabilities["digituniverse06711.fcuFanSpeed"]
+  if cap then
+    local evt = cap.fanSpeed(fan_mode)
+    evt.state_change = true
+    device:emit_event(evt)
+  end
+
+  cosock.spawn(function()
+    local ip, port = get_gateway_ip_port(driver)
+    if ip and port then
+      gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", val)
+    end
+  end, "fcu_set_fan_task")
+end
+
+function CommandHandlers.handle_fcu_set_oscillation(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id or d_id ~= 0x2C then return end
+  local osc = (command.args and command.args.oscillation) or "fixed"
+  local val = (osc == "swing") and 2 or 0
+
+  device:set_field("last_fcu_osc", osc, { persist = true })
+  local cap = capabilities["digituniverse06711.fcuOscillation"]
+  if cap then
+    local evt = cap.oscillation(osc)
+    evt.state_change = true
+    device:emit_event(evt)
+  end
+
+  cosock.spawn(function()
+    local ip, port = get_gateway_ip_port(driver)
+    if ip and port then
+      gateway_client.device_control(ip, port, d_id, s1, s2, "swing", val)
+    end
+  end, "fcu_set_osc_task")
+end
+
+function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id or d_id ~= 0x2C then return end
+
+  local cap = capabilities["digituniverse06711.fcuSetpoint"]
+  local prev_temp = device:get_field("last_fcu_setpoint") or 24
+
+  -- 1. 전원 상태 및 현재 모드 검사
+  local sw_state = device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME)
+  local cur_mode = device:get_field("last_fcu_mode") or "cool"
+
+  if sw_state == "off" or cur_mode == "fanOnly" then
+    log.warn(string.format("⚠️ [FCU CMD] %s Setpoint rejected (Power=%s, Mode=%s). Spring-back to %d°C",
+                           device.label, tostring(sw_state), tostring(cur_mode), prev_temp))
+    if cap then
+      local revert_evt = cap.setpoint({ value = prev_temp, unit = "°C" })
+      revert_evt.state_change = true
+      device:emit_event(revert_evt)
+    end
+    return
+  end
+
+  -- 2. 유효한 냉방/난방 모드일 때 정상 반영
+  local raw_temp = (command.args and command.args.setpoint) or 24
+  local temp = math.floor((tonumber(raw_temp) or 24) + 0.5)
+  if temp < 18 then temp = 18 end
+  if temp > 30 then temp = 30 end
+
+  device:set_field("last_fcu_setpoint", temp, { persist = true })
+  if cap then
+    local evt = cap.setpoint({ value = temp, unit = "°C" })
+    evt.state_change = true
+    device:emit_event(evt)
+  end
+
+  cosock.spawn(function()
+    local ip, port = get_gateway_ip_port(driver)
+    if ip and port then
+      gateway_client.device_control(ip, port, d_id, s1, s2, "set_temp", temp)
+    end
+  end, "fcu_set_temp_task")
+end
+
 function CommandHandlers.handle_child_set_ac_fan_mode(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
@@ -736,7 +861,12 @@ function CommandHandlers.handle_child_set_ac_fan_mode(driver, device, command)
 
   if d_id == 0x2C then
     local val = FCU_FAN_MODE_TO_VAL[fan_mode] or 4
-    device:emit_event(capabilities.airConditionerFanMode.fanMode(fan_mode))
+    local comp_fan = device.profile.components["fan"]
+    if comp_fan then
+      device:emit_component_event(comp_fan, capabilities.airConditionerFanMode.fanMode(fan_mode))
+    else
+      device:emit_event(capabilities.airConditionerFanMode.fanMode(fan_mode))
+    end
     local ip, port = get_gateway_ip_port(driver)
     gateway_client.device_control(ip, port, d_id, s1, s2, "fan_speed", val)
     return
@@ -752,7 +882,12 @@ function CommandHandlers.handle_child_set_oscillation_mode(driver, device, comma
   if not d_id or d_id ~= 0x2C then return end
   local mode = (command.args and (command.args.mode or command.args.fanOscillationMode)) or "fixed"
   local val = FCU_SWING_TO_VAL[mode] or 0
-  device:emit_event(capabilities.fanOscillationMode.fanOscillationMode(mode))
+  local comp_osc = device.profile.components["oscillation"]
+  if comp_osc then
+    device:emit_component_event(comp_osc, capabilities.fanOscillationMode.fanOscillationMode(mode))
+  else
+    device:emit_event(capabilities.fanOscillationMode.fanOscillationMode(mode))
+  end
   local ip, port = get_gateway_ip_port(driver)
   gateway_client.device_control(ip, port, d_id, s1, s2, "swing", val)
 end

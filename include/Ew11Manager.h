@@ -51,6 +51,10 @@ struct SlotRuntime {
   uint8_t timeout_count{0};
   bool waiting_response{false};
   bool is_online{false};
+  Mode last_active_mode{Mode::FanOnly};         // 기록 없을 시 기본 송풍
+  FanSpeed last_active_fan{FanSpeed::Low};       // 기록 없을 시 기본 약풍
+  Swing last_active_swing{Swing::Off};           // 기록 없을 시 기본 고정
+  bool has_active_record{false};                // 냉방/난방 운전 이력 여부
 };
 
 // ── 외부 공개 제어 API (MgmtRpc에서 호출, 스레드-세이프) ──

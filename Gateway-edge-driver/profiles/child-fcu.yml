@@ -1,22 +1,29 @@
 name: child-fcu
 components:
   - id: main
+    label: "FCU 에어컨"
     capabilities:
       - id: switch
         version: 1
-      - id: airConditionerMode
-        version: 1
-      - id: airConditionerFanMode
-        version: 1
-      - id: thermostatCoolingSetpoint
+      - id: digituniverse06711.fcuInfo
         version: 1
       - id: temperatureMeasurement
         version: 1
-      - id: fanOscillationMode
+      - id: digituniverse06711.fcuSetpoint
         version: 1
-      - id: healthCheck
+      - id: digituniverse06711.fcuMode
+        version: 1
+      - id: digituniverse06711.fcuFanSpeed
+        version: 1
+      - id: digituniverse06711.fcuOscillation
         version: 1
       - id: refresh
         version: 1
     categories:
       - name: AirConditioner
+metadata:
+  deviceType: AirConditioner
+  ocfDeviceType: oic.d.airconditioner
+  deviceTypeId: AirConditioner
+  mnmn: SmartThingsCommunity
+  vid: e34735f0-fde2-3ca5-91ad-4bf9fa160e54
