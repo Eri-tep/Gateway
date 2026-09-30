@@ -9,7 +9,7 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.4.2";
+constexpr const char *FIRMWARE_VERSION = "v1.4.3";
 } // namespace Config
 
 namespace Config::Task {
@@ -93,6 +93,15 @@ namespace Config::Network {
 // [WiFi] AP 접속 시도 타임아웃 (기본: 30초)
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 30000;
 } // namespace Config::Network
+
+namespace Config::OTA {
+// [OTA] 다운로드 전체 제한 시간 (기본: 5분)
+constexpr uint32_t DOWNLOAD_DEADLINE_MS = 300000;
+// [OTA] 소켓 침묵 스톨 타임아웃 (기본: 15초)
+constexpr uint32_t STALL_TIMEOUT_MS = 15000;
+// [OTA] 데이터 미수신/대기 시 CPU 양보 시간 (기본: 2ms)
+constexpr uint32_t IDLE_DELAY_MS = 2;
+} // namespace Config::OTA
 
 namespace Config::Metrics {
 // [메트릭] 링버퍼 샘플링 주기 (기본: 5초) - Core0 태스크와 모니터링 공통 참조

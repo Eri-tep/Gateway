@@ -402,16 +402,28 @@ static bool do_ota(const char *initial_url) {
   while (written < static_cast<size_t>(contentLength)) {
     esp_task_wdt_reset();
 
-    // 5분 전체 하드 데드라인 검사
-    if (millis() - download_start_ms > 300000) {
-      fail("Total download deadline exceeded (5m)");
+    // 1. 전체 OTA 다운로드 deadline
+    if (millis() - download_start_ms > Config::OTA::DOWNLOAD_DEADLINE_MS) {
+      fail("Total download deadline exceeded");
       http.end();
       secure_client.stop();
       plain_client.stop();
       return false;
     }
 
-    if (!stream->connected() && stream->available() == 0) {
+    // 2. 마지막 정상 수신 이후 stall timeout (어떤 continue 경로에서도 반드시 매 루프 검사)
+    if (millis() - last_progress_time > Config::OTA::STALL_TIMEOUT_MS) {
+      fail("Stream read stall timeout (15s)");
+      http.end();
+      secure_client.stop();
+      plain_client.stop();
+      return false;
+    }
+
+    // 3. 현재 수신 버퍼 상태 (1회만 조회)
+    int avail = stream->available();
+
+    if (!stream->connected() && avail == 0) {
       fail("Connection lost prematurely at %u/%d bytes", (unsigned)written, contentLength);
       http.end();
       secure_client.stop();
@@ -419,52 +431,46 @@ static bool do_ota(const char *initial_url) {
       return false;
     }
 
-    int avail = stream->available();
-    if (avail > 0) {
-      size_t to_read = (avail < (int)sizeof(s_ota_buff)) ? avail : sizeof(s_ota_buff);
-      if (written + to_read > static_cast<size_t>(contentLength)) {
-        to_read = contentLength - written;
-      }
-
-      size_t read_bytes = stream->readBytes(s_ota_buff, to_read);
-      if (read_bytes > 0) {
-        size_t written_bytes = Update.write(s_ota_buff, read_bytes);
-        if (written_bytes != read_bytes) {
-          fail("Update.write mismatch (exp %u, got %u)", (unsigned)read_bytes, (unsigned)written_bytes);
-          http.end();
-          secure_client.stop();
-          plain_client.stop();
-          return false;
-        }
-
-        written += read_bytes;
-        last_progress_time = millis();
-
-        int pct = (written * 100) / contentLength;
-        g_http_ota_state.progress_pct = pct;
-        if (pct != last_pct && (pct % 10 == 0 || pct == 100)) {
-          last_pct = pct;
-          ::Serial.printf("[OTA] Progress: %d%% (%u / %d bytes)\r\n", pct, (unsigned)written, contentLength);
-        }
-
-        // Core 0의 IDLE 태스크 및 Wi-Fi 스택에 CPU 양보
-        vTaskDelay(pdMS_TO_TICKS(1));
-      } else {
-        // avail > 0인데 readBytes가 0을 반환한 경우 (TLS 일시 대기 등)
-        vTaskDelay(pdMS_TO_TICKS(2));
-      }
-    } else {
-      // 버퍼에 들어온 데이터가 없을 때 블로킹 대기 (Busy-wait 방지)
-      vTaskDelay(pdMS_TO_TICKS(2));
+    // Guard 1: 현재 수신 데이터 없음
+    if (avail <= 0) {
+      vTaskDelay(pdMS_TO_TICKS(Config::OTA::IDLE_DELAY_MS));
+      continue;
     }
 
-    // 소켓 침묵 스톨 검사 (공통 분기 밖에서 15초 제한)
-    if (millis() - last_progress_time > 15000) {
-      fail("Stream read stall timeout (15s)");
+    size_t to_read = (avail < static_cast<int>(sizeof(s_ota_buff)))
+                         ? static_cast<size_t>(avail)
+                         : sizeof(s_ota_buff);
+
+    if (written + to_read > static_cast<size_t>(contentLength)) {
+      to_read = static_cast<size_t>(contentLength) - written;
+    }
+
+    size_t read_bytes = stream->readBytes(s_ota_buff, to_read);
+
+    // Guard 2: 일시적 TLS/socket read 실패
+    if (read_bytes == 0) {
+      vTaskDelay(pdMS_TO_TICKS(Config::OTA::IDLE_DELAY_MS));
+      continue;
+    }
+
+    // ===== Happy Path (완전 Flat 구조, 성공 시 지연 없이 즉시 다음 청크 스트리밍) =====
+    size_t written_bytes = Update.write(s_ota_buff, read_bytes);
+    if (written_bytes != read_bytes) {
+      fail("Update.write mismatch (exp %u, got %u)", (unsigned)read_bytes, (unsigned)written_bytes);
       http.end();
       secure_client.stop();
       plain_client.stop();
       return false;
+    }
+
+    written += read_bytes;
+    last_progress_time = millis();
+
+    int pct = (written * 100) / contentLength;
+    g_http_ota_state.progress_pct = pct;
+    if (pct != last_pct && (pct % 10 == 0 || pct == 100)) {
+      last_pct = pct;
+      ::Serial.printf("[OTA] Progress: %d%% (%u / %d bytes)\r\n", pct, (unsigned)written, contentLength);
     }
   }
 
