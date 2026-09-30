@@ -60,6 +60,7 @@ struct SlotRuntime {
   bool has_pending_temp{false};                 // 온도 패킷 전송 대기 여부
   uint8_t pending_cmd_buf[16]{};               // RS-485 Stop-and-Wait 대기 명령 버퍼
   uint8_t pending_cmd_len{0};                  // 대기 중인 명령 패킷 길이
+  uint8_t pending_restore_swing{0};            // 전원 켜기 복원 시 모터 캘리브레이션 후 안착시킬 스윙값 (2: 회전)
 };
 
 // ── 외부 공개 제어 API (MgmtRpc에서 호출, 스레드-세이프) ──

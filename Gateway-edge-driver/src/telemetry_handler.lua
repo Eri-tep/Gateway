@@ -734,19 +734,6 @@ local DEVICE_TELEMETRY_HANDLERS = {
       local ev = cap_osc.oscillation(swing_str)
       ev.state_change = true
       dev:emit_event(ev)
-
-      -- [Event-Driven 스윙 자동 안착]
-      -- 기기가 실제 켜졌음(Power=1)이 확인되었는데, 사용자가 원했던 상태는 회전(swing)이고
-      -- 기기는 아직 날개가 닫혀있는 과도기(swing != 2)라면, 선로가 비어있는 지금 1회 스윙 보정 전송!
-      local saved_osc = dev:get_field("saved_fcu_osc") or "fixed"
-      if event_data.power == 1 and saved_osc == "swing" and event_data.swing ~= 2 then
-        local ip, port = get_gateway_ip_port(driver)
-        local d_id, s1, s2 = parse_child_key(dev.parent_assigned_child_key)
-        if ip and port and d_id then
-          log.info(string.format("🔄 [FCU SWING SYNC] Device Power ON confirmed! Syncing swing to 'swing' (Car 0x%02X %d-%d)", d_id, s1, s2))
-          gateway_client.device_control(ip, port, d_id, s1, s2, "swing", 2)
-        end
-      end
     end
 
     -- 3. 희망 설정 온도 (digituniverse06711.fcuSetpoint)

@@ -434,6 +434,17 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
     }
     rt.last_active_swing = new_snap.swing;
 
+    // [펌웨어 레벨 스윙 자동 안착]
+    // 복원 명령으로 회전(2)을 지시받았으나 모터 원점 복귀로 인해 swing != 2로 보고된 경우 1회 자동 보정
+    if (new_snap.power && rt.pending_restore_swing == 2) {
+      if (new_snap.swing != Fcu::Swing::On) {
+        uint8_t swing_pkt[8];
+        size_t s_len = Fcu_BuildWriteSingle(swing_pkt, 0x0003, 2);
+        Fcu_SendRaw(slot_idx, swing_pkt, s_len);
+      }
+      rt.pending_restore_swing = 0; // 1회만 보정 수행
+    }
+
     // ── 2nd-Tier Cache: 기존 Ch1Engine 패턴과 동일 ──
     DeviceStateEntry *dev = g_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
     if (dev) {
@@ -598,6 +609,14 @@ bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing,
     rt.pending_temp = temp;
     rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS;
   }
+
+  // 모터 캘리브레이션으로 인한 스윙 풀림 대비: 회전(2) 요구 시 pending_restore_swing 등록
+  if (swing == 2) {
+    rt.pending_restore_swing = 2;
+  } else {
+    rt.pending_restore_swing = 0;
+  }
+
   return true;
 }
 
@@ -614,6 +633,12 @@ bool SetPower(uint8_t slot_idx, bool on) {
       target_fan = FanSpeed::Low;
     }
 
+    if (target_swing == Swing::On) {
+      rt.pending_restore_swing = 2;
+    } else {
+      rt.pending_restore_swing = 0;
+    }
+
     uint8_t buf[15];
     size_t len = Fcu_BuildPowerOn(buf,
                    static_cast<uint16_t>(target_mode),
@@ -627,6 +652,7 @@ bool SetPower(uint8_t slot_idx, bool on) {
     }
     return ok;
   } else {
+    rt.pending_restore_swing = 0;
     bool ok = Fcu_SendRaw(slot_idx, kFcuPowerOff, sizeof(kFcuPowerOff));
     if (ok) {
       applyOptimisticState(slot_idx, static_cast<uint16_t>(rt.snap.mode), 0,

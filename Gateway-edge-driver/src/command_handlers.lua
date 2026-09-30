@@ -940,16 +940,23 @@ function CommandHandlers.handle_fcu_set_mode(driver, device, command)
   if not d_id or d_id ~= 0x2C then return end
   local mode = (command.args and command.args.mode) or "cool"
 
-  if mode == "cool" or mode == "heat" then
-    device:set_field("saved_fcu_mode", mode, { persist = true })
-  end
-  device:set_field("last_fcu_mode", mode, { persist = true })
   local cap = capabilities["digituniverse06711.fcuMode"]
   if cap then
     local evt = cap.mode(mode)
     evt.state_change = true
     device:emit_event(evt)
   end
+
+  local is_power_on = (device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) == "on")
+  if not is_power_on then
+    log.info("ℹ️ [FCU] Mode adjusted while power is OFF -> Keep saved_fcu_mode intact and do not send restore")
+    return
+  end
+
+  if mode == "cool" or mode == "heat" then
+    device:set_field("saved_fcu_mode", mode, { persist = true })
+  end
+  device:set_field("last_fcu_mode", mode, { persist = true })
 
   schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end
@@ -959,17 +966,24 @@ function CommandHandlers.handle_fcu_set_fan_speed(driver, device, command)
   if not d_id or d_id ~= 0x2C then return end
   local fan_mode = (command.args and command.args.fanSpeed) or "auto"
 
-  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
-  if cur_mode == "cool" or cur_mode == "heat" then
-    device:set_field("saved_fcu_fan", fan_mode, { persist = true })
-  end
-  device:set_field("last_fcu_fan", fan_mode, { persist = true })
   local cap = capabilities["digituniverse06711.fcuFanSpeed"]
   if cap then
     local evt = cap.fanSpeed(fan_mode)
     evt.state_change = true
     device:emit_event(evt)
   end
+
+  local is_power_on = (device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) == "on")
+  if not is_power_on then
+    log.info("ℹ️ [FCU] Fan speed adjusted while power is OFF -> Keep saved_fcu_fan intact and do not send restore")
+    return
+  end
+
+  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
+  if cur_mode == "cool" or cur_mode == "heat" then
+    device:set_field("saved_fcu_fan", fan_mode, { persist = true })
+  end
+  device:set_field("last_fcu_fan", fan_mode, { persist = true })
 
   schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end
@@ -979,17 +993,24 @@ function CommandHandlers.handle_fcu_set_oscillation(driver, device, command)
   if not d_id or d_id ~= 0x2C then return end
   local osc = (command.args and command.args.oscillation) or "fixed"
 
-  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
-  if cur_mode == "cool" or cur_mode == "heat" then
-    device:set_field("saved_fcu_osc", osc, { persist = true })
-  end
-  device:set_field("last_fcu_osc", osc, { persist = true })
   local cap = capabilities["digituniverse06711.fcuOscillation"]
   if cap then
     local evt = cap.oscillation(osc)
     evt.state_change = true
     device:emit_event(evt)
   end
+
+  local is_power_on = (device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) == "on")
+  if not is_power_on then
+    log.info("ℹ️ [FCU] Oscillation adjusted while power is OFF -> Keep saved_fcu_osc intact and do not send restore")
+    return
+  end
+
+  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
+  if cur_mode == "cool" or cur_mode == "heat" then
+    device:set_field("saved_fcu_osc", osc, { persist = true })
+  end
+  device:set_field("last_fcu_osc", osc, { persist = true })
 
   schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end
@@ -1003,17 +1024,23 @@ function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
   if temp < 18 then temp = 18 end
   if temp > 30 then temp = 30 end
 
-  -- 송풍(fanOnly) 중 조작한 온도는 냉방/난방 복원 저장소(saved_fcu_temp)를 오염시키지 않도록 엄격 차단
-  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
-  if cur_mode == "cool" or cur_mode == "heat" then
-    device:set_field("saved_fcu_temp", temp, { persist = true })
-  end
-
   local cap = capabilities["digituniverse06711.fcuSetpoint"]
   if cap then
     local evt = cap.setpoint({ value = temp, unit = "°C" })
     evt.state_change = true
     device:emit_event(evt)
+  end
+
+  local is_power_on = (device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) == "on")
+  if not is_power_on then
+    log.info("ℹ️ [FCU] Setpoint adjusted while power is OFF -> Keep saved_fcu_temp intact and do not send restore")
+    return
+  end
+
+  -- 송풍(fanOnly) 중 조작한 온도는 냉방/난방 복원 저장소(saved_fcu_temp)를 오염시키지 않도록 엄격 차단
+  local cur_mode = device:get_field("saved_fcu_mode") or "cool"
+  if cur_mode == "cool" or cur_mode == "heat" then
+    device:set_field("saved_fcu_temp", temp, { persist = true })
   end
 
   schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
