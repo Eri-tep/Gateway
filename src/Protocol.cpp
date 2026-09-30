@@ -1428,41 +1428,11 @@ void AutoProbingEngine::feedFrame(span<const uint8_t> raw_frame) {
   }
 }
 
-void AutoProbingEngine::feedOpcodePair(span<const uint8_t> req, span<const uint8_t> ack) {
-  if (req.size() < 5 || ack.size() < 5)
-    return;
-
-  bool should_sync = false;
-  AutoProbeDescriptor desc_to_sync;
-
-  {
-    CriticalSectionLocker lock(&_mux);
-    if (_desc.opcodes_locked)
-      return;
-
-    size_t min_len = std::min(req.size(), ack.size());
-    for (size_t i = 1; i < min_len - 1; ++i) {
-      if (req[i] != ack[i]) {
-        _diff_idx_counts[i < 16 ? i : 15]++;
-        if (_diff_idx_counts[i < 16 ? i : 15] >= 10) {
-          _desc.opcode_offset = static_cast<uint8_t>(i);
-          _desc.query_opcode = req[i];
-          _desc.ack_opcode = ack[i];
-          _desc.opcodes_locked = true;
-          if (_desc.is_locked) {
-            should_sync = true;
-            desc_to_sync = _desc;
-          }
-          break;
-        }
-      }
-    }
-  }
-
-  if (should_sync) {
-    ProfileRepository::syncAutoProfileToNvs(desc_to_sync);
-  }
+void AutoProbingEngine::feedOpcodePair(span<const uint8_t> /*req*/, span<const uint8_t> /*ack*/) {
+  // Early opcode locking removed to eliminate race conditions with frame length fields.
+  // Full cross-device matrix analysis in analyzeCacheMatrix() is the sole authoritative opcode evaluator.
 }
+
 
 void AutoProbingEngine::feedControlFrame(span<const uint8_t> ctrl_frame) {
   if (ctrl_frame.size() < 5) return;
