@@ -99,8 +99,27 @@ void Ch1_PollNext(size_t &current_dev_idx) {
   }
 
   if (target_selected) {
-    MutexLocker lock(g_uart0_mutex, pdMS_TO_TICKS(100));
-    if (lock.isLocked()) {
+    constexpr uint8_t kMaxRetries = 3;
+    constexpr uint32_t kDelayMs = Config::Timing::CH1_INTER_PACKET_DELAY_MS;
+    constexpr TickType_t kUartLockTimeout = pdMS_TO_TICKS(5);
+    bool sent = false;
+
+    for (uint8_t retry = 0; retry < kMaxRetries; ++retry) {
+      Ch1_WaitBusIdle(kDelayMs);
+
+      MutexLocker lock(g_uart0_mutex, kUartLockTimeout);
+      if (!lock.isLocked()) {
+        // High-priority control transaction in progress on UART0 (Policy A: abort poll cycle)
+        return;
+      }
+
+      uint32_t last_act = g_ch1_bus_ms.load(std::memory_order_acquire);
+      uint32_t elapsed = millis() - last_act;
+      if (elapsed < kDelayMs) {
+        // TOCTOU: bus became active right before lock acquisition
+        continue;
+      }
+
       StaticPacket q_pkt;
       if (poll_raw_len > 0 && poll_raw_ptr) {
         q_pkt.channel_id = 1;
@@ -111,7 +130,6 @@ void Ch1_PollNext(size_t &current_dev_idx) {
                                              poll_sub2);
       }
       g_telnet_tracer.trace(1, true, TraceType::QRY, q_pkt);
-      Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
 
       uart_flush_input(UART_NUM_0);
       uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
@@ -141,6 +159,14 @@ void Ch1_PollNext(size_t &current_dev_idx) {
         g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
         g_device_repo.handlePollingTimeout(poll_dev_id, poll_sub1, poll_sub2);
       }
+
+      sent = true;
+      break;
+    }
+
+    if (!sent) {
+      // Abort poll cycle due to repeated TOCTOU bus activity
+      return;
     }
   }
 }
@@ -219,8 +245,6 @@ void Task_Ch1(void *pvParameters) {
             xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
           }
           if (parser && parser->isAutoMode() && !g_auto_probing_engine.isOffsetsLocked()) {
-            MutexLocker u0_lock(g_uart0_mutex, pdMS_TO_TICKS(100));
-            Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
             g_auto_probing_engine.analyzeCacheMatrix();
           }
           g_pkt_stats.resetAll();

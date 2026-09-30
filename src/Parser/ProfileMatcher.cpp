@@ -67,129 +67,128 @@ void injectProfile(const WallpadProfile *profile, ControlTemplateRegistry &regis
 
   for (size_t i = 0; i < profile->device_count; ++i) {
     const DeviceSpec &spec = profile->devices[i];
-    GroupControlTemplate *grp = registry.registerOrTouch(spec.dev_id, spec.name);
-    if (!grp) continue;
+    registry.modifyOrCreateGroup(spec.dev_id, [&](GroupControlTemplate &grp) {
+      grp.coverage.dev_class = spec.dev_class;
+      snprintf(grp.group_name, sizeof(grp.group_name), "%s", spec.name);
 
-    grp->coverage.dev_class = spec.dev_class;
-    snprintf(grp->group_name, sizeof(grp->group_name), "%s", spec.name);
+      // 기본 제어 템플릿(CTL) 구조 설정
+      grp.frame_len = spec.ctl_len;
+      grp.sub1_offset = profile->sub1_offset;
+      grp.sub2_offset = profile->sub2_offset;
 
-    // 기본 제어 템플릿(CTL) 구조 설정
-    grp->frame_len = spec.ctl_len;
-    grp->sub1_offset = profile->sub1_offset;
-    grp->sub2_offset = profile->sub2_offset;
+      // 0x34 엘리베이터의 경우 월패드 쿼리가 없으므로 기본 제어 골격 주입
+      if (spec.dev_id == 0x34 && spec.ctl_len == 11) {
+        const uint8_t ev_proto[11] = {0xF7, 0x0B, 0x01, 0x34, 0x02, 0x41, 0x10, 0x06, 0x00, 0x9C, 0xEE};
+        std::copy(ev_proto, ev_proto + 11, grp.raw_template);
+        grp.power_slot.action_offset = 7;
+        grp.power_slot.on_val = 0x06;
+        grp.power_slot.off_val = 0x00;
+        grp.ctl_sub1_override = 0x10;
+      }
 
-    // 0x34 엘리베이터의 경우 월패드 쿼리가 없으므로 기본 제어 골격 주입
-    if (spec.dev_id == 0x34 && spec.ctl_len == 11) {
-      const uint8_t ev_proto[11] = {0xF7, 0x0B, 0x01, 0x34, 0x02, 0x41, 0x10, 0x06, 0x00, 0x9C, 0xEE};
-      std::copy(ev_proto, ev_proto + 11, grp->raw_template);
-      grp->power_slot.action_offset = 7;
-      grp->power_slot.on_val = 0x06;
-      grp->power_slot.off_val = 0x00;
-      grp->ctl_sub1_override = 0x10;
-    }
+      // 전원 액션 슬롯 설정
+      grp.power_slot.discovered = true;
+      grp.power_slot.action_offset = spec.ctl_payload_offset;
+      grp.power_slot.on_val = spec.pwr_on_val;
+      grp.power_slot.off_val = spec.pwr_off_val;
+      grp.power_slot.ack_state_offset = spec.ctl_ack_state_offset;
 
-    // 전원 액션 슬롯 설정
-    grp->power_slot.discovered = true;
-    grp->power_slot.action_offset = spec.ctl_payload_offset;
-    grp->power_slot.on_val = spec.pwr_on_val;
-    grp->power_slot.off_val = spec.pwr_off_val;
-    grp->power_slot.ack_state_offset = spec.ctl_ack_state_offset;
+      // 외출 모드 토큰 주입 (난방 0x07 등)
+      if (spec.pwr_away_val != 0xFF) {
+        grp.away_mode_token = spec.pwr_away_val;
+      }
 
-    // 외출 모드 토큰 주입 (난방 0x07 등)
-    if (spec.pwr_away_val != 0xFF) {
-      grp->away_mode_token = spec.pwr_away_val;
-    }
+      // 기기 클래스별 추가 슬롯 설정
+      if (spec.dev_class == DeviceClass::THERMOSTAT) {
+        grp.temp_slot.discovered = true;
+        grp.temp_slot.category_offset = 5; // 현대통신 온도제어 카테고리 오프셋
+        grp.temp_slot.category_val = 0x45;    // 현대통신 온도제어 카테고리 코드
+        grp.temp_slot.action_offset = spec.ctl_payload_offset;
+        grp.temp_slot.min_val = 14;
+        grp.temp_slot.max_val = 36;
+        grp.temp_slot.ack_state_offset = spec.ctl_ack_state_offset;
+        grp.temp_slot.ack_target_offset = spec.ctl_ack_echo_offset;
+        grp.temp_slot.ack_telemetry_offset = spec.ctl_ack_ambtemp_offset;
+      } else if (spec.dev_class == DeviceClass::VENT) {
+        grp.speed_slot.discovered = true;
+        grp.speed_slot.category_offset = 5; // 현대통신 풍량제어 카테고리 오프셋
+        grp.speed_slot.category_val = 0x42;   // 현대통신 풍량제어 카테고리 코드
+        grp.speed_slot.action_offset = spec.ctl_payload_offset;
+        grp.speed_slot.min_val = 1;
+        grp.speed_slot.max_val = 3;
+        grp.speed_slot.level_count = 3;
+        grp.speed_slot.level_tokens[0] = 0x01; // 1단 (약)
+        grp.speed_slot.level_tokens[1] = 0x03; // 2단 (중)
+        grp.speed_slot.level_tokens[2] = 0x07; // 3단 (강)
+        grp.speed_slot.ack_state_offset = spec.ctl_ack_state_offset;
 
-    // 기기 클래스별 추가 슬롯 설정
-    if (spec.dev_class == DeviceClass::THERMOSTAT) {
-      grp->temp_slot.discovered = true;
-      grp->temp_slot.category_offset = 5; // 현대통신 온도제어 카테고리 오프셋
-      grp->temp_slot.category_val = 0x45;    // 현대통신 온도제어 카테고리 코드
-      grp->temp_slot.action_offset = spec.ctl_payload_offset;
-      grp->temp_slot.min_val = 14;
-      grp->temp_slot.max_val = 36;
-      grp->temp_slot.ack_state_offset = spec.ctl_ack_state_offset;
-      grp->temp_slot.ack_target_offset = spec.ctl_ack_echo_offset;
-      grp->temp_slot.ack_telemetry_offset = spec.ctl_ack_ambtemp_offset;
-    } else if (spec.dev_class == DeviceClass::VENT) {
-      grp->speed_slot.discovered = true;
-      grp->speed_slot.category_offset = 5; // 현대통신 풍량제어 카테고리 오프셋
-      grp->speed_slot.category_val = 0x42;   // 현대통신 풍량제어 카테고리 코드
-      grp->speed_slot.action_offset = spec.ctl_payload_offset;
-      grp->speed_slot.min_val = 1;
-      grp->speed_slot.max_val = 3;
-      grp->speed_slot.level_count = 3;
-      grp->speed_slot.level_tokens[0] = 0x01; // 1단 (약)
-      grp->speed_slot.level_tokens[1] = 0x03; // 2단 (중)
-      grp->speed_slot.level_tokens[2] = 0x07; // 3단 (강)
-      grp->speed_slot.ack_state_offset = spec.ctl_ack_state_offset;
+        // 운전 모드 슬롯 설정 (Cat 0x43, 일반 0x01, 바이패스 0x02, 자동 0x03, 공기청정 0x04)
+        grp.mode_slot.discovered = true;
+        grp.mode_slot.category_offset = 5;
+        grp.mode_slot.category_val = 0x43;
+        grp.mode_slot.action_offset = spec.ctl_payload_offset; // Byte #7
+        grp.mode_slot.min_val = 1;
+        grp.mode_slot.max_val = 4;
+        grp.mode_slot.ack_state_offset = spec.ctl_ack_state_offset;
+      } else if (spec.dev_class == DeviceClass::GAS) {
+        grp.close_slot.discovered = true;
+        grp.close_slot.category_offset = 5;
+        grp.close_slot.category_val = 0x43;
+        grp.close_slot.action_offset = spec.ctl_payload_offset; // Byte #7
+        grp.close_slot.off_val = spec.pwr_off_val;              // 0x02
+        grp.close_slot.ack_state_offset = spec.ctl_ack_state_offset;
+      } else if (spec.dev_class == DeviceClass::AIRCON) {
+        // 시스템 에어컨 희망온도 (Cat 0x45)
+        grp.temp_slot.discovered = true;
+        grp.temp_slot.category_offset = 5;
+        grp.temp_slot.category_val = 0x45;
+        grp.temp_slot.action_offset = spec.ctl_payload_offset;
+        grp.temp_slot.min_val = 18;
+        grp.temp_slot.max_val = 30;
+        grp.temp_slot.ack_state_offset = spec.ctl_ack_state_offset;
+        grp.temp_slot.ack_target_offset = spec.ctl_ack_echo_offset;
 
-      // 운전 모드 슬롯 설정 (Cat 0x43, 일반 0x01, 바이패스 0x02, 자동 0x03, 공기청정 0x04)
-      grp->mode_slot.discovered = true;
-      grp->mode_slot.category_offset = 5;
-      grp->mode_slot.category_val = 0x43;
-      grp->mode_slot.action_offset = spec.ctl_payload_offset; // Byte #7
-      grp->mode_slot.min_val = 1;
-      grp->mode_slot.max_val = 4;
-      grp->mode_slot.ack_state_offset = spec.ctl_ack_state_offset;
-    } else if (spec.dev_class == DeviceClass::GAS) {
-      grp->close_slot.discovered = true;
-      grp->close_slot.category_offset = 5;
-      grp->close_slot.category_val = 0x43;
-      grp->close_slot.action_offset = spec.ctl_payload_offset; // Byte #7
-      grp->close_slot.off_val = spec.pwr_off_val;              // 0x02
-      grp->close_slot.ack_state_offset = spec.ctl_ack_state_offset;
-    } else if (spec.dev_class == DeviceClass::AIRCON) {
-      // 시스템 에어컨 희망온도 (Cat 0x45)
-      grp->temp_slot.discovered = true;
-      grp->temp_slot.category_offset = 5;
-      grp->temp_slot.category_val = 0x45;
-      grp->temp_slot.action_offset = spec.ctl_payload_offset;
-      grp->temp_slot.min_val = 18;
-      grp->temp_slot.max_val = 30;
-      grp->temp_slot.ack_state_offset = spec.ctl_ack_state_offset;
-      grp->temp_slot.ack_target_offset = spec.ctl_ack_echo_offset;
+        // 시스템 에어컨 풍량 (Cat 0x42)
+        grp.speed_slot.discovered = true;
+        grp.speed_slot.category_offset = 5;
+        grp.speed_slot.category_val = 0x42;
+        grp.speed_slot.action_offset = spec.ctl_payload_offset;
+        grp.speed_slot.min_val = 1;
+        grp.speed_slot.max_val = 3;
+        grp.speed_slot.level_count = 3;
+        grp.speed_slot.level_tokens[0] = 0x01; // 미풍
+        grp.speed_slot.level_tokens[1] = 0x02; // 약풍
+        grp.speed_slot.level_tokens[2] = 0x03; // 강풍
+        grp.speed_slot.ack_state_offset = spec.ctl_ack_state_offset;
 
-      // 시스템 에어컨 풍량 (Cat 0x42)
-      grp->speed_slot.discovered = true;
-      grp->speed_slot.category_offset = 5;
-      grp->speed_slot.category_val = 0x42;
-      grp->speed_slot.action_offset = spec.ctl_payload_offset;
-      grp->speed_slot.min_val = 1;
-      grp->speed_slot.max_val = 3;
-      grp->speed_slot.level_count = 3;
-      grp->speed_slot.level_tokens[0] = 0x01; // 미풍
-      grp->speed_slot.level_tokens[1] = 0x02; // 약풍
-      grp->speed_slot.level_tokens[2] = 0x03; // 강풍
-      grp->speed_slot.ack_state_offset = spec.ctl_ack_state_offset;
+        // 시스템 에어컨 운전 모드 (Cat 0x41: 1:냉방, 2:제습, 3:송풍, 4:자동, 5:난방)
+        grp.mode_slot.discovered = true;
+        grp.mode_slot.category_offset = 5;
+        grp.mode_slot.category_val = 0x41;
+        grp.mode_slot.action_offset = spec.ctl_payload_offset;
+        grp.mode_slot.min_val = 1;
+        grp.mode_slot.max_val = 5;
+        grp.mode_slot.ack_state_offset = spec.ctl_ack_state_offset;
+      }
 
-      // 시스템 에어컨 운전 모드 (Cat 0x41: 1:냉방, 2:제습, 3:송풍, 4:자동, 5:난방)
-      grp->mode_slot.discovered = true;
-      grp->mode_slot.category_offset = 5;
-      grp->mode_slot.category_val = 0x41;
-      grp->mode_slot.action_offset = spec.ctl_payload_offset;
-      grp->mode_slot.min_val = 1;
-      grp->mode_slot.max_val = 5;
-      grp->mode_slot.ack_state_offset = spec.ctl_ack_state_offset;
-    }
+      // 제어 응답 슬롯(ack_slots) 명세 주입
+      grp.ack_slots.discovered = true;
+      grp.ack_slots.power_offset = spec.ctl_ack_state_offset;
+      if (spec.dev_class == DeviceClass::THERMOSTAT) {
+        grp.ack_slots.target_temp_offset = spec.ctl_ack_echo_offset;
+        grp.ack_slots.current_temp_offset = spec.ctl_ack_ambtemp_offset;
+      }
 
-    // 제어 응답 슬롯(ack_slots) 명세 주입
-    grp->ack_slots.discovered = true;
-    grp->ack_slots.power_offset = spec.ctl_ack_state_offset;
-    if (spec.dev_class == DeviceClass::THERMOSTAT) {
-      grp->ack_slots.target_temp_offset = spec.ctl_ack_echo_offset;
-      grp->ack_slots.current_temp_offset = spec.ctl_ack_ambtemp_offset;
-    }
-
-    // 쿼리 응답 슬롯(query_slots) 명세 주입
-    grp->query_slots.discovered = true;
-    grp->query_slots.expected_len = spec.qry_ack_len;
-    grp->query_slots.power_offset = spec.qry_power_offset;
-    grp->query_slots.target_temp_offset = spec.qry_settemp_offset;
-    grp->query_slots.current_temp_offset = spec.qry_ambtemp_offset;
-    grp->query_slots.fan_speed_offset = spec.qry_fanspeed_offset;
-    grp->query_slots.valve_state_offset = spec.qry_valve_offset;
-    grp->query_slots.power_w_offset = spec.qry_watt_h_offset;
+      // 쿼리 응답 슬롯(query_slots) 명세 주입
+      grp.query_slots.discovered = true;
+      grp.query_slots.expected_len = spec.qry_ack_len;
+      grp.query_slots.power_offset = spec.qry_power_offset;
+      grp.query_slots.target_temp_offset = spec.qry_settemp_offset;
+      grp.query_slots.current_temp_offset = spec.qry_ambtemp_offset;
+      grp.query_slots.fan_speed_offset = spec.qry_fanspeed_offset;
+      grp.query_slots.valve_state_offset = spec.qry_valve_offset;
+      grp.query_slots.power_w_offset = spec.qry_watt_h_offset;
+    }, spec.name);
 
     ESP_LOGI(TAG, "Injected Dev 0x%02X (%s): CTL len=%u, QRY len=%u, StateOff=#%u",
              spec.dev_id, spec.name, spec.ctl_len, spec.qry_ack_len, spec.qry_power_offset);

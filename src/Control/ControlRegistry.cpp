@@ -83,37 +83,38 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
   bool is_ctl = parser->isControlPacket(frame);
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
   bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
-  const GroupControlTemplate *grp = (has_key && dev_id != 0) ? g_control_registry.findGroup(dev_id) : nullptr;
+  GroupControlTemplate grp{};
+  bool has_grp = (has_key && dev_id != 0) ? g_control_registry.findGroup(dev_id, grp) : false;
 
-  if (!is_ctl && grp && grp->frame_len > 4 && frame.size() >= grp->frame_len) {
+  if (!is_ctl && has_grp && grp.frame_len > 4 && frame.size() >= grp.frame_len) {
     VendorProfileDescriptor desc;
     ProfileRepository::getActiveProfile(desc);
     uint8_t op_off = (desc.opcode_offset < frame.size()) ? desc.opcode_offset : 4;
-    if (frame[op_off] == grp->raw_template[op_off]) {
+    if (frame[op_off] == grp.raw_template[op_off]) {
       is_ctl = true;
     }
   }
 
   if (is_ctl) {
-    if (grp) {
-      if (grp->coverage.dev_class == DeviceClass::GAS) {
-        if (grp->close_slot.discovered && grp->close_slot.action_offset < req.length) {
-          uint8_t val = req.data[grp->close_slot.action_offset];
-          if (val != grp->close_slot.off_val) {
+    if (has_grp) {
+      if (grp.coverage.dev_class == DeviceClass::GAS) {
+        if (grp.close_slot.discovered && grp.close_slot.action_offset < req.length) {
+          uint8_t val = req.data[grp.close_slot.action_offset];
+          if (val != grp.close_slot.off_val) {
             g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
             return false;
           }
         }
       }
-      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->temp_slot.discovered &&
-          grp->temp_slot.action_offset < req.length) {
+      if (grp.coverage.dev_class == DeviceClass::THERMOSTAT && grp.temp_slot.discovered &&
+          grp.temp_slot.action_offset < req.length) {
         bool is_temp = false;
-        if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < req.length) {
-          is_temp = (req.data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
+        if (grp.temp_slot.category_offset != 0xFF && grp.temp_slot.category_offset < req.length) {
+          is_temp = (req.data[grp.temp_slot.category_offset] == grp.temp_slot.category_val);
         }
 
         if (is_temp) {
-          uint8_t t_val = req.data[grp->temp_slot.action_offset];
+          uint8_t t_val = req.data[grp.temp_slot.action_offset];
           if (t_val < 5 || t_val > 35) {
             g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
             return false;
@@ -129,7 +130,8 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
     }
 
     if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0 && ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {
-      if (dev_id == 0x34 || ep.slot_idx == 0) {
+      bool is_unidirectional = (has_grp && grp.isUnidirectional()) || (dev_id == 0x34);
+      if (is_unidirectional || ep.slot_idx == 0) {
         Ew11Manager::sendBurstPacket(static_cast<uint8_t>(ep.slot_idx), req, 2, 20);
       } else {
         bool sent = Hub_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);

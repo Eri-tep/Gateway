@@ -398,12 +398,18 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   pairs.reserve(std::min<size_t>(g_polling_targets.totalCount(), 32));
 
   size_t target_count = g_polling_targets.totalCount();
+  constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
   for (size_t i = 0; i < target_count; ++i) {
     PollingTargetEntry target;
     if (!g_polling_targets.getEntry(i, target))
       continue;
     if (!target.is_active || target.raw_query_len < 4)
       continue;
+
+    // 월패드 프로토콜 분석은 오직 CH2(메인 월패드), CH3(서브 월패드)에서 유래한 쿼리만 대상으로 함
+    if ((target.source_channels & CH23_MASK) == 0) {
+      continue;
+    }
 
     if (target.raw_ack_len >= 4) {
       PktPair pair;

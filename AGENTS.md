@@ -41,8 +41,8 @@ Integrated project: **M5Stack AtomS3 Lite RS-485/TCP Gateway Firmware (C++17)** 
 9. **NO UNMODIFIED PACKAGE**: Never package the Edge Driver (`edge:drivers:package`) if no files under `Gateway-edge-driver/` were modified. Packaging without edge driver modifications is STRICTLY FORBIDDEN.
 10. **NO REPETITIVE TOOL LOOPS**: Once the root cause or target code is identified, stop inspection immediately. Do NOT run recursive or speculative inspection loops on tangential files.
 11. **NO INTERACTIVE CLI HANGS**: Never invoke CLI tools without non-interactive flags (e.g., `-H <hub_id>`, `-C <channel_id>`, `--yes`, non-interactive flags). Never allow commands to wait on interactive prompt (`? Select...`).
-12. **NO EXPLORATION IN EXECUTION PHASE**: Once `implementation_plan.md` is approved, all read tools (`view_file`, `grep_search`, `list_dir`) are STRICTLY FORBIDDEN. Proceed directly to edits (`replace_file_content`) and verification build. Trust the compiler/package checks.
-13. **MAX 2 INSPECTIONS BEFORE PLAN**: When investigating an issue or bug, read/grep inspections must NOT exceed 2 calls before formulating and presenting `implementation_plan.md`. Never engage in chain-inspection loops without user check-in.
+12. **NO UNNECESSARY EXPLORATION IN EXECUTION PHASE**: Once `implementation_plan.md` is approved, architectural exploration or unrelated file reading is strictly forbidden. Targeted `view_file` slices are permitted ONLY when strictly necessary to verify exact line numbers/indentation for `replace_file_content` or to inspect compiler/package error locations. Proceed directly to edits and verification.
+13. **MAX 4 PINPOINT INSPECTIONS BEFORE PLAN**: Prohibit unnecessary or broad file walks. Pinpoint inspections must focus strictly on directly relevant symbols/files (headers, implementation, callers) to identify root causes and targets, and must NOT exceed 4 calls before formulating and presenting `implementation_plan.md`. Never engage in wandering inspection loops without user check-in.
 
 ---
 

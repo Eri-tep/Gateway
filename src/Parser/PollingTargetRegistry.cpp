@@ -119,7 +119,14 @@ void PollingTargetRegistry::updateResponse(const uint8_t *query_pkt, size_t quer
 void PollingTargetRegistry::reindexWithOffsets(uint8_t dev_id_offset, uint8_t sub1_offset,
                                                uint8_t sub2_offset) {
   CriticalSectionLocker lock(&_mux);
+  constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
+
   for (size_t i = 0; i < _count; ++i) {
+    // 월패드(CH2, CH3) 유래 타겟이 아닌 경우(CH5 EW11/Modbus 등) 오프셋 재계산 제외
+    if ((_entries[i].source_channels & CH23_MASK) == 0) {
+      continue;
+    }
+
     if (_entries[i].raw_query_len > dev_id_offset) {
       _entries[i].dev_id = _entries[i].raw_query_data[dev_id_offset];
     }

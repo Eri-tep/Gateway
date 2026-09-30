@@ -297,8 +297,8 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   if (argc == 0 || (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "list") == 0) ||
       (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "status") == 0)) {
-    char buf[2048];
-    AppendBuf out{buf, sizeof(buf)};
+    static char s_ew11_status_buf[2048];
+    AppendBuf out{s_ew11_status_buf, sizeof(s_ew11_status_buf)};
     out.append("\r\n");
     out.append(Fmt::DIV80EQ);
     out.append("                      CH5 EW11 TCP CLIENT SOCKET STATUS                         \r\n");

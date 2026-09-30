@@ -48,7 +48,11 @@ void printSystemOverview(AppendBuf &out) {
   auto *active = WallpadParserFactory::getActiveParser();
   auto desc = g_auto_probing_engine.getDescriptor();
   char wp_status_buf[80];
-  const char *catalog_vendor = active ? active->getVendorName() : "Unknown";
+  char vendor_name_buf[UniversalProtocolEngine::kVendorNameMaxLen] = "Unknown";
+  if (active) {
+    active->getVendorName(vendor_name_buf, sizeof(vendor_name_buf));
+  }
+  const char *catalog_vendor = vendor_name_buf;
 
   if (g_config.wallpad_profile == 0) {
     if (desc.is_locked) {

@@ -17,6 +17,9 @@ struct StaticPacket {
   std::array<uint8_t, 64> data;
 };
 
+struct GroupControlTemplate;
+struct DecodedDeviceState;
+
 struct TimestampedPacket {
   uint32_t due_ms;
   StaticPacket pkt;
@@ -227,6 +230,10 @@ public:
   bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                      uint8_t temp) noexcept;
   void updateFromBus(StaticPacket &ack);
+  static void decodeDeviceState(const GroupControlTemplate &grp,
+                                const StaticPacket &ack,
+                                const DeviceStateEntry *dev,
+                                DecodedDeviceState &out);
   void handlePollingTimeout(const DeviceStateEntry *dev);
   void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);
   [[nodiscard]] bool copyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,

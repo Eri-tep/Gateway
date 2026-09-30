@@ -230,140 +230,26 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
     DeviceStateEntry snap{};
     if (!g_device_repo.getSnapshot(i, snap) || snap.dev_id == 0) continue;
 
-    DeviceClass dc = DeviceClass::SWITCH;
-    const char *cls_str = "switch";
-    const char *grp_name = "Switch";
-    bool is_outlet = false;
+    GroupControlTemplate grp{};
+    if (!g_control_registry.findGroup(snap.dev_id, grp)) continue;
 
-    const GroupControlTemplate *grp = g_control_registry.findGroup(snap.dev_id);
-    if (!grp) continue;
+    StaticPacket ack{};
+    ack.length = snap.last_ack_len;
+    memcpy(ack.data.data(), snap.last_ack_data.data(), std::min<size_t>(snap.last_ack_len, 32));
 
-    dc = grp->coverage.dev_class;
-    grp_name = grp->group_name;
-    switch (dc) {
-      case DeviceClass::THERMOSTAT: cls_str = "thermostat"; break;
-      case DeviceClass::VENT:       cls_str = "vent"; break;
-      case DeviceClass::GAS:        cls_str = "gas"; break;
-      case DeviceClass::MOMENTARY:  cls_str = "momentary"; break;
-      case DeviceClass::AIRCON:     cls_str = "aircon"; break;
-      case DeviceClass::OUTLET:     cls_str = "outlet"; break;
-      case DeviceClass::SWITCH:
-      default:                      cls_str = "switch"; break;
-    }
+    DecodedDeviceState st{};
+    DeviceRepository::decodeDeviceState(grp, ack, &snap, st);
 
-    is_outlet = (dc == DeviceClass::OUTLET) ||
-                (dc == DeviceClass::SWITCH && grp->frame_len >= 17);
-    if (is_outlet) {
-      cls_str = "outlet";
-    }
+    DeviceClass dc = st.dev_class;
+    const char *cls_str = DeviceClassToTelemetryString(dc);
+    const char *grp_name = grp.group_name;
+    bool is_outlet = (dc == DeviceClass::OUTLET);
 
     char name_buf[32];
     if (dc == DeviceClass::GAS || dc == DeviceClass::VENT || dc == DeviceClass::MOMENTARY) {
       snprintf(name_buf, sizeof(name_buf), "%s", grp_name);
     } else {
       snprintf(name_buf, sizeof(name_buf), "%s %u-%u", grp_name, snap.sub1, snap.sub2);
-    }
-
-    int power = 0;
-    int target_temp = 0;
-    int current_temp = 0;
-    int fan_speed = 0;
-    int vent_mode = 1;
-    float power_w = 0.0f;
-    int floor = 1;
-    int direction = 0;
-    const char *valve_state = "closed";
-
-    if (grp) {
-      uint8_t p_off = grp->getPowerOffset(snap.last_ack_len);
-      if (p_off != 0xFF && p_off < snap.last_ack_len) {
-        uint8_t b = snap.last_ack_data[p_off];
-        if (grp->coverage.dev_class == DeviceClass::VENT) {
-          power = (b == 0x01) ? 1 : 0;
-        } else if (b == grp->power_slot.on_val) {
-          power = 1;
-        } else if (b == grp->power_slot.off_val || b == 0) {
-          power = 0;
-        } else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) {
-          power = 2;
-        } else {
-          power = 0;
-        }
-      }
-    }
-
-    if (grp && grp->coverage.dev_class == DeviceClass::THERMOSTAT) {
-      target_temp = snap.last_target_temp;
-      current_temp = snap.last_current_temp > 0 ? snap.last_current_temp : target_temp;
-
-      uint8_t t_off = grp->getTargetTempOffset(snap.last_ack_len);
-      uint8_t c_off = grp->getCurrentTempOffset(snap.last_ack_len);
-
-      if (t_off == 0xFF && c_off == 0xFF) {
-        bool is_temp_ack = true;
-        if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < snap.last_ack_len) {
-          is_temp_ack = (snap.last_ack_data[grp->temp_slot.category_offset] == grp->temp_slot.category_val);
-        }
-        if (is_temp_ack) {
-          t_off = grp->ack_slots.target_temp_offset;
-        }
-        c_off = grp->ack_slots.current_temp_offset;
-      }
-
-      if (t_off != 0xFF && t_off < snap.last_ack_len) {
-        uint8_t b = snap.last_ack_data[t_off];
-        if (b >= 5 && b <= 35) target_temp = b;
-      }
-      if (c_off != 0xFF && c_off < snap.last_ack_len) {
-        uint8_t b = snap.last_ack_data[c_off];
-        if (b >= 5 && b <= 50) current_temp = b;
-      }
-    }
-
-    if (grp && grp->coverage.dev_class == DeviceClass::VENT) {
-      fan_speed = 1;
-      uint8_t spd_off = grp->getFanSpeedOffset(snap.last_ack_len);
-      if (spd_off != 0xFF && spd_off < snap.last_ack_len) {
-        uint8_t raw_b = snap.last_ack_data[spd_off];
-        fan_speed = grp->decodeFanSpeed(raw_b);
-      }
-      bool is_mode_pkt = (snap.last_ack_len >= 6 && snap.last_ack_data[5] == 0x43);
-      if (power == 1 && is_mode_pkt) {
-        uint8_t p_off = grp->getPowerOffset(snap.last_ack_len);
-        if (p_off != 0xFF && p_off < snap.last_ack_len) {
-          uint8_t raw_mode = snap.last_ack_data[p_off];
-          if (raw_mode >= 1 && raw_mode <= 4) {
-            vent_mode = raw_mode;
-          }
-        }
-      }
-    }
-
-    if (grp && grp->coverage.dev_class == DeviceClass::GAS) {
-      uint8_t v_off = grp->getValveStateOffset(snap.last_ack_len);
-      if (v_off != 0xFF && v_off < snap.last_ack_len) {
-        valve_state = (snap.last_ack_data[v_off] == grp->close_slot.off_val) ? "closed" : "open";
-      } else {
-        valve_state = "closed";
-      }
-    }
-
-    if (is_outlet && grp) {
-      uint8_t w_off = grp->getWattageOffset(snap.last_ack_len);
-      if (w_off != 0xFF && w_off + 1 < snap.last_ack_len) {
-        uint16_t raw_w = (static_cast<uint16_t>(snap.last_ack_data[w_off]) << 8) | snap.last_ack_data[w_off + 1];
-        if (raw_w < 50000) {
-          power_w = static_cast<float>(raw_w);
-        }
-      }
-    }
-
-    if (dc == DeviceClass::MOMENTARY && snap.last_ack_len >= 6) {
-      floor = snap.last_ack_data[5];
-      if (floor < 1 || floor > 60) floor = 1;
-      if (snap.last_ack_len >= 7) {
-        direction = snap.last_ack_data[6]; // 1: 상승, 2: 하강, 0: 정지
-      }
     }
 
     RouteEndpoint ep{1, -1, 0};
@@ -374,18 +260,18 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
 
     if (locked_count > 0) out.append(",");
     out.appendFormat("{\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\",\"name\":\"%s\",\"channel\":%u,\"power\":%d",
-                     snap.dev_id, snap.sub1, snap.sub2, cls_str, name_buf, ch, power);
+                     snap.dev_id, snap.sub1, snap.sub2, cls_str, name_buf, ch, st.power);
 
     if (dc == DeviceClass::THERMOSTAT) {
-      out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d", target_temp, current_temp);
+      out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d", st.target_temp, st.current_temp);
     } else if (dc == DeviceClass::VENT) {
-      out.appendFormat(",\"fan_speed\":%d,\"vent_mode\":%d", fan_speed, vent_mode);
+      out.appendFormat(",\"fan_speed\":%d,\"vent_mode\":%d", st.fan_speed, st.vent_mode);
     } else if (dc == DeviceClass::GAS) {
-      out.appendFormat(",\"valve\":\"%s\"", valve_state);
+      out.appendFormat(",\"valve\":\"%s\"", st.valve_state);
     } else if (is_outlet) {
-      out.appendFormat(",\"power_w\":%.1f", power_w);
+      out.appendFormat(",\"power_w\":%.1f", st.power_w);
     } else if (dc == DeviceClass::MOMENTARY) {
-      out.appendFormat(",\"floor\":%d,\"direction\":%d", floor, direction);
+      out.appendFormat(",\"floor\":%d,\"direction\":%d", st.floor, st.direction);
     }
     out.append("}");
     locked_count++;

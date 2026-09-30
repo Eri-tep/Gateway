@@ -698,14 +698,36 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       return;
     }
 
+    struct ActionEntry {
+      const char *name;
+      ControlActionType type;
+    };
+    static constexpr ActionEntry kActionTable[] = {
+      {"power", ControlActionType::POWER},
+      {"pwr", ControlActionType::POWER},
+      {"set_temp", ControlActionType::SET_TEMP},
+      {"temp", ControlActionType::SET_TEMP},
+      {"fan_speed", ControlActionType::FAN_SPEED},
+      {"spd", ControlActionType::FAN_SPEED},
+      {"valve_close", ControlActionType::VALVE_CLOSE},
+      {"cls", ControlActionType::VALVE_CLOSE},
+      {"momentary", ControlActionType::MOMENTARY_TRIGGER},
+      {"mom", ControlActionType::MOMENTARY_TRIGGER},
+      {"vent_mode", ControlActionType::VENT_MODE},
+      {"vnt", ControlActionType::VENT_MODE},
+      {"mode", ControlActionType::VENT_MODE},
+      {"ac_mode", ControlActionType::VENT_MODE},
+    };
+
     ControlActionType act = ControlActionType::UNKNOWN;
-    if (strcasecmp(act_str, "power") == 0 || strcasecmp(act_str, "pwr") == 0) act = ControlActionType::POWER;
-    else if (strcasecmp(act_str, "set_temp") == 0 || strcasecmp(act_str, "temp") == 0) act = ControlActionType::SET_TEMP;
-    else if (strcasecmp(act_str, "fan_speed") == 0 || strcasecmp(act_str, "spd") == 0) act = ControlActionType::FAN_SPEED;
-    else if (strcasecmp(act_str, "valve_close") == 0 || strcasecmp(act_str, "cls") == 0) act = ControlActionType::VALVE_CLOSE;
-    else if (strcasecmp(act_str, "momentary") == 0 || strcasecmp(act_str, "mom") == 0) act = ControlActionType::MOMENTARY_TRIGGER;
-    else if (strcasecmp(act_str, "vent_mode") == 0 || strcasecmp(act_str, "vnt") == 0 ||
-             strcasecmp(act_str, "mode") == 0 || strcasecmp(act_str, "ac_mode") == 0) act = ControlActionType::VENT_MODE;
+    if (act_str[0] != '\0') {
+      for (const auto &entry : kActionTable) {
+        if (strcasecmp(act_str, entry.name) == 0) {
+          act = entry.type;
+          break;
+        }
+      }
+    }
 
     if (act == ControlActionType::UNKNOWN) {
       const char *err_msg = "{\"res\":\"error\",\"msg\":\"Invalid action (power/set_temp/fan_speed/valve_close/momentary/vent_mode/mode)\"}\n";
@@ -713,8 +735,8 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       return;
     }
 
-    const GroupControlTemplate *grp = g_control_registry.findGroup(static_cast<uint8_t>(dev_id));
-    if (!grp) {
+    GroupControlTemplate grp{};
+    if (!g_control_registry.findGroup(static_cast<uint8_t>(dev_id), grp)) {
       const char *err_msg = "{\"res\":\"error\",\"msg\":\"Device is not registered in ctl_spec registry\"}\n";
       send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
       return;

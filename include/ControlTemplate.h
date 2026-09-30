@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -45,19 +47,58 @@ struct ActionSlot {
 // ============================================================================
 
 enum class DeviceClass : uint8_t {
-  UNKNOWN = 0,
-  SWITCH,     // 지속 릴레이 (ON/OFF) - 조명, 일괄소등
-  OUTLET,     // 스마트 콘센트 (대기전력/소비전력 모니터링 포함)
-  GAS,        // 차단 밸브 (단방향 닫기 / 차단) - 가스 밸브
-  MOMENTARY,  // 단방향 순간 펄스 트리거 (호출) - 엘리베이터 호출, 현관문 열림
-  THERMOSTAT, // 연속 희망온도 파라미터 - 난방
-  VENT,       // 이산 다단계 풍량 파라미터 - 환기
-  AIRCON      // 온도 + 풍량 복합 파라미터 - 에어컨
+  UNKNOWN     = 0,
+  SWITCH      = 1, // 지속 릴레이 (ON/OFF) - 조명, 일괄소등
+  OUTLET      = 2, // 스마트 콘센트 (대기전력/소비전력 모니터링 포함)
+  GAS         = 3, // 차단 밸브 (단방향 닫기 / 차단) - 가스 밸브
+  MOMENTARY   = 4, // 단방향 순간 펄스 트리거 (호출) - 엘리베이터 호출, 현관문 열림
+  THERMOSTAT  = 5, // 연속 희망온도 파라미터 - 난방
+  VENT        = 6, // 이산 다단계 풍량 파라미터 - 환기
+  AIRCON      = 7  // 온도 + 풍량 복합 파라미터 - 에어컨
 };
 
 struct SlotCoverage {
   DeviceClass dev_class{DeviceClass::UNKNOWN};
 };
+
+struct DecodedDeviceState {
+  int power{0};
+  int target_temp{0};
+  int current_temp{0};
+  int fan_speed{0};
+  int vent_mode{1};
+  float power_w{0.0f};
+  int floor{1};
+  int direction{0};
+  int ho{0};
+  char valve_state[8]{"closed"}; // 고정 8바이트 버퍼로 수명 안전 보장
+  DeviceClass dev_class{DeviceClass::UNKNOWN};
+  bool should_broadcast{false};
+};
+
+inline const char *DeviceClassToName(DeviceClass cls) {
+  static constexpr const char *kNames[] = {
+    "Unknown", "Light", "Outlet", "Gas", "Elevator", "Thermo", "Vent", "Aircon"
+  };
+  const size_t idx = static_cast<size_t>(cls);
+  return (idx < sizeof(kNames) / sizeof(kNames[0])) ? kNames[idx] : "Unknown";
+}
+
+inline const char *DeviceClassToCliString(DeviceClass cls) {
+  static constexpr const char *kCliNames[] = {
+    "UNKNOWN", "SWITCH", "OUTLET", "GAS", "MOMENT", "THERMO", "VENT", "AIRCON"
+  };
+  const size_t idx = static_cast<size_t>(cls);
+  return (idx < sizeof(kCliNames) / sizeof(kCliNames[0])) ? kCliNames[idx] : "UNKNOWN";
+}
+
+inline const char *DeviceClassToTelemetryString(DeviceClass cls) {
+  static constexpr const char *kTeleNames[] = {
+    "unknown", "switch", "outlet", "gas", "momentary", "thermostat", "vent", "aircon"
+  };
+  const size_t idx = static_cast<size_t>(cls);
+  return (idx < sizeof(kTeleNames) / sizeof(kTeleNames[0])) ? kTeleNames[idx] : "unknown";
+}
 
 // ============================================================================
 // GROUP CONTROL TEMPLATE (CONTROL BLUEPRINT)
@@ -221,7 +262,16 @@ struct GroupControlTemplate {
     if (query_slots.discovered && query_slots.power_w_offset != 0xFF) return query_slots.power_w_offset;
     return 0xFF;
   }
+
+  inline bool isUnidirectional() const {
+    return dev_id == 0x34; // 기존 코드의 dev_id == 0x34 단방향 버스트 전송 의미와 100% 일치
+  }
 };
+
+static_assert(
+    sizeof(GroupControlTemplate) == 180,
+    "NVS ABI break: GroupControlTemplate size changed"
+);
 
 // ============================================================================
 // CONTROL TEMPLATE REGISTRY
@@ -230,6 +280,8 @@ struct GroupControlTemplate {
 class ControlTemplateRegistry {
 public:
   static constexpr size_t MAX_GROUPS = 8;
+  static constexpr TickType_t kQueryLockTimeout = pdMS_TO_TICKS(5);
+  static constexpr TickType_t kManageLockTimeout = pdMS_TO_TICKS(50);
 
   ControlTemplateRegistry();
 
@@ -240,14 +292,24 @@ public:
   void synthesizeFromConvergedCache();
 
   // 그룹 등록 및 조회
-  GroupControlTemplate *findGroup(uint8_t dev_id);
-  const GroupControlTemplate *findGroup(uint8_t dev_id) const;
-  GroupControlTemplate *registerOrTouch(uint8_t dev_id, const char *name = nullptr);
+  bool findGroup(uint8_t dev_id, GroupControlTemplate &out, TickType_t timeout = kQueryLockTimeout) const;
+  size_t getGroupsSnapshot(GroupControlTemplate *out_buf, size_t max_count, TickType_t timeout = kQueryLockTimeout) const;
   size_t getGroupCount() const;
   bool getGroupByIndex(size_t index, GroupControlTemplate &out) const;
   bool resetGroup(uint8_t dev_id, bool full_reset = false);
   bool setGroupName(uint8_t dev_id, const char *name);
   bool setGroupClass(uint8_t dev_id, DeviceClass cls, const char *name = nullptr);
+
+  template <typename Func>
+  bool modifyOrCreateGroup(uint8_t dev_id, Func&& mutator, const char *initial_name = nullptr, TickType_t timeout = kManageLockTimeout) {
+    if (dev_id == 0) return false;
+    MutexLocker lock(_mutex, timeout);
+    if (!lock.isLocked()) return false;
+    GroupControlTemplate *grp = registerOrTouchUnlocked(dev_id, initial_name);
+    if (!grp) return false;
+    mutator(*grp);
+    return true;
+  }
 
   // 제어 패킷 조립 (스마트싱스 및 외부 연동 공용)
   bool buildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
@@ -264,9 +326,13 @@ public:
 private:
   GroupControlTemplate _groups[MAX_GROUPS];
   size_t _group_count{0};
-  mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+  mutable StaticSemaphore_t _mutex_storage{};
+  mutable SemaphoreHandle_t _mutex{nullptr};
+  mutable StaticSemaphore_t _nvs_mutex_storage{};
+  mutable SemaphoreHandle_t _nvs_mutex{nullptr};
 
   void autoAssignGroupName(GroupControlTemplate &group);
+  GroupControlTemplate *registerOrTouchUnlocked(uint8_t dev_id, const char *name = nullptr);
 };
 
 extern ControlTemplateRegistry g_control_registry;

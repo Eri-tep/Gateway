@@ -190,9 +190,11 @@ bool ProfileRepository::saveCurrentAutoAs(const char *name, size_t &saved_idx) {
 
   size_t total_tgts = g_polling_targets.totalCount();
   uint8_t obs_min_len = 255, obs_max_len = 0;
+  constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
   for (size_t i = 0; i < total_tgts; ++i) {
     PollingTargetEntry entry;
     if (g_polling_targets.getEntry(i, entry) && entry.raw_query_len > 0) {
+      if ((entry.source_channels & CH23_MASK) == 0) continue;
       if (entry.raw_query_len < obs_min_len) obs_min_len = entry.raw_query_len;
       if (entry.raw_query_len > obs_max_len) obs_max_len = entry.raw_query_len;
     }

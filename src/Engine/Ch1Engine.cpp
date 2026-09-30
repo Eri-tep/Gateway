@@ -7,10 +7,12 @@ static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1, uint8_t sub2) no
 }
 
 static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
-  if (grp && grp->power_slot.category_val != 0 && grp->power_slot.category_val != 0xFF) {
-    if (sub1 == grp->temp_slot.category_val || sub1 == grp->speed_slot.category_val) {
-      return grp->power_slot.category_val;
+  GroupControlTemplate grp{};
+  if (g_control_registry.findGroup(dev_id, grp)) {
+    if (grp.power_slot.category_val != 0 && grp.power_slot.category_val != 0xFF) {
+      if (sub1 == grp.temp_slot.category_val || sub1 == grp.speed_slot.category_val) {
+        return grp.power_slot.category_val;
+      }
     }
   }
   return sub1;
@@ -154,141 +156,160 @@ void DeviceRepository::clear() {
 
 namespace {
 
-inline void parseThermostatState(const GroupControlTemplate *grp, const StaticPacket &ack,
-                                 DeviceStateEntry *dev, int b_pwr,
-                                 int &b_t_temp, int &b_c_temp) {
-  b_t_temp = dev->last_target_temp;
-  b_c_temp = dev->last_current_temp > 0 ? dev->last_current_temp : b_t_temp;
-
-  uint8_t target_off = grp->getTargetTempOffset(ack.length);
-  uint8_t current_off = grp->getCurrentTempOffset(ack.length);
-
-  if (target_off == 0xFF && current_off == 0xFF) {
-    uint8_t cat_val = 0;
-    if (grp->temp_slot.category_offset != 0xFF && grp->temp_slot.category_offset < ack.length) {
-      cat_val = ack.data[grp->temp_slot.category_offset];
-    } else if (grp->power_slot.category_offset != 0xFF && grp->power_slot.category_offset < ack.length) {
-      cat_val = ack.data[grp->power_slot.category_offset];
-    }
-
-    if (grp->temp_slot.category_val != 0 && cat_val == grp->temp_slot.category_val) {
-      target_off = (grp->temp_slot.ack_target_offset != 0xFF) ? grp->temp_slot.ack_target_offset : grp->ack_slots.target_temp_offset;
-      current_off = (grp->temp_slot.ack_telemetry_offset != 0xFF) ? grp->temp_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
-    } else if (grp->power_slot.category_val != 0 && cat_val == grp->power_slot.category_val) {
-      target_off = (grp->power_slot.ack_target_offset != 0xFF) ? grp->power_slot.ack_target_offset : 0xFF;
-      current_off = (grp->power_slot.ack_telemetry_offset != 0xFF) ? grp->power_slot.ack_telemetry_offset : grp->ack_slots.current_temp_offset;
-    }
-  }
-
-  if (target_off != 0xFF && target_off < ack.length) {
-    uint8_t b = ack.data[target_off];
-    if (b >= 5 && b <= 35) {
-      b_t_temp = b;
-      dev->last_target_temp = b;
-    }
-  }
-
-  if (current_off != 0xFF && current_off < ack.length) {
-    uint8_t b = ack.data[current_off];
-    if (b >= 5 && b <= 50) {
-      b_c_temp = b;
-      dev->last_current_temp = b;
-    }
-  }
-}
-
-inline void parseVentState(const GroupControlTemplate *grp, const StaticPacket &ack, int b_pwr, int &b_spd, int &b_vent_mode) {
-  b_spd = 1;
-  b_vent_mode = 1;
-  uint8_t spd_off = grp->getFanSpeedOffset(ack.length);
-  if (spd_off != 0xFF && spd_off < ack.length) {
-    uint8_t raw_b = ack.data[spd_off];
-    b_spd = grp->decodeFanSpeed(raw_b);
-  }
-  // 전원이 켜져 있고 0x43 전용 모드 패킷이거나 모드 슬롯이 유효한 경우에만 모드 파싱
-  bool is_mode_pkt = (ack.length >= 6 && ack.data[5] == 0x43);
-  if (b_pwr == 1 && is_mode_pkt) {
-    uint8_t p_off = grp->getPowerOffset(ack.length);
-    if (p_off != 0xFF && p_off < ack.length) {
-      uint8_t raw_mode = ack.data[p_off];
-      if (raw_mode >= 1 && raw_mode <= 4) {
-        b_vent_mode = raw_mode;
-      }
-    }
-  }
-}
-
-inline void parseGasState(const GroupControlTemplate *grp, const StaticPacket &ack, const char *&b_v_state) {
-  uint8_t v_off = grp->getValveStateOffset(ack.length);
-  if (v_off != 0xFF && v_off < ack.length) {
-    b_v_state = (ack.data[v_off] == grp->close_slot.off_val) ? "closed" : "open";
-  }
-}
-
-inline void parseOutletState(const GroupControlTemplate *grp, const StaticPacket &ack, float &b_power_w) {
-  uint8_t w_off = grp->getWattageOffset(ack.length);
-  if (w_off != 0xFF && w_off + 1 < ack.length) {
+void decodeOutlet(const GroupControlTemplate &grp, const StaticPacket &ack,
+                  const DeviceStateEntry * /*dev*/, DecodedDeviceState &out) {
+  uint8_t w_off = grp.getWattageOffset(ack.length);
+  if (w_off + 1 < ack.length) {
     uint16_t raw_w = (static_cast<uint16_t>(ack.data[w_off]) << 8) | ack.data[w_off + 1];
-    if (raw_w < 50000) b_power_w = static_cast<float>(raw_w);
+    out.power_w = (raw_w < 50000) ? static_cast<float>(raw_w) : 0.0f;
   }
 }
 
-inline void parseMomentaryState(uint8_t dev_id, const StaticPacket &ack, DeviceStateEntry *dev,
-                                int &b_pwr, int &b_floor, int &b_direction, int &b_ho) {
-  if (dev_id == 0x34) {
-    if (ack.length == 11 && ack.data[4] == 0x04) {
-      // 11바이트 상태 ACK (Byte #8: 0x06 = 호출 중, 0x00 = 대기/종료)
-      b_pwr = (ack.data[8] == 0x06) ? 1 : 0;
-      b_direction = 0;
-      b_floor = 15;
-      b_ho = 0;
-    } else {
-      // 그 외 13바이트 브로드캐스트 등은 상태 변경 없이 기존 상태 유지
-      b_pwr = dev->last_ack_data[0] & 0x01;
-      b_direction = 0;
-      b_floor = 15;
-      b_ho = 0;
-    }
+void decodeSwitch(const GroupControlTemplate &grp, const StaticPacket &ack,
+                  const DeviceStateEntry *dev, DecodedDeviceState &out) {
+  if (grp.frame_len >= 17) {
+    out.dev_class = DeviceClass::OUTLET;
+    decodeOutlet(grp, ack, dev, out);
+  }
+}
+
+void decodeGas(const GroupControlTemplate &grp, const StaticPacket &ack,
+               const DeviceStateEntry * /*dev*/, DecodedDeviceState &out) {
+  uint8_t v_off = grp.getValveStateOffset(ack.length);
+  bool is_closed = (v_off >= ack.length || ack.data[v_off] == grp.close_slot.off_val);
+  snprintf(out.valve_state, sizeof(out.valve_state), "%s", is_closed ? "closed" : "open");
+}
+
+void decodeMomentary(const GroupControlTemplate &grp, const StaticPacket &ack,
+                     const DeviceStateEntry *dev, DecodedDeviceState &out) {
+  out.floor = 15;
+  out.direction = 0;
+  out.ho = 0;
+
+  if (grp.dev_id == 0x34) {
+    out.power = (ack.length == 11 && ack.data[4] == 0x04)
+                ? ((ack.data[8] == 0x06) ? 1 : 0)
+                : ((dev && dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01) : 0);
   } else if (ack.length >= 6) {
-    b_floor = ack.data[5];
-    if (b_floor < 1 || b_floor > 60) b_floor = 1;
-    if (ack.length >= 7) b_direction = ack.data[6];
+    out.floor = constrain(static_cast<int>(ack.data[5]), 1, 60);
+    out.direction = (ack.length >= 7) ? ack.data[6] : 0;
   }
 }
 
-inline void parseAirconState(const StaticPacket &ack, DeviceStateEntry *dev,
-                             int &b_pwr, int &b_vent_mode, int &b_spd, int &b_c_temp, int &b_t_temp) {
-  size_t state_idx = (ack.length == 14) ? 7 : 8;
-  if (state_idx + 4 >= ack.length) return;
+void decodeThermostat(const GroupControlTemplate &grp, const StaticPacket &ack,
+                      const DeviceStateEntry *dev, DecodedDeviceState &out) {
+  out.target_temp = dev ? dev->last_target_temp : 0;
+  out.current_temp = (dev && dev->last_current_temp > 0) ? dev->last_current_temp : out.target_temp;
 
-  uint8_t raw_state = ack.data[state_idx];
-  uint8_t raw_mode  = ack.data[state_idx + 1];
-  uint8_t raw_spd   = ack.data[state_idx + 2];
-  uint8_t raw_amb   = ack.data[state_idx + 3];
-  uint8_t raw_tgt   = ack.data[state_idx + 4];
+  uint8_t p_off = grp.getPowerOffset(ack.length);
+  if (p_off < ack.length && grp.away_mode_token != 0 && ack.data[p_off] == grp.away_mode_token) {
+    out.power = 2;
+  }
 
-  b_pwr = ((raw_state & 0x7F) == 0x01) ? 1 : 0;
+  uint8_t t_off = grp.getTargetTempOffset(ack.length);
+  if (t_off < ack.length && ack.data[t_off] >= 5 && ack.data[t_off] <= 35) {
+    out.target_temp = ack.data[t_off];
+    if (dev) const_cast<DeviceStateEntry *>(dev)->last_target_temp = ack.data[t_off];
+  }
 
-  if (raw_mode >= 1 && raw_mode <= 5) {
-    b_vent_mode = raw_mode;
-  }
-  if (raw_spd >= 1 && raw_spd <= 4) {
-    b_spd = raw_spd;
-  } else if (raw_spd == 0) {
-    b_spd = 4;
-  }
-  if (raw_amb >= 5 && raw_amb <= 50) {
-    b_c_temp = raw_amb;
-    dev->last_current_temp = raw_amb;
-  }
-  uint8_t t_int = raw_tgt & 0x7F;
-  if (t_int >= 5 && t_int <= 35) {
-    b_t_temp = t_int;
-    dev->last_target_temp = t_int;
+  uint8_t c_off = grp.getCurrentTempOffset(ack.length);
+  if (c_off < ack.length && ack.data[c_off] >= 5 && ack.data[c_off] <= 50) {
+    out.current_temp = ack.data[c_off];
+    if (dev) const_cast<DeviceStateEntry *>(dev)->last_current_temp = ack.data[c_off];
   }
 }
+
+void decodeVent(const GroupControlTemplate &grp, const StaticPacket &ack,
+                const DeviceStateEntry * /*dev*/, DecodedDeviceState &out) {
+  uint8_t p_off = grp.getPowerOffset(ack.length);
+  out.power = (p_off < ack.length && ack.data[p_off] == 0x01) ? 1 : 0;
+  out.fan_speed = 1;
+  out.vent_mode = 1;
+
+  uint8_t spd_off = grp.getFanSpeedOffset(ack.length);
+  if (spd_off < ack.length) {
+    out.fan_speed = grp.decodeFanSpeed(ack.data[spd_off]);
+  }
+
+  bool is_mode_pkt = (ack.length >= 6 && ack.data[5] == 0x43);
+  if (out.power == 1 && is_mode_pkt && p_off < ack.length) {
+    uint8_t m = ack.data[p_off];
+    if (m >= 1 && m <= 4) out.vent_mode = m;
+  }
+}
+
+void decodeAircon(const GroupControlTemplate & /*grp*/, const StaticPacket &ack,
+                  const DeviceStateEntry *dev, DecodedDeviceState &out) {
+  size_t base = (ack.length == 14) ? 7 : 8;
+  if (base + 4 >= ack.length) return;
+
+  out.power = ((ack.data[base] & 0x7F) == 0x01) ? 1 : 0;
+  out.vent_mode = constrain(static_cast<int>(ack.data[base + 1]), 1, 5);
+  out.fan_speed = (ack.data[base + 2] >= 1 && ack.data[base + 2] <= 4) ? ack.data[base + 2] : 4;
+
+  uint8_t amb = ack.data[base + 3];
+  if (amb >= 5 && amb <= 50) {
+    out.current_temp = amb;
+    if (dev) const_cast<DeviceStateEntry *>(dev)->last_current_temp = amb;
+  }
+  uint8_t tgt = ack.data[base + 4] & 0x7F;
+  if (tgt >= 5 && tgt <= 35) {
+    out.target_temp = tgt;
+    if (dev) const_cast<DeviceStateEntry *>(dev)->last_target_temp = tgt;
+  }
+}
+
+void decodeUnknown(const GroupControlTemplate & /*grp*/, const StaticPacket & /*ack*/,
+                   const DeviceStateEntry * /*dev*/, DecodedDeviceState & /*out*/) {
+}
+
+using ClassDecoderFn = void (*)(const GroupControlTemplate &grp, const StaticPacket &ack,
+                                const DeviceStateEntry *dev, DecodedDeviceState &out);
+
+static constexpr ClassDecoderFn kClassDecoders[] = {
+  decodeUnknown,    // UNKNOWN = 0
+  decodeSwitch,     // SWITCH = 1
+  decodeOutlet,     // OUTLET = 2
+  decodeGas,        // GAS = 3
+  decodeMomentary,  // MOMENTARY = 4
+  decodeThermostat, // THERMOSTAT = 5
+  decodeVent,       // VENT = 6
+  decodeAircon      // AIRCON = 7
+};
 
 } // anonymous namespace
+
+void DeviceRepository::decodeDeviceState(const GroupControlTemplate &grp,
+                                         const StaticPacket &ack,
+                                         const DeviceStateEntry *dev,
+                                         DecodedDeviceState &out) {
+  out.dev_class = grp.coverage.dev_class;
+  out.should_broadcast = false;
+  out.power = 0;
+  out.target_temp = 0;
+  out.current_temp = 0;
+  out.fan_speed = 0;
+  out.vent_mode = 1;
+  out.power_w = 0.0f;
+  out.floor = 1;
+  out.direction = 0;
+  out.ho = 0;
+  snprintf(out.valve_state, sizeof(out.valve_state), "closed");
+
+  // 1. 공통 기본 전원 슬롯 디코딩
+  uint8_t p_off = grp.getPowerOffset(ack.length);
+  if (p_off != 0xFF && p_off < ack.length) {
+    out.power = (ack.data[p_off] == grp.power_slot.on_val) ? 1 : 0;
+  }
+
+  // 2. 클래스별 디스패치 (특수 전원 및 파라미터 개별 디코딩)
+  const size_t idx = static_cast<size_t>(grp.coverage.dev_class);
+  if (idx < sizeof(kClassDecoders) / sizeof(kClassDecoders[0])) {
+    kClassDecoders[idx](grp, ack, dev, out);
+  } else {
+    decodeUnknown(grp, ack, dev, out);
+  }
+}
 
 void DeviceRepository::updateFromBus(StaticPacket &ack) {
   // 2차 캐시는 CH#1 (물리 서브기기 응답) 및 CH#5 (EW11 스니핑 응답)만 등록 허용 (CH2, CH3, CH4, CH6 금지)
@@ -348,11 +369,7 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
     return;
   }
 
-  bool should_broadcast = false;
-  DeviceClass b_dev_class = DeviceClass::SWITCH;
-  int b_pwr = 0, b_t_temp = 0, b_c_temp = 0, b_spd = 0, b_vent_mode = 1, b_floor = 1, b_direction = 0, b_ho = 0;
-  float b_power_w = 0.0f;
-  const char *b_v_state = "closed";
+  DecodedDeviceState st{};
 
   {
     MutexLocker lock(_cache_mutex);
@@ -388,76 +405,35 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
     dev->is_online = true;
 
     if (ack_changed) {
-      if (dev_id == 0x34) {
-        parseMomentaryState(dev_id, ack, dev, b_pwr, b_floor, b_direction, b_ho);
-        // 엘리베이터 실질적 상태 변화가 있을 때만 브로드캐스트 (전원 변경, 방향/도착 변경, 호기 변경)
-        bool ev_state_changed = (b_pwr != prev_pwr) || (b_direction != prev_dir) || (b_ho != prev_ho);
-        if (ev_state_changed) {
-          should_broadcast = true;
-          b_dev_class = DeviceClass::MOMENTARY;
-          dev->last_current_temp = static_cast<uint8_t>(b_floor);
-          dev->last_target_temp = static_cast<uint8_t>(b_direction);
-          dev->last_ack_data[0] = static_cast<uint8_t>(b_pwr);
-          dev->last_ack_data[1] = static_cast<uint8_t>(b_ho);
-        }
-      } else {
-        const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
-        if (grp) {
-          should_broadcast = true;
-          b_dev_class = grp->coverage.dev_class;
+      GroupControlTemplate grp{};
+      bool has_grp = g_control_registry.findGroup(dev_id, grp);
+      if (!has_grp && dev_id == 0x34) {
+        grp.dev_id = 0x34;
+        grp.coverage.dev_class = DeviceClass::MOMENTARY;
+        has_grp = true;
+      }
 
-          bool is_outlet = (grp->coverage.dev_class == DeviceClass::OUTLET) ||
-                           (grp->coverage.dev_class == DeviceClass::SWITCH && grp->frame_len >= 17);
-
-          uint8_t p_off = grp->getPowerOffset(ack.length);
-          if (p_off != 0xFF && p_off < ack.length) {
-            uint8_t b = ack.data[p_off];
-            if (grp->coverage.dev_class == DeviceClass::VENT) {
-              b_pwr = (b == 0x01) ? 1 : 0;
-            } else if (b == grp->power_slot.on_val) {
-              b_pwr = 1;
-            } else if (b == grp->power_slot.off_val || b == 0) {
-              b_pwr = 0;
-            } else if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && grp->away_mode_token != 0 && b == grp->away_mode_token) {
-              b_pwr = 2;
-            } else {
-              b_pwr = 0;
-            }
+      if (has_grp) {
+        decodeDeviceState(grp, ack, dev, st);
+        if (dev_id == 0x34) {
+          bool ev_state_changed = (st.power != prev_pwr) || (st.direction != prev_dir) || (st.ho != prev_ho);
+          if (ev_state_changed) {
+            st.should_broadcast = true;
+            dev->last_current_temp = static_cast<uint8_t>(st.floor);
+            dev->last_target_temp = static_cast<uint8_t>(st.direction);
+            dev->last_ack_data[0] = static_cast<uint8_t>(st.power);
+            dev->last_ack_data[1] = static_cast<uint8_t>(st.ho);
           }
-
-          switch (grp->coverage.dev_class) {
-            case DeviceClass::THERMOSTAT:
-              parseThermostatState(grp, ack, dev, b_pwr, b_t_temp, b_c_temp);
-              break;
-            case DeviceClass::VENT:
-              parseVentState(grp, ack, b_pwr, b_spd, b_vent_mode);
-              break;
-            case DeviceClass::GAS:
-              parseGasState(grp, ack, b_v_state);
-              break;
-            case DeviceClass::MOMENTARY:
-              parseMomentaryState(dev_id, ack, dev, b_pwr, b_floor, b_direction, b_ho);
-              break;
-            case DeviceClass::AIRCON:
-              parseAirconState(ack, dev, b_pwr, b_vent_mode, b_spd, b_c_temp, b_t_temp);
-              break;
-            case DeviceClass::OUTLET:
-              parseOutletState(grp, ack, b_power_w);
-              break;
-            default:
-              if (is_outlet) {
-                b_dev_class = DeviceClass::OUTLET;
-                parseOutletState(grp, ack, b_power_w);
-              }
-              break;
-          }
+        } else {
+          st.should_broadcast = true;
         }
       }
     }
   } // _cache_mutex unlocked
 
-  if (should_broadcast) {
-    Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, b_dev_class, b_pwr, b_t_temp, b_c_temp, b_spd, b_v_state, b_power_w, b_floor, b_direction, b_ho, b_vent_mode);
+  if (st.should_broadcast) {
+    Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, st.dev_class, st.power, st.target_temp, st.current_temp,
+                              st.fan_speed, st.valve_state, st.power_w, st.floor, st.direction, st.ho, st.vent_mode);
   }
 }
 

@@ -234,8 +234,11 @@ private:
   }
 
 public:
-  const char *getVendorName() const;
-  const char *getProfileKey() const;
+  static constexpr size_t kVendorNameMaxLen = 64;
+  static constexpr size_t kProfileKeyMaxLen = 16;
+
+  size_t getVendorName(char *out, size_t max_len) const;
+  size_t getActiveProfileKey(char *out, size_t max_len) const;
 
   bool isLocked() const {
     VendorProfileDescriptor d = activeProfile();

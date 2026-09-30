@@ -43,8 +43,12 @@ void wallpadPrintStatus(AppendBuf &out) {
   out.append(Fmt::DIV80EQ);
   out.append("                    WALLPAD PROTOCOL & PROFILE DIAGNOSTICS                   \r\n");
   out.append(Fmt::DIV80EQ);
+  char prof_key_buf[UniversalProtocolEngine::kProfileKeyMaxLen] = "Standard";
+  if (active) {
+    active->getActiveProfileKey(prof_key_buf, sizeof(prof_key_buf));
+  }
   out.appendFormat("Active Profile  : %s (ID: %u)\r\n",
-                   active ? active->getProfileKey() : "Standard",
+                   prof_key_buf,
                    static_cast<unsigned>(g_config.wallpad_profile));
   if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
     out.appendFormat("Profile Mode    : Auto Adaptive [%s]\r\n", phase_str);
@@ -84,9 +88,11 @@ void wallpadPrintStatus(AppendBuf &out) {
     }
   };
 
+  constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
   for (size_t i = 0; i < total_tgts; ++i) {
     PollingTargetEntry entry;
     if (g_polling_targets.getEntry(i, entry)) {
+      if ((entry.source_channels & CH23_MASK) == 0) continue;
       if (entry.raw_query_len > 0) add_unique_len(q_lens, q_len_cnt, entry.raw_query_len);
       if (entry.raw_ack_len > 0) add_unique_len(ack_lens, ack_len_cnt, entry.raw_ack_len);
     }
@@ -150,6 +156,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   for (size_t i = 0; i < total_tgts; ++i) {
     PollingTargetEntry entry;
     if (g_polling_targets.getEntry(i, entry)) {
+      if ((entry.source_channels & CH23_MASK) == 0) continue;
       if (dev_id_cnt < 16 && std::find(dev_ids, dev_ids + dev_id_cnt, entry.dev_id) == dev_ids + dev_id_cnt) {
         dev_ids[dev_id_cnt++] = entry.dev_id;
       }
@@ -526,10 +533,16 @@ void wallpadSetProfile(int sock, const char *key) {
 
   if (ok) {
     auto *new_p = WallpadParserFactory::getActiveParser();
+    char v_name[UniversalProtocolEngine::kVendorNameMaxLen] = {0};
+    char p_key[UniversalProtocolEngine::kProfileKeyMaxLen] = {0};
+    if (new_p) {
+      new_p->getVendorName(v_name, sizeof(v_name));
+      new_p->getActiveProfileKey(p_key, sizeof(p_key));
+    }
     sendTelnetMsgf(sock,
                    "[OK] Wallpad profile changed to '%s' (%s) and saved to NVS.\r\n",
-                   new_p ? new_p->getVendorName() : key,
-                   new_p ? new_p->getProfileKey() : key);
+                   v_name[0] ? v_name : key,
+                   p_key[0] ? p_key : key);
   } else {
     sendTelnetMsgf(sock,
                    "[ERROR] Unknown vendor profile '%s'. Use 'wallpad list' to see available profiles.\r\n",

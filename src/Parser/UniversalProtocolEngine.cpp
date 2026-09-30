@@ -5,30 +5,28 @@
 
 static UniversalProtocolEngine s_universal_engine;
 
-const char *UniversalProtocolEngine::getVendorName() const {
+size_t UniversalProtocolEngine::getVendorName(char *out, size_t max_len) const {
+  if (!out || max_len == 0) return 0;
+  out[0] = '\0';
   VendorProfileDescriptor desc;
   ProfileRepository::getActiveProfile(desc);
   if (strcasecmp(desc.key, "auto") == 0) {
     auto ad = g_auto_probing_engine.getDescriptor();
     if (ad.is_locked) {
-      static char buf[64];
-      snprintf(buf, sizeof(buf), "Auto [STX 0x%02X ETX 0x%02X / %s]",
-               ad.stx, ad.etx, AutoProbingEngine::getAlgoName(ad.checksum_algo));
-      return buf;
+      return snprintf(out, max_len, "Auto [STX 0x%02X ETX 0x%02X / %s]",
+                      ad.stx, ad.etx, AutoProbingEngine::getAlgoName(ad.checksum_algo));
     }
-    return "Auto (Learning...)";
+    return snprintf(out, max_len, "%s", "Auto (Learning...)");
   }
-  static char buf[32];
-  snprintf(buf, sizeof(buf), "%s", desc.name);
-  return buf;
+  return snprintf(out, max_len, "%s", desc.name);
 }
 
-const char *UniversalProtocolEngine::getProfileKey() const {
-  static char buf[16];
+size_t UniversalProtocolEngine::getActiveProfileKey(char *out, size_t max_len) const {
+  if (!out || max_len == 0) return 0;
+  out[0] = '\0';
   VendorProfileDescriptor desc;
   ProfileRepository::getActiveProfile(desc);
-  snprintf(buf, sizeof(buf), "%s", desc.key);
-  return buf;
+  return snprintf(out, max_len, "%s", desc.key);
 }
 
 static inline bool checkFramingPure(span<const uint8_t> frame, uint8_t stx,

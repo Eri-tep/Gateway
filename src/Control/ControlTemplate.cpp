@@ -8,8 +8,11 @@
 using namespace ControlTemplateUtils;
 
 ControlTemplateRegistry g_control_registry;
+static GroupControlTemplate s_nvs_transfer_buf[ControlTemplateRegistry::MAX_GROUPS];
 
 ControlTemplateRegistry::ControlTemplateRegistry() {
+  _mutex = xSemaphoreCreateMutexStatic(&_mutex_storage);
+  _nvs_mutex = xSemaphoreCreateMutexStatic(&_nvs_mutex_storage);
   clear();
 }
 
@@ -18,13 +21,104 @@ void ControlTemplateRegistry::init() {
 }
 
 void ControlTemplateRegistry::clear() {
-  taskENTER_CRITICAL(&_mux);
-  for (size_t i = 0; i < MAX_GROUPS; ++i) {
-    _groups[i] = GroupControlTemplate{};
+  MutexLocker lock(_mutex, kManageLockTimeout);
+  if (lock.isLocked()) {
+    for (size_t i = 0; i < MAX_GROUPS; ++i) {
+      _groups[i] = GroupControlTemplate{};
+    }
+    _group_count = 0;
   }
-  _group_count = 0;
-  taskEXIT_CRITICAL(&_mux);
 }
+
+namespace {
+
+// ── 제어 액션 빌더 테이블 디스패치 ──
+bool buildActionPower(const GroupControlTemplate &grp, int value, StaticPacket &out) {
+  if (value > 0 && grp.coverage.dev_class == DeviceClass::GAS) {
+    return false; // 가스 밸브 원격 열림 방지 안전 가드
+  }
+  if (!grp.power_slot.discovered) return false;
+  if (grp.power_slot.category_offset < grp.frame_len) {
+    out.data[grp.power_slot.category_offset] = grp.power_slot.category_val;
+  }
+  if (grp.power_slot.action_offset < grp.frame_len) {
+    if (value == 2 && grp.away_mode_token != 0) {
+      out.data[grp.power_slot.action_offset] = grp.away_mode_token;
+    } else {
+      out.data[grp.power_slot.action_offset] = (value > 0) ? grp.power_slot.on_val : grp.power_slot.off_val;
+    }
+  }
+  return true;
+}
+
+bool buildActionSetTemp(const GroupControlTemplate &grp, int value, StaticPacket &out) {
+  if (!grp.temp_slot.discovered) return false;
+  if (grp.temp_slot.category_offset < grp.frame_len) {
+    out.data[grp.temp_slot.category_offset] = grp.temp_slot.category_val;
+  }
+  if (grp.temp_slot.action_offset < grp.frame_len) {
+    uint8_t t_val = static_cast<uint8_t>(constrain(value, 5, 35));
+    out.data[grp.temp_slot.action_offset] = t_val;
+  }
+  return true;
+}
+
+bool buildActionFanSpeed(const GroupControlTemplate &grp, int value, StaticPacket &out) {
+  if (!grp.speed_slot.discovered) return false;
+  if (grp.speed_slot.category_offset < grp.frame_len) {
+    out.data[grp.speed_slot.category_offset] = grp.speed_slot.category_val;
+  }
+  if (grp.speed_slot.action_offset < grp.frame_len) {
+    uint8_t speed_token = 0;
+    if (grp.speed_slot.level_count > 0) {
+      int idx = constrain(value - 1, 0, grp.speed_slot.level_count - 1);
+      speed_token = grp.speed_slot.level_tokens[idx];
+    } else {
+      uint8_t min_s = (grp.speed_slot.min_val > 0) ? grp.speed_slot.min_val : 1;
+      uint8_t max_s = (grp.speed_slot.max_val > 0) ? grp.speed_slot.max_val : 3;
+      speed_token = static_cast<uint8_t>(constrain(value, min_s, max_s));
+    }
+    out.data[grp.speed_slot.action_offset] = speed_token;
+  }
+  return true;
+}
+
+bool buildActionValveClose(const GroupControlTemplate &grp, int /*value*/, StaticPacket &out) {
+  if (!grp.close_slot.discovered) return false;
+  if (grp.close_slot.category_offset < grp.frame_len) {
+    out.data[grp.close_slot.category_offset] = grp.close_slot.category_val;
+  }
+  if (grp.close_slot.action_offset < grp.frame_len) {
+    out.data[grp.close_slot.action_offset] = grp.close_slot.off_val;
+  }
+  return true;
+}
+
+bool buildActionVentMode(const GroupControlTemplate &grp, int value, StaticPacket &out) {
+  if (!grp.mode_slot.discovered) return false;
+  if (grp.mode_slot.category_offset < grp.frame_len) {
+    out.data[grp.mode_slot.category_offset] = grp.mode_slot.category_val;
+  }
+  if (grp.mode_slot.action_offset < grp.frame_len) {
+    uint8_t max_m = (grp.mode_slot.max_val > 0) ? grp.mode_slot.max_val : 5;
+    uint8_t m_val = static_cast<uint8_t>(constrain(value, 1, max_m));
+    out.data[grp.mode_slot.action_offset] = m_val;
+  }
+  return true;
+}
+
+using ActionBuilderFn = bool (*)(const GroupControlTemplate &grp, int value, StaticPacket &out);
+
+static constexpr ActionBuilderFn kActionBuilders[] = {
+  buildActionPower,       // POWER = 0
+  buildActionSetTemp,     // SET_TEMP = 1
+  buildActionFanSpeed,    // FAN_SPEED = 2
+  buildActionValveClose,  // VALVE_CLOSE = 3
+  buildActionPower,       // MOMENTARY_TRIGGER = 4
+  buildActionVentMode     // VENT_MODE = 5
+};
+
+} // anonymous namespace
 
 void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
   if (strlen(group.group_name) > 0 &&
@@ -39,127 +133,113 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
     return;
   }
 
-  switch (group.coverage.dev_class) {
-  case DeviceClass::GAS:
-    snprintf(group.group_name, sizeof(group.group_name), "Gas");
-    break;
-  case DeviceClass::SWITCH:
-    snprintf(group.group_name, sizeof(group.group_name), "Light");
-    break;
-  case DeviceClass::OUTLET:
-    snprintf(group.group_name, sizeof(group.group_name), "Outlet");
-    break;
-  case DeviceClass::MOMENTARY:
-    snprintf(group.group_name, sizeof(group.group_name), "Elevator");
-    break;
-  case DeviceClass::THERMOSTAT:
-    snprintf(group.group_name, sizeof(group.group_name), "Thermo");
-    break;
-  case DeviceClass::VENT:
-    snprintf(group.group_name, sizeof(group.group_name), "Vent");
-    break;
-  case DeviceClass::AIRCON:
-    snprintf(group.group_name, sizeof(group.group_name), "Aircon");
-    break;
-  case DeviceClass::UNKNOWN:
-  default:
-    snprintf(group.group_name, sizeof(group.group_name), "-");
-    break;
-  }
+  const char *default_name = DeviceClassToName(group.coverage.dev_class);
+  snprintf(group.group_name, sizeof(group.group_name), "%s",
+           (group.coverage.dev_class == DeviceClass::UNKNOWN) ? "-" : default_name);
 }
 
 bool ControlTemplateRegistry::setGroupName(uint8_t dev_id, const char *name) {
   if (dev_id == 0 || !name || strlen(name) == 0) return false;
 
-  taskENTER_CRITICAL(&_mux);
-  for (size_t i = 0; i < _group_count; ++i) {
-    if (_groups[i].dev_id == dev_id) {
-      strncpy(_groups[i].group_name, name, sizeof(_groups[i].group_name) - 1);
-      _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
-      if (strcasecmp(name, "Elevator") == 0 || strcasecmp(name, "EV") == 0) {
-        _groups[i].coverage.dev_class = DeviceClass::MOMENTARY;
-      } else if (strcasestr(name, "Outlet") != nullptr) {
-        _groups[i].coverage.dev_class = DeviceClass::OUTLET;
+  bool modified = false;
+  {
+    MutexLocker lock(_mutex, kManageLockTimeout);
+    if (!lock.isLocked()) return false;
+    for (size_t i = 0; i < _group_count; ++i) {
+      if (_groups[i].dev_id == dev_id) {
+        strncpy(_groups[i].group_name, name, sizeof(_groups[i].group_name) - 1);
+        _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
+        if (strcasecmp(name, "Elevator") == 0 || strcasecmp(name, "EV") == 0) {
+          _groups[i].coverage.dev_class = DeviceClass::MOMENTARY;
+        } else if (strcasestr(name, "Outlet") != nullptr) {
+          _groups[i].coverage.dev_class = DeviceClass::OUTLET;
+        }
+        modified = true;
+        break;
       }
-      taskEXIT_CRITICAL(&_mux);
-      saveToNvs();
-      return true;
     }
   }
-  taskEXIT_CRITICAL(&_mux);
+  if (modified) {
+    saveToNvs();
+    return true;
+  }
   return false;
 }
 
 bool ControlTemplateRegistry::setGroupClass(uint8_t dev_id, DeviceClass cls, const char *name) {
   if (dev_id == 0) return false;
 
-  taskENTER_CRITICAL(&_mux);
-  for (size_t i = 0; i < _group_count; ++i) {
-    if (_groups[i].dev_id == dev_id) {
-      if (_groups[i].coverage.dev_class != cls) {
-        if (_groups[i].coverage.dev_class == DeviceClass::UNKNOWN) {
-          _groups[i].coverage.dev_class = cls;
+  bool modified = false;
+  {
+    MutexLocker lock(_mutex, kManageLockTimeout);
+    if (!lock.isLocked()) return false;
+    for (size_t i = 0; i < _group_count; ++i) {
+      if (_groups[i].dev_id == dev_id) {
+        if (_groups[i].coverage.dev_class != cls) {
+          if (_groups[i].coverage.dev_class == DeviceClass::UNKNOWN) {
+            _groups[i].coverage.dev_class = cls;
+          } else {
+            _groups[i].coverage = SlotCoverage{};
+            _groups[i].coverage.dev_class = cls;
+            _groups[i].power_slot = ActionSlot{};
+            _groups[i].temp_slot = ActionSlot{};
+            _groups[i].speed_slot = ActionSlot{};
+            _groups[i].close_slot = ActionSlot{};
+          }
         } else {
-          _groups[i].coverage = SlotCoverage{};
           _groups[i].coverage.dev_class = cls;
-          _groups[i].power_slot = ActionSlot{};
-          _groups[i].temp_slot = ActionSlot{};
-          _groups[i].speed_slot = ActionSlot{};
-          _groups[i].close_slot = ActionSlot{};
         }
-      } else {
-        _groups[i].coverage.dev_class = cls;
+        if (name && strlen(name) > 0) {
+          strncpy(_groups[i].group_name, name, sizeof(_groups[i].group_name) - 1);
+          _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
+        } else {
+          autoAssignGroupName(_groups[i]);
+        }
+        modified = true;
+        break;
       }
-      if (name && strlen(name) > 0) {
-        strncpy(_groups[i].group_name, name, sizeof(_groups[i].group_name) - 1);
-        _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
-      } else {
-        autoAssignGroupName(_groups[i]);
-      }
-      taskEXIT_CRITICAL(&_mux);
-      saveToNvs();
-      return true;
     }
   }
-  taskEXIT_CRITICAL(&_mux);
+  if (modified) {
+    saveToNvs();
+    return true;
+  }
   return false;
 }
 
-GroupControlTemplate *ControlTemplateRegistry::findGroup(uint8_t dev_id) {
-  taskENTER_CRITICAL(&_mux);
+bool ControlTemplateRegistry::findGroup(uint8_t dev_id, GroupControlTemplate &out, TickType_t timeout) const {
+  if (dev_id == 0) return false;
+  MutexLocker lock(_mutex, timeout);
+  if (!lock.isLocked()) return false;
   for (size_t i = 0; i < _group_count; ++i) {
     if (_groups[i].dev_id == dev_id) {
-      taskEXIT_CRITICAL(&_mux);
-      return &_groups[i];
+      out = _groups[i];
+      return true;
     }
   }
-  taskEXIT_CRITICAL(&_mux);
-  return nullptr;
+  return false;
 }
 
-const GroupControlTemplate *ControlTemplateRegistry::findGroup(uint8_t dev_id) const {
-  taskENTER_CRITICAL(&_mux);
-  for (size_t i = 0; i < _group_count; ++i) {
-    if (_groups[i].dev_id == dev_id) {
-      taskEXIT_CRITICAL(&_mux);
-      return &_groups[i];
-    }
+size_t ControlTemplateRegistry::getGroupsSnapshot(GroupControlTemplate *out_buf, size_t max_count, TickType_t timeout) const {
+  if (!out_buf || max_count == 0) return 0;
+  MutexLocker lock(_mutex, timeout);
+  if (!lock.isLocked()) return 0;
+  size_t count = std::min(_group_count, max_count);
+  for (size_t i = 0; i < count; ++i) {
+    out_buf[i] = _groups[i];
   }
-  taskEXIT_CRITICAL(&_mux);
-  return nullptr;
+  return count;
 }
 
-GroupControlTemplate *ControlTemplateRegistry::registerOrTouch(uint8_t dev_id, const char *name) {
+GroupControlTemplate *ControlTemplateRegistry::registerOrTouchUnlocked(uint8_t dev_id, const char *name) {
   if (dev_id == 0) return nullptr;
 
-  taskENTER_CRITICAL(&_mux);
   for (size_t i = 0; i < _group_count; ++i) {
     if (_groups[i].dev_id == dev_id) {
       if (name && strlen(name) > 0) {
         strncpy(_groups[i].group_name, name, sizeof(_groups[i].group_name) - 1);
         _groups[i].group_name[sizeof(_groups[i].group_name) - 1] = '\0';
       }
-      taskEXIT_CRITICAL(&_mux);
       return &_groups[i];
     }
   }
@@ -185,85 +265,88 @@ GroupControlTemplate *ControlTemplateRegistry::registerOrTouch(uint8_t dev_id, c
     } else {
       autoAssignGroupName(new_grp);
     }
-    taskEXIT_CRITICAL(&_mux);
     return &new_grp;
   }
-  taskEXIT_CRITICAL(&_mux);
   return nullptr;
 }
 
 size_t ControlTemplateRegistry::getGroupCount() const {
-  taskENTER_CRITICAL(&_mux);
-  size_t cnt = _group_count;
-  taskEXIT_CRITICAL(&_mux);
-  return cnt;
+  MutexLocker lock(_mutex, kQueryLockTimeout);
+  if (!lock.isLocked()) return 0;
+  return _group_count;
 }
 
 bool ControlTemplateRegistry::getGroupByIndex(size_t index, GroupControlTemplate &out) const {
-  taskENTER_CRITICAL(&_mux);
+  MutexLocker lock(_mutex, kQueryLockTimeout);
+  if (!lock.isLocked()) return false;
   if (index < _group_count) {
     out = _groups[index];
-    taskEXIT_CRITICAL(&_mux);
     return true;
   }
-  taskEXIT_CRITICAL(&_mux);
   return false;
 }
 
 bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
-  taskENTER_CRITICAL(&_mux);
   bool modified = false;
+  {
+    MutexLocker lock(_mutex, kManageLockTimeout);
+    if (!lock.isLocked()) return false;
 
-  if (full_reset) {
-    if (dev_id == 0) {
-      for (size_t i = 0; i < MAX_GROUPS; ++i) {
-        _groups[i] = GroupControlTemplate{};
+    if (full_reset) {
+      if (dev_id == 0) {
+        for (size_t i = 0; i < MAX_GROUPS; ++i) {
+          _groups[i] = GroupControlTemplate{};
+        }
+        _group_count = 0;
+        modified = true;
+      } else {
+        for (size_t i = 0; i < _group_count; ++i) {
+          if (_groups[i].dev_id == dev_id) {
+            for (size_t j = i; j + 1 < _group_count; ++j) {
+              _groups[j] = _groups[j + 1];
+            }
+            _groups[_group_count - 1] = GroupControlTemplate{};
+            _group_count--;
+            modified = true;
+            break;
+          }
+        }
       }
-      _group_count = 0;
-      modified = true;
     } else {
       for (size_t i = 0; i < _group_count; ++i) {
-        if (_groups[i].dev_id == dev_id) {
-          for (size_t j = i; j + 1 < _group_count; ++j) {
-            _groups[j] = _groups[j + 1];
-          }
-          _groups[_group_count - 1] = GroupControlTemplate{};
-          _group_count--;
+        if (dev_id == 0 || _groups[i].dev_id == dev_id) {
+          _groups[i].power_slot  = ActionSlot{};
+          _groups[i].temp_slot   = ActionSlot{};
+          _groups[i].speed_slot  = ActionSlot{};
+          _groups[i].close_slot  = ActionSlot{};
+          _groups[i].mode_slot   = ActionSlot{};
+          _groups[i].ack_slots   = AckStateSlots{};
+          _groups[i].query_slots = QueryStateSlots{};
+
+          DeviceClass preserved_cls = _groups[i].coverage.dev_class;
+          _groups[i].coverage = SlotCoverage{};
+          _groups[i].coverage.dev_class = preserved_cls;
+
           modified = true;
-          break;
+          if (dev_id != 0) break;
         }
       }
     }
-  } else {
-    for (size_t i = 0; i < _group_count; ++i) {
-      if (dev_id == 0 || _groups[i].dev_id == dev_id) {
-        _groups[i].power_slot  = ActionSlot{};
-        _groups[i].temp_slot   = ActionSlot{};
-        _groups[i].speed_slot  = ActionSlot{};
-        _groups[i].close_slot  = ActionSlot{};
-        _groups[i].mode_slot   = ActionSlot{};
-        _groups[i].ack_slots   = AckStateSlots{};
-        _groups[i].query_slots = QueryStateSlots{};
-
-        DeviceClass preserved_cls = _groups[i].coverage.dev_class;
-        _groups[i].coverage = SlotCoverage{};
-        _groups[i].coverage.dev_class = preserved_cls;
-
-        modified = true;
-        if (dev_id != 0) break;
-      }
-    }
   }
-  taskEXIT_CRITICAL(&_mux);
 
   if (modified) {
     if (full_reset && dev_id == 0) {
-      char ns[16];
-      getControlNamespace(ns, sizeof(ns), getCurrentProfileIndex());
-      Preferences prefs;
-      if (prefs.begin(ns, false)) {
-        prefs.clear();
-        prefs.end();
+      {
+        MutexLocker nvs_lock(_nvs_mutex, kManageLockTimeout);
+        if (nvs_lock.isLocked()) {
+          char ns[16];
+          getControlNamespace(ns, sizeof(ns), getCurrentProfileIndex());
+          Preferences prefs;
+          if (prefs.begin(ns, false)) {
+            prefs.clear();
+            prefs.end();
+          }
+        }
       }
       synthesizeFromConvergedCache();
     } else {
@@ -295,24 +378,21 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
     if (d_id == 0 || d_id == 0x34) continue;
     if (entry.source_channels == (1 << 5)) continue;
 
-    GroupControlTemplate *grp = registerOrTouch(d_id);
-    if (!grp) continue;
+    modifyOrCreateGroup(d_id, [&](GroupControlTemplate &grp) {
+      if (grp.frame_len == 0) {
+        grp.frame_len = entry.raw_query_len;
+        std::copy(entry.raw_query_data.begin(),
+                  entry.raw_query_data.begin() + std::min<size_t>(entry.raw_query_len, 32),
+                  grp.raw_template);
 
-    taskENTER_CRITICAL(&_mux);
-    if (grp->frame_len == 0) {
-      grp->frame_len = entry.raw_query_len;
-      std::copy(entry.raw_query_data.begin(),
-                entry.raw_query_data.begin() + std::min<size_t>(entry.raw_query_len, 32),
-                grp->raw_template);
-
-      if (opcode_offset < grp->frame_len && ctrl_opcode != 0) {
-        grp->raw_template[opcode_offset] = ctrl_opcode;
+        if (opcode_offset < grp.frame_len && ctrl_opcode != 0) {
+          grp.raw_template[opcode_offset] = ctrl_opcode;
+        }
+        grp.sub1_offset = sub1_offset;
+        grp.sub2_offset = sub2_offset;
+        grp.ctl_sub1_override = entry.sub1;
       }
-      grp->sub1_offset = sub1_offset;
-      grp->sub2_offset = sub2_offset;
-      grp->ctl_sub1_override = entry.sub1;
-    }
-    taskEXIT_CRITICAL(&_mux);
+    });
   }
 
   // 제조사 하드코딩 명세 기반 슬롯 주입 (ProfileMatcher)
@@ -324,16 +404,16 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
 bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                                  ControlActionType action, int value,
                                                  StaticPacket &out) const {
-  const GroupControlTemplate *grp = findGroup(dev_id);
-  if (!grp || grp->frame_len < 5) return false;
+  GroupControlTemplate grp{};
+  if (!findGroup(dev_id, grp) || grp.frame_len < 5) return false;
 
   auto *parser = WallpadParserFactory::getActiveParser();
   if (!parser) return false;
 
   out.channel_id = 1;
-  out.length = grp->frame_len;
+  out.length = grp.frame_len;
   out.data.fill(0);
-  std::copy(grp->raw_template, grp->raw_template + grp->frame_len, out.data.begin());
+  std::copy(grp.raw_template, grp.raw_template + grp.frame_len, out.data.begin());
 
   size_t unit_count = 0;
   for (size_t i = 0; i < g_device_repo.count(); ++i) {
@@ -344,69 +424,16 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1, u
     }
   }
 
-  uint8_t actual_sub1 = (unit_count <= 1 && grp->ctl_sub1_override != 0xFF) ? grp->ctl_sub1_override : sub1;
-  if (grp->sub1_offset < grp->frame_len) out.data[grp->sub1_offset] = actual_sub1;
-  if (grp->sub2_offset < grp->frame_len) out.data[grp->sub2_offset] = sub2;
+  uint8_t actual_sub1 = (unit_count <= 1 && grp.ctl_sub1_override != 0xFF) ? grp.ctl_sub1_override : sub1;
+  if (grp.sub1_offset < grp.frame_len) out.data[grp.sub1_offset] = actual_sub1;
+  if (grp.sub2_offset < grp.frame_len) out.data[grp.sub2_offset] = sub2;
 
-  if (action == ControlActionType::POWER || action == ControlActionType::MOMENTARY_TRIGGER) {
-    if (grp->coverage.dev_class == DeviceClass::GAS && value > 0) {
-      return false;
-    }
-    if (!grp->power_slot.discovered) return false;
-    if (grp->power_slot.category_offset < grp->frame_len) {
-      out.data[grp->power_slot.category_offset] = grp->power_slot.category_val;
-    }
-    if (grp->power_slot.action_offset < grp->frame_len) {
-      if (grp->coverage.dev_class == DeviceClass::THERMOSTAT && value == 2 && grp->away_mode_token != 0) {
-        out.data[grp->power_slot.action_offset] = grp->away_mode_token;
-      } else {
-        out.data[grp->power_slot.action_offset] = (value > 0) ? grp->power_slot.on_val : grp->power_slot.off_val;
-      }
-    }
-  } else if (action == ControlActionType::SET_TEMP) {
-    if (!grp->temp_slot.discovered) return false;
-    if (grp->temp_slot.category_offset < grp->frame_len) {
-      out.data[grp->temp_slot.category_offset] = grp->temp_slot.category_val;
-    }
-    if (grp->temp_slot.action_offset < grp->frame_len) {
-      uint8_t t_val = static_cast<uint8_t>(constrain(value, 5, 35));
-      out.data[grp->temp_slot.action_offset] = t_val;
-    }
-  } else if (action == ControlActionType::FAN_SPEED) {
-    if (!grp->speed_slot.discovered) return false;
-    if (grp->speed_slot.category_offset < grp->frame_len) {
-      out.data[grp->speed_slot.category_offset] = grp->speed_slot.category_val;
-    }
-    if (grp->speed_slot.action_offset < grp->frame_len) {
-      uint8_t speed_token = 0;
-      if (grp->speed_slot.level_count > 0) {
-        int idx = constrain(value - 1, 0, grp->speed_slot.level_count - 1);
-        speed_token = grp->speed_slot.level_tokens[idx];
-      } else {
-        uint8_t min_s = (grp->speed_slot.min_val > 0) ? grp->speed_slot.min_val : 1;
-        uint8_t max_s = (grp->speed_slot.max_val > 0) ? grp->speed_slot.max_val : 3;
-        speed_token = static_cast<uint8_t>(constrain(value, min_s, max_s));
-      }
-      out.data[grp->speed_slot.action_offset] = speed_token;
-    }
-  } else if (action == ControlActionType::VALVE_CLOSE) {
-    if (!grp->close_slot.discovered) return false;
-    if (grp->close_slot.category_offset < grp->frame_len) {
-      out.data[grp->close_slot.category_offset] = grp->close_slot.category_val;
-    }
-    if (grp->close_slot.action_offset < grp->frame_len) {
-      out.data[grp->close_slot.action_offset] = grp->close_slot.off_val;
-    }
-  } else if (action == ControlActionType::VENT_MODE) {
-    if (!grp->mode_slot.discovered) return false;
-    if (grp->mode_slot.category_offset < grp->frame_len) {
-      out.data[grp->mode_slot.category_offset] = grp->mode_slot.category_val;
-    }
-    if (grp->mode_slot.action_offset < grp->frame_len) {
-      uint8_t max_m = (grp->mode_slot.max_val > 0) ? grp->mode_slot.max_val : 5;
-      uint8_t m_val = static_cast<uint8_t>(constrain(value, 1, max_m));
-      out.data[grp->mode_slot.action_offset] = m_val;
-    }
+  const size_t act_idx = static_cast<size_t>(action);
+  if (act_idx >= sizeof(kActionBuilders) / sizeof(kActionBuilders[0])) {
+    return false;
+  }
+  if (!kActionBuilders[act_idx](grp, value, out)) {
+    return false;
   }
 
   if (out.length >= 3) {
@@ -425,14 +452,19 @@ void ControlTemplateRegistry::loadFromNvs() {
 }
 
 void ControlTemplateRegistry::saveToNvsForProfile(uint8_t prof_idx) {
+  MutexLocker nvs_lock(_nvs_mutex, kManageLockTimeout);
+  if (!nvs_lock.isLocked()) return;
+
   uint8_t save_count = 0;
-  taskENTER_CRITICAL(&_mux);
-  for (size_t i = 0; i < _group_count; ++i) {
-    if (_groups[i].dev_id != 0) {
-      save_count++;
+  {
+    MutexLocker ram_lock(_mutex, kManageLockTimeout);
+    if (!ram_lock.isLocked()) return;
+    for (size_t i = 0; i < _group_count; ++i) {
+      if (_groups[i].dev_id != 0) {
+        s_nvs_transfer_buf[save_count++] = _groups[i];
+      }
     }
   }
-  taskEXIT_CRITICAL(&_mux);
 
   char ns[16];
   getControlNamespace(ns, sizeof(ns), prof_idx);
@@ -441,57 +473,41 @@ void ControlTemplateRegistry::saveToNvsForProfile(uint8_t prof_idx) {
   if (!prefs.begin(ns, false)) return;
 
   prefs.putUChar("cnt", save_count);
-  uint8_t saved_idx = 0;
-  for (size_t i = 0; i < MAX_GROUPS && saved_idx < save_count; ++i) {
-    GroupControlTemplate temp{};
-    bool has_item = false;
-
-    taskENTER_CRITICAL(&_mux);
-    if (i < _group_count && _groups[i].dev_id != 0) {
-      temp = _groups[i];
-      has_item = true;
-    }
-    taskEXIT_CRITICAL(&_mux);
-
-    if (has_item) {
-      char key[16];
-      snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(saved_idx));
-      NvsEnvelope<GroupControlTemplate> env{};
-      env.payload = temp;
-      env.seal();
-      prefs.putBytes(key, &env, sizeof(env));
-      saved_idx++;
-    }
+  for (size_t i = 0; i < save_count; ++i) {
+    char key[16];
+    snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
+    NvsEnvelope<GroupControlTemplate> env{};
+    env.payload = s_nvs_transfer_buf[i];
+    env.seal();
+    prefs.putBytes(key, &env, sizeof(env));
   }
   prefs.end();
 }
 
 void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
+  MutexLocker nvs_lock(_nvs_mutex, kManageLockTimeout);
+  if (!nvs_lock.isLocked()) return;
+
   char ns[16];
   getControlNamespace(ns, sizeof(ns), prof_idx);
 
   Preferences prefs;
   if (!prefs.begin(ns, true) || prefs.getUChar("cnt", 0) == 0) {
     prefs.end();
-    taskENTER_CRITICAL(&_mux);
-    _group_count = 0;
-    for (size_t i = 0; i < MAX_GROUPS; ++i) {
-      _groups[i] = GroupControlTemplate{};
+    MutexLocker ram_lock(_mutex, kManageLockTimeout);
+    if (ram_lock.isLocked()) {
+      _group_count = 0;
+      for (size_t i = 0; i < MAX_GROUPS; ++i) {
+        _groups[i] = GroupControlTemplate{};
+      }
     }
-    taskEXIT_CRITICAL(&_mux);
     return;
   }
 
   uint8_t cnt = prefs.getUChar("cnt", 0);
   if (cnt > MAX_GROUPS) cnt = MAX_GROUPS;
 
-  taskENTER_CRITICAL(&_mux);
-  _group_count = 0;
-  for (size_t i = 0; i < MAX_GROUPS; ++i) {
-    _groups[i] = GroupControlTemplate{};
-  }
-  taskEXIT_CRITICAL(&_mux);
-
+  size_t valid_count = 0;
   for (size_t i = 0; i < cnt; ++i) {
     char key[16];
     snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
@@ -509,7 +525,28 @@ void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
     }
 
     if (loaded && temp.dev_id != 0) {
-      taskENTER_CRITICAL(&_mux);
+      if (temp.sub1_offset == 2 && temp.sub2_offset > 2) {
+        temp.sub1_offset = temp.sub2_offset;
+      }
+      if (temp.coverage.dev_class == DeviceClass::THERMOSTAT && temp.temp_slot.min_val == 7) {
+        temp.temp_slot.min_val = 0;
+      }
+      s_nvs_transfer_buf[valid_count++] = temp;
+    }
+  }
+  prefs.end();
+
+  // Atomically commit transfer buffer into RAM under _mutex
+  {
+    MutexLocker ram_lock(_mutex, kManageLockTimeout);
+    if (!ram_lock.isLocked()) return;
+    _group_count = 0;
+    for (size_t i = 0; i < MAX_GROUPS; ++i) {
+      _groups[i] = GroupControlTemplate{};
+    }
+
+    for (size_t i = 0; i < valid_count; ++i) {
+      const GroupControlTemplate &temp = s_nvs_transfer_buf[i];
       if (_group_count < MAX_GROUPS) {
         size_t insert_idx = _group_count;
         for (size_t j = 0; j < _group_count; ++j) {
@@ -518,19 +555,14 @@ void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
             break;
           }
         }
-        if (temp.sub1_offset == 2 && temp.sub2_offset > 2) {
-          temp.sub1_offset = temp.sub2_offset;
-        }
-        if (temp.coverage.dev_class == DeviceClass::THERMOSTAT && temp.temp_slot.min_val == 7) {
-          temp.temp_slot.min_val = 0;
+        for (size_t k = _group_count; k > insert_idx; --k) {
+          _groups[k] = _groups[k - 1];
         }
         _groups[insert_idx] = temp;
         _group_count++;
       }
-      taskEXIT_CRITICAL(&_mux);
     }
   }
-  prefs.end();
 }
 
 void ControlTemplateRegistry::onProfileChanged(uint8_t old_prof_idx, uint8_t new_prof_idx) {

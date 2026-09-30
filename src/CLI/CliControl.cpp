@@ -501,7 +501,8 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.append("                 DEVICE CONTROL BLUEPRINTS & ACTION SLOTS                     \r\n");
   out.append(Fmt::DIV80EQ);
 
-  size_t count = g_control_registry.getGroupCount();
+  GroupControlTemplate grps[ControlTemplateRegistry::MAX_GROUPS];
+  size_t count = g_control_registry.getGroupsSnapshot(grps, ControlTemplateRegistry::MAX_GROUPS);
   out.appendFormat("  Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted               \r\n", count);
   out.append(Fmt::DIV80);
   out.append("DevID  Name        Class      CTL_Len  Power Action Slot   QRY_Len  Status Offsets\r\n");
@@ -516,20 +517,10 @@ void wallpadPrintControlTable(AppendBuf &out) {
   }
 
   for (size_t i = 0; i < count; ++i) {
-    GroupControlTemplate grp{};
-    if (!g_control_registry.getGroupByIndex(i, grp) || grp.dev_id == 0) continue;
+    const GroupControlTemplate &grp = grps[i];
+    if (grp.dev_id == 0) continue;
 
-    const char *cls_str = "UNKNOWN";
-    switch (grp.coverage.dev_class) {
-      case DeviceClass::SWITCH:     cls_str = "SWITCH"; break;
-      case DeviceClass::OUTLET:     cls_str = "OUTLET"; break;
-      case DeviceClass::GAS:        cls_str = "GAS"; break;
-      case DeviceClass::MOMENTARY:  cls_str = "MOMENT"; break;
-      case DeviceClass::THERMOSTAT: cls_str = "THERMO"; break;
-      case DeviceClass::VENT:       cls_str = "VENT"; break;
-      case DeviceClass::AIRCON:     cls_str = "AIRCON"; break;
-      default: break;
-    }
+    const char *cls_str = DeviceClassToCliString(grp.coverage.dev_class);
 
     char name_safe[17] = {0};
     strncpy(name_safe, grp.group_name, sizeof(name_safe) - 1);
@@ -584,62 +575,62 @@ void wallpadPrintControlTable(AppendBuf &out) {
 }
 
 void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
-  const GroupControlTemplate *grp = g_control_registry.findGroup(dev_id);
-  if (!grp) {
+  GroupControlTemplate grp{};
+  if (!g_control_registry.findGroup(dev_id, grp)) {
     out.appendFormat("[ERROR] Group 0x%02X not found in control blueprints.\r\n", dev_id);
     return;
   }
 
   char name_safe[17] = {0};
-  strncpy(name_safe, grp->group_name, sizeof(name_safe) - 1);
+  strncpy(name_safe, grp.group_name, sizeof(name_safe) - 1);
 
   out.append("\r\n");
   out.append(Fmt::DIV80EQ);
   out.appendFormat("               DEVICE CONTROL BLUEPRINT DETAIL: 0x%02X (%s)                \r\n",
-                   grp->dev_id, name_safe);
+                   grp.dev_id, name_safe);
   out.append(Fmt::DIV80EQ);
   out.appendFormat("  Frame Specs     : CTL Length = %u Bytes | QRY Response Length = %u Bytes\r\n",
-                   grp->frame_len, grp->query_slots.expected_len);
+                   grp.frame_len, grp.query_slots.expected_len);
   out.appendFormat("  Addressing      : Sub1 = Offset #%u | Sub2 = Offset #%u (Override = 0x%02X)\r\n",
-                   grp->sub1_offset, grp->sub2_offset, grp->ctl_sub1_override);
+                   grp.sub1_offset, grp.sub2_offset, grp.ctl_sub1_override);
   out.append(Fmt::DIV80);
 
   out.append("[Outbound Action Slots]\r\n");
-  if (grp->power_slot.discovered) {
+  if (grp.power_slot.discovered) {
     out.appendFormat("  Power Control : Offset #%u  [ ON: 0x%02X / OFF: 0x%02X ]\r\n",
-                     grp->power_slot.action_offset, grp->power_slot.on_val, grp->power_slot.off_val);
+                     grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
   } else {
     out.append("  Power Control : None\r\n");
   }
 
-  if (grp->temp_slot.discovered) {
+  if (grp.temp_slot.discovered) {
     out.appendFormat("  Temp Control  : Offset #%u  [ Range: %u ~ %u C ]\r\n",
-                     grp->temp_slot.action_offset, grp->temp_slot.min_val, grp->temp_slot.max_val);
+                     grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
   } else {
     out.append("  Temp Control  : None\r\n");
   }
 
-  if (grp->speed_slot.discovered) {
-    if (grp->speed_slot.level_count > 0) {
+  if (grp.speed_slot.discovered) {
+    if (grp.speed_slot.level_count > 0) {
       char tok_str[64] = {0};
-      for (uint8_t i = 0; i < grp->speed_slot.level_count; ++i) {
+      for (uint8_t i = 0; i < grp.speed_slot.level_count; ++i) {
         char t_buf[16] = {0};
-        snprintf(t_buf, sizeof(t_buf), "%sL%u:0x%02X", (i > 0 ? ", " : ""), i + 1, grp->speed_slot.level_tokens[i]);
+        snprintf(t_buf, sizeof(t_buf), "%sL%u:0x%02X", (i > 0 ? ", " : ""), i + 1, grp.speed_slot.level_tokens[i]);
         strncat(tok_str, t_buf, sizeof(tok_str) - strlen(tok_str) - 1);
       }
       out.appendFormat("  Speed Control : Offset #%u  [ Levels: %s ]\r\n",
-                       grp->speed_slot.action_offset, tok_str);
+                       grp.speed_slot.action_offset, tok_str);
     } else {
       out.appendFormat("  Speed Control : Offset #%u  [ Range: %u ~ %u ]\r\n",
-                       grp->speed_slot.action_offset, grp->speed_slot.min_val, grp->speed_slot.max_val);
+                       grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
     }
   } else {
     out.append("  Speed Control : None\r\n");
   }
 
-  if (grp->close_slot.discovered) {
+  if (grp.close_slot.discovered) {
     out.appendFormat("  Close Control : Offset #%u  [ Action: 0x%02X ]\r\n",
-                     grp->close_slot.action_offset, grp->close_slot.off_val);
+                     grp.close_slot.action_offset, grp.close_slot.off_val);
   } else {
     out.append("  Close Control : None\r\n");
   }
@@ -653,12 +644,12 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     }
   };
 
-  format_slot(out, "Power State", grp->query_slots.power_offset);
-  format_slot(out, "Target Temp", grp->query_slots.target_temp_offset);
-  format_slot(out, "Ambient Temp", grp->query_slots.current_temp_offset);
-  format_slot(out, "Fan Speed", grp->query_slots.fan_speed_offset);
-  format_slot(out, "Power Wattage", grp->query_slots.power_w_offset);
-  format_slot(out, "CTL ACK State", grp->ack_slots.power_offset);
+  format_slot(out, "Power State", grp.query_slots.power_offset);
+  format_slot(out, "Target Temp", grp.query_slots.target_temp_offset);
+  format_slot(out, "Ambient Temp", grp.query_slots.current_temp_offset);
+  format_slot(out, "Fan Speed", grp.query_slots.fan_speed_offset);
+  format_slot(out, "Power Wattage", grp.query_slots.power_w_offset);
+  format_slot(out, "CTL ACK State", grp.ack_slots.power_offset);
 
   out.append(Fmt::DIV80EQ);
   out.append("\r\n");
