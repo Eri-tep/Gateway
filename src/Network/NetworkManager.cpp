@@ -260,6 +260,9 @@ void Task_Network(void *pvParameters) {
     struct timeval tv = {0, 10000};
     if (max_fd >= 0) {
       act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
+      if (ota_now) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
     } else {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
