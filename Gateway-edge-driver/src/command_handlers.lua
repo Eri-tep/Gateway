@@ -893,18 +893,18 @@ function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
 end
 
 local function dispatch_fcu_unified_restore(driver, device, d_id, s1, s2)
-  local saved_mode = device:get_field("saved_fcu_mode") or "cool"
+  local target_mode = device:get_field("last_fcu_mode") or device:get_field("saved_fcu_mode") or "cool"
   local val_map = { cool = 1, heat = 2, fanOnly = 3 }
-  local m_val = val_map[saved_mode] or 1
+  local m_val = val_map[target_mode] or 1
 
-  local saved_temp = device:get_field("saved_fcu_temp") or 24
-  if saved_temp < 18 or saved_temp > 30 then saved_temp = 24 end
+  local target_temp = device:get_field("last_fcu_temp") or device:get_field("saved_fcu_temp") or 24
+  if target_temp < 18 or target_temp > 30 then target_temp = 24 end
 
-  local saved_fan = device:get_field("saved_fcu_fan") or "auto"
-  local f_val = FCU_FAN_MODE_TO_VAL[saved_fan] or 4
+  local target_fan = device:get_field("last_fcu_fan") or device:get_field("saved_fcu_fan") or "auto"
+  local f_val = FCU_FAN_MODE_TO_VAL[target_fan] or 4
 
-  local saved_osc = device:get_field("saved_fcu_osc") or "fixed"
-  local o_val = (saved_osc == "swing") and 2 or 0
+  local target_osc = device:get_field("last_fcu_osc") or device:get_field("saved_fcu_osc") or "fixed"
+  local o_val = (target_osc == "swing") and 2 or 0
 
   local ip, port = get_gateway_ip_port(driver)
   local payload = {
@@ -916,7 +916,7 @@ local function dispatch_fcu_unified_restore(driver, device, d_id, s1, s2)
     mode = m_val,
     fan = f_val,
     swing = o_val,
-    temp = saved_temp
+    temp = target_temp
   }
   gateway_client.device_control_custom(ip, port, payload)
 end
@@ -1042,6 +1042,7 @@ function CommandHandlers.handle_fcu_set_setpoint(driver, device, command)
   if cur_mode == "cool" or cur_mode == "heat" then
     device:set_field("saved_fcu_temp", temp, { persist = true })
   end
+  device:set_field("last_fcu_temp", temp, { persist = true })
 
   schedule_fcu_unified_restore(driver, device, d_id, s1, s2)
 end

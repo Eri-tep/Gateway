@@ -436,11 +436,15 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
 
     // [펌웨어 레벨 스윙 자동 안착]
     // 복원 명령으로 회전(2)을 지시받았으나 모터 원점 복귀로 인해 swing != 2로 보고된 경우 1회 자동 보정
+    // ※ Fcu_SendRaw 직접 호출 시 g_ch5_mutex 재귀 데드락(Self-Deadlock)이 발생하므로
+    //   Stop-and-Wait 대기 큐(pending_cmd_buf)에 적재하여 handleSlotLoop에서 안전하게 방출
     if (new_snap.power && rt.pending_restore_swing == 2) {
       if (new_snap.swing != Fcu::Swing::On) {
         uint8_t swing_pkt[8];
         size_t s_len = Fcu_BuildWriteSingle(swing_pkt, 0x0003, 2);
-        Fcu_SendRaw(slot_idx, swing_pkt, s_len);
+        memcpy(rt.pending_cmd_buf, swing_pkt, s_len);
+        rt.pending_cmd_len = static_cast<uint8_t>(s_len);
+        rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS;
       }
       rt.pending_restore_swing = 0; // 1회만 보정 수행
     }

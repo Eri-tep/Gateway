@@ -723,25 +723,25 @@ local DEVICE_TELEMETRY_HANDLERS = {
         local fan_str = FCU_VAL_TO_FAN_MODE[event_data.fan_speed] or dev:get_field("saved_fcu_fan") or "auto"
         dev:emit_event(cap_fan.fanSpeed(fan_str))
       end
+
+      -- 희망 설정 온도 (digituniverse06711.fcuSetpoint) - 켜져 있을 때만 실제 에어컨 세팅값 반영
+      local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
+      if event_data.target_temp and cap_sp then
+        local sp_evt = cap_sp.setpoint({ value = event_data.target_temp, unit = "°C" })
+        sp_evt.state_change = true
+        dev:emit_event(sp_evt)
+      end
+
+      -- 바람 방향 (digituniverse06711.fcuOscillation: fixed / swing) - 켜져 있을 때만 실제 에어컨 스윙 반영
+      local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
+      if cap_osc and event_data.swing ~= nil then
+        local swing_str = (event_data.swing == 2) and "swing" or "fixed"
+        local ev = cap_osc.oscillation(swing_str)
+        ev.state_change = true
+        dev:emit_event(ev)
+      end
     else
       dev:emit_event(capabilities.switch.switch.off())
-    end
-
-    -- 2. 바람 방향 (digituniverse06711.fcuOscillation: fixed / swing)
-    local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
-    if cap_osc and event_data.swing ~= nil then
-      local swing_str = (event_data.swing == 2) and "swing" or "fixed"
-      local ev = cap_osc.oscillation(swing_str)
-      ev.state_change = true
-      dev:emit_event(ev)
-    end
-
-    -- 3. 희망 설정 온도 (digituniverse06711.fcuSetpoint)
-    local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
-    if event_data.target_temp and cap_sp then
-      local sp_evt = cap_sp.setpoint({ value = event_data.target_temp, unit = "°C" })
-      sp_evt.state_change = true
-      dev:emit_event(sp_evt)
     end
 
     -- 4. 실내 측정 온도 (temperatureMeasurement)
