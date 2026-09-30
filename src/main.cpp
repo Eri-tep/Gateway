@@ -326,10 +326,10 @@ static void Boot_StartTasks() {
         cr_task(Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1, nullptr,
                 13, stackCore1Ch1, &g_task_core1_ch1_buf);
     g_ch2_task_handle =
-        cr_task(Task_Ch2Ch3, "CH#2_WP#1", Config::Task::STACK_SIZE_CORE1,
+        cr_task(Task_Ch2Ch3, "CH#2_WP#1", Config::Task::STACK_SIZE_SLAVE,
                 &ch2_config, 10, stackCore1Slave, &g_task_core1_slave_buf);
     g_ch3_task_handle =
-        cr_task(Task_Ch2Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_CORE1,
+        cr_task(Task_Ch2Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_SLAVE,
                 &ch3_config, 10, stackCore1Slave2, &g_task_core1_slave2_buf);
     g_ch4_task_handle =
         cr_task(Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,

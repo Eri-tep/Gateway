@@ -316,8 +316,8 @@ extern StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
     g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,
     g_telnet_task_buf;
 extern StackType_t stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
-    stackCore1Slave[Config::Task::STACK_SIZE_CORE1],
-    stackCore1Slave2[Config::Task::STACK_SIZE_CORE1],
+    stackCore1Slave[Config::Task::STACK_SIZE_SLAVE],
+    stackCore1Slave2[Config::Task::STACK_SIZE_SLAVE],
     stackCore1Ch4[Config::Task::STACK_SIZE_CH4],
     stackCore0Net[Config::Task::STACK_SIZE_CORE0],
     telnetTaskStack[Config::Task::STACK_SIZE_TELNET];
