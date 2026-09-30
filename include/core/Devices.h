@@ -367,7 +367,9 @@ void System_TakeSnapshot(SysSnapshot &sys_snapshot, HwSnapshot &hw_snapshot,
                          PktSnapshot &pkt_snapshot);
 
 extern uint32_t rtc_magic;
-extern uint32_t rtc_last_alive_ms[6];
+extern uint32_t rtc_last_alive_ms[Config::Task::TASK_COUNT];
+extern volatile uint32_t g_telnet_stage;
+#define TSTAGE(n) (g_telnet_stage = (0xA5A50000u | (static_cast<uint32_t>(n) & 0xFFFFu)))
 constexpr uint32_t RTC_MAGIC_WDT = 0x57445431;
 extern uint32_t rtc_rescue_magic;
 constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343;

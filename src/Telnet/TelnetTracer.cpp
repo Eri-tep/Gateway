@@ -1,5 +1,6 @@
 #include "TelnetCli.h"
 #include "WallpadParser.h"
+#include "core/Devices.h"
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -148,6 +149,7 @@ void TelnetTracer::flushToClient() {
   if (c_fd < 0)
     return;
 
+  TSTAGE(12);
   if (g_telnet_tx_sem && xSemaphoreTake(g_telnet_tx_sem, 0) != pdTRUE) {
     return; // CLI 명령 등이 소켓에 출력 중일 때는 트레이서가 즉시 양보하여 끼어들기 및 타임아웃 assertion 방지
   }
@@ -305,6 +307,7 @@ void TelnetTracer::flushToClient() {
     if (is_new_req && s_last_pkt_tv.tv_sec > 0) {
       long gap = calc_delay_ms(entry.tv, s_last_pkt_tv);
       if (gap > 50 || gap < 0) {
+        TSTAGE(13);
         sendTelnetMsgLen(c_fd, "\r\n", 2);
       }
     }
@@ -376,6 +379,7 @@ void TelnetTracer::flushToClient() {
     }
 
     idx += snprintf(line_buf + idx, sizeof(line_buf) - idx, "\r\n");
+    TSTAGE(13);
     send(c_fd, line_buf, idx, MSG_DONTWAIT);
   }
 

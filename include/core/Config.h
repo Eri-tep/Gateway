@@ -9,7 +9,7 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.4.7";
+constexpr const char *FIRMWARE_VERSION = "v1.4.8";
 } // namespace Config
 
 namespace Config::Task {
@@ -26,6 +26,10 @@ constexpr size_t STACK_SIZE_CH4 = 4096;
 constexpr size_t STACK_SIZE_CORE0 = 8192;
 // [Task] Telnet CLI 스택 크기 (실측 2.9KB + 3배 마진 3.2KB = 6KB)
 constexpr size_t STACK_SIZE_TELNET = 6144;
+// [Task] 총 감시 대상 태스크 개수 및 텔넷 WDT ID
+constexpr size_t TASK_COUNT = 6;
+constexpr uint8_t WDT_ID_TELNET = 5;
+static_assert(WDT_ID_TELNET < TASK_COUNT, "WDT_ID_TELNET out of range");
 } // namespace Config::Task
 
 namespace Config::Queue {

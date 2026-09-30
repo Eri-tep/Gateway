@@ -18,9 +18,15 @@ CoreDumpInfo g_coredump_info;
 Config::Doorphone::FramingTracker g_doorphone_tracker;
 
 void System_DiagnoseStuck() {
-  static const char *const TASK_NAMES[6] = {"CH#1_IoT",  "CH#2_WP#1",
-                                            "CH#3_WP#2", "CH#4_WP#3",
-                                            "Network",   "Telnet_CLI"};
+  uint32_t saved_telnet_stage = g_telnet_stage;
+  g_telnet_stage = 0;
+
+  static const char *const TASK_NAMES[Config::Task::TASK_COUNT] = {
+      "CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
+      "CH#4_WP#3", "Network",   "Telnet_CLI"};
+  static_assert(Config::Task::TASK_COUNT == 6, "Mismatch in TASK_COUNT");
+  static_assert(Config::Task::WDT_ID_TELNET < Config::Task::TASK_COUNT,
+                "WDT_ID_TELNET out of bounds");
 
   esp_reset_reason_t reason = esp_reset_reason();
 
@@ -31,7 +37,7 @@ void System_DiagnoseStuck() {
   }
 
   uint32_t max_val = 0;
-  for (size_t i = 0; i < 6; i++) {
+  for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
     if (rtc_last_alive_ms[i] > max_val)
       max_val = rtc_last_alive_ms[i];
   }
@@ -42,7 +48,7 @@ void System_DiagnoseStuck() {
   uint32_t max_gap = 0;
   int found_idx = -1;
 
-  for (size_t i = 0; i < 6; i++) {
+  for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
     if (rtc_last_alive_ms[i] > 0) {
       uint32_t gap = (max_val >= rtc_last_alive_ms[i])
                          ? (max_val - rtc_last_alive_ms[i])
@@ -55,9 +61,16 @@ void System_DiagnoseStuck() {
   }
 
   s_stuck_diag.found = true;
-  if (found_idx >= 0 && found_idx < 6) {
-    snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
-             "Task WDT: %s (+%.1fs)", TASK_NAMES[found_idx], max_gap / 1000.0f);
+  if (found_idx >= 0 && found_idx < static_cast<int>(Config::Task::TASK_COUNT)) {
+    if (found_idx == Config::Task::WDT_ID_TELNET && ((saved_telnet_stage >> 16) == 0xA5A5)) {
+      uint16_t stage = static_cast<uint16_t>(saved_telnet_stage & 0xFFFF);
+      snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
+               "Task WDT: %s (stage=%u, +%.1fs)", TASK_NAMES[found_idx],
+               (unsigned)stage, max_gap / 1000.0f);
+    } else {
+      snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
+               "Task WDT: %s (+%.1fs)", TASK_NAMES[found_idx], max_gap / 1000.0f);
+    }
   } else {
     snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
              "Task WDT: All Tasks Stalled");

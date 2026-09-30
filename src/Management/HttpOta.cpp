@@ -588,12 +588,42 @@ static void Task_HttpOta(void *pvParameters) {
   vTaskDelete(nullptr);
 }
 
+class OtaAdmissionGuard {
+public:
+  OtaAdmissionGuard() {
+    g_ota_in_progress.store(true, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+  }
+  ~OtaAdmissionGuard() {
+    if (!_dismissed) {
+      g_ota_in_progress.store(false, std::memory_order_release);
+      g_http_ota_state.in_progress.store(false, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+      }
+    }
+  }
+  void dismiss() noexcept { _dismissed = true; }
+  OtaAdmissionGuard(const OtaAdmissionGuard &) = delete;
+  OtaAdmissionGuard &operator=(const OtaAdmissionGuard &) = delete;
+
+private:
+  bool _dismissed{false};
+};
+
 void Mgmt_StartHttpOta(const char *url) {
-  // 1. 이미 진행 중인지 원자적으로 확인
-  if (g_http_ota_state.in_progress.exchange(true, std::memory_order_acq_rel)) {
+  // 1. 이미 진행 중인지 원자적으로 확인 (CAS)
+  bool expected = false;
+  if (!g_http_ota_state.in_progress.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel)) {
     ::Serial.println("[OTA] Start requested but already in progress");
     return;
   }
+
+  // 2. Admission Guard 생성 (모든 조기 리턴 및 실패 경로에서 자동 롤백 보장)
+  OtaAdmissionGuard admission_guard;
 
   const char *target = url;
   if (!target || strlen(target) == 0) {
@@ -606,7 +636,6 @@ void Mgmt_StartHttpOta(const char *url) {
                     (unsigned)strlen(target), (unsigned)MAX_INITIAL_URL_LEN);
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Initial OTA URL too long");
-    g_http_ota_state.in_progress.store(false, std::memory_order_release);
     return;
   }
 
@@ -616,12 +645,11 @@ void Mgmt_StartHttpOta(const char *url) {
   bool target_is_https = false;
   extract_url_components(target, target_host, sizeof(target_host), target_port, target_path, sizeof(target_path), target_is_https);
 
-  // 2. 외부 HTTPS인 경우 유효한 시스템 시간 Sanity check (NTP 미동기화 시 인증서 검증 실패 방지)
+  // 3. 외부 HTTPS인 경우 유효한 시스템 시간 Sanity check (NTP 미동기화 시 인증서 검증 실패 방지)
   if (!is_private_host(target_host) && time(nullptr) < 1700000000) {
     ::Serial.println("[OTA] System time not synced (NTP required for TLS)");
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "System time not synced (NTP required)");
-    g_http_ota_state.in_progress.store(false, std::memory_order_release);
     return;
   }
 
@@ -630,11 +658,10 @@ void Mgmt_StartHttpOta(const char *url) {
                     target_host[0] ? target_host : "invalid", target_port, target_path);
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Untrusted OTA URL domain, port, or path");
-    g_http_ota_state.in_progress.store(false, std::memory_order_release);
     return;
   }
 
-  // 3. 힙 메모리 여유 사전 검사 (TLS 핸드셰이크 최소 내부 SRAM 60KB & 연속 30KB 확보)
+  // 4. 힙 메모리 여유 사전 검사 (TLS 핸드셰이크 최소 내부 SRAM 60KB & 연속 30KB 확보)
   uint32_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   uint32_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   ::Serial.printf("[OTA] Internal SRAM check: free=%u bytes, largest_block=%u bytes\r\n",
@@ -646,7 +673,6 @@ void Mgmt_StartHttpOta(const char *url) {
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
     snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
              "Heap too low (%u bytes, largest %u, need >= 60000)", (unsigned)free_heap, (unsigned)largest_block);
-    g_http_ota_state.in_progress.store(false, std::memory_order_release);
     return;
   }
 
@@ -657,7 +683,7 @@ void Mgmt_StartHttpOta(const char *url) {
   g_http_ota_state.progress_pct = 0;
   g_http_ota_state.last_error[0] = '\0';
 
-  // 4. OTA 전용 백그라운드 태스크 생성 (Core 0, 우선순위 10, 스택 12KB)
+  // 5. OTA 전용 백그라운드 태스크 생성 (Core 1, 우선순위 10, 스택 12KB)
   BaseType_t res = xTaskCreatePinnedToCore(
       Task_HttpOta,
       "HttpOtaTask",
@@ -665,14 +691,16 @@ void Mgmt_StartHttpOta(const char *url) {
       s_ota_target_url,
       10,
       nullptr,
-      0
+      1
   );
 
   if (res != pdPASS) {
-    ::Serial.println("[OTA] Failed to create HttpOtaTask");
+    ::Serial.printf("[OTA] Failed to create HttpOtaTask: %d\r\n", res);
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
-    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Task creation failed");
-    g_http_ota_state.in_progress.store(false, std::memory_order_release);
+    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error), "Failed to spawn OTA task");
     return;
   }
+
+  // 6. 태스크 생성 성공: Task_HttpOta로 생명주기 인계
+  admission_guard.dismiss();
 }

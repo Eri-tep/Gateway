@@ -173,6 +173,7 @@ void TelnetManager::tick() {
     tv.tv_usec = 10000;
   }
 
+  TSTAGE(6);
   int activity = select(max_fd + 1, &readfds, &writefds, &errorfds, &tv);
 
   if (activity < 0) {
@@ -182,9 +183,11 @@ void TelnetManager::tick() {
     return;
   }
 
+  TSTAGE(7);
   MutexLocker cliLock(_cli_mutex);
   uint32_t now = millis();
 
+  TSTAGE(8);
   if (_server_fd >= 0 && FD_ISSET(_server_fd, &readfds)) {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
@@ -217,6 +220,7 @@ void TelnetManager::tick() {
     bool did_read = false;
     if (FD_ISSET(s.sock, &readfds)) {
       char rx_buf[128];
+      TSTAGE(9);
       int len = recv(s.sock, rx_buf, sizeof(rx_buf) - 1, 0);
       if (len > 0) {
         rx_buf[len] = '\0';
@@ -234,6 +238,7 @@ void TelnetManager::tick() {
     // select 반환 당시의 txLen(stale EmbeddedCli echo bytes)이 테이블 사이로
     // 끼어드는 것을 방지한다.
     if (!did_read && FD_ISSET(s.sock, &writefds) && s.txLen > 0) {
+      TSTAGE(10);
       int sent = send(s.sock, s.txBuf, s.txLen, MSG_DONTWAIT);
       if (sent > 0) {
         if (static_cast<size_t>(sent) < s.txLen) {
@@ -267,19 +272,25 @@ bool TelnetManager::broadcastNoticeNonBlocking(const char *msg) {
   return true;
 }
 
-constexpr uint8_t WDT_ID_TELNET = 5;
-
 void Task_Telnet(void *pvParameters) {
+  TSTAGE(1);
   const esp_err_t wdt_ret = esp_task_wdt_add(nullptr);
   const bool twdt_registered = (wdt_ret == ESP_OK);
+  TSTAGE(2);
   if (!g_tracer_sem)
     g_tracer_sem = xSemaphoreCreateBinary();
   g_telnet_manager.startServer();
+  TSTAGE(3);
+
+  static bool first_feed = true;
+  static uint32_t s_last_twdt_feed_ms = 0;
+  static uint32_t s_max_twdt_interval_ms = 0;
 
   bool ota_notice_sent = false;
 
   for (;;) {
     if (g_ota_in_progress.load(std::memory_order_acquire)) {
+      TSTAGE(4);
       if (!ota_notice_sent) {
         if (g_telnet_manager.broadcastNoticeNonBlocking(
                 "\r\n[OTA] Firmware update in progress. Telnet CLI paused...\r\n")) {
@@ -287,18 +298,41 @@ void Task_Telnet(void *pvParameters) {
         }
       }
       if (twdt_registered) {
+        uint32_t now_ms = millis();
+        if (first_feed) {
+          s_last_twdt_feed_ms = now_ms;
+          first_feed = false;
+        } else {
+          uint32_t interval = now_ms - s_last_twdt_feed_ms;
+          if (interval > s_max_twdt_interval_ms) {
+            s_max_twdt_interval_ms = interval;
+          }
+          s_last_twdt_feed_ms = now_ms;
+        }
         esp_task_wdt_reset();
       }
-      g_wdt_monitor.feed(WDT_ID_TELNET);
+      g_wdt_monitor.feed(Config::Task::WDT_ID_TELNET);
       vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
     ota_notice_sent = false;
 
+    TSTAGE(5);
     if (twdt_registered) {
+      uint32_t now_ms = millis();
+      if (first_feed) {
+        s_last_twdt_feed_ms = now_ms;
+        first_feed = false;
+      } else {
+        uint32_t interval = now_ms - s_last_twdt_feed_ms;
+        if (interval > s_max_twdt_interval_ms) {
+          s_max_twdt_interval_ms = interval;
+        }
+        s_last_twdt_feed_ms = now_ms;
+      }
       esp_task_wdt_reset();
     }
-    g_wdt_monitor.feed(WDT_ID_TELNET);
+    g_wdt_monitor.feed(Config::Task::WDT_ID_TELNET);
 
     if (g_restart_pending.load(std::memory_order_acquire)) {
       g_restart_pending.store(false, std::memory_order_relaxed);
@@ -307,10 +341,13 @@ void Task_Telnet(void *pvParameters) {
 
     g_telnet_manager.tick();
 
+    TSTAGE(11);
     if (g_telnet_manager.hasActiveClients()) {
       g_telnet_tracer.flushToClient();
+      TSTAGE(14);
       xSemaphoreTake(g_tracer_sem, pdMS_TO_TICKS(5));
     } else {
+      TSTAGE(14);
       xSemaphoreTake(g_tracer_sem, 0);
     }
   }
