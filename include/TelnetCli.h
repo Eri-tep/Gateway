@@ -131,6 +131,7 @@ public:
   void tick();
   void shutdownForReboot();
   void sendScanResult(const WifiScanReq &req, const char *result_str);
+  bool broadcastNoticeNonBlocking(const char *msg);
   bool hasActiveClients() const noexcept {
     for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
       if (_sessions[i].sock >= 0)

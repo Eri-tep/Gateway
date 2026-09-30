@@ -173,7 +173,32 @@ static bool is_trusted_ota_url(const char *url, OtaUrlContext context) {
   return false;
 }
 
+class OtaInProgressGuard {
+public:
+  OtaInProgressGuard() {
+    g_ota_in_progress.store(true, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+  }
+  ~OtaInProgressGuard() {
+    if (!_dismissed) {
+      g_ota_in_progress.store(false, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+      }
+    }
+  }
+  void dismiss() noexcept { _dismissed = true; }
+  OtaInProgressGuard(const OtaInProgressGuard &) = delete;
+  OtaInProgressGuard &operator=(const OtaInProgressGuard &) = delete;
+
+private:
+  bool _dismissed{false};
+};
+
 static bool do_ota(const char *initial_url) {
+  OtaInProgressGuard ota_guard;
   auto fail = [](const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -201,11 +226,7 @@ static bool do_ota(const char *initial_url) {
   g_http_ota_state.progress_pct = 0;
   g_http_ota_state.last_error[0] = '\0';
 
-  // [Step 1] OTA 진행 플래그 설정 및 RS-485 폴링 태스크 대기 유도
-  g_ota_in_progress.store(true, std::memory_order_release);
-  if (g_system_event_group) {
-    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-  }
+  // [Step 1] OTA 진행 플래그 설정 (OtaInProgressGuard 생성자에서 수행됨)
 
   // [Step 2] EW11 소켓 일시 해제 (lwIP pcb + 소켓 수신 버퍼 힙 확보)
   // 뮤텍스를 짧은 블록 스코프로 제한하여 소켓 정리 직후 즉시 반환
@@ -397,6 +418,7 @@ static bool do_ota(const char *initial_url) {
   size_t written = 0;
   uint32_t last_progress_time = millis();
   uint32_t download_start_ms = millis();
+  uint32_t last_diag_ms = millis();
   int last_pct = -1;
 
   while (written < static_cast<size_t>(contentLength)) {
@@ -453,7 +475,7 @@ static bool do_ota(const char *initial_url) {
       continue;
     }
 
-    // ===== Happy Path (완전 Flat 구조, 성공 시 지연 없이 즉시 다음 청크 스트리밍) =====
+    // ===== Happy Path (Flash Stream Write) =====
     size_t written_bytes = Update.write(s_ota_buff, read_bytes);
     if (written_bytes != read_bytes) {
       fail("Update.write mismatch (exp %u, got %u)", (unsigned)read_bytes, (unsigned)written_bytes);
@@ -472,6 +494,20 @@ static bool do_ota(const char *initial_url) {
       last_pct = pct;
       ::Serial.printf("[OTA] Progress: %d%% (%u / %d bytes)\r\n", pct, (unsigned)written, contentLength);
     }
+
+    // Periodic diagnostic telemetry (every 5 seconds to Serial)
+    if (TimeUtils::isElapsed(last_diag_ms, 5000)) {
+      last_diag_ms = millis();
+      uint32_t cur_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      uint32_t cur_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      uint32_t cur_min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      ::Serial.printf("[OTA] %u/%d bytes (%d%%), free=%u, largest=%u, min=%u\r\n",
+                      (unsigned)written, contentLength, pct,
+                      (unsigned)cur_free, (unsigned)cur_largest, (unsigned)cur_min);
+    }
+
+    // Cooperative yield: provide scheduling window for Core 0 tasks
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 
   ::Serial.printf("[OTA] Phase 4: Download complete (%u bytes). Finalizing update...\r\n", (unsigned)written);
@@ -501,6 +537,7 @@ static bool do_ota(const char *initial_url) {
   snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Success");
   g_http_ota_state.progress_pct = 100;
   ::Serial.printf("[OTA] Firmware update SUCCESS! Rebooting in 1 second...\r\n");
+  ota_guard.dismiss();
   return true;
 }
 

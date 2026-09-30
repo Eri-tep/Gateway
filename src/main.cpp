@@ -31,6 +31,7 @@ static WallpadChannelConfig ch3_config = {
 
 static void Boot_CheckCrashLoop() {
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
   g_boot_start_ms = millis();
   System_DiagnoseStuck();
   System_CheckCoreDump();

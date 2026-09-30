@@ -250,14 +250,55 @@ void TelnetManager::tick() {
   }
 }
 
+bool TelnetManager::broadcastNoticeNonBlocking(const char *msg) {
+  if (!msg)
+    return true;
+  MutexLocker cliLock(_cli_mutex, 0);
+  if (!cliLock.isLocked()) {
+    return false;
+  }
+  size_t len = strlen(msg);
+  for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
+    int sock = _sessions[i].sock;
+    if (sock >= 0) {
+      send(sock, msg, len, MSG_DONTWAIT);
+    }
+  }
+  return true;
+}
+
+constexpr uint8_t WDT_ID_TELNET = 5;
+
 void Task_Telnet(void *pvParameters) {
-  esp_task_wdt_add(nullptr);
+  const esp_err_t wdt_ret = esp_task_wdt_add(nullptr);
+  const bool twdt_registered = (wdt_ret == ESP_OK);
   if (!g_tracer_sem)
     g_tracer_sem = xSemaphoreCreateBinary();
   g_telnet_manager.startServer();
 
+  bool ota_notice_sent = false;
+
   for (;;) {
-    g_wdt_monitor.feed(5);
+    if (g_ota_in_progress.load(std::memory_order_acquire)) {
+      if (!ota_notice_sent) {
+        if (g_telnet_manager.broadcastNoticeNonBlocking(
+                "\r\n[OTA] Firmware update in progress. Telnet CLI paused...\r\n")) {
+          ota_notice_sent = true;
+        }
+      }
+      if (twdt_registered) {
+        esp_task_wdt_reset();
+      }
+      g_wdt_monitor.feed(WDT_ID_TELNET);
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    ota_notice_sent = false;
+
+    if (twdt_registered) {
+      esp_task_wdt_reset();
+    }
+    g_wdt_monitor.feed(WDT_ID_TELNET);
 
     if (g_restart_pending.load(std::memory_order_acquire)) {
       g_restart_pending.store(false, std::memory_order_relaxed);

@@ -9,15 +9,18 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.4.6";
+constexpr const char *FIRMWARE_VERSION = "v1.4.7";
 } // namespace Config
 
 namespace Config::Task {
-// [Task] Core1 RS-485 마스터(CH1) 통신 스택 크기 (실측 3.0KB + 3배 마진 3.0KB = 6KB)
+// [Task] Core1 RS-485 마스터(CH1) 통신 스택 크기 (실측 3.0KB + 3배 마진 3.0KB =
+// 6KB)
 constexpr size_t STACK_SIZE_CORE1 = 6144;
-// [Task] Core1 RS-485 슬레이브(CH2, CH3) 통신 스택 크기 (실측 3.6KB + 2배 마진 2.0KB = 5.5KB)
+// [Task] Core1 RS-485 슬레이브(CH2, CH3) 통신 스택 크기 (실측 3.6KB + 2배
+// 마진 2.0KB = 5.5KB)
 constexpr size_t STACK_SIZE_SLAVE = 5632;
-// [Task] Core1 도어폰(CH4 SoftwareSerial) 통신 스택 크기 (실측 1.9KB + 2배 마진 2.2KB = 4KB)
+// [Task] Core1 도어폰(CH4 SoftwareSerial) 통신 스택 크기 (실측 1.9KB + 2배
+// 마진 2.2KB = 4KB)
 constexpr size_t STACK_SIZE_CH4 = 4096;
 // [Task] Core0 네트워크 스택 크기 (실측 4.1KB + 4배 마진 4.1KB = 8KB 보존)
 constexpr size_t STACK_SIZE_CORE0 = 8192;
