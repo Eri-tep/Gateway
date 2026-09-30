@@ -25,8 +25,8 @@ TaskWdtMonitor g_wdt_monitor;
 
 StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf;
 uint8_t g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS * sizeof(StaticPacket)];
+uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
 
 QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
 QueueSetHandle_t g_ch1_queue_set = nullptr;

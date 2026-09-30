@@ -106,7 +106,7 @@ struct RtcWarmCache {
   uint32_t magic; // 0x57415243 ('WARC')
   uint8_t count;
   uint8_t reserved[3];
-  RtcWarmCacheEntry entries[32];
+  RtcWarmCacheEntry entries[48];
   uint32_t crc32;
 };
 
@@ -202,7 +202,8 @@ struct WallpadChannelConfig {
 
 class DeviceRepository {
 private:
-  static constexpr size_t MAX_DEVICES = 64;
+  // 1차 캐시(MAX_TARGETS=48)와 1:1 일치 정렬 (실제 28대 + 20대 여유)
+  static constexpr size_t MAX_DEVICES = 48;
   DeviceStateEntry cache[MAX_DEVICES]{};
   int8_t dev_lookup_map[256]{};
   size_t device_count = 0;
@@ -307,9 +308,9 @@ extern StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf,
 extern uint8_t
     g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 extern uint8_t
-    g_ch4_pass_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+    g_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS * sizeof(StaticPacket)];
 extern uint8_t
-    g_ch1_vip_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+    g_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
 
 extern StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
     g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,

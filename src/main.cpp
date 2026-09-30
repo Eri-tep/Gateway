@@ -128,15 +128,14 @@ static void Boot_InitSyncPrimitives() {
   g_uart1_mutex = xSemaphoreCreateMutex();
   g_uart2_mutex = xSemaphoreCreateMutex();
 
-  auto init_q = [](StaticQueue_t *qb, uint8_t *st) {
-    return xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL,
-                              sizeof(StaticPacket), st, qb);
+  auto init_q = [](StaticQueue_t *qb, uint8_t *st, size_t q_len) {
+    return xQueueCreateStatic(q_len, sizeof(StaticPacket), st, qb);
   };
-  g_ch1_control_queue = init_q(&g_ch1_ctrl_queue_buf, g_ch1_ctrl_storage);
-  g_ch1_vip_queue = init_q(&g_ch1_vip_queue_buf, g_ch1_vip_storage);
-  g_ch4_passthrough_queue = init_q(&g_ch4_pass_queue_buf, g_ch4_pass_storage);
+  g_ch1_control_queue = init_q(&g_ch1_ctrl_queue_buf, g_ch1_ctrl_storage, Config::Queue::POOL_SIZE_CONTROL);
+  g_ch1_vip_queue = init_q(&g_ch1_vip_queue_buf, g_ch1_vip_storage, Config::Queue::POOL_SIZE_VIP);
+  g_ch4_passthrough_queue = init_q(&g_ch4_pass_queue_buf, g_ch4_pass_storage, Config::Queue::POOL_SIZE_CH4_PASS);
 
-  g_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL * 2);
+  g_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL + Config::Queue::POOL_SIZE_VIP);
   if (g_ch1_queue_set) {
     BaseType_t res1 = xQueueAddToSet(g_ch1_vip_queue, g_ch1_queue_set);
     BaseType_t res2 = xQueueAddToSet(g_ch1_control_queue, g_ch1_queue_set);

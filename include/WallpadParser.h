@@ -72,8 +72,8 @@ struct PollingTargetEntry {
 
 class PollingTargetRegistry {
 public:
-  // 현대통신 세대망 환경(조명 1~8, 난방 1~6, 가스, 환기, 대기전력, 에어컨 등) 32대로 넉넉히 수용
-  static constexpr size_t MAX_TARGETS = 32;
+  // 현대통신 세대망 환경(실제 28대 기기 수용 + 20대 여유 슬롯) 48대 설정
+  static constexpr size_t MAX_TARGETS = 48;
 
   // 폴링 후보 선별을 위한 경량 메타데이터 구조체 (7 bytes)
   struct PollingCandidate {

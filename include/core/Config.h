@@ -9,7 +9,7 @@
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.4.4";
+constexpr const char *FIRMWARE_VERSION = "v1.4.5";
 } // namespace Config
 
 namespace Config::Task {
@@ -26,8 +26,12 @@ constexpr size_t STACK_SIZE_TELNET = 9216;
 } // namespace Config::Task
 
 namespace Config::Queue {
-// [Queue] CH1 제어 명령 큐 용량 (기본: 32개)
+// [Queue] CH1 일반 제어 명령 큐 용량 (기본: 32개)
 constexpr size_t POOL_SIZE_CONTROL = 32;
+// [Queue] CH1 VIP 긴급 제어 명령 큐 용량 (16개)
+constexpr size_t POOL_SIZE_VIP = 16;
+// [Queue] CH4 도어폰 패스스루 큐 용량 (16개)
+constexpr size_t POOL_SIZE_CH4_PASS = 16;
 // [Queue] UART 이벤트 이중화 큐 (기본: 16개)
 constexpr size_t UART_EVENT_QUEUE_SIZE = 16;
 } // namespace Config::Queue
