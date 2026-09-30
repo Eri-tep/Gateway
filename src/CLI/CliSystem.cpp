@@ -253,11 +253,12 @@ void cmdCoreDump(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  static char buf[2048]; // BSS 영역 고정 배치 [C-5]
+  char *buf = g_cli_scratch_buf;
+  constexpr size_t buf_size = sizeof(g_cli_scratch_buf);
   int pos = 0;
 
   pos += snprintf(
-      buf + pos, sizeof(buf) - pos,
+      buf + pos, buf_size - pos,
       "\r\n========================================================================"
       "========\r\n"
       "                    CRASH CORE DUMP BACKTRACE SUMMARY                   "
@@ -274,14 +275,14 @@ void cmdCoreDump(EmbeddedCli *cli, char *args, void *context) {
       summary.exc_bt_info.depth,
       summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
 
-  for (int i = 0; i < summary.exc_bt_info.depth && pos < static_cast<int>(sizeof(buf)) - 64;
+  for (int i = 0; i < summary.exc_bt_info.depth && pos < static_cast<int>(buf_size) - 64;
        ++i) {
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "  [%2d] 0x%08X\r\n", i,
+    pos += snprintf(buf + pos, buf_size - pos, "  [%2d] 0x%08X\r\n", i,
                     static_cast<unsigned>(summary.exc_bt_info.bt[i]));
   }
 
   pos += snprintf(
-      buf + pos, sizeof(buf) - pos,
+      buf + pos, buf_size - pos,
       "\r\n===================================================================="
       "============\r\n"
       "Use: xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>\r\n"

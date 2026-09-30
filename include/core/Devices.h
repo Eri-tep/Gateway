@@ -106,7 +106,7 @@ struct RtcWarmCache {
   uint32_t magic; // 0x57415243 ('WARC')
   uint8_t count;
   uint8_t reserved[3];
-  RtcWarmCacheEntry entries[64];
+  RtcWarmCacheEntry entries[32];
   uint32_t crc32;
 };
 

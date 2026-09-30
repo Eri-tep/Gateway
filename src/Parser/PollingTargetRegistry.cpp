@@ -169,6 +169,41 @@ size_t PollingTargetRegistry::getActiveTargets(PollingTargetEntry *out_targets,
   return written;
 }
 
+size_t PollingTargetRegistry::getActiveCandidates(PollingCandidate *out_cands,
+                                                 size_t max_count) {
+  if (!out_cands || max_count == 0)
+    return 0;
+  CriticalSectionLocker lock(&_mux);
+  size_t written = 0;
+  for (size_t i = 0; i < _count && written < max_count; ++i) {
+    if (_entries[i].is_active) {
+      out_cands[written].dev_id = _entries[i].dev_id;
+      out_cands[written].sub1 = _entries[i].sub1;
+      out_cands[written].sub2 = _entries[i].sub2;
+      out_cands[written].source_channels = _entries[i].source_channels;
+      out_cands[written].raw_ack_len = _entries[i].raw_ack_len;
+      out_cands[written].raw_query_len = _entries[i].raw_query_len;
+      out_cands[written].entry_idx = static_cast<uint8_t>(i);
+      written++;
+    }
+  }
+  return written;
+}
+
+bool PollingTargetRegistry::getQueryData(uint8_t entry_idx,
+                                        const uint8_t *&out_data,
+                                        uint8_t &out_len) const {
+  CriticalSectionLocker lock(&_mux);
+  if (entry_idx >= _count || !_entries[entry_idx].is_active) {
+    out_data = nullptr;
+    out_len = 0;
+    return false;
+  }
+  out_len = _entries[entry_idx].raw_query_len;
+  out_data = _entries[entry_idx].raw_query_data.data();
+  return true;
+}
+
 size_t PollingTargetRegistry::activeCount() const {
   CriticalSectionLocker lock(&_mux);
   size_t active = 0;

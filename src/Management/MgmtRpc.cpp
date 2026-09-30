@@ -199,6 +199,9 @@ static void sendRpcResponse(int sock, long req_id, const char *res, const char *
   }
 }
 
+// Task_Network 단일 태스크 동기 전송 환경: 직렬 응답 버퍼 단일화 (-3,072B)
+static char s_mgmt_resp_buf[4096];
+
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   if (sock < 0 || !json_str) return;
 
@@ -229,9 +232,8 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   }
 
   if (strcasecmp(cmd, "get_telemetry") == 0) {
-    static char tel_buf[3072];
-    tel_buf[0] = '\0';
-    AppendBuf ab{tel_buf, sizeof(tel_buf)};
+    s_mgmt_resp_buf[0] = '\0';
+    AppendBuf ab{s_mgmt_resp_buf, sizeof(s_mgmt_resp_buf)};
     Mgmt_SerializeTelemetry(ab, req_id);
     ab.append("\n");
     send(sock, ab.buf, ab.offset, MSG_DONTWAIT);
@@ -618,9 +620,8 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
 
   if (strcasecmp(cmd, "get_devices") == 0 || strcasecmp(cmd, "gd") == 0 ||
       strcasecmp(cmd, "get_locked_devices") == 0 || strcasecmp(cmd, "gld") == 0) {
-    static char dev_buf[4096];
-    dev_buf[0] = '\0';
-    AppendBuf ab{dev_buf, sizeof(dev_buf)};
+    s_mgmt_resp_buf[0] = '\0';
+    AppendBuf ab{s_mgmt_resp_buf, sizeof(s_mgmt_resp_buf)};
     Mgmt_SerializeDevices(ab, req_id);
     send(sock, ab.buf, ab.offset, MSG_DONTWAIT);
     g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);

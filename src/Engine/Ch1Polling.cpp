@@ -10,8 +10,9 @@ constexpr uint32_t CACHE_CONVERGENCE_STABLE_MS = 1500;
 void Ch1_PollNext(size_t &current_dev_idx) {
   g_polling_targets.sweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
 
-  static PollingTargetEntry s_active_targets[PollingTargetRegistry::MAX_TARGETS];
-  size_t active_cnt = g_polling_targets.getActiveTargets(s_active_targets, PollingTargetRegistry::MAX_TARGETS);
+  // 불필요한 9.7KB BSS 버퍼를 제거하고 224B 경량 메타데이터 스택 배열 활용
+  PollingTargetRegistry::PollingCandidate candidates[PollingTargetRegistry::MAX_TARGETS];
+  size_t active_cnt = g_polling_targets.getActiveCandidates(candidates, PollingTargetRegistry::MAX_TARGETS);
 
   uint8_t poll_dev_id = 0, poll_sub1 = 0, poll_sub2 = 0;
   const uint8_t *poll_raw_ptr = nullptr;
@@ -25,7 +26,7 @@ void Ch1_PollNext(size_t &current_dev_idx) {
 
     for (size_t i = 0; i < active_cnt; i++) {
       size_t idx = (current_dev_idx + i) % active_cnt;
-      const auto &tgt = s_active_targets[idx];
+      const auto &tgt = candidates[idx];
 
       constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
       if (tgt.source_channels != 0 && (tgt.source_channels & CH23_MASK) == 0) {
@@ -57,13 +58,14 @@ void Ch1_PollNext(size_t &current_dev_idx) {
     }
 
     if (best_prio <= 3) {
-      const auto &tgt = s_active_targets[best_idx];
+      const auto &tgt = candidates[best_idx];
       poll_dev_id = tgt.dev_id;
       poll_sub1 = tgt.sub1;
       poll_sub2 = tgt.sub2;
       poll_raw_len = tgt.raw_query_len;
-      if (poll_raw_len > 0)
-        poll_raw_ptr = tgt.raw_query_data.data();
+      if (poll_raw_len > 0) {
+        g_polling_targets.getQueryData(tgt.entry_idx, poll_raw_ptr, poll_raw_len);
+      }
 
       if (best_prio == 3) {
         g_device_repo.setLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);

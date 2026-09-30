@@ -72,7 +72,19 @@ struct PollingTargetEntry {
 
 class PollingTargetRegistry {
 public:
-  static constexpr size_t MAX_TARGETS = 64;
+  // 현대통신 세대망 환경(조명 1~8, 난방 1~6, 가스, 환기, 대기전력, 에어컨 등) 32대로 넉넉히 수용
+  static constexpr size_t MAX_TARGETS = 32;
+
+  // 폴링 후보 선별을 위한 경량 메타데이터 구조체 (7 bytes)
+  struct PollingCandidate {
+    uint8_t dev_id{0};
+    uint8_t sub1{0};
+    uint8_t sub2{0};
+    uint8_t source_channels{0};
+    uint8_t raw_ack_len{0};
+    uint8_t raw_query_len{0};
+    uint8_t entry_idx{0};
+  };
 
 private:
   PollingTargetEntry _entries[MAX_TARGETS]{};
@@ -88,6 +100,8 @@ public:
                           uint8_t sub2_offset);
   void sweepExpired(uint32_t ttl_ms = 30000);
   size_t getActiveTargets(PollingTargetEntry *out_buf, size_t max_count);
+  size_t getActiveCandidates(PollingCandidate *out_cands, size_t max_count);
+  bool getQueryData(uint8_t entry_idx, const uint8_t *&out_data, uint8_t &out_len) const;
   size_t activeCount() const;
   size_t totalCount() const;
   size_t ackedCount() const;

@@ -67,9 +67,8 @@ static const ConfigParamDef PARAM_TABLE[] = {
 static const size_t PARAM_COUNT = sizeof(PARAM_TABLE) / sizeof(ConfigParamDef);
 
 void printConfig(int sock) {
-  // BSS 영역 고정 배치 — Task_Telnet 단일 직렬 실행, mutex 불필요 [C-5]
-  static char buf[2048];
-  AppendBuf out{buf, sizeof(buf)};
+  g_cli_scratch_buf[0] = '\0';
+  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
 
   char f1[8], f2[8], f3[8], f4[8];
   snprintf(f1, sizeof(f1), "%s", formatFramingStr(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits));
@@ -111,8 +110,8 @@ void printConfig(int sock) {
 }
 
 void printConfigHelp(int sock) {
-  static char buf[2048]; // BSS 영역 고정 배치 [C-5]
-  AppendBuf out{buf, sizeof(buf)};
+  g_cli_scratch_buf[0] = '\0';
+  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
 
   out.append("\r\n");
   out.append(Fmt::DIV80EQ);
@@ -524,8 +523,8 @@ void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
   static DeviceRouteEntry entries[DeviceRouteRegistry::MAX_ROUTES];
   size_t count = g_route_registry.getRoutes(entries, DeviceRouteRegistry::MAX_ROUTES);
 
-  static char buf[2048]; // BSS 영역 고정 배치 [C-5]
-  AppendBuf out{buf, sizeof(buf)};
+  g_cli_scratch_buf[0] = '\0';
+  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
   out.append("\r\n");
   out.append(Fmt::DIV80EQ);
   out.append("                 DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)         \r\n");
