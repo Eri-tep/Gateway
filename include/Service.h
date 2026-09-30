@@ -1,6 +1,8 @@
 #pragma once
 
-#include "Common.h"
+#include "Core.h"
+
+
 #include <lwip/sockets.h>
 
 // ============================================================================
@@ -63,3 +65,7 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                int ho = 0, int vent_mode = 1);
 void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
+
+// ── Network Subsystem Entry Points ──
+void Task_Network(void *pvParameters);
+extern EventGroupHandle_t g_wifi_event_group;

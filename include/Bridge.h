@@ -1,6 +1,8 @@
 #pragma once
 
-#include "Common.h"
+#include "Core.h"
+
+
 #include <cstdint>
 #include <cstddef>
 
@@ -95,3 +97,8 @@ void processStream(int slot_idx, struct HubClientSlot *slot);
 bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count = 2, uint32_t silence_ms = 20);
 
 } // namespace Ew11Manager
+
+// ── EW11 Socket Server & Client Bridge Entry Points ──
+int Hub_AcceptClient(int slot_idx, int server_fd);
+void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data, size_t pkt_len);
+void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len);
