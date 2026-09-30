@@ -435,7 +435,7 @@ static bool do_ota(const char *initial_url) {
 
     // 2. 마지막 정상 수신 이후 stall timeout (어떤 continue 경로에서도 반드시 매 루프 검사)
     if (millis() - last_progress_time > Config::OTA::STALL_TIMEOUT_MS) {
-      fail("Stream read stall timeout (15s)");
+      fail("Stream read stall timeout (25s)");
       http.end();
       secure_client.stop();
       plain_client.stop();

@@ -265,7 +265,9 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     end,
     ota = function()
       log.info("🚀 [CMD] Cloud OTA Update triggered from OTA switch!")
-      CommandHandlers.handle_start_ota(driver, device, command)
+      cosock.spawn(function()
+        CommandHandlers.handle_start_ota(driver, device, command)
+      end, "ota_update_task")
     end,
   }
 
@@ -326,22 +328,54 @@ function CommandHandlers.handle_start_ota(driver, device, command)
   end
 
   log.info(string.format("🚀 [OTA] Triggering Cloud OTA -> Target URL: %s (Repo: %s, Channel: %s)", ota_url, repo, branch))
-  gateway_client.start_ota(ip, port, ota_url)
+  local ok, res, err = pcall(gateway_client.start_ota, ip, port, ota_url)
 
-  -- ESP32가 TLS 연결 및 펌웨어 다운로드/플래시/재부팅을 무사히 마칠 때까지 일체 폴링하지 않음
-  -- 25초 후 1회 상태 확인 및 정규 주기적 폴링 타이머 복구
-  device.thread:call_with_delay(25, function()
-    log.info("▶️ [OTA] OTA window finished, refreshing status and resuming periodic polling")
-    refresh_telemetry(driver, device)
-
-    -- 주기적 폴링 타이머 재등록
+  if not ok or (res == nil and err) then
+    log.error(string.format("❌ [OTA] Failed to trigger Cloud OTA: %s", tostring(err or res)))
+    if comp_ota and cap_ostate then
+      device:emit_component_event(comp_ota, cap_ostate.build({ value = "Failed (RPC Error)" }))
+    end
+    -- 실패 시 즉시 텔레메트리 갱신 및 폴링 복구 (기존 타이머 중복 정리)
+    pcall(refresh_telemetry, driver, device)
+    if device:get_field("poll_timer") then
+      device.thread:cancel_timer(device:get_field("poll_timer"))
+      device:set_field("poll_timer", nil)
+    end
     local interval = device.preferences.pollingInterval or 30
     if interval < 5 then interval = 5 end
     local timer = device.thread:call_on_schedule(interval, function()
-      refresh_telemetry(driver, device)
+      pcall(refresh_telemetry, driver, device)
+    end, "gateway_poll_timer")
+    device:set_field("poll_timer", timer)
+    return
+  end
+
+  -- 기존에 대기 중이던 OTA 복구 타이머가 있다면 중복 실행 방지를 위해 사전 취소
+  if device:get_field("ota_resume_timer") then
+    device.thread:cancel_timer(device:get_field("ota_resume_timer"))
+    device:set_field("ota_resume_timer", nil)
+  end
+
+  -- ESP32가 TLS 연결 및 펌웨어 다운로드/플래시/재부팅을 무사히 마칠 때까지 일체 폴링하지 않음
+  -- 35초 후 1회 상태 확인 및 정규 주기적 폴링 타이머 무조건 복구
+  local resume_timer = device.thread:call_with_delay(35, function()
+    device:set_field("ota_resume_timer", nil)
+    log.info("▶️ [OTA] OTA window finished, refreshing status and resuming periodic polling")
+    pcall(refresh_telemetry, driver, device)
+
+    -- 주기적 폴링 타이머 재등록 (기존 타이머 중복 방지 및 무조건 복구)
+    if device:get_field("poll_timer") then
+      device.thread:cancel_timer(device:get_field("poll_timer"))
+      device:set_field("poll_timer", nil)
+    end
+    local interval = device.preferences.pollingInterval or 30
+    if interval < 5 then interval = 5 end
+    local timer = device.thread:call_on_schedule(interval, function()
+      pcall(refresh_telemetry, driver, device)
     end, "gateway_poll_timer")
     device:set_field("poll_timer", timer)
   end, "ota_resume_timer")
+  device:set_field("ota_resume_timer", resume_timer)
 end
 
 -- ============================================================================

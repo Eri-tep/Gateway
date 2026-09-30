@@ -440,8 +440,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
       return;
     }
     Mgmt_StartHttpOta(target_url);
-    const char *ok_msg = "{\"res\":\"ok\",\"msg\":\"Cloud HTTPS OTA started in background\"}\n";
-    send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
+    sendRpcResponse(sock, req_id, "ok", "Cloud HTTPS OTA started in background");
     return;
   }
 
