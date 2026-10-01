@@ -2,16 +2,18 @@
 
 #include "Core.h"
 
-
 #include <lwip/sockets.h>
 
 // ============================================================================
 // 3대 핵심 런타임 타이밍 구조체 (NVS 영구 보관)
 // ============================================================================
 struct RuntimeTimingConfig {
-  uint16_t ch1_poll_interval_ms{1000}; // CH1 폴링 주기 (200~3000ms, 기본 1000ms)
-  uint16_t ch2_cache_delay_ms{30};     // CH2 메인 월패드 Virtual ACK 딜레이 (10~150ms, 기본 30ms)
-  uint16_t ch3_cache_delay_ms{240};    // CH3 서브 월패드 Virtual ACK 딜레이 (50~500ms, 기본 240ms)
+  uint16_t ch1_poll_interval_ms{
+      1000}; // CH1 폴링 주기 (200~3000ms, 기본 1000ms)
+  uint16_t ch2_cache_delay_ms{
+      30}; // CH2 메인 월패드 Virtual ACK 딜레이 (10~150ms, 기본 30ms)
+  uint16_t ch3_cache_delay_ms{
+      240}; // CH3 서브 월패드 Virtual ACK 딜레이 (50~500ms, 기본 240ms)
 };
 
 extern RuntimeTimingConfig g_timing_config;
@@ -31,7 +33,8 @@ struct HttpOtaState {
 
 extern HttpOtaState g_http_ota_state;
 
-static constexpr const char *DEFAULT_CLOUD_OTA_URL = "https://raw.githubusercontent.com/Eri-tep/Gateway/main/bin/firmware.bin";
+static constexpr const char *DEFAULT_CLOUD_OTA_URL =
+    "https://raw.githubusercontent.com/Eri-tep/Gateway/main/bin/firmware.bin";
 void Mgmt_StartHttpOta(const char *url);
 
 // ============================================================================
@@ -61,8 +64,9 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                DeviceClass dev_class, int power,
                                int target_temp = 0, int current_temp = 0,
                                int speed = 0, const char *valve_state = nullptr,
-                               float power_w = 0.0f, int floor = 0, int direction = 0,
-                               int ho = 0, int vent_mode = 1);
+                               float power_w = 0.0f, int floor = 0,
+                               int direction = 0, int ho = 0,
+                               int vent_mode = 1);
 void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
 

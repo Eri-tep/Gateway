@@ -1132,3 +1132,266 @@ void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
 }
 
 } // namespace Config::Doorphone
+
+// ============================================================================
+// SYSTEM & NETWORKING HELPER IMPLEMENTATIONS (Decoupled from Core.h)
+// ============================================================================
+
+SoftwareSerialConfig Door_SerialConfig(uint8_t data_bits, uint8_t parity,
+                                      uint8_t stop_bits) {
+  if (data_bits == 7 && stop_bits == 1) {
+    if (parity == 1)
+      return SWSERIAL_7E1;
+    if (parity == 2)
+      return SWSERIAL_7O1;
+  } else if (data_bits == 8) {
+    if (stop_bits == 1) {
+      if (parity == 1)
+        return SWSERIAL_8E1;
+      if (parity == 2)
+        return SWSERIAL_8O1;
+    } else if (stop_bits == 2 && parity == 0) {
+      return SWSERIAL_8N2;
+    }
+  }
+  return SWSERIAL_8N1;
+}
+
+const char *formatFramingStr(uint8_t data_bits, uint8_t parity,
+                             uint8_t stop_bits) noexcept {
+  if (data_bits == 8) {
+    if (parity == 0 && stop_bits == 1)
+      return "8N1";
+    if (parity == 1 && stop_bits == 1)
+      return "8E1";
+    if (parity == 2 && stop_bits == 1)
+      return "8O1";
+    if (parity == 0 && stop_bits == 2)
+      return "8N2";
+  }
+  return "8N1";
+}
+
+bool parseFramingStr(const char *str, uint8_t &data_bits,
+                     uint8_t &parity, uint8_t &stop_bits) noexcept {
+  if (!str)
+    return false;
+  if (strcasecmp(str, "8N1") == 0) {
+    data_bits = 8;
+    parity = 0;
+    stop_bits = 1;
+    return true;
+  } else if (strcasecmp(str, "8E1") == 0) {
+    data_bits = 8;
+    parity = 1;
+    stop_bits = 1;
+    return true;
+  } else if (strcasecmp(str, "8O1") == 0) {
+    data_bits = 8;
+    parity = 2;
+    stop_bits = 1;
+    return true;
+  } else if (strcasecmp(str, "8N2") == 0) {
+    data_bits = 8;
+    parity = 0;
+    stop_bits = 2;
+    return true;
+  }
+  return false;
+}
+
+bool Tcp_IsAllowedIP(IPAddress ip) {
+  if (ip == IPAddress(127, 0, 0, 1))
+    return true;
+
+  if (ip[0] == 172 && ip[1] == 30 && (ip[2] == 1 || ip[2] == 2))
+    return true;
+
+  if (WiFi.isConnected()) {
+    IPAddress sta_ip = WiFi.localIP();
+    IPAddress sta_mask = WiFi.subnetMask();
+    if ((ip & sta_mask) == (sta_ip & sta_mask))
+      return true;
+  }
+
+  if (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA) {
+    IPAddress ap_ip = WiFi.softAPIP();
+    IPAddress ap_mask = WiFi.softAPSubnetMask();
+    if ((ip & ap_mask) == (ap_ip & ap_mask))
+      return true;
+  }
+
+  return false;
+}
+
+bool Telnet_IsAllowedIP(IPAddress ip) {
+  if (ip == IPAddress(115, 91, 242, 69))
+    return true;
+
+  return Tcp_IsAllowedIP(ip);
+}
+
+bool Queue_EnqueueDropHead(QueueHandle_t queue,
+                           const StaticPacket &packet) noexcept {
+  if (UNLIKELY(!queue))
+    return false;
+  MutexLocker lock(g_ctrl_queue_mutex);
+  if (xQueueSend(queue, &packet, 0) == pdTRUE)
+    return true;
+  StaticPacket dummy;
+  xQueueReceive(queue, &dummy, 0);
+  return (xQueueSend(queue, &packet, 0) == pdTRUE);
+}
+
+// ============================================================================
+// Core Module Optimized Implementations & Method Bodies
+// ============================================================================
+
+namespace TimeUtils {
+bool isElapsed(uint32_t start_ms, uint32_t duration_ms) noexcept {
+  return (millis() - start_ms) >= duration_ms;
+}
+
+long elapsedMs(const struct timeval &now, const struct timeval &prev) noexcept {
+  if (prev.tv_sec == 0)
+    return -1;
+  const long total_ms =
+      (now.tv_sec - prev.tv_sec) * 1000 + (now.tv_usec - prev.tv_usec) / 1000;
+  return (total_ms >= 0 && total_ms < 60000) ? total_ms : -1;
+}
+} // namespace TimeUtils
+
+namespace Config::Timing {
+uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
+  if (baud == 0)
+    return DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS;
+  const uint32_t timeout = (60000UL + baud - 1) / baud;
+  return (timeout < 6) ? 6 : (timeout > 20 ? 20 : timeout);
+}
+} // namespace Config::Timing
+
+namespace Config::Doorphone {
+void FramingTracker::setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept {
+  candidate_stx.store(stx, std::memory_order_relaxed);
+  candidate_etx.store(etx, std::memory_order_relaxed);
+  candidate_len.store(len, std::memory_order_relaxed);
+  consecutive_matches.store(10, std::memory_order_relaxed);
+  consecutive_mismatches.store(0, std::memory_order_relaxed);
+  is_custom_fixed.store(true, std::memory_order_relaxed);
+  status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
+}
+
+void FramingTracker::reset() noexcept {
+  is_custom_fixed.store(false, std::memory_order_relaxed);
+  candidate_stx.store(0, std::memory_order_relaxed);
+  candidate_etx.store(0, std::memory_order_relaxed);
+  candidate_len.store(0, std::memory_order_relaxed);
+  consecutive_matches.store(0, std::memory_order_relaxed);
+  consecutive_mismatches.store(0, std::memory_order_relaxed);
+  status.store(FramingStatus::WAITING, std::memory_order_relaxed);
+}
+
+bool FramingTracker::isConsistent(uint8_t stx, uint8_t etx) const noexcept {
+  const FramingStatus cur = status.load(std::memory_order_relaxed);
+  if (cur != FramingStatus::LOCKED)
+    return true;
+  return (stx == candidate_stx.load(std::memory_order_relaxed) &&
+          etx == candidate_etx.load(std::memory_order_relaxed));
+}
+} // namespace Config::Doorphone
+
+namespace Fmt {
+void FormatHex(const uint8_t *data, size_t len, char *out,
+               size_t out_len) noexcept {
+  if (!out || out_len == 0)
+    return;
+  size_t idx = 0;
+  for (size_t k = 0; k < len && idx + 3 < out_len; ++k) {
+    const auto &hex_chars = HexLUT::LUT[data[k]];
+    out[idx++] = hex_chars[0];
+    out[idx++] = hex_chars[1];
+    out[idx++] = ' ';
+  }
+  out[idx] = '\0';
+}
+
+void FormatElapsed(uint32_t now, uint32_t timestamp, char *out,
+                   size_t out_len) noexcept {
+  if (!out || out_len == 0)
+    return;
+  if (timestamp == 0) {
+    snprintf(out, out_len, "Never");
+    return;
+  }
+  const uint32_t el_ms = (now >= timestamp) ? (now - timestamp) : 0;
+  const float el = el_ms / 1000.0f;
+  if (el < 60.0f) {
+    snprintf(out, out_len, "%.1fs", el);
+  } else {
+    snprintf(out, out_len, "%lum", static_cast<unsigned long>(el / 60));
+  }
+}
+} // namespace Fmt
+
+void AppendBuf::appendFormatV(const char *fmt, va_list a) {
+  if (!buf || offset >= cap)
+    return;
+  const int n = vsnprintf(buf + offset, cap - offset, fmt, a);
+  if (n > 0) {
+    offset = std::min(offset + static_cast<size_t>(n), cap - 1);
+  }
+}
+
+void AppendBuf::appendFormat(const char *fmt, ...) {
+  va_list a;
+  va_start(a, fmt);
+  appendFormatV(fmt, a);
+  va_end(a);
+}
+
+void AppendBuf::append(std::string_view sv) noexcept {
+  if (sv.empty() || !buf || offset >= cap)
+    return;
+  const size_t copy_len = std::min(sv.size(), cap - 1 - offset);
+  if (copy_len > 0) {
+    memcpy(buf + offset, sv.data(), copy_len);
+    offset += copy_len;
+    buf[offset] = '\0';
+  }
+}
+
+void AppendBuf::append(const char *str) noexcept {
+  if (!str || !buf || offset >= cap)
+    return;
+  const size_t len = strlen(str);
+  const size_t copy_len = std::min(len, cap - 1 - offset);
+  if (copy_len > 0) {
+    memcpy(buf + offset, str, copy_len);
+    offset += copy_len;
+    buf[offset] = '\0';
+  }
+}
+
+void TaskWdtMonitor::feed(size_t index) noexcept {
+  if (UNLIKELY(index >= TASK_COUNT))
+    return;
+
+  const uint32_t now = millis();
+  rtc_last_alive_ms[index] = now;
+  const uint32_t prev =
+      tasks[index].last_feed_ms.exchange(now, std::memory_order_relaxed);
+  if (prev > 0) {
+    const uint32_t gap = (now >= prev) ? (now - prev) : 0;
+    uint32_t cur_max =
+        tasks[index].max_interval_ms.load(std::memory_order_relaxed);
+    // TTAS Pattern (Test-and-Test-and-Set) to prevent bus lock contention
+    while (gap > cur_max &&
+           !tasks[index].max_interval_ms.compare_exchange_weak(
+               cur_max, gap, std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+  }
+  tasks[index].feed_count.fetch_add(1, std::memory_order_relaxed);
+  esp_task_wdt_reset();
+}
+

@@ -140,6 +140,86 @@ inline int opOf(span<const uint8_t> f, const EffProfile &e) {
 } // namespace
 
 // ============================================================================
+// HYUNDAI WALLPAD PROFILE (현대통신 실측 데이터 기반 정규화 - rodata 플래시 배치)
+// ============================================================================
+
+static constexpr DeviceSpec s_hyundai_devices[] = {
+  // 0x19 일반 조명 (Switch)
+  {
+    0x19, DeviceClass::SWITCH, "Light",
+    11, 7, 0x01, 0x02, 0xFF,
+    11, 8, 0xFF, 0xFF, 0xFF, false, 0xFF, 0xFF, 0xFF,
+    11, 7, 8, 0xFF
+  },
+  // 0x18 난방 / 보일러 (Thermostat)
+  {
+    0x18, DeviceClass::THERMOSTAT, "Thermo",
+    11, 7, 0x01, 0x04, 0x07,
+    18, 8, 10, 9, 0xFF, false, 0xFF, 0xFF, 0xFF,
+    13, 7, 8, 9
+  },
+  // 0x1F 콘센트 (Outlet)
+  {
+    0x1F, DeviceClass::OUTLET, "Outlet",
+    11, 7, 0x01, 0x02, 0xFF,
+    18, 8, 0xFF, 0xFF, 0xFF, false, 0xFF, 9, 10,
+    11, 7, 8, 0xFF
+  },
+  // 0x2B 환기 / 전열교환기 (Vent)
+  {
+    0x2B, DeviceClass::VENT, "Vent",
+    11, 7, 0x01, 0x02, 0xFF,
+    13, 8, 0xFF, 0xFF, 9, true, 0xFF, 0xFF, 0xFF,
+    13, 7, 8, 0xFF
+  },
+  // 0x1B 가스 차단기 (Gas)
+  {
+    0x1B, DeviceClass::GAS, "Gas",
+    11, 7, 0x00, 0x02, 0xFF,
+    13, 0xFF, 0xFF, 0xFF, 0xFF, false, 8, 0xFF, 0xFF,
+    13, 7, 8, 0xFF
+  },
+  // 0x34 엘리베이터 (Momentary)
+  {
+    0x34, DeviceClass::MOMENTARY, "Elevator",
+    11, 7, 0x06, 0x00, 0xFF,
+    13, 8, 0xFF, 0xFF, 0xFF, false, 0xFF, 0xFF, 0xFF,
+    11, 7, 8, 0xFF
+  },
+  // 0x1C 시스템 에어컨 / FCU (Aircon)
+  {
+    0x1C, DeviceClass::AIRCON, "Aircon",
+    11, 7, 0x01, 0x02, 0xFF,
+    15, 8, 12, 11, 10, true, 9, 0xFF, 0xFF,
+    11, 7, 8, 0xFF
+  }
+};
+
+const WallpadProfile kHyundaiProfile = {
+  WallpadVendorId::HYUNDAI,
+  "Hyundai HT",
+  0xF7,
+  0xEE,
+  ChecksumAlgo::XOR_NO_STX,
+  4, // opcode_offset
+  2, // dev_id_offset
+  6, // sub1_offset
+  6, // sub2_offset
+  s_hyundai_devices,
+  sizeof(s_hyundai_devices) / sizeof(s_hyundai_devices[0]),
+  {
+    3860, 0x7F, 0xEE, 5, "Hyundai HT Standard",
+    0xB5, 0x5A, 0xB9, 0x5F, 0xB4, 0x61, 0xB8, 0x60
+  }
+};
+
+const WallpadProfile *const kWallpadProfiles[] = {
+  &kHyundaiProfile
+};
+
+const size_t kWallpadProfileCount = sizeof(kWallpadProfiles) / sizeof(kWallpadProfiles[0]);
+
+// ============================================================================
 // ProfileMatcher
 // ============================================================================
 
@@ -2474,4 +2554,145 @@ void ControlTemplateRegistry::onProfileChanged(uint8_t old_prof_idx,
   loadFromNvsForProfile(new_prof_idx);
   if (getGroupCount() == 0)
     synthesizeFromConvergedCache();
+}
+
+// ============================================================================
+// GroupControlTemplate Optimized Methods
+// ============================================================================
+
+uint8_t GroupControlTemplate::getPowerOffset(uint8_t pkt_len) const noexcept {
+  if (pkt_len > 0) {
+    if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
+        ack_slots.power_offset != 0xFF) {
+      return ack_slots.power_offset;
+    }
+    if (query_slots.discovered && query_slots.power_offset != 0xFF) {
+      return query_slots.power_offset;
+    }
+  }
+  if (ack_slots.discovered && ack_slots.power_offset != 0xFF)
+    return ack_slots.power_offset;
+  if (query_slots.discovered && query_slots.power_offset != 0xFF)
+    return query_slots.power_offset;
+  if (power_slot.discovered && power_slot.ack_state_offset != 0xFF)
+    return power_slot.ack_state_offset;
+  return 0xFF;
+}
+
+uint8_t GroupControlTemplate::getTargetTempOffset(uint8_t pkt_len) const noexcept {
+  if (pkt_len > 0) {
+    if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
+        ack_slots.target_temp_offset != 0xFF) {
+      return ack_slots.target_temp_offset;
+    }
+    if (query_slots.discovered && query_slots.target_temp_offset != 0xFF) {
+      return query_slots.target_temp_offset;
+    }
+  }
+  if (query_slots.discovered && query_slots.target_temp_offset != 0xFF)
+    return query_slots.target_temp_offset;
+  if (ack_slots.discovered && ack_slots.target_temp_offset != 0xFF)
+    return ack_slots.target_temp_offset;
+  return 0xFF;
+}
+
+uint8_t GroupControlTemplate::getCurrentTempOffset(uint8_t pkt_len) const noexcept {
+  if (pkt_len > 0) {
+    if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
+        ack_slots.current_temp_offset != 0xFF) {
+      return ack_slots.current_temp_offset;
+    }
+    if (query_slots.discovered && query_slots.current_temp_offset != 0xFF) {
+      return query_slots.current_temp_offset;
+    }
+  }
+  if (query_slots.discovered && query_slots.current_temp_offset != 0xFF)
+    return query_slots.current_temp_offset;
+  if (ack_slots.discovered && ack_slots.current_temp_offset != 0xFF)
+    return ack_slots.current_temp_offset;
+  return 0xFF;
+}
+
+uint8_t GroupControlTemplate::getFanSpeedOffset(uint8_t pkt_len) const noexcept {
+  if (pkt_len > 0) {
+    if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
+        ack_slots.fan_speed_offset != 0xFF) {
+      return ack_slots.fan_speed_offset;
+    }
+    if (query_slots.discovered && query_slots.fan_speed_offset != 0xFF) {
+      return query_slots.fan_speed_offset;
+    }
+  }
+  if (query_slots.discovered && query_slots.fan_speed_offset != 0xFF)
+    return query_slots.fan_speed_offset;
+  if (ack_slots.discovered && ack_slots.fan_speed_offset != 0xFF)
+    return ack_slots.fan_speed_offset;
+  return 0xFF;
+}
+
+uint8_t GroupControlTemplate::decodeFanSpeed(uint8_t raw_token) const noexcept {
+  if (speed_slot.level_count > 0) {
+    for (uint8_t i = 0; i < speed_slot.level_count; ++i) {
+      if (speed_slot.level_tokens[i] == raw_token) {
+        return static_cast<uint8_t>(i + 1);
+      }
+    }
+  }
+  // Lookup Table-driven Token Resolution (Anti-Pattern Elimination)
+  switch (raw_token) {
+  case 0x11:
+  case 0x01:
+  case 0x10:
+    return 1;
+  case 0x13:
+  case 0x03:
+  case 0x02:
+    return 2;
+  case 0x17:
+  case 0x07:
+    return 3;
+  default:
+    if (raw_token >= 1 && raw_token <= 3)
+      return raw_token;
+    return 1;
+  }
+}
+
+uint8_t GroupControlTemplate::decodeVentMode(uint8_t raw_byte) const noexcept {
+  // Byte #8 운전 모드 토큰 (1:일반, 2:바이패스, 3:자동, 4:공기청정, 0x81:Reject)
+  if (raw_byte >= 1 && raw_byte <= 4)
+    return raw_byte;
+  const uint8_t nibble = (raw_byte >> 4) & 0x0F;
+  if (nibble >= 1 && nibble <= 4)
+    return nibble;
+  return 1; // 기본 일반 환기 (0x01)
+}
+
+uint8_t GroupControlTemplate::getValveStateOffset(uint8_t pkt_len) const noexcept {
+  if (pkt_len > 0) {
+    if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
+        ack_slots.valve_state_offset != 0xFF) {
+      return ack_slots.valve_state_offset;
+    }
+    if (query_slots.discovered && query_slots.valve_state_offset != 0xFF) {
+      return query_slots.valve_state_offset;
+    }
+  }
+  if (query_slots.discovered && query_slots.valve_state_offset != 0xFF)
+    return query_slots.valve_state_offset;
+  if (ack_slots.discovered && ack_slots.valve_state_offset != 0xFF)
+    return ack_slots.valve_state_offset;
+  return 0xFF;
+}
+
+uint8_t GroupControlTemplate::getWattageOffset(uint8_t pkt_len) const noexcept {
+  if (pkt_len > 0 && pkt_len < 16)
+    return 0xFF;
+  if (query_slots.discovered && query_slots.power_w_offset != 0xFF)
+    return query_slots.power_w_offset;
+  return 0xFF;
+}
+
+bool GroupControlTemplate::isUnidirectional() const noexcept {
+  return dev_id == 0x34; // 단방향 버스트 전송 (엘리베이터 등)
 }

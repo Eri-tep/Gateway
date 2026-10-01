@@ -5,6 +5,7 @@
 #include "Service.h"
 
 #include "esp_task_wdt.h"
+#include <WiFi.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdio>

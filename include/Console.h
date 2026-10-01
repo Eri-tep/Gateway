@@ -2,7 +2,6 @@
 
 #include "Core.h"
 
-
 // ============================================================================
 // From include/TelnetCli.h
 // ============================================================================
@@ -48,7 +47,8 @@ struct Args {
     return (idx >= 0 && idx < argc && argv[idx]) ? argv[idx] : "";
   }
   bool is(int idx, const char *val) const noexcept {
-    return (idx >= 0 && idx < argc && argv[idx] && val) && (strcasecmp(argv[idx], val) == 0);
+    return (idx >= 0 && idx < argc && argv[idx] && val) &&
+           (strcasecmp(argv[idx], val) == 0);
   }
 };
 
@@ -77,7 +77,11 @@ public:
     uint8_t lineLen = 0;
 
     // ANSI escape sequence filter state
-    enum class EscState : uint8_t { NORMAL, GOT_ESC, IN_CSI } esc_state{EscState::NORMAL};
+    enum class EscState : uint8_t {
+      NORMAL,
+      GOT_ESC,
+      IN_CSI
+    } esc_state{EscState::NORMAL};
 
     // ── Command History Ring Buffer (Zero-Heap, Fixed Size) ──
     static constexpr uint8_t HISTORY_MAX = 8;
@@ -85,19 +89,22 @@ public:
     char history[HISTORY_MAX][CMD_MAX_LEN]{{0}};
     uint8_t hist_count = 0;
     uint8_t hist_head = 0;
-    int8_t  browse_idx = -1;
+    int8_t browse_idx = -1;
 
     void addHistory(const char *cmd) {
-      if (!cmd || !*cmd) return;
+      if (!cmd || !*cmd)
+        return;
       // Do not duplicate if identical to the latest entry
       if (hist_count > 0) {
         uint8_t prev = (hist_head + HISTORY_MAX - 1) % HISTORY_MAX;
-        if (strncmp(history[prev], cmd, CMD_MAX_LEN - 1) == 0) return;
+        if (strncmp(history[prev], cmd, CMD_MAX_LEN - 1) == 0)
+          return;
       }
       strncpy(history[hist_head], cmd, CMD_MAX_LEN - 1);
       history[hist_head][CMD_MAX_LEN - 1] = '\0';
       hist_head = (hist_head + 1) % HISTORY_MAX;
-      if (hist_count < HISTORY_MAX) hist_count++;
+      if (hist_count < HISTORY_MAX)
+        hist_count++;
     }
 
     void reset() {
@@ -142,11 +149,7 @@ private:
   AuthBlockEntry _authBlocks[4];
   uint32_t _nextSessionId = 1;
 
-  enum class AuthResult : uint8_t {
-    OK,
-    WRONG_PASSWORD,
-    LOCKED_OUT
-  };
+  enum class AuthResult : uint8_t { OK, WRONG_PASSWORD, LOCKED_OUT };
 
   static AuthResult evaluateAuth(const char *clean_pw, const char *stored_hash,
                                  AuthBlockEntry *blk, uint32_t now_ms);
@@ -210,7 +213,9 @@ public:
   void resetTrackers() noexcept;
   void pause() noexcept { _paused.store(true, std::memory_order_release); }
   void resume() noexcept { _paused.store(false, std::memory_order_release); }
-  bool isPaused() const noexcept { return _paused.load(std::memory_order_acquire); }
+  bool isPaused() const noexcept {
+    return _paused.load(std::memory_order_acquire);
+  }
   void setClient(int sock) noexcept;
   int getClient() const noexcept {
     return _client_fd.load(std::memory_order_acquire);
@@ -245,8 +250,10 @@ public:
   uint8_t getFilterTargetVal() const {
     return _filterTargetVal.load(std::memory_order_acquire);
   }
-  bool passesFilter(uint8_t channel, TraceType type, const StaticPacket &pkt) const;
-  void trace(uint8_t channel, bool is_tx, TraceType type, const StaticPacket &pkt);
+  bool passesFilter(uint8_t channel, TraceType type,
+                    const StaticPacket &pkt) const;
+  void trace(uint8_t channel, bool is_tx, TraceType type,
+             const StaticPacket &pkt);
   void trace(const char *fmt, ...);
   void flushToClient();
 };
@@ -254,7 +261,8 @@ public:
 extern SemaphoreHandle_t g_telnet_tx_sem;
 void sendTelnetMsg(int sock, const char *str);
 void sendTelnetMsgLen(int sock, const char *str, size_t len);
-void sendTelnetMsgf(int sock, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+void sendTelnetMsgf(int sock, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 
 extern TelnetManager g_telnet_manager;
 extern TelnetTracer g_telnet_tracer;
