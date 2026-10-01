@@ -465,12 +465,13 @@ void TelnetManager::onClientConnect(int new_sock,
   Serial.printf("[TELNET] Incoming connection from %s (sock: %d)\r\n",
                 remote_ip.toString().c_str(), new_sock);
 
-  if (!Tcp_IsAllowedIP(remote_ip)) {
+  if (!Telnet_IsAllowedIP(remote_ip)) {
     Serial.printf("[TELNET] Connection rejected: IP %s not allowed!\r\n",
                   remote_ip.toString().c_str());
     close(new_sock);
     return;
   }
+
 
   int flags = fcntl(new_sock, F_GETFL, 0);
   fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);

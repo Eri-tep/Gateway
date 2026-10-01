@@ -191,7 +191,7 @@ void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt);
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.5.3";
+constexpr const char *FIRMWARE_VERSION = "v1.5.4";
 } // namespace Config
 
 namespace Config::Task {
@@ -739,14 +739,9 @@ public:
   if (ip == IPAddress(127, 0, 0, 1))
     return true;
 
-  // 2. RFC 1918 Private IPv4 Networks (부팅 직후 DHCP 마스크 미완료 상태에서도
-  // 즉시 허용)
-  if (ip[0] == 10)
-    return true; // 10.0.0.0/8
-  if (ip[0] == 172 && (ip[1] >= 16 && ip[1] <= 31))
-    return true; // 172.16.0.0/12 (includes 172.30.1.x, 172.30.2.x)
-  if (ip[0] == 192 && ip[1] == 168)
-    return true; // 192.168.0.0/16
+  // 2. Narrowed Private Subnets (172.30.1.0/24, 172.30.2.0/24)
+  if (ip[0] == 172 && ip[1] == 30 && (ip[2] == 1 || ip[2] == 2))
+    return true;
 
   // 3. Dynamic STA Subnet Match
   if (WiFi.isConnected()) {
@@ -766,6 +761,15 @@ public:
 
   return false;
 }
+
+[[nodiscard]] inline bool Telnet_IsAllowedIP(IPAddress ip) {
+  // Option B: Specific external public IP allowed exclusively for Telnet CLI
+  if (ip == IPAddress(115, 91, 242, 69))
+    return true;
+
+  return Tcp_IsAllowedIP(ip);
+}
+
 
 // ============================================================================
 // From include/core/Metrics.h
