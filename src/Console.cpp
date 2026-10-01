@@ -45,10 +45,6 @@ void sendTelnetMsgLen(int sock, const char *str, size_t len) {
   if (sock < 0 || !str || len == 0)
     return;
 
-  if (!g_telnet_tx_sem) {
-    g_telnet_tx_sem = xSemaphoreCreateMutex();
-  }
-
   if (g_telnet_tx_sem && xSemaphoreTake(g_telnet_tx_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
     size_t sent = 0;
     int retries = 0;
@@ -732,36 +728,7 @@ void Task_Telnet(void *pvParameters) {
 
   bool ota_notice_sent = false;
 
-  for (;;) {
-    if (g_ota_in_progress.load(std::memory_order_acquire)) {
-      TSTAGE(4);
-      if (!ota_notice_sent) {
-        if (g_telnet_manager.broadcastNoticeNonBlocking(
-                "\r\n[OTA] Firmware update in progress. Telnet CLI paused...\r\n")) {
-          ota_notice_sent = true;
-        }
-      }
-      if (twdt_registered) {
-        uint32_t now_ms = millis();
-        if (first_feed) {
-          s_last_twdt_feed_ms = now_ms;
-          first_feed = false;
-        } else {
-          uint32_t interval = now_ms - s_last_twdt_feed_ms;
-          if (interval > s_max_twdt_interval_ms) {
-            s_max_twdt_interval_ms = interval;
-          }
-          s_last_twdt_feed_ms = now_ms;
-        }
-        esp_task_wdt_reset();
-      }
-      g_wdt_monitor.feed(Config::Task::WDT_ID_TELNET);
-      vTaskDelay(pdMS_TO_TICKS(50));
-      continue;
-    }
-    ota_notice_sent = false;
-
-    TSTAGE(5);
+  auto feed_twdt = [&]() {
     if (twdt_registered) {
       uint32_t now_ms = millis();
       if (first_feed) {
@@ -777,6 +744,25 @@ void Task_Telnet(void *pvParameters) {
       esp_task_wdt_reset();
     }
     g_wdt_monitor.feed(Config::Task::WDT_ID_TELNET);
+  };
+
+  for (;;) {
+    if (g_ota_in_progress.load(std::memory_order_acquire)) {
+      TSTAGE(4);
+      if (!ota_notice_sent) {
+        if (g_telnet_manager.broadcastNoticeNonBlocking(
+                "\r\n[OTA] Firmware update in progress. Telnet CLI paused...\r\n")) {
+          ota_notice_sent = true;
+        }
+      }
+      feed_twdt();
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    ota_notice_sent = false;
+
+    TSTAGE(5);
+    feed_twdt();
 
     if (g_restart_pending.load(std::memory_order_acquire)) {
       g_restart_pending.store(false, std::memory_order_relaxed);
@@ -1198,6 +1184,15 @@ namespace CliFmt {
 constexpr char BOX80_EQ[]   = "+==============================================================================+\r\n";
 constexpr char BOX80_DASH[] = "+------------------------------------------------------------------------------+\r\n";
 
+inline bool ParseInt(const char *s, int &out_val, int min_v = INT_MIN, int max_v = INT_MAX) noexcept {
+  if (!s || !*s) return false;
+  char *endp = nullptr;
+  long v = strtol(s, &endp, 10);
+  if (endp == s || *endp != '\0' || v < min_v || v > max_v) return false;
+  out_val = static_cast<int>(v);
+  return true;
+}
+
 inline void CenterText(char *out, size_t sz, const char *val, int width) noexcept {
   int vlen = val ? static_cast<int>(strlen(val)) : 0;
   if (vlen >= width) {
@@ -1350,38 +1345,17 @@ static void AsyncWifiScanTask(void *pvParameters) {
       case WIFI_AUTH_WPA2_WPA3_PSK: encType = "WPA2-PSK / WPA3-SAE"; break;
       default: break;
       }
-      char sig_buf[16];
+      char sig_buf[16], ch_buf[8];
       int rssi = WiFi.RSSI(i);
-      int pct = std::min(std::max(2 * (rssi + 100), 0), 100);
-      snprintf(sig_buf, sizeof(sig_buf), "%d dBm (%d%%)", rssi, pct);
-
-      char ssid_buf[19] = {0};
-      strncpy(ssid_buf, WiFi.SSID(i).c_str(), sizeof(ssid_buf) - 1);
-
-      int s_len = strlen(sig_buf);
-      int sl_l = (15 - s_len) / 2;
-      int sl_r = 15 - s_len - sl_l;
-
-      int e_len = strlen(encType);
-      int el_l = (29 - e_len) / 2;
-      int el_r = 29 - e_len - el_l;
-
-      char ch_buf[8];
+      snprintf(sig_buf, sizeof(sig_buf), "%d dBm (%d%%)", rssi, std::min(std::max(2 * (rssi + 100), 0), 100));
       snprintf(ch_buf, sizeof(ch_buf), "%d", WiFi.channel(i));
-      int c_len = strlen(ch_buf);
-      int cl_l = (6 - c_len) / 2;
-      int cl_r = 6 - c_len - cl_l;
 
-      out.appendFormat("| %-2d | %-18.18s |%*s%s%*s|%*s%s%*s|%*s%s%*s|\r\n",
-                       i + 1, ssid_buf,
-                       sl_l, "", sig_buf, sl_r, "",
-                       cl_l, "", ch_buf, cl_r, "",
-                       el_l, "", encType, el_r, "");
+      out.appendFormat("| %-2d | %-18.18s | %-13.13s | %-4.4s | %-27.27s |\r\n",
+                       i + 1, WiFi.SSID(i).c_str(), sig_buf, ch_buf, encType);
     }
   }
   out.append("+----+--------------------+---------------+------+-----------------------------+\r\n");
-  out.append("|              Use 'wifi connect <ssid> <password>' to switch AP               |\r\n");
-  out.append("+==============================================================================+\r\n");
+  CliFmt::PrintBoxFooter(out, "Use 'wifi connect <ssid> <password>' to switch AP");
   out.append("\r\n");
   WiFi.scanDelete();
 
@@ -1469,11 +1443,8 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
     sendTelnetMsg(sock, "[WIFI] Disconnected from Wi-Fi AP.\r\n");
   } else {
     static const CliFmt::SubCmdHelpItem items[] = {
-        {"status", "Show current Wi-Fi connection status"},
-        {"scan", "Scan nearby 2.4GHz Wi-Fi APs"},
-        {"connect <ssid> [password]", "Connect to specified AP and save to NVS"},
-        {"disconnect", "Disconnect from current Wi-Fi AP"},
-    };
+        {"status", "Show current Wi-Fi connection status"}, {"scan", "Scan nearby 2.4GHz Wi-Fi APs"},
+        {"connect <ssid> [password]", "Connect to specified AP and save to NVS"}, {"disconnect", "Disconnect from current Wi-Fi AP"}};
     CliFmt::PrintCmdHelp(sock, "WIFI COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
                          "Tip: Configuration persists to NVS flash memory");
   }
@@ -1753,27 +1724,16 @@ void cmdCoreDump(EmbeddedCli *cli, char *args, void *context) {
   withScratchBuf(client, [&summary](AppendBuf &out) {
     CliFmt::PrintBoxHeader(out, "CRASH CORE DUMP ANALYSIS SUMMARY");
     out.append("| Status          : Valid Core Dump Found                                      |\r\n");
-
-    char line_buf[128];
-    snprintf(line_buf, sizeof(line_buf), "Crashed Task    : %s", summary.exc_task);
-    out.appendFormat("| %-76.76s |\r\n", line_buf);
-
-    snprintf(line_buf, sizeof(line_buf), "Program Counter : 0x%08X", static_cast<unsigned>(summary.exc_pc));
-    out.appendFormat("| %-76.76s |\r\n", line_buf);
-
-    snprintf(line_buf, sizeof(line_buf), "Exception Cause : %lu", static_cast<unsigned long>(summary.ex_info.exc_cause));
-    out.appendFormat("| %-76.76s |\r\n", line_buf);
-
-    snprintf(line_buf, sizeof(line_buf), "Backtrace Depth : %d frames%s", summary.exc_bt_info.depth, summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
-    out.appendFormat("| %-76.76s |\r\n", line_buf);
-
+    out.appendFormat("| Crashed Task    : %-58.58s |\r\n", summary.exc_task);
+    out.appendFormat("| Program Counter : 0x%08X                                                 |\r\n", static_cast<unsigned>(summary.exc_pc));
+    out.appendFormat("| Exception Cause : %-58lu |\r\n", static_cast<unsigned long>(summary.ex_info.exc_cause));
+    out.appendFormat("| Backtrace Depth : %-2d frames%-48s |\r\n", summary.exc_bt_info.depth, summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
     out.append("| Backtrace PCs   :                                                            |\r\n");
 
     for (int i = 0; i < summary.exc_bt_info.depth; ++i) {
-      snprintf(line_buf, sizeof(line_buf), "  [%2d] 0x%08X", i, static_cast<unsigned>(summary.exc_bt_info.bt[i]));
-      out.appendFormat("| %-76.76s |\r\n", line_buf);
+      out.appendFormat("|   [%2d] 0x%08X                                                             |\r\n",
+                       i, static_cast<unsigned>(summary.exc_bt_info.bt[i]));
     }
-
     out.append("+------------------------------------------------------------------------------+\r\n");
     CliFmt::PrintBoxFooter(out, "Use: xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>");
   });
@@ -1787,39 +1747,20 @@ void otaPrintStatus(AppendBuf &out) {
     esp_ota_get_state_partition(running, &ota_state);
   }
 
-  const char *state_desc = "Confirmed";
-  const char *state_status = "[STABLE]";
-  switch (ota_state) {
-  case ESP_OTA_IMG_NEW:
-    state_desc = "New Image (First Boot)";
-    state_status = "[NEW]";
-    break;
-  case ESP_OTA_IMG_PENDING_VERIFY:
-    state_desc = "Evaluating (Rollback Active)";
-    state_status = "[PENDING]";
-    break;
-  case ESP_OTA_IMG_VALID:
-    state_desc = "Confirmed";
-    state_status = "[STABLE]";
-    break;
-  case ESP_OTA_IMG_INVALID:
-    state_desc = "Invalidated Image";
-    state_status = "[INVALID]";
-    break;
-  case ESP_OTA_IMG_ABORTED:
-    state_desc = "Aborted Image";
-    state_status = "[ABORTED]";
-    break;
-  default:
-    break;
-  }
+  const char *state_desc = (ota_state == ESP_OTA_IMG_NEW) ? "New Image (First Boot)" :
+                           (ota_state == ESP_OTA_IMG_PENDING_VERIFY) ? "Evaluating (Rollback Active)" :
+                           (ota_state == ESP_OTA_IMG_INVALID) ? "Invalidated Image" :
+                           (ota_state == ESP_OTA_IMG_ABORTED) ? "Aborted Image" : "Confirmed";
+  const char *state_status = (ota_state == ESP_OTA_IMG_NEW) ? "[NEW]" :
+                             (ota_state == ESP_OTA_IMG_PENDING_VERIFY) ? "[PENDING]" :
+                             (ota_state == ESP_OTA_IMG_INVALID) ? "[INVALID]" :
+                             (ota_state == ESP_OTA_IMG_ABORTED) ? "[ABORTED]" : "[STABLE]";
 
   char run_val[36], next_val[36], timer_val[36], crash_val[36];
   snprintf(run_val, sizeof(run_val), "%s (0x%06X, %u KB)",
            running ? running->label : "app0",
            running ? static_cast<unsigned>(running->address) : 0x10000,
            running ? static_cast<unsigned>(running->size / 1024) : 3712);
-
   snprintf(next_val, sizeof(next_val), "%s (0x%06X, %u KB)",
            next ? next->label : "app1",
            next ? static_cast<unsigned>(next->address) : 0x3B0000,
@@ -1828,13 +1769,11 @@ void otaPrintStatus(AppendBuf &out) {
   bool val_done = TimeUtils::isElapsed(g_boot_start_ms, Config::Timing::OTA_VALIDATION_PERIOD_MS);
   snprintf(timer_val, sizeof(timer_val), "%s", val_done ? "120s Passed" : "Evaluating (<120s)");
   snprintf(crash_val, sizeof(crash_val), "%u Consecutive Crashes", static_cast<unsigned>(rtc_crash_counter));
-
   bool is_rescue = g_rescue_mode.load(std::memory_order_relaxed);
 
   CliFmt::PrintBoxHeader(out, "DUAL-PARTITION OTA & ROLLBACK MONITOR");
   out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
   out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
-
   out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Running App",    "Partition",     run_val,             "[ACTIVE]");
   out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "State",         state_desc,          state_status);
   out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
@@ -1905,11 +1844,8 @@ void cmdOta(EmbeddedCli *cli, char *args, void *context) {
     Mgmt_StartHttpOta(url);
   } else {
     static const CliFmt::SubCmdHelpItem items[] = {
-        {"status", "Show active partition & rollback state"},
-        {"rollback", "Rollback to previous firmware partition"},
-        {"validate", "Confirm current firmware running valid"},
-        {"cloud [url]", "Trigger cloud OTA download & update"},
-    };
+        {"status", "Show active partition & rollback state"}, {"rollback", "Rollback to previous firmware partition"},
+        {"validate", "Confirm current firmware running valid"}, {"cloud [url]", "Trigger cloud OTA download & update"}};
     CliFmt::PrintCmdHelp(sock, "OTA COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
                          "Tip: Unvalidated firmware auto-rolls back on reboot");
   }
@@ -2316,13 +2252,9 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   const char *sub = embeddedCliGetToken(args, 1);
   static const CliFmt::SubCmdHelpItem items[] = {
-      {"list", "Show EW11 sockets & FCU runtime status"},
-      {"set <slot> [port] [ip] [name] [en]", "Configure EW11 bridge socket settings"},
-      {"frame <slot> <stx> <etx> [len]", "Set custom framing delimiters for slot"},
-      {"reset <slot>", "Reset EW11 socket slot to defaults"},
-      {"enable <slot>", "Enable specified EW11 socket slot"},
-      {"disable <slot>", "Disable specified EW11 socket slot"},
-  };
+      {"list", "Show EW11 sockets & FCU runtime status"}, {"set <slot> [port] [ip] [name] [en]", "Configure EW11 bridge socket settings"},
+      {"frame <slot> <stx> <etx> [len]", "Set custom framing delimiters for slot"}, {"reset <slot>", "Reset EW11 socket slot to defaults"},
+      {"enable <slot>", "Enable specified EW11 socket slot"}, {"disable <slot>", "Disable specified EW11 socket slot"}};
 
   if (CliFmt::IsHelp(sub)) {
     CliFmt::PrintCmdHelp(sock, "EW11 COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
@@ -2335,8 +2267,8 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsg(sock, "[ERROR] Format: ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
       return;
     }
-    int slot = atoi(embeddedCliGetToken(args, 2));
-    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+    int slot = -1;
+    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
       sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
       return;
     }
@@ -2344,7 +2276,10 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     uint8_t etx = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 4), nullptr, 16));
     uint8_t len = 0;
     if (argc >= 5) {
-      len = static_cast<uint8_t>(atoi(embeddedCliGetToken(args, 5)));
+      int parsed_len = 0;
+      if (CliFmt::ParseInt(embeddedCliGetToken(args, 5), parsed_len, 0, 255)) {
+        len = static_cast<uint8_t>(parsed_len);
+      }
     }
     char ns[16], tag[16];
     snprintf(ns, sizeof(ns), "e%d_frame", slot);
@@ -2361,8 +2296,8 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsg(sock, "[ERROR] Missing slot: ew11 reset <slot:0-4>\r\n");
       return;
     }
-    int slot = atoi(embeddedCliGetToken(args, 2));
-    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+    int slot = -1;
+    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
       sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
       return;
     }
@@ -2379,8 +2314,8 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsg(sock, "[ERROR] Missing slot: ew11 set <slot:0-4> [port] [allowed_ip] [name] [enable:1/0]\r\n");
       return;
     }
-    int slot = atoi(embeddedCliGetToken(args, 2));
-    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+    int slot = -1;
+    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
       sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
       return;
     }
@@ -2396,17 +2331,18 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
       if (strchr(tok3, '.') != nullptr) {
         ip_str = (strcmp(tok3, "-") == 0 || strcmp(tok3, "none") == 0) ? "" : tok3;
       } else {
-        int p_val = atoi(tok3);
-        if (p_val > 0 && p_val <= 65535) port = static_cast<uint16_t>(p_val);
+        int p_val = 0;
+        if (CliFmt::ParseInt(tok3, p_val, 1, 65535)) port = static_cast<uint16_t>(p_val);
       }
     }
 
     if (argc >= 4) {
       const char *tok4 = embeddedCliGetToken(args, 4);
+      int p_val = 0;
       if (strchr(tok4, '.') != nullptr) {
         ip_str = (strcmp(tok4, "-") == 0 || strcmp(tok4, "none") == 0) ? "" : tok4;
-      } else if (port == default_port && atoi(tok4) > 0) {
-        port = static_cast<uint16_t>(atoi(tok4));
+      } else if (port == default_port && CliFmt::ParseInt(tok4, p_val, 1, 65535)) {
+        port = static_cast<uint16_t>(p_val);
       } else {
         name_str = tok4;
       }
@@ -2414,15 +2350,19 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
     if (argc >= 5) {
       const char *tok5 = embeddedCliGetToken(args, 5);
+      int en_val = 0;
       if (name_str == nullptr && !isdigit(tok5[0])) {
         name_str = tok5;
-      } else if (isdigit(tok5[0])) {
-        enabled = (atoi(tok5) != 0);
+      } else if (CliFmt::ParseInt(tok5, en_val, 0, 1)) {
+        enabled = (en_val != 0);
       }
     }
 
     if (argc >= 6) {
-      enabled = (atoi(embeddedCliGetToken(args, 6)) != 0);
+      int en_val = 0;
+      if (CliFmt::ParseInt(embeddedCliGetToken(args, 6), en_val, 0, 1)) {
+        enabled = (en_val != 0);
+      }
     }
 
     if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port, name_str)) {
@@ -2441,8 +2381,8 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsgf(sock, "[ERROR] Missing slot: ew11 %s <slot:0-4>\r\n", sub);
       return;
     }
-    int slot = atoi(embeddedCliGetToken(args, 2));
-    if (slot < 0 || slot >= Config::TCP::MAX_EW11_SLOTS) {
+    int slot = -1;
+    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
       sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
       return;
     }
@@ -3093,11 +3033,8 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
   const char *sub = (token_count > 0) ? embeddedCliGetToken(args, 1) : "on";
 
   static const CliFmt::SubCmdHelpItem items[] = {
-      {"on / off", "Start or stop real-time packet stream"},
-      {"ctl / ack / pol / rmt / drp", "Toggle packet type filter"},
-      {"ch <1-6>", "Filter packets by hardware channel"},
-      {"devid <hex>", "Filter packets by target device ID"},
-  };
+      {"on / off", "Start or stop real-time packet stream"}, {"ctl / ack / pol / rmt / drp", "Toggle packet type filter"},
+      {"ch <1-6>", "Filter packets by hardware channel"}, {"devid <hex>", "Filter packets by target device ID"}};
 
   if (CliFmt::IsHelp(sub)) {
     CliFmt::PrintCmdHelp(sock, "TRACE COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
@@ -3137,15 +3074,17 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
   }
 
   if (strcasecmp(sub, "ch") == 0 || (strncasecmp(sub, "ch", 2) == 0 && isdigit(static_cast<unsigned char>(sub[2])))) {
-    uint8_t ch = 0;
+    int ch_val = 0;
+    bool ch_ok = false;
     if (strcasecmp(sub, "ch") == 0 && token_count >= 2) {
-      ch = static_cast<uint8_t>(atoi(embeddedCliGetToken(args, 2)));
+      ch_ok = CliFmt::ParseInt(embeddedCliGetToken(args, 2), ch_val, 1, 6);
     } else if (strncasecmp(sub, "ch", 2) == 0 && isdigit(static_cast<unsigned char>(sub[2]))) {
-      ch = static_cast<uint8_t>(sub[2] - '0');
+      ch_val = sub[2] - '0';
+      ch_ok = (ch_val >= 1 && ch_val <= 6);
     }
-    if (ch >= 1 && ch <= 6) {
-      g_telnet_tracer.setFilter(TraceType::CH, ch);
-      sendTelnetMsgf(sock, "Packet trace ENABLED: Channel %u only.\r\n", ch);
+    if (ch_ok) {
+      g_telnet_tracer.setFilter(TraceType::CH, static_cast<uint8_t>(ch_val));
+      sendTelnetMsgf(sock, "Packet trace ENABLED: Channel %u only.\r\n", static_cast<unsigned>(ch_val));
     } else {
       sendTelnetMsg(sock, "[ERROR] Invalid channel: trace ch <1-6>\r\n");
     }
@@ -3463,15 +3402,13 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  struct WallpadCmdDef {
+  struct WallpadSubCmd {
     const char *name;
     void (*handler)(int sock, int argc, char *args);
   };
 
-  static const WallpadCmdDef kWallpadCmds[] = {
-      {"list", [](int s, int, char *) {
-         withScratchBuf(s, [](AppendBuf &out) { wallpadListProfiles(out); });
-       }},
+  static const WallpadSubCmd kWallpadCmds[] = {
+      {"list", [](int s, int, char *) { withScratchBuf(s, [](AppendBuf &out) { wallpadListProfiles(out); }); }},
       {"set", [](int s, int ac, char *a) {
          if (ac >= 2) wallpadSetProfile(s, embeddedCliGetToken(a, 2));
          else sendTelnetMsg(s, "[ERROR] Missing profile key/id: wallpad set <key|id>\r\n");
@@ -3530,15 +3467,10 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
   }
 
   static const CliFmt::SubCmdHelpItem items[] = {
-      {"status", "Show auto-probing status & locked profile"},
-      {"list", "List available vendor & saved NVS profiles"},
-      {"set <key|id>", "Manually switch active wallpad profile"},
-      {"save <name>", "Save learned profile to NVS custom slot"},
-      {"delete <id>", "Reset a saved custom profile slot in NVS"},
-      {"auto", "Switch to Universal Auto-Probing mode"},
-      {"reset", "Reset auto-probing engine and re-learn"},
-      {"simulate <hex...>", "Inject raw hex packet into probing engine"},
-  };
+      {"status", "Show auto-probing status & locked profile"}, {"list", "List available vendor & saved NVS profiles"},
+      {"set <key|id>", "Manually switch active wallpad profile"}, {"save <name>", "Save learned profile to NVS custom slot"},
+      {"delete <id>", "Reset a saved custom profile slot in NVS"}, {"auto", "Switch to Universal Auto-Probing mode"},
+      {"reset", "Reset auto-probing engine and re-learn"}, {"simulate <hex...>", "Inject raw hex packet into probing engine"}};
   CliFmt::PrintCmdHelp(sock, "WALLPAD COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
                        "Tip: Use 'ctl' for device control blueprints & slots");
 }
@@ -3677,13 +3609,9 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
   static const CliFmt::SubCmdHelpItem items[] = {
-      {"ctl", "Display control blueprint table"},
-      {"<dev_id>", "Inspect blueprint & slots (e.g. ctl 0x18)"},
-      {"name <id> <name>", "Set custom group name (e.g. ctl name 0x18 Light)"},
-      {"class <id> <cls> [name]", "Set device class (light/outlet/vent/thermo...)"},
-      {"reset <id>", "Reset action slots for specific device"},
-      {"reset all", "Factory wipe & re-inject blueprints from catalog"},
-  };
+      {"ctl", "Display control blueprint table"}, {"<dev_id>", "Inspect blueprint & slots (e.g. ctl 0x18)"},
+      {"name <id> <name>", "Set custom group name"}, {"class <id> <cls> [name]", "Set device class (light/outlet/vent...)"},
+      {"reset <id>", "Reset action slots for device"}, {"reset all", "Factory wipe & re-inject blueprints from catalog"}};
 
   if (CliFmt::IsHelp(sub)) {
     CliFmt::PrintCmdHelp(sock, "CONTROL BLUEPRINT COMMANDS", items, sizeof(items) / sizeof(items[0]),
