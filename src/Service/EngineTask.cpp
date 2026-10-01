@@ -1,8 +1,11 @@
-#include "Engine.h"
-#include "Console.h"
-#include "Core.h"
-#include "Protocol.h"
-#include "Service.h"
+// ============================================================================
+// EngineTask: Level 4 RTOS Task Scheduling, Queues & RS-485 Engine Implementation
+// ============================================================================
+
+#include "Service/EngineTask.h"
+#include "Service/RemoteService.h"
+#include "Service/ConsoleCli.h"
+
 
 #include "esp_task_wdt.h"
 #include <WiFi.h>
@@ -10,6 +13,75 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+
+// ── Core Repositories & Metrics Trackers ──
+DeviceRepository g_device_repo;
+ControlDispatcher g_control_dispatcher;
+
+// ── Static FreeRTOS Queues & Storage Pools ──
+StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf;
+uint8_t
+    g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS *
+                           sizeof(StaticPacket)];
+uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
+
+QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
+QueueSetHandle_t g_ch1_queue_set = nullptr;
+QueueHandle_t g_uart0_event_queue = nullptr, g_uart1_event_queue = nullptr,
+              g_uart2_event_queue = nullptr;
+QueueHandle_t g_ch4_passthrough_queue = nullptr;
+
+EventGroupHandle_t g_system_event_group = nullptr;
+
+SoftwareSerial g_doorphone_serial;
+SemaphoreHandle_t g_ch5_mutex = nullptr;
+SemaphoreHandle_t g_ctrl_queue_mutex = nullptr;
+
+// ── Static FreeRTOS Tasks & Stacks ──
+StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
+    g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,
+    g_telnet_task_buf;
+StackType_t stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
+    stackCore1Slave[Config::Task::STACK_SIZE_SLAVE],
+    stackCore1Slave2[Config::Task::STACK_SIZE_SLAVE],
+    stackCore1Ch4[Config::Task::STACK_SIZE_CH4],
+    stackCore0Net[Config::Task::STACK_SIZE_CORE0],
+    telnetTaskStack[Config::Task::STACK_SIZE_TELNET];
+TaskHandle_t g_telnet_task_handle = nullptr, g_ch1_task_handle = nullptr,
+             g_ch2_task_handle = nullptr, g_ch3_task_handle = nullptr,
+             g_ch4_task_handle = nullptr, g_network_task_handle = nullptr;
+
+uint32_t g_boot_start_ms = 0;
+std::atomic<uint32_t> g_ch1_bus_ms{0};
+SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
+                  g_uart2_mutex = nullptr, g_tracer_sem = nullptr;
+Ch1StateMetrics g_ch1_state_metrics;
+
+std::atomic<bool> g_ota_in_progress{false},
+    g_initial_caching_complete{false}, g_probe_convergence_reset{false};
+WifiFallbackGuard g_wifi_guard;
+Config::Doorphone::DoorphoneState g_doorphone_state{};
+CoreDumpInfo g_coredump_info;
+Config::Doorphone::FramingTracker g_doorphone_tracker;
+
+
+
+bool Queue_EnqueueDropHead(QueueHandle_t queue,
+                           const StaticPacket &packet) noexcept {
+  if (UNLIKELY(!queue))
+    return false;
+  MutexLocker lock(g_ctrl_queue_mutex);
+  if (xQueueSend(queue, &packet, 0) == pdTRUE)
+    return true;
+  StaticPacket dummy;
+  xQueueReceive(queue, &dummy, 0);
+  return (xQueueSend(queue, &packet, 0) == pdTRUE);
+}
+
+
+
+
 
 // ============================================================================
 // Internal Types & Forward Declarations
@@ -35,217 +107,7 @@ void Ch1_BuildQueryPacket(StaticPacket &out, uint8_t dev_id, uint8_t sub1,
                           uint8_t sub2);
 }
 
-// ============================================================================
-// 1. Hardware Metrics Tracker & Diagnostics (formerly Engine.cpp)
-// ============================================================================
 
-namespace {
-constexpr uint32_t MIN_SAMPLE_INTERVAL_MS = 100;
-constexpr uint32_t CPU0_BASE_LOAD = 3;
-constexpr uint32_t CPU0_PPS_DIVISOR = 3;
-constexpr uint32_t CPU1_BASE_LOAD = 2;
-constexpr uint32_t CPU1_PPS_DIVISOR = 8;
-} // namespace
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-float temperatureRead(void);
-#ifdef __cplusplus
-}
-#endif
-
-int8_t System_ReadTempC() { return static_cast<int8_t>(temperatureRead()); }
-
-void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
-  static std::atomic<uint32_t> s_last_time_ms{0}, s_last_ch1{0}, s_last_ch23{0},
-      s_last_tcp{0};
-
-  uint32_t now_ms = millis();
-  uint32_t prev_ms = s_last_time_ms.load(std::memory_order_relaxed);
-
-  uint32_t cur_ch1 = g_pkt_stats.ch1.rx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch1.tx_pkts.load(std::memory_order_relaxed);
-  uint32_t cur_ch23 = g_pkt_stats.ch2.rx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch2.tx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch3.rx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch3.tx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch4.rx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch4.tx_pkts.load(std::memory_order_relaxed);
-  uint32_t cur_tcp = g_pkt_stats.ch5.rx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch5.tx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch6.rx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch6.tx_pkts.load(std::memory_order_relaxed);
-
-  uint32_t elapsed_ms = now_ms - prev_ms;
-  if (!prev_ms || elapsed_ms < MIN_SAMPLE_INTERVAL_MS) {
-    if (!prev_ms) {
-      s_last_time_ms.store(now_ms, std::memory_order_relaxed);
-      s_last_ch1.store(cur_ch1, std::memory_order_relaxed);
-      s_last_ch23.store(cur_ch23, std::memory_order_relaxed);
-      s_last_tcp.store(cur_tcp, std::memory_order_relaxed);
-    }
-    cpu0_out = 4;
-    cpu1_out = 3;
-    return;
-  }
-
-  auto get_delta = [](uint32_t cur, std::atomic<uint32_t> &last) {
-    uint32_t prev = last.exchange(cur, std::memory_order_relaxed);
-    return (cur >= prev) ? (cur - prev) : cur;
-  };
-
-  s_last_time_ms.store(now_ms, std::memory_order_relaxed);
-  uint32_t delta_tcp = get_delta(cur_tcp, s_last_tcp);
-  uint32_t delta_uart =
-      get_delta(cur_ch1, s_last_ch1) + get_delta(cur_ch23, s_last_ch23);
-
-  uint32_t tcp_pps = static_cast<uint32_t>(
-      (static_cast<uint64_t>(delta_tcp) * 1000) / elapsed_ms);
-  uint32_t load0 = CPU0_BASE_LOAD + (tcp_pps / CPU0_PPS_DIVISOR);
-  if (WiFi.isConnected())
-    load0 += 1;
-  if (g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed))
-    load0 += 1;
-
-  uint32_t uart_pps = static_cast<uint32_t>(
-      (static_cast<uint64_t>(delta_uart) * 1000) / elapsed_ms);
-  uint32_t load1 = CPU1_BASE_LOAD + (uart_pps / CPU1_PPS_DIVISOR);
-
-  cpu0_out = static_cast<uint8_t>(std::min(load0, 99U));
-  cpu1_out = static_cast<uint8_t>(std::min(load1, 99U));
-}
-
-void SystemMetricsTracker::init() {
-  if (!_metrics_mutex)
-    _metrics_mutex = xSemaphoreCreateMutex();
-  _cached_flash_kb = _current.flash_kb =
-      static_cast<uint16_t>(ESP.getSketchSize() / 1024);
-  memset(&_cur_bucket, 0, sizeof(_cur_bucket));
-}
-
-void SystemMetricsTracker::reset() {
-  MutexLocker lock(_metrics_mutex);
-  _ring15_head = 0;
-  _ring15_count = 0;
-  _ring24_head = 0;
-  _ring24_count = 0;
-  _bucket_sample_count = 0;
-  memset(&_cur_bucket, 0, sizeof(_cur_bucket));
-}
-
-void SystemMetricsTracker::addSample(uint8_t cpu0_pct, uint8_t cpu1_pct,
-                                     uint16_t ram_kb, int8_t temp_c) {
-  const uint16_t flash_kb = _cached_flash_kb;
-  MutexLocker lock(_metrics_mutex);
-  _current = {cpu0_pct, cpu1_pct, ram_kb, flash_kb, temp_c};
-
-  _ring15[_ring15_head] = _current;
-  _ring15_head = (_ring15_head + 1) % SAMPLES_15M;
-  if (_ring15_count < SAMPLES_15M)
-    _ring15_count++;
-
-  _cur_bucket.cpu0_sum += cpu0_pct;
-  _cur_bucket.cpu1_sum += cpu1_pct;
-  _cur_bucket.ram_sum += ram_kb;
-  _cur_bucket.temp_sum += temp_c;
-
-  _cur_bucket.cpu0_peak = std::max(_cur_bucket.cpu0_peak, cpu0_pct);
-  _cur_bucket.cpu1_peak = std::max(_cur_bucket.cpu1_peak, cpu1_pct);
-  _cur_bucket.ram_peak = std::max(_cur_bucket.ram_peak, ram_kb);
-  if (_cur_bucket.count == 0 || temp_c > _cur_bucket.temp_peak) {
-    _cur_bucket.temp_peak = temp_c;
-  }
-
-  _cur_bucket.count++;
-  _bucket_sample_count++;
-
-  if (_bucket_sample_count >= SAMPLES_15M) {
-    _ring24[_ring24_head] = _cur_bucket;
-    _ring24_head = (_ring24_head + 1) % BUCKETS_24H;
-    if (_ring24_count < BUCKETS_24H)
-      _ring24_count++;
-    memset(&_cur_bucket, 0, sizeof(_cur_bucket));
-    _bucket_sample_count = 0;
-  }
-}
-
-namespace {
-struct MetricAccumulator {
-  uint32_t cpu0_sum = 0, cpu1_sum = 0, ram_sum = 0, flash_sum = 0;
-  int32_t temp_sum = 0;
-  uint8_t cpu0_peak = 0, cpu1_peak = 0;
-  uint16_t ram_peak = 0, flash_peak = 0;
-  int8_t temp_peak = -127;
-  uint32_t count = 0;
-
-  void add(uint8_t c0, uint8_t c1, uint16_t ram, uint16_t flash, int8_t temp) {
-    cpu0_sum += c0;
-    cpu1_sum += c1;
-    ram_sum += ram;
-    flash_sum += flash;
-    temp_sum += temp;
-    count++;
-    cpu0_peak = std::max(cpu0_peak, c0);
-    cpu1_peak = std::max(cpu1_peak, c1);
-    ram_peak = std::max(ram_peak, ram);
-    flash_peak = std::max(flash_peak, flash);
-    temp_peak = std::max(temp_peak, temp);
-  }
-
-  void addBucket(const MetricBucket &b) {
-    if (!b.count)
-      return;
-    cpu0_sum += b.cpu0_sum;
-    cpu1_sum += b.cpu1_sum;
-    ram_sum += b.ram_sum;
-    temp_sum += b.temp_sum;
-    count += b.count;
-    cpu0_peak = std::max(cpu0_peak, b.cpu0_peak);
-    cpu1_peak = std::max(cpu1_peak, b.cpu1_peak);
-    ram_peak = std::max(ram_peak, b.ram_peak);
-    temp_peak = std::max(temp_peak, b.temp_peak);
-  }
-
-  StatSummary finalize(uint16_t fallback_flash = 0) const {
-    StatSummary r = {};
-    if (!count)
-      return r;
-    r.cpu0_avg = cpu0_sum / count;
-    r.cpu0_peak = cpu0_peak;
-    r.cpu1_avg = cpu1_sum / count;
-    r.cpu1_peak = cpu1_peak;
-    r.ram_avg = ram_sum / count;
-    r.ram_peak = ram_peak;
-    r.flash_avg = flash_sum ? (flash_sum / count) : fallback_flash;
-    r.flash_peak = flash_peak ? flash_peak : fallback_flash;
-    r.temp_avg = temp_sum / static_cast<int32_t>(count);
-    r.temp_peak = temp_peak;
-    r.count = static_cast<uint16_t>(std::min<uint32_t>(count, 65535U));
-    return r;
-  }
-};
-} // namespace
-
-StatSummary SystemMetricsTracker::get15m() const {
-  MutexLocker lock(_metrics_mutex);
-  MetricAccumulator acc;
-  for (size_t i = 0; i < _ring15_count; i++) {
-    const auto &ms = _ring15[i];
-    acc.add(ms.cpu0_pct, ms.cpu1_pct, ms.ram_kb, ms.flash_kb, ms.temp_c);
-  }
-  return acc.finalize();
-}
-
-StatSummary SystemMetricsTracker::get24h() const {
-  MutexLocker lock(_metrics_mutex);
-  MetricAccumulator acc;
-  for (size_t i = 0; i < _ring24_count; i++) {
-    acc.addBucket(_ring24[i]);
-  }
-  acc.addBucket(_cur_bucket);
-  return acc.finalize(_cached_flash_kb);
-}
 
 // ============================================================================
 // 2. UART RX Stream Demux & Packet Validation (formerly UartRx.cpp)

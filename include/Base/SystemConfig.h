@@ -1,0 +1,255 @@
+#pragma once
+
+// ============================================================================
+// SystemConfig: Level 0 Immutables, Pinmaps, Timings & NVS Runtime Config
+// ============================================================================
+
+#include "SystemPlatform.h"
+#include <atomic>
+#include <shared_mutex>
+
+namespace Config {
+constexpr const char *FIRMWARE_VERSION = "v1.6.8";
+} // namespace Config
+
+namespace Config::Task {
+constexpr size_t STACK_SIZE_CORE1 = 6144;
+constexpr size_t STACK_SIZE_SLAVE = 5632;
+constexpr size_t STACK_SIZE_CH4 = 4096;
+constexpr size_t STACK_SIZE_CORE0 = 8192;
+constexpr size_t STACK_SIZE_TELNET = 6144;
+constexpr size_t TASK_COUNT = 6;
+constexpr uint8_t WDT_ID_TELNET = 5;
+static_assert(WDT_ID_TELNET < TASK_COUNT, "WDT_ID_TELNET out of range");
+} // namespace Config::Task
+
+namespace Config::Queue {
+constexpr size_t POOL_SIZE_CONTROL = 32;
+constexpr size_t POOL_SIZE_VIP = 16;
+constexpr size_t POOL_SIZE_CH4_PASS = 16;
+constexpr size_t UART_EVENT_QUEUE_SIZE = 16;
+} // namespace Config::Queue
+
+namespace Config::Timing {
+constexpr uint32_t CH1_POLL_TIMEOUT_MS = 200;
+constexpr uint32_t MAX_LOCK_HOLD_MS = 300;
+constexpr uint32_t UPTIME_24H_MS = 86400000;
+constexpr uint32_t CH1_INTER_PACKET_DELAY_MS = 15;
+constexpr uint32_t UART_TX_DONE_TIMEOUT_MS = 20;
+constexpr uint32_t CH1_POLL_INTERVAL_MS = 1000;
+constexpr uint32_t STALE_DEVICE_THRESHOLD_MS = 180000;
+constexpr uint32_t CH1_STALE_POLL_INTERVAL_MS = 10000;
+constexpr uint32_t INITIAL_CACHING_GRACE_PERIOD_MS = 5000;
+constexpr uint32_t SYSTEM_MONITOR_INTERVAL_MS = 15000;
+constexpr uint32_t DOORPHONE_DEBOUNCE_MS = 500;
+constexpr uint32_t WALLPAD_AUTO_IPG_MS = 20;
+constexpr uint32_t DOORPHONE_IPG_MS = 25;
+constexpr uint32_t DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS = 16;
+uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept;
+constexpr uint32_t CH2_CACHE_DELAY_MS = 30;
+constexpr uint32_t CH3_CACHE_DELAY_MS = 240;
+constexpr uint32_t OTA_VALIDATION_PERIOD_MS = 120000;
+constexpr uint32_t RESCUE_BUTTON_HOLD_MS = 2500;
+constexpr uint32_t WIFI_BACKGROUND_RETRY_INTERVAL_MS = 60000;
+constexpr uint32_t WARM_CACHE_NVS_DEBOUNCE_MS = 60000;
+constexpr uint32_t WARM_CACHE_VERIFY_TIMEOUT_MS = 60000;
+} // namespace Config::Timing
+
+namespace Config::Network {
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 30000;
+} // namespace Config::Network
+
+namespace Config::OTA {
+constexpr uint32_t DOWNLOAD_DEADLINE_MS = 300000;
+constexpr uint32_t STALL_TIMEOUT_MS = 25000;
+constexpr uint32_t IDLE_DELAY_MS = 2;
+} // namespace Config::OTA
+
+namespace Config::Metrics {
+constexpr uint32_t SAMPLE_INTERVAL_MS = 5000;
+} // namespace Config::Metrics
+
+namespace Config::Memory {
+constexpr uint32_t MIN_HEAP_THRESHOLD_KB = 25;
+} // namespace Config::Memory
+
+namespace Config::Packet {
+constexpr uint8_t MIN_LEN = 3;
+constexpr uint8_t MAX_LEN = 64;
+constexpr uint16_t UART_HW_RX_BUF_SIZE = 2048;
+constexpr size_t UART_READ_CHUNK = 64;
+constexpr size_t MAX_STREAM_BUF = 128;
+} // namespace Config::Packet
+
+namespace Config::GPIO {
+constexpr int BTN_PIN = 41;
+constexpr int TX_GPIO = 39;
+constexpr int RX_GPIO = 38;
+} // namespace Config::GPIO
+
+namespace Config::TCP {
+constexpr uint16_t TELNET_PORT = 23;
+constexpr uint16_t EW11_PORT = 8898;
+constexpr uint16_t MGMT_PORT = 8900;
+constexpr uint8_t MAX_TELNET_CLIENTS = 3;
+constexpr uint8_t MAX_MGMT_CLIENTS = 3;
+constexpr uint8_t MAX_EW11_SLOTS = 5;
+constexpr uint16_t EW11_SLOT_PORTS[MAX_EW11_SLOTS] = {8898, 8891, 8892, 8893,
+                                                      8894};
+constexpr int SOCKET_BUFFER_SIZE = 4096;
+constexpr size_t HUB_RX_BUFFER_SIZE = 1024;
+constexpr size_t MGMT_BUFFER_SIZE = 512;
+constexpr size_t POLL_RX_CHUNK_SIZE = 128;
+constexpr uint32_t TELNET_SESSION_TIMEOUT_MS = 600000;
+constexpr uint32_t CLEANUP_INTERVAL_MS = 30000;
+constexpr uint32_t DEFAULT_KEEPALIVE_IDLE_SEC = 60;
+constexpr uint32_t DEFAULT_KEEPALIVE_INTVL_SEC = 5;
+constexpr uint32_t DEFAULT_KEEPALIVE_CNT = 3;
+} // namespace Config::TCP
+
+namespace Config::FCU {
+constexpr uint32_t POLL_INTERVAL_MS = 1000;
+constexpr uint32_t RX_TIMEOUT_MS = 500;
+constexpr uint32_t INTER_PACKET_DELAY_MS = 50;
+constexpr uint8_t MAX_TIMEOUT_COUNT = 3;
+constexpr uint8_t TEMP_MIN = 18;
+constexpr uint8_t TEMP_MAX = 30;
+constexpr uint8_t DEV_ID = 0x2C;
+} // namespace Config::FCU
+
+namespace Config::Serial {
+constexpr uint32_t DEFAULT_DOORPHONE_BAUD = 3860;
+constexpr uint8_t DEFAULT_DOORPHONE_PARITY = 1;
+constexpr uint8_t DEFAULT_DOORPHONE_DATABITS = 8;
+constexpr uint8_t DEFAULT_DOORPHONE_STOPBITS = 1;
+} // namespace Config::Serial
+
+namespace Config::Doorphone {
+constexpr uint8_t STX = 0x7F;
+constexpr uint8_t ETX = 0xEE;
+constexpr uint8_t PKT_LEN = 5;
+
+enum class FramingStatus : uint8_t {
+  WAITING = 0,
+  LEARNING = 1,
+  LOCKED = 2,
+  NOISY = 3
+};
+
+struct FramingTracker {
+  std::atomic<FramingStatus> status{FramingStatus::WAITING};
+  std::atomic<uint8_t> candidate_stx{0};
+  std::atomic<uint8_t> candidate_etx{0};
+  std::atomic<uint8_t> candidate_len{0};
+  std::atomic<uint8_t> consecutive_matches{0};
+  std::atomic<uint8_t> consecutive_mismatches{0};
+  std::atomic<bool> is_custom_fixed{false};
+
+  void setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
+  void reset() noexcept;
+  void clearNvs(const char *nvs_ns, const char *tag = "DOORPHONE") noexcept;
+  void processFrame(uint8_t stx, uint8_t etx, uint8_t len, const char *nvs_ns,
+                    const char *tag = "DOORPHONE") noexcept;
+
+  static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
+                              size_t max_len) noexcept {
+    snprintf(out_ns, max_len, "dp_frame_p%u",
+             static_cast<unsigned int>(prof_idx & 0x03));
+  }
+
+  void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",
+                      const char *tag = "DOORPHONE") noexcept;
+  void saveToNvs(const char *nvs_ns = "dp_frame_p0",
+                 const char *tag = "DOORPHONE") noexcept;
+
+  [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
+};
+
+struct DoorphoneState {
+  std::atomic<bool> front_bell{false};
+  std::atomic<bool> lobby_bell{false};
+  std::atomic<uint32_t> last_bell_ms{0};
+};
+} // namespace Config::Doorphone
+
+extern Config::Doorphone::DoorphoneState g_doorphone_state;
+extern Config::Doorphone::FramingTracker g_doorphone_tracker;
+
+enum class HubDeviceType : uint8_t {
+  WALLPAD_COMPATIBLE = 0,
+  AIR_CONDITIONER = 1
+};
+
+struct HubClientSlot {
+  bool enabled{false};
+  char name[16]{""};
+  char target_ip[16]{""};
+  uint16_t target_port{8898};
+  HubDeviceType dev_type{HubDeviceType::WALLPAD_COMPATIBLE};
+  Config::Doorphone::FramingTracker tracker;
+  int sock{-1};
+  bool is_connected{false};
+  uint32_t last_reconnect_ms{0};
+  uint8_t rx_buf[Config::TCP::HUB_RX_BUFFER_SIZE];
+  size_t rx_len{0};
+  uint32_t last_rx_ms{0};
+  uint32_t rx_pkts{0};
+  uint32_t tx_pkts{0};
+  uint32_t dropped_pkts{0};
+  uint8_t last_query_data[64]{0};
+  uint8_t last_query_len{0};
+};
+
+extern HubClientSlot g_hub_slots[Config::TCP::MAX_EW11_SLOTS];
+
+enum class WallpadProfileIndex : uint8_t {
+  ADAPTIVE = 0,
+  CUSTOM1 = 1,
+  CUSTOM2 = 2,
+  CUSTOM3 = 3,
+  COUNT = 4
+};
+
+struct RuntimeConfig {
+  uint32_t uart_baud_rate{9600};
+  uint32_t ch2_baud_rate{9600};
+  uint32_t ch3_baud_rate{9600};
+  uint32_t doorphone_baud_rate{Config::Serial::DEFAULT_DOORPHONE_BAUD};
+  char wifi_ssid[64]{0};
+  char wifi_password[64]{0};
+  char ap_ssid[64]{0};
+  char ap_password[64]{0};
+  char telnet_pass_hash[68]{0};
+  uint16_t wifi_connect_timeout_s{30};
+  uint8_t uart_data_bits{8};
+  uint8_t uart_parity{0};
+  uint8_t uart_stop_bits{1};
+  uint8_t ch2_data_bits{8};
+  uint8_t ch2_parity{0};
+  uint8_t ch2_stop_bits{1};
+  uint8_t ch3_data_bits{8};
+  uint8_t ch3_parity{0};
+  uint8_t ch3_stop_bits{1};
+  uint8_t doorphone_data_bits{Config::Serial::DEFAULT_DOORPHONE_DATABITS};
+  uint8_t doorphone_parity{Config::Serial::DEFAULT_DOORPHONE_PARITY};
+  uint8_t doorphone_stop_bits{Config::Serial::DEFAULT_DOORPHONE_STOPBITS};
+  uint8_t wallpad_profile{0};
+};
+
+extern RuntimeConfig g_config;
+extern std::shared_mutex g_config_rw;
+extern portMUX_TYPE g_config_mux;
+extern std::atomic<bool> g_config_dirty;
+
+const char *formatFramingStr(uint8_t data_bits, uint8_t parity,
+                             uint8_t stop_bits) noexcept;
+
+bool parseFramingStr(const char *str, uint8_t &data_bits, uint8_t &parity,
+                     uint8_t &stop_bits) noexcept;
+
+bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format);
+
+void Config_Load();
+void Config_Save();
+void Config_ResetDefaults();
+void System_Sha256ToHex(const char *input, char *output);

@@ -1,9 +1,10 @@
-#include "Console.h"
-#include "Bridge.h"
-#include "Core.h"
-#include "Engine.h"
-#include "Protocol.h"
-#include "Service.h"
+// ============================================================================
+// ConsoleCli: Level 4 Telnet Socket Server & Interactive Console Engine Implementation
+// ============================================================================
+
+#include "Service/ConsoleCli.h"
+#include "Service/RemoteService.h"
+#include "Service/EngineTask.h"
 
 #include <WiFi.h>
 #include <cstdarg>

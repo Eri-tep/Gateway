@@ -1,12 +1,11 @@
 #pragma once
 
-#include "Core.h"
-
 // ============================================================================
-// From include/TelnetCli.h
+// ConsoleCli: Level 4 Telnet Socket Server & Interactive Console Engine
 // ============================================================================
 
-#include "Protocol.h"
+#include "Service/RemoteService.h"
+#include "Service/EngineTask.h"
 
 // ============================================================================
 // SECTION 1: TELNET PROTOCOL & IAC ENUMS

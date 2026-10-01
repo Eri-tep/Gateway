@@ -1,0 +1,366 @@
+#include "SystemConfig.h"
+#include <Arduino.h>
+#include <Preferences.h>
+#include <cstring>
+#include <mbedtls/sha256.h>
+
+RuntimeConfig g_config;
+std::shared_mutex g_config_rw;
+portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
+std::atomic<bool> g_config_dirty{false};
+
+HubClientSlot g_hub_slots[Config::TCP::MAX_EW11_SLOTS];
+
+namespace Config::Timing {
+uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
+  if (baud == 0)
+    return DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS;
+  const uint32_t timeout = (60000UL + baud - 1) / baud;
+  return (timeout < 6) ? 6 : (timeout > 20 ? 20 : timeout);
+}
+} // namespace Config::Timing
+
+namespace Config::Doorphone {
+void FramingTracker::setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept {
+  candidate_stx.store(stx, std::memory_order_relaxed);
+  candidate_etx.store(etx, std::memory_order_relaxed);
+  candidate_len.store(len, std::memory_order_relaxed);
+  consecutive_matches.store(10, std::memory_order_relaxed);
+  consecutive_mismatches.store(0, std::memory_order_relaxed);
+  is_custom_fixed.store(true, std::memory_order_relaxed);
+  status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
+}
+
+void FramingTracker::reset() noexcept {
+  is_custom_fixed.store(false, std::memory_order_relaxed);
+  candidate_stx.store(0, std::memory_order_relaxed);
+  candidate_etx.store(0, std::memory_order_relaxed);
+  candidate_len.store(0, std::memory_order_relaxed);
+  consecutive_matches.store(0, std::memory_order_relaxed);
+  consecutive_mismatches.store(0, std::memory_order_relaxed);
+  status.store(FramingStatus::WAITING, std::memory_order_relaxed);
+}
+
+void FramingTracker::clearNvs(const char *nvs_ns, const char *tag) noexcept {
+  reset();
+  Preferences prefs;
+  if (prefs.begin(nvs_ns, false)) {
+    prefs.clear();
+    prefs.end();
+    ::Serial.printf("[%s] Cleared framing NVS storage (%s).\r\n", tag, nvs_ns);
+  }
+}
+
+void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
+                                  const char *nvs_ns,
+                                  const char *tag) noexcept {
+  if (is_custom_fixed.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  FramingStatus cur = status.load(std::memory_order_relaxed);
+
+  if (stx == 0x7F && etx == 0xEE && (len == 0 || len == 5)) {
+    setFixedLock(0x7F, 0xEE, 5);
+    saveToNvs(nvs_ns, tag);
+    return;
+  }
+
+  if (cur == FramingStatus::WAITING) {
+    candidate_stx.store(stx, std::memory_order_relaxed);
+    candidate_etx.store(etx, std::memory_order_relaxed);
+    if (len > 0)
+      candidate_len.store(len, std::memory_order_relaxed);
+    consecutive_matches.store(1, std::memory_order_relaxed);
+    consecutive_mismatches.store(0, std::memory_order_relaxed);
+    status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
+    return;
+  }
+
+  uint8_t cand_s = candidate_stx.load(std::memory_order_relaxed);
+  uint8_t cand_e = candidate_etx.load(std::memory_order_relaxed);
+
+  if (stx == cand_s && etx == cand_e) {
+    if (len > 0)
+      candidate_len.store(len, std::memory_order_relaxed);
+    consecutive_mismatches.store(0, std::memory_order_relaxed);
+    uint8_t m = consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (m >= 3) {
+      status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
+      saveToNvs(nvs_ns, tag);
+    } else {
+      status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
+    }
+  } else {
+    consecutive_matches.store(0, std::memory_order_relaxed);
+    uint8_t m =
+        consecutive_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (cur == FramingStatus::LOCKED) {
+      if (m >= 10) {
+        status.store(FramingStatus::WAITING, std::memory_order_relaxed);
+        consecutive_mismatches.store(0, std::memory_order_relaxed);
+      }
+    } else {
+      if (m >= 5) {
+        candidate_stx.store(stx, std::memory_order_relaxed);
+        candidate_etx.store(etx, std::memory_order_relaxed);
+        if (len > 0)
+          candidate_len.store(len, std::memory_order_relaxed);
+        consecutive_matches.store(1, std::memory_order_relaxed);
+        consecutive_mismatches.store(0, std::memory_order_relaxed);
+        status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
+      }
+    }
+  }
+}
+
+void FramingTracker::restoreFromNvs(const char *nvs_ns,
+                                    const char *tag) noexcept {
+  if (!nvs_ns)
+    nvs_ns = "dp_frame_p0";
+
+  Preferences prefs;
+  if (prefs.begin(nvs_ns, true)) {
+    uint8_t s = prefs.getUChar("stx", 0);
+    uint8_t e = prefs.getUChar("etx", 0);
+    uint8_t l = prefs.getUChar("len", 0);
+    bool locked = prefs.getBool("locked", false);
+    bool fixed = prefs.getBool("fixed", false);
+    prefs.end();
+
+    if (locked && s != 0 && e != 0) {
+      candidate_stx.store(s, std::memory_order_relaxed);
+      candidate_etx.store(e, std::memory_order_relaxed);
+      candidate_len.store(l, std::memory_order_relaxed);
+      status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
+      is_custom_fixed.store(fixed, std::memory_order_relaxed);
+      ::Serial.printf("[%s] Restored valid framing from NVS (%s): STX=0x%02X, "
+                      "ETX=0x%02X, LEN=%u\r\n",
+                      tag, nvs_ns, s, e, l);
+    }
+  }
+}
+
+void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
+  if (!nvs_ns)
+    nvs_ns = "dp_frame_p0";
+
+  Preferences prefs;
+  if (prefs.begin(nvs_ns, false)) {
+    uint8_t s = candidate_stx.load(std::memory_order_relaxed);
+    uint8_t e = candidate_etx.load(std::memory_order_relaxed);
+    uint8_t l = candidate_len.load(std::memory_order_relaxed);
+    bool is_locked =
+        (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
+    bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
+
+    prefs.putUChar("stx", s);
+    prefs.putUChar("etx", e);
+    prefs.putUChar("len", l);
+    prefs.putBool("locked", is_locked);
+    prefs.putBool("fixed", fixed);
+    prefs.end();
+
+    ::Serial.printf("[%s] Persisted framing to NVS (%s): STX=0x%02X, "
+                    "ETX=0x%02X, LEN=%u%s\r\n",
+                    tag, nvs_ns, s, e, l, fixed ? " [FIXED]" : "");
+  }
+}
+
+bool FramingTracker::isConsistent(uint8_t stx, uint8_t etx) const noexcept {
+  const FramingStatus cur = status.load(std::memory_order_relaxed);
+  if (cur != FramingStatus::LOCKED)
+    return true;
+  return (stx == candidate_stx.load(std::memory_order_relaxed) &&
+          etx == candidate_etx.load(std::memory_order_relaxed));
+}
+} // namespace Config::Doorphone
+
+const char *formatFramingStr(uint8_t data_bits, uint8_t parity,
+                             uint8_t stop_bits) noexcept {
+  if (data_bits == 8) {
+    if (parity == 0 && stop_bits == 1)
+      return "8N1";
+    if (parity == 1 && stop_bits == 1)
+      return "8E1";
+    if (parity == 2 && stop_bits == 1)
+      return "8O1";
+    if (parity == 0 && stop_bits == 2)
+      return "8N2";
+  }
+  return "8N1";
+}
+
+bool parseFramingStr(const char *str, uint8_t &data_bits, uint8_t &parity,
+                     uint8_t &stop_bits) noexcept {
+  if (!str)
+    return false;
+  if (strcasecmp(str, "8N1") == 0) {
+    data_bits = 8;
+    parity = 0;
+    stop_bits = 1;
+    return true;
+  } else if (strcasecmp(str, "8E1") == 0) {
+    data_bits = 8;
+    parity = 1;
+    stop_bits = 1;
+    return true;
+  } else if (strcasecmp(str, "8O1") == 0) {
+    data_bits = 8;
+    parity = 2;
+    stop_bits = 1;
+    return true;
+  } else if (strcasecmp(str, "8N2") == 0) {
+    data_bits = 8;
+    parity = 0;
+    stop_bits = 2;
+    return true;
+  }
+  return false;
+}
+
+void System_Sha256ToHex(const char *input, char *output) {
+  if (!input || !output)
+    return;
+  uint8_t hash[32];
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts_ret(&ctx, 0);
+  mbedtls_sha256_update_ret(
+      &ctx, reinterpret_cast<const unsigned char *>(input), strlen(input));
+  mbedtls_sha256_finish_ret(&ctx, hash);
+  mbedtls_sha256_free(&ctx);
+
+  for (size_t i = 0; i < 32; i++) {
+    sprintf(output + (i * 2), "%02x", hash[i]);
+  }
+  output[64] = '\0';
+}
+
+void Config_Load() {
+  Preferences p;
+  p.begin("runtime-config", true);
+  std::unique_lock lock(g_config_rw);
+  auto &c = g_config;
+
+  c.uart_baud_rate = p.getULong("uart_baud", 9600);
+  c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
+  c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
+  c.doorphone_baud_rate =
+      p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
+
+  c.wifi_ssid[0] = '\0';
+  p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
+  c.wifi_password[0] = '\0';
+  p.getString("wifi_pass", c.wifi_password, sizeof(c.wifi_password));
+  c.ap_ssid[0] = '\0';
+  p.getString("ap_ssid", c.ap_ssid, sizeof(c.ap_ssid));
+  c.ap_password[0] = '\0';
+  p.getString("ap_pass", c.ap_password, sizeof(c.ap_password));
+  c.telnet_pass_hash[0] = '\0';
+  p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
+
+  c.uart_parity = p.getUChar("u_parity", 0);
+  c.uart_stop_bits = p.getUChar("u_sbits", 1);
+  c.uart_data_bits = p.getUChar("u_dbits", 8);
+  c.ch2_parity = p.getUChar("ch2_parity", 0);
+  c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
+  c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
+  c.ch3_parity = p.getUChar("ch3_parity", 0);
+  c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
+  c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
+  c.doorphone_data_bits =
+      p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
+  c.doorphone_parity =
+      p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
+  c.doorphone_stop_bits =
+      p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
+  c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
+  c.wallpad_profile =
+      p.getUChar("w_prof", static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE));
+  p.end();
+
+  uint16_t mac_suffix = static_cast<uint16_t>(ESP.getEfuseMac() >> 32);
+
+  if (strlen(c.wifi_ssid) == 0) {
+#ifdef WIFI_SSID
+    strncpy(c.wifi_ssid, WIFI_SSID, sizeof(c.wifi_ssid) - 1);
+    c.wifi_ssid[sizeof(c.wifi_ssid) - 1] = '\0';
+#endif
+  }
+
+  if (strlen(c.wifi_password) == 0) {
+#ifdef WIFI_PASSWORD
+    strncpy(c.wifi_password, WIFI_PASSWORD, sizeof(c.wifi_password) - 1);
+    c.wifi_password[sizeof(c.wifi_password) - 1] = '\0';
+#endif
+  }
+
+  if (strlen(c.ap_ssid) == 0) {
+    snprintf(c.ap_ssid, sizeof(c.ap_ssid), "Gateway-Setup-%04X", mac_suffix);
+  }
+
+  if (strlen(c.ap_password) < 8) {
+#ifdef EMERGENCY_AP_PASS
+    strncpy(c.ap_password, EMERGENCY_AP_PASS, sizeof(c.ap_password) - 1);
+    c.ap_password[sizeof(c.ap_password) - 1] = '\0';
+#else
+    strncpy(c.ap_password, "9dnjf1!DLF", sizeof(c.ap_password) - 1);
+    c.ap_password[sizeof(c.ap_password) - 1] = '\0';
+#endif
+  }
+
+  if (strlen(c.telnet_pass_hash) == 0) {
+#ifdef DEFAULT_TELNET_PASS
+    System_Sha256ToHex(DEFAULT_TELNET_PASS, c.telnet_pass_hash);
+#endif
+  }
+}
+
+void Config_Save() {
+  if (!g_config_dirty.load(std::memory_order_acquire))
+    return;
+
+  RuntimeConfig snapshot;
+  {
+    std::unique_lock lock(g_config_rw);
+    snapshot = g_config;
+    g_config_dirty.store(false, std::memory_order_release);
+  }
+
+  Preferences p;
+  p.begin("runtime-config", false);
+
+  p.putULong("uart_baud", snapshot.uart_baud_rate);
+  p.putULong("ch2_baud", snapshot.ch2_baud_rate);
+  p.putULong("ch3_baud", snapshot.ch3_baud_rate);
+  p.putULong("door_baud", snapshot.doorphone_baud_rate);
+  p.putString("wifi_ssid", snapshot.wifi_ssid);
+  p.putString("wifi_pass", snapshot.wifi_password);
+  p.putString("ap_ssid", snapshot.ap_ssid);
+  p.putString("ap_pass", snapshot.ap_password);
+  p.putString("telnet_hash", snapshot.telnet_pass_hash);
+
+  p.putUChar("u_parity", snapshot.uart_parity);
+  p.putUChar("u_sbits", snapshot.uart_stop_bits);
+  p.putUChar("u_dbits", snapshot.uart_data_bits);
+  p.putUChar("ch2_parity", snapshot.ch2_parity);
+  p.putUChar("ch2_sbits", snapshot.ch2_stop_bits);
+  p.putUChar("ch2_dbits", snapshot.ch2_data_bits);
+  p.putUChar("ch3_parity", snapshot.ch3_parity);
+  p.putUChar("ch3_sbits", snapshot.ch3_stop_bits);
+  p.putUChar("ch3_dbits", snapshot.ch3_data_bits);
+  p.putUChar("d_dbits", snapshot.doorphone_data_bits);
+  p.putUChar("d_parity", snapshot.doorphone_parity);
+  p.putUChar("d_sbits", snapshot.doorphone_stop_bits);
+  p.putUShort("w_tout", snapshot.wifi_connect_timeout_s);
+  p.putUChar("w_prof", snapshot.wallpad_profile);
+
+  p.end();
+}
+
+void Config_ResetDefaults() {
+  std::unique_lock lock(g_config_rw);
+  g_config = RuntimeConfig{};
+  g_config_dirty.store(true, std::memory_order_release);
+}
