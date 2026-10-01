@@ -79,6 +79,27 @@ public:
     // ANSI escape sequence filter state
     enum class EscState : uint8_t { NORMAL, GOT_ESC, IN_CSI } esc_state{EscState::NORMAL};
 
+    // ── Command History Ring Buffer (Zero-Heap, Fixed Size) ──
+    static constexpr uint8_t HISTORY_MAX = 8;
+    static constexpr uint8_t CMD_MAX_LEN = 64;
+    char history[HISTORY_MAX][CMD_MAX_LEN]{{0}};
+    uint8_t hist_count = 0;
+    uint8_t hist_head = 0;
+    int8_t  browse_idx = -1;
+
+    void addHistory(const char *cmd) {
+      if (!cmd || !*cmd) return;
+      // Do not duplicate if identical to the latest entry
+      if (hist_count > 0) {
+        uint8_t prev = (hist_head + HISTORY_MAX - 1) % HISTORY_MAX;
+        if (strncmp(history[prev], cmd, CMD_MAX_LEN - 1) == 0) return;
+      }
+      strncpy(history[hist_head], cmd, CMD_MAX_LEN - 1);
+      history[hist_head][CMD_MAX_LEN - 1] = '\0';
+      hist_head = (hist_head + 1) % HISTORY_MAX;
+      if (hist_count < HISTORY_MAX) hist_count++;
+    }
+
     void reset() {
       if (sock >= 0) {
         close(sock);
@@ -95,6 +116,10 @@ public:
       memset(lineBuf, 0, sizeof(lineBuf));
       lineLen = 0;
       esc_state = EscState::NORMAL;
+      memset(history, 0, sizeof(history));
+      hist_count = 0;
+      hist_head = 0;
+      browse_idx = -1;
     }
   };
 
@@ -130,9 +155,9 @@ private:
                        uint32_t now);
   void onClientData(TelnetSession *session, const char *data, size_t len);
   void handleClientDisconnect(TelnetSession *session);
-  bool handlePassword(TelnetSession *session, const char *password);
 
 public:
+  bool handlePassword(TelnetSession *session, const char *password);
   static void cmdExit(CliContext &ctx);
   explicit TelnetManager(uint16_t port = Config::TCP::TELNET_PORT);
   void startServer();

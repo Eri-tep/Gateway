@@ -199,7 +199,7 @@ void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt);
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.6.0";
+constexpr const char *FIRMWARE_VERSION = "v1.6.1";
 } // namespace Config
 
 namespace Config::Task {
