@@ -301,35 +301,36 @@ void TelnetManager::writeCharToClient(EmbeddedCli *cli, char c) {
   }
 }
 
+struct CmdDef {
+  const char *n;
+  const char *h;
+  void (*b)(EmbeddedCli *, char *, void *);
+};
+
+static const CmdDef kConsoleCmds[] = {
+    {"stats",    "Show real-time HW metrics & traffic stats [clear]", SystemCli::cmdStats},
+    {"devs",     "Show device registry & cache [1|2|all|clear]", WallpadCli::cmdDevs},
+    {"wifi",     "Manage WiFi connection [status|scan|connect|disconnect]", WifiCli::cmdWifi},
+    {"trace",    "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]", WallpadCli::cmdTrace},
+    {"wallpad",  "Wallpad protocol & auto-probing [status|list|set|save|delete|auto|reset|simulate]", WallpadCli::cmdWallpad},
+    {"ctl",      "Device control blueprints [table|<dev_id>|name|class|reset]", WallpadCli::cmdCtl},
+    {"config",   "View or modify runtime configuration [set|reset]", ConfigCli::cmdConfig},
+    {"save",     "Save current runtime configuration to NVS flash", ConfigCli::cmdSave},
+    {"ew11",     "CH5 EW11 hub sockets & FCU [list|set|frame|reset|enable|disable]", ConfigCli::cmdEw11},
+    {"routes",   "Show dynamic device ingress routing table [clear]", ConfigCli::cmdRoutes},
+    {"logview",  "Persistent reboot history & crash logs [list|<1-20>|last|clear]", SystemCli::cmdLogView},
+    {"coredump", "Show crash core dump summary or erase partition [clear]", SystemCli::cmdCoreDump},
+    {"ota",      "Dual-partition OTA & rollback [status|rollback|validate|cloud]", SystemCli::cmdOta},
+    {"reboot",   "Perform hardware system reboot with safe shutdown", SystemCli::cmdReboot},
+    {"q",        "Stop active packet tracing (shortcut for 'trace off')", WallpadCli::cmdStop},
+    {"exit",     "Disconnect current Telnet CLI session", TelnetManager::cmdExit},
+    {"help",     "Display comprehensive command reference and usage examples", SystemCli::cmdHelp}};
+
 void TelnetManager::bindCommands(TelnetSession *session) {
   if (!session->cli)
     return;
 
-  struct CmdDef {
-    const char *n;
-    const char *h;
-    void (*b)(EmbeddedCli *, char *, void *);
-  };
-  static const CmdDef cmds[] = {
-      {"stats", "Show real-time HW metrics & traffic stats [clear]", SystemCli::cmdStats},
-      {"devs", "Show device registry & cache [1|2|clear]", WallpadCli::cmdDevs},
-      {"wifi", "Manage WiFi STA connection [status|scan|connect|disconnect]", WifiCli::cmdWifi},
-      {"trace", "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]", WallpadCli::cmdTrace},
-      {"wallpad", "Wallpad protocol & auto-probing [status|list|set|save|delete|auto|reset]", WallpadCli::cmdWallpad},
-      {"ctl", "Device control specs [view|reset|name|class]", WallpadCli::cmdCtl},
-      {"config", "View or modify runtime configuration [set|reset]", ConfigCli::cmdConfig},
-      {"save", "Save current runtime configuration to NVS flash", ConfigCli::cmdSave},
-      {"ew11", "CH5 EW11 multi-client hub config [list|set|enable|disable]", ConfigCli::cmdEw11},
-      {"routes", "Show dynamic device ingress routing table [clear]", ConfigCli::cmdRoutes},
-      {"logview", "Persistent reboot history & crash logs [list|<1-20>|last|clear]", SystemCli::cmdLogView},
-      {"coredump", "Show crash core dump summary or erase partition [clear]", SystemCli::cmdCoreDump},
-      {"ota", "Dual-partition OTA & auto-rollback management [status|rollback|validate]", SystemCli::cmdOta},
-      {"reboot", "Perform hardware system reboot with safe shutdown", SystemCli::cmdReboot},
-      {"q", "Immediately stop active packet tracing (shortcut for 'trace off')", WallpadCli::cmdStop},
-      {"exit", "Disconnect current Telnet CLI session", cmdExit},
-      {"help", "Display comprehensive command reference and usage examples", SystemCli::cmdHelp}};
-
-  for (const auto &c : cmds) {
+  for (const auto &c : kConsoleCmds) {
     if (strcmp(c.n, "help") == 0) {
       struct InternalCliImpl {
         void *rxBuf;
@@ -1190,6 +1191,118 @@ static inline int getSock(void *ctx) noexcept {
 char g_cli_scratch_buf[5120];
 
 // ============================================================================
+// CLI 80-COLUMN UNIFIED FORMATTING & BUFFER HELPERS
+// ============================================================================
+
+namespace CliFmt {
+constexpr char BOX80_EQ[]   = "+==============================================================================+\r\n";
+constexpr char BOX80_DASH[] = "+------------------------------------------------------------------------------+\r\n";
+
+inline void CenterText(char *out, size_t sz, const char *val, int width) noexcept {
+  int vlen = val ? static_cast<int>(strlen(val)) : 0;
+  if (vlen >= width) {
+    snprintf(out, sz, "%.*s", width, val ? val : "");
+    return;
+  }
+  int l = (width - vlen) / 2;
+  int r = width - vlen - l;
+  snprintf(out, sz, "%*s%s%*s", l, "", val ? val : "", r, "");
+}
+
+inline void PrintBoxHeader(AppendBuf &out, const char *title) {
+  out.append("\r\n");
+  out.append(BOX80_EQ);
+  int tlen = title ? static_cast<int>(strlen(title)) : 0;
+  if (tlen > 78) tlen = 78;
+  int pad_l = (78 - tlen) / 2;
+  int pad_r = 78 - tlen - pad_l;
+  out.appendFormat("|%*s%.*s%*s|\r\n", pad_l, "", tlen, title ? title : "", pad_r, "");
+  out.append(BOX80_EQ);
+}
+
+inline void PrintBoxSubtitle(AppendBuf &out, const char *subtitle) {
+  int slen = subtitle ? static_cast<int>(strlen(subtitle)) : 0;
+  if (slen > 78) slen = 78;
+  int pad_l = (78 - slen) / 2;
+  int pad_r = 78 - slen - pad_l;
+  out.appendFormat("|%*s%.*s%*s|\r\n", pad_l, "", slen, subtitle ? subtitle : "", pad_r, "");
+}
+
+inline void PrintBoxFooter(AppendBuf &out, const char *tip) {
+  int tlen = tip ? static_cast<int>(strlen(tip)) : 0;
+  if (tlen > 78) tlen = 78;
+  int pad_l = (78 - tlen) / 2;
+  int pad_r = 78 - tlen - pad_l;
+  out.appendFormat("|%*s%.*s%*s|\r\n", pad_l, "", tlen, tip ? tip : "", pad_r, "");
+  out.append(BOX80_EQ);
+  out.append("\r\n");
+}
+
+inline void PrintCardRow2(AppendBuf &out, const char *key, const char *val) {
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", key ? key : "", val ? val : "");
+}
+
+inline void PrintCardRow4(AppendBuf &out, const char *cat, const char *param, const char *val, const char *status) {
+  char clean_s[16] = {0};
+  if (status && status[0] == '[' && status[strlen(status) - 1] == ']') {
+    size_t slen = strlen(status);
+    if (slen >= 2 && slen - 2 < sizeof(clean_s)) {
+      strncpy(clean_s, status + 1, slen - 2);
+      clean_s[slen - 2] = '\0';
+    }
+  } else if (status) {
+    strncpy(clean_s, status, sizeof(clean_s) - 1);
+  }
+  char s_centered[14] = {0};
+  CenterText(s_centered, sizeof(s_centered), clean_s, 12);
+  out.appendFormat("| %-12.12s | %-13.13s | %-32.32s |%s|\r\n",
+                   cat ? cat : "", param ? param : "", val ? val : "", s_centered);
+}
+
+inline bool IsHelp(const char *s) {
+  return s && (s[0] == '?' || strcasecmp(s, "help") == 0);
+}
+
+struct SubCmdHelpItem {
+  const char *syntax;
+  const char *desc;
+};
+
+} // namespace CliFmt
+
+template <typename F>
+inline void withScratchBuf(int sock, F &&fn) {
+  g_cli_scratch_buf[0] = '\0';
+  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
+  fn(out);
+  if (sock >= 0 && out.offset > 0) {
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  }
+}
+
+namespace CliFmt {
+
+inline void PrintCmdHelp(int sock, const char *title, const SubCmdHelpItem *items, size_t count, const char *tip = nullptr) {
+  withScratchBuf(sock, [title, items, count, tip](AppendBuf &out) {
+    PrintBoxHeader(out, title);
+    out.append("| Subcommand / Syntax                | Description                             |\r\n");
+    out.append("+------------------------------------+-----------------------------------------+\r\n");
+    for (size_t i = 0; i < count; ++i) {
+      out.appendFormat("| %-34.34s | %-39.39s |\r\n", items[i].syntax ? items[i].syntax : "", items[i].desc ? items[i].desc : "");
+    }
+    out.append("+------------------------------------+-----------------------------------------+\r\n");
+    if (tip) {
+      PrintBoxFooter(out, tip);
+    } else {
+      out.append(BOX80_EQ);
+      out.append("\r\n");
+    }
+  });
+}
+
+} // namespace CliFmt
+
+// ============================================================================
 // From src/CLI/CliNetwork.cpp
 // ============================================================================
 
@@ -1285,42 +1398,36 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
   const char *subCmd = (count > 0) ? embeddedCliGetToken(args, 1) : "status";
 
   if (count == 0 || strcasecmp(subCmd, "status") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
+    withScratchBuf(sock, [](AppendBuf &out) {
+      CliFmt::PrintBoxHeader(out, "WI-FI HARDWARE & NETWORK STATUS");
+      out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
+      out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
-    out.append("\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("|                       WI-FI HARDWARE & NETWORK STATUS                        |\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
-    out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
+      bool sta_ok = (WiFi.status() == WL_CONNECTED);
+      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Station (STA)", "SSID",
+                       sta_ok ? WiFi.SSID().c_str() : g_config.wifi_ssid,
+                       sta_ok ? "[CONNECTED]" : "[DISCONNECTED]");
+      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "IP Address",
+                       sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0",
+                       sta_ok ? "[ACTIVE]" : "[IDLE]");
+      char rssi_b[16];
+      snprintf(rssi_b, sizeof(rssi_b), "%d dBm", WiFi.RSSI());
+      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Signal (RSSI)",
+                       sta_ok ? rssi_b : "N/A", sta_ok ? "[STABLE]" : "[IDLE]");
+      out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
-    bool sta_ok = (WiFi.status() == WL_CONNECTED);
-    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Station (STA)", "SSID",
-                     sta_ok ? WiFi.SSID().c_str() : g_config.wifi_ssid,
-                     sta_ok ? "[CONNECTED]" : "[DISCONNECTED]");
-    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "IP Address",
-                     sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0",
-                     sta_ok ? "[ACTIVE]" : "[IDLE]");
-    char rssi_b[16];
-    snprintf(rssi_b, sizeof(rssi_b), "%d dBm", WiFi.RSSI());
-    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Signal (RSSI)",
-                     sta_ok ? rssi_b : "N/A", sta_ok ? "[STABLE]" : "[IDLE]");
-    out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
-
-    bool ap_active = (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA);
-    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "SoftAP (AP)", "SSID",
-                     g_config.ap_ssid, ap_active ? "[BROADCASTING]" : "[DISABLED]");
-    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "AP IP",
-                     ap_active ? WiFi.softAPIP().toString().c_str() : "0.0.0.0",
-                     ap_active ? "[ACTIVE]" : "[INACTIVE]");
-    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Clients",
-                     ap_active ? "Max 4 Clients" : "0 Clients",
-                     ap_active ? "[READY]" : "[OFF]");
-    out.append("+==============================================================================+\r\n");
-    out.append("\r\n");
-
-    sendTelnetMsgLen(sock, out.buf, out.offset);
+      bool ap_active = (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA);
+      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "SoftAP (AP)", "SSID",
+                       g_config.ap_ssid, ap_active ? "[BROADCASTING]" : "[DISABLED]");
+      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "AP IP",
+                       ap_active ? WiFi.softAPIP().toString().c_str() : "0.0.0.0",
+                       ap_active ? "[ACTIVE]" : "[INACTIVE]");
+      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Clients",
+                       ap_active ? "Max 4 Clients" : "0 Clients",
+                       ap_active ? "[READY]" : "[OFF]");
+      out.append(CliFmt::BOX80_EQ);
+      out.append("\r\n");
+    });
     return;
   }
 
@@ -1338,7 +1445,7 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
         NULL, 0);
   } else if (strcasecmp(subCmd, "connect") == 0) {
     if (count < 2) {
-      sendTelnetMsg(sock, "[ERROR] Usage: wifi connect <ssid> [password]\r\n");
+      sendTelnetMsg(sock, "[ERROR] Missing SSID: wifi connect <ssid> [password]\r\n");
       return;
     }
     const char *ssid_arg = embeddedCliGetToken(args, 2);
@@ -1361,7 +1468,14 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
     WiFi.disconnect(false);
     sendTelnetMsg(sock, "[WIFI] Disconnected from Wi-Fi AP.\r\n");
   } else {
-    sendTelnetMsg(sock, "Usage: wifi [status | scan | connect <ssid> [password] | disconnect]\r\n");
+    static const CliFmt::SubCmdHelpItem items[] = {
+        {"status", "Show current Wi-Fi connection status"},
+        {"scan", "Scan nearby 2.4GHz Wi-Fi APs"},
+        {"connect <ssid> [password]", "Connect to specified AP and save to NVS"},
+        {"disconnect", "Disconnect from current Wi-Fi AP"},
+    };
+    CliFmt::PrintCmdHelp(sock, "WIFI COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                         "Tip: Configuration persists to NVS flash memory");
   }
 }
 
@@ -1520,8 +1634,6 @@ void cmdStats(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsg(client, "All traffic statistics, hits, and metrics history CLEARED to 0.\r\n");
       return;
     }
-    sendTelnetMsg(client, "Usage: stats [clear]\r\n");
-    return;
   }
   printStats(client);
 }
@@ -1552,73 +1664,54 @@ void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
   }
 
   if (strcasecmp(sub_cmd, "list") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
+    withScratchBuf(client, [count](AppendBuf &out) {
+      CliFmt::PrintBoxHeader(out, "PERSISTENT REBOOT LOG HISTORY");
+      char sub_buf[64];
+      snprintf(sub_buf, sizeof(sub_buf), "Total Stored: %u / %u Logs | Non-Volatile RTC/NVS",
+               static_cast<unsigned>(count), static_cast<unsigned>(LogManager::MAX_LOG_ENTRIES));
+      CliFmt::PrintBoxSubtitle(out, sub_buf);
 
-    out.append("\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("|                        PERSISTENT REBOOT LOG HISTORY                         |\r\n");
-    out.append("+==============================================================================+\r\n");
-    char sub_buf[64];
-    snprintf(sub_buf, sizeof(sub_buf), "Total Stored: %u / %u Logs | Non-Volatile RTC/NVS",
-             static_cast<unsigned>(count), static_cast<unsigned>(LogManager::MAX_LOG_ENTRIES));
-    int s_len = strlen(sub_buf);
-    int sl_l = (78 - s_len) / 2;
-    int sl_r = 78 - s_len - sl_l;
-    out.appendFormat("|%*s%s%*s|\r\n", sl_l, "", sub_buf, sl_r, "");
+      out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
+      out.append("| No  |      Timestamp      |           Reboot Reason           |    Uptime    |\r\n");
+      out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
 
-    out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
-    out.append("| No  |      Timestamp      |           Reboot Reason           |    Uptime    |\r\n");
-    out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
-
-    for (size_t i = 0; i < count; i++) {
-      LogEntry entry;
-      if (LogManager::getLogEntry(i, entry)) {
-        char time_buf[32] = "N/A";
-        if (entry.timestamp > 0) {
-          struct tm timeinfo;
-          time_t sec = static_cast<time_t>(entry.timestamp);
-          localtime_r(&sec, &timeinfo);
-          if (timeinfo.tm_year >= 124) {
-            strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
-          } else {
-            snprintf(time_buf, sizeof(time_buf),
-                     "%04d-%02d-%02d %02d:%02d:%02d", timeinfo.tm_year + 1900,
-                     timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour,
-                     timeinfo.tm_min, timeinfo.tm_sec);
+      for (size_t i = 0; i < count; i++) {
+        LogEntry entry;
+        if (LogManager::getLogEntry(i, entry)) {
+          char time_buf[32] = "N/A";
+          if (entry.timestamp > 0) {
+            struct tm timeinfo;
+            time_t sec = static_cast<time_t>(entry.timestamp);
+            localtime_r(&sec, &timeinfo);
+            if (timeinfo.tm_year >= 124) {
+              strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+            } else {
+              snprintf(time_buf, sizeof(time_buf),
+                       "%04d-%02d-%02d %02d:%02d:%02d", timeinfo.tm_year + 1900,
+                       timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour,
+                       timeinfo.tm_min, timeinfo.tm_sec);
+            }
           }
+          uint32_t sec = entry.stats_snapshot.uptime_ms / 1000;
+          char up_buf[16];
+          snprintf(up_buf, sizeof(up_buf), "%02uh %02um %02us",
+                   sec / 3600, (sec % 3600) / 60, sec % 60);
+
+          char no_buf[8];
+          snprintf(no_buf, sizeof(no_buf), "#%u", static_cast<unsigned>(i + 1));
+
+          char no_c[8], time_c[24], up_c[16];
+          CliFmt::CenterText(no_c, sizeof(no_c), no_buf, 5);
+          CliFmt::CenterText(time_c, sizeof(time_c), time_buf, 21);
+          CliFmt::CenterText(up_c, sizeof(up_c), up_buf, 14);
+
+          out.appendFormat("|%s|%s| %-33.33s |%s|\r\n",
+                           no_c, time_c, entry.reason, up_c);
         }
-        uint32_t sec = entry.stats_snapshot.uptime_ms / 1000;
-        char up_buf[16];
-        snprintf(up_buf, sizeof(up_buf), "%02uh %02um %02us",
-                 sec / 3600, (sec % 3600) / 60, sec % 60);
-
-        char no_buf[8];
-        snprintf(no_buf, sizeof(no_buf), "#%u", static_cast<unsigned>(i + 1));
-        int n_len = strlen(no_buf);
-        int nl_l = (5 - n_len) / 2;
-        int nl_r = 5 - n_len - nl_l;
-
-        int t_len = strlen(time_buf);
-        int tl_l = (21 - t_len) / 2;
-        int tl_r = 21 - t_len - tl_l;
-
-        int u_len = strlen(up_buf);
-        int ul_l = (14 - u_len) / 2;
-        int ul_r = 14 - u_len - ul_l;
-
-        out.appendFormat("|%*s%s%*s|%*s%s%*s| %-33.33s |%*s%s%*s|\r\n",
-                         nl_l, "", no_buf, nl_r, "",
-                         tl_l, "", time_buf, tl_r, "",
-                         entry.reason,
-                         ul_l, "", up_buf, ul_r, "");
       }
-    }
-    out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
-    out.append("|        Use 'logview <1-20>' for details, 'logview clear' to wipe history     |\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("\r\n");
-    sendTelnetMsgLen(client, out.buf, out.offset);
+      out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
+      CliFmt::PrintBoxFooter(out, "Use 'logview <1-20>' for details, 'logview clear' to wipe history");
+    });
     return;
   }
 
@@ -1631,7 +1724,7 @@ void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
     if (endp != sub_cmd && *endp == '\0' && val >= 1 && static_cast<size_t>(val) <= count) {
       target_idx = static_cast<size_t>(val - 1);
     } else {
-      sendTelnetMsg(client, "Usage: logview [list | <1-20> | last | clear]\r\n");
+      sendTelnetMsg(client, "[ERROR] Invalid log index. Use 'logview' or 'logview <1-20>'\r\n");
       return;
     }
   }
@@ -1653,49 +1746,37 @@ void cmdCoreDump(EmbeddedCli *cli, char *args, void *context) {
   esp_err_t err = esp_core_dump_get_summary(&summary);
 
   if (err != ESP_OK) {
-    sendTelnetMsg(client,
-                  "\r\n[COREDUMP] No crash core dump summary available (Partition clean or empty).\r\n");
+    sendTelnetMsg(client, "\r\n[COREDUMP] No crash core dump summary available (Partition clean or empty).\r\n");
     return;
   }
 
-  char *buf = g_cli_scratch_buf;
-  constexpr size_t buf_size = sizeof(g_cli_scratch_buf);
-  int pos = 0;
+  withScratchBuf(client, [&summary](AppendBuf &out) {
+    CliFmt::PrintBoxHeader(out, "CRASH CORE DUMP ANALYSIS SUMMARY");
+    out.append("| Status          : Valid Core Dump Found                                      |\r\n");
 
-  pos += snprintf(
-      buf + pos, buf_size - pos,
-      "\r\n+==============================================================================+\r\n"
-      "|                       CRASH CORE DUMP ANALYSIS SUMMARY                       |\r\n"
-      "+==============================================================================+\r\n"
-      "| Status          : Valid Core Dump Found                                      |\r\n");
+    char line_buf[128];
+    snprintf(line_buf, sizeof(line_buf), "Crashed Task    : %s", summary.exc_task);
+    out.appendFormat("| %-76.76s |\r\n", line_buf);
 
-  char line_buf[128];
-  snprintf(line_buf, sizeof(line_buf), "Crashed Task    : %s", summary.exc_task);
-  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+    snprintf(line_buf, sizeof(line_buf), "Program Counter : 0x%08X", static_cast<unsigned>(summary.exc_pc));
+    out.appendFormat("| %-76.76s |\r\n", line_buf);
 
-  snprintf(line_buf, sizeof(line_buf), "Program Counter : 0x%08X", static_cast<unsigned>(summary.exc_pc));
-  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+    snprintf(line_buf, sizeof(line_buf), "Exception Cause : %lu", static_cast<unsigned long>(summary.ex_info.exc_cause));
+    out.appendFormat("| %-76.76s |\r\n", line_buf);
 
-  snprintf(line_buf, sizeof(line_buf), "Exception Cause : %lu", static_cast<unsigned long>(summary.ex_info.exc_cause));
-  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+    snprintf(line_buf, sizeof(line_buf), "Backtrace Depth : %d frames%s", summary.exc_bt_info.depth, summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
+    out.appendFormat("| %-76.76s |\r\n", line_buf);
 
-  snprintf(line_buf, sizeof(line_buf), "Backtrace Depth : %d frames%s", summary.exc_bt_info.depth, summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
-  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+    out.append("| Backtrace PCs   :                                                            |\r\n");
 
-  pos += snprintf(buf + pos, buf_size - pos, "| Backtrace PCs   :                                                            |\r\n");
+    for (int i = 0; i < summary.exc_bt_info.depth; ++i) {
+      snprintf(line_buf, sizeof(line_buf), "  [%2d] 0x%08X", i, static_cast<unsigned>(summary.exc_bt_info.bt[i]));
+      out.appendFormat("| %-76.76s |\r\n", line_buf);
+    }
 
-  for (int i = 0; i < summary.exc_bt_info.depth && pos < static_cast<int>(buf_size) - 128;
-       ++i) {
-    snprintf(line_buf, sizeof(line_buf), "  [%2d] 0x%08X", i, static_cast<unsigned>(summary.exc_bt_info.bt[i]));
-    pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
-  }
-
-  pos += snprintf(
-      buf + pos, buf_size - pos,
-      "+------------------------------------------------------------------------------+\r\n"
-      "| Use: xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>                |\r\n"
-      "+==============================================================================+\r\n\r\n");
-  sendTelnetMsg(client, buf);
+    out.append("+------------------------------------------------------------------------------+\r\n");
+    CliFmt::PrintBoxFooter(out, "Use: xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>");
+  });
 }
 
 void otaPrintStatus(AppendBuf &out) {
@@ -1750,10 +1831,7 @@ void otaPrintStatus(AppendBuf &out) {
 
   bool is_rescue = g_rescue_mode.load(std::memory_order_relaxed);
 
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|                    DUAL-PARTITION OTA & ROLLBACK MONITOR                     |\r\n");
-  out.append("+==============================================================================+\r\n");
+  CliFmt::PrintBoxHeader(out, "DUAL-PARTITION OTA & ROLLBACK MONITOR");
   out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
   out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
@@ -1782,7 +1860,7 @@ void otaPrintStatus(AppendBuf &out) {
   out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Safety Guard",   "Health Timer",  timer_val,           val_done ? "[STABLE]" : "[TESTING]");
   out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Crash Loop",    crash_val,           rtc_crash_counter == 0 ? "[STABLE]" : "[WARNING]");
   out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Rescue Mode",   is_rescue ? "Forced Safe SoftAP" : "Standard Boot", is_rescue ? "[RESCUE]" : "[STABLE]");
-  out.append("+==============================================================================+\r\n");
+  out.append(CliFmt::BOX80_EQ);
   out.append("\r\n");
 }
 
@@ -1814,10 +1892,9 @@ void cmdOta(EmbeddedCli *cli, char *args, void *context) {
   const char *subCmd = (count > 0) ? embeddedCliGetToken(args, 1) : "status";
 
   if (strcasecmp(subCmd, "status") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-    otaPrintStatus(out);
-    sendTelnetMsgLen(sock, out.buf, out.offset);
+    withScratchBuf(sock, [](AppendBuf &out) {
+      otaPrintStatus(out);
+    });
   } else if (strcasecmp(subCmd, "rollback") == 0) {
     otaTriggerRollback(sock);
   } else if (strcasecmp(subCmd, "validate") == 0) {
@@ -1827,44 +1904,29 @@ void cmdOta(EmbeddedCli *cli, char *args, void *context) {
     sendTelnetMsg(sock, "[OTA] Initiating GitHub Cloud HTTP(S) OTA in background...\r\n");
     Mgmt_StartHttpOta(url);
   } else {
-    sendTelnetMsg(sock, "Usage: ota [status|rollback|validate|cloud [url]]\r\n");
+    static const CliFmt::SubCmdHelpItem items[] = {
+        {"status", "Show active partition & rollback state"},
+        {"rollback", "Rollback to previous firmware partition"},
+        {"validate", "Confirm current firmware running valid"},
+        {"cloud [url]", "Trigger cloud OTA download & update"},
+    };
+    CliFmt::PrintCmdHelp(sock, "OTA COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                         "Tip: Unvalidated firmware auto-rolls back on reboot");
   }
 }
 
 void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   int client = getSock(context);
-
-  g_cli_scratch_buf[0] = '\0';
-  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|                       GATEWAY TELNET COMMAND REFERENCE                       |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("| Command   | Description & Usage Syntax                                       |\r\n");
-  out.append("+-----------+------------------------------------------------------------------+\r\n");
-  out.append("| stats     | Show real-time HW metrics & traffic stats [clear]                |\r\n");
-  out.append("| devs      | Show device registry & cache [1|2|clear]                         |\r\n");
-  out.append("| wifi      | Manage WiFi STA connection [status|scan|connect|disconnect]      |\r\n");
-  out.append("| trace     | Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]          |\r\n");
-  out.append("| wallpad   | Wallpad protocol & probing [status|list|set|save|delete|auto]    |\r\n");
-  out.append("| ctl       | Device control specs [view|reset|name|class]                     |\r\n");
-  out.append("| config    | View or modify runtime configuration [set|reset]                 |\r\n");
-  out.append("| save      | Save current runtime configuration to NVS flash                  |\r\n");
-  out.append("| ew11      | CH5 EW11 multi-client hub config [list|set|enable|disable]       |\r\n");
-  out.append("| routes    | Show dynamic device ingress routing table [clear]                |\r\n");
-  out.append("| logview   | Persistent reboot history & crash logs [list|<1-20>|last|clear]  |\r\n");
-  out.append("| coredump  | Show crash core dump summary or erase partition [clear]          |\r\n");
-  out.append("| ota       | Dual-partition OTA & auto-rollback management [status|rollback]  |\r\n");
-  out.append("| reboot    | Perform hardware system reboot with safe shutdown                |\r\n");
-  out.append("| q         | Stop active packet tracing (shortcut for 'trace off')            |\r\n");
-  out.append("| exit      | Disconnect current Telnet CLI session                            |\r\n");
-  out.append("+-----------+------------------------------------------------------------------+\r\n");
-  out.append("|         Type '<command> help' or refer to documentation for details          |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("\r\n");
-
-  sendTelnetMsgLen(client, out.buf, out.offset);
+  withScratchBuf(client, [](AppendBuf &out) {
+    CliFmt::PrintBoxHeader(out, "GATEWAY TELNET COMMAND REFERENCE");
+    out.append("| Command   | Description & Usage Syntax                                       |\r\n");
+    out.append("+-----------+------------------------------------------------------------------+\r\n");
+    for (const auto &c : kConsoleCmds) {
+      out.appendFormat("| %-9.9s | %-64.64s |\r\n", c.n, c.h);
+    }
+    out.append("+-----------+------------------------------------------------------------------+\r\n");
+    CliFmt::PrintBoxFooter(out, "Type '<command> ?' or '<command> help' for detailed reference");
+  });
 }
 
 } // namespace SystemCli
@@ -1938,101 +2000,79 @@ static const ConfigParamDef PARAM_TABLE[] = {
 static const size_t PARAM_COUNT = sizeof(PARAM_TABLE) / sizeof(ConfigParamDef);
 
 void printConfig(int sock) {
-  g_cli_scratch_buf[0] = '\0';
-  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
+  withScratchBuf(sock, [](AppendBuf &out) {
+    char f1[8], f2[8], f3[8], f4[8];
+    snprintf(f1, sizeof(f1), "%s", formatFramingStr(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits));
+    snprintf(f2, sizeof(f2), "%s", formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits));
+    snprintf(f3, sizeof(f3), "%s", formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits));
+    snprintf(f4, sizeof(f4), "%s", formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits));
 
-  char f1[8], f2[8], f3[8], f4[8];
-  snprintf(f1, sizeof(f1), "%s", formatFramingStr(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits));
-  snprintf(f2, sizeof(f2), "%s", formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits));
-  snprintf(f3, sizeof(f3), "%s", formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits));
-  snprintf(f4, sizeof(f4), "%s", formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits));
+    const char *prof_name = "0 (Auto-Discovered & Learned)";
+    if (g_config.wallpad_profile == 1) prof_name = "1 (Custom Slot 1)";
+    else if (g_config.wallpad_profile == 2) prof_name = "2 (Custom Slot 2)";
+    else if (g_config.wallpad_profile == 3) prof_name = "3 (Custom Slot 3)";
 
-  const char *prof_name = "0 (Auto-Discovered & Learned)";
-  if (g_config.wallpad_profile == 1) prof_name = "1 (Custom Slot 1)";
-  else if (g_config.wallpad_profile == 2) prof_name = "2 (Custom Slot 2)";
-  else if (g_config.wallpad_profile == 3) prof_name = "3 (Custom Slot 3)";
+    char v_wifi[48], v_ap[48], v_tout[48], v_uart[48], v_ch2[48], v_ch3[48], v_ch4[48], v_poll[48], v_ack2[48], v_ack3[48];
+    snprintf(v_wifi, sizeof(v_wifi), "\"%s\"", g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(Not Configured)");
+    snprintf(v_ap, sizeof(v_ap), "\"%s\"", g_config.ap_ssid[0] ? g_config.ap_ssid : "(Disabled)");
+    snprintf(v_tout, sizeof(v_tout), "%u sec", g_config.wifi_connect_timeout_s);
+    snprintf(v_uart, sizeof(v_uart), "%u bps (%s)", static_cast<unsigned>(g_config.uart_baud_rate), f1);
+    snprintf(v_ch2, sizeof(v_ch2), "%u bps (%s)", static_cast<unsigned>(g_config.ch2_baud_rate), f2);
+    snprintf(v_ch3, sizeof(v_ch3), "%u bps (%s)", static_cast<unsigned>(g_config.ch3_baud_rate), f3);
+    snprintf(v_ch4, sizeof(v_ch4), "%u bps (%s)", static_cast<unsigned>(g_config.doorphone_baud_rate), f4);
+    snprintf(v_poll, sizeof(v_poll), "%u ms", g_timing_config.ch1_poll_interval_ms);
+    snprintf(v_ack2, sizeof(v_ack2), "%u ms", g_timing_config.ch2_cache_delay_ms);
+    snprintf(v_ack3, sizeof(v_ack3), "%u ms", g_timing_config.ch3_cache_delay_ms);
 
-  char val_wifi_ssid[50], val_ap_ssid[50], val_wifi_tout[50], val_telnet_pass[50];
-  char val_uart[50], val_ch2[50], val_ch3[50], val_ch4[50];
-  char val_ch1_poll[50], val_ch2_ack[50], val_ch3_ack[50];
-
-  snprintf(val_wifi_ssid, sizeof(val_wifi_ssid), "\"%s\"", g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(Not Configured)");
-  snprintf(val_ap_ssid, sizeof(val_ap_ssid), "\"%s\"", g_config.ap_ssid[0] ? g_config.ap_ssid : "(Disabled)");
-  snprintf(val_wifi_tout, sizeof(val_wifi_tout), "%u sec", g_config.wifi_connect_timeout_s);
-  snprintf(val_telnet_pass, sizeof(val_telnet_pass), "%s", g_config.telnet_pass_hash[0] ? "Configured (SHA-256)" : "Default (None)");
-
-  snprintf(val_uart, sizeof(val_uart), "%u bps (%s)", static_cast<unsigned>(g_config.uart_baud_rate), f1);
-  snprintf(val_ch2, sizeof(val_ch2), "%u bps (%s)", static_cast<unsigned>(g_config.ch2_baud_rate), f2);
-  snprintf(val_ch3, sizeof(val_ch3), "%u bps (%s)", static_cast<unsigned>(g_config.ch3_baud_rate), f3);
-  snprintf(val_ch4, sizeof(val_ch4), "%u bps (%s)", static_cast<unsigned>(g_config.doorphone_baud_rate), f4);
-
-  snprintf(val_ch1_poll, sizeof(val_ch1_poll), "%u ms", g_timing_config.ch1_poll_interval_ms);
-  snprintf(val_ch2_ack, sizeof(val_ch2_ack), "%u ms", g_timing_config.ch2_cache_delay_ms);
-  snprintf(val_ch3_ack, sizeof(val_ch3_ack), "%u ms", g_timing_config.ch3_cache_delay_ms);
-
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|                     RUNTIME GATEWAY CONFIGURATION (NVS)                      |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|       Parameter Key       |                  Configured Value                |\r\n");
-  out.append("+---------------------------+--------------------------------------------------+\r\n");
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "wifi_ssid", val_wifi_ssid);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ap_ssid", val_ap_ssid);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "wifi_timeout", val_wifi_tout);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "telnet_pass", val_telnet_pass);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "wallpad_profile", prof_name);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "uart_baud_rate (CH1)", val_uart);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch2_baud_rate (CH2)", val_ch2);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch3_baud_rate (CH3)", val_ch3);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "doorphone_baud_rate (CH4)", val_ch4);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch1_poll_interval", val_ch1_poll);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch2_cache_delay", val_ch2_ack);
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch3_cache_delay", val_ch3_ack);
-  out.append("+---------------------------+--------------------------------------------------+\r\n");
-  out.append("|       Use 'config set <key> <val>' and 'save' to persist to NVS              |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("\r\n");
-
-  sendTelnetMsgLen(sock, out.buf, out.offset);
+    CliFmt::PrintBoxHeader(out, "RUNTIME GATEWAY CONFIGURATION (NVS)");
+    out.append("|       Parameter Key       |                  Configured Value                |\r\n");
+    out.append("+---------------------------+--------------------------------------------------+\r\n");
+    CliFmt::PrintCardRow2(out, "wifi_ssid", v_wifi);
+    CliFmt::PrintCardRow2(out, "ap_ssid", v_ap);
+    CliFmt::PrintCardRow2(out, "wifi_timeout", v_tout);
+    CliFmt::PrintCardRow2(out, "telnet_pass", g_config.telnet_pass_hash[0] ? "Configured (SHA-256)" : "Default (None)");
+    CliFmt::PrintCardRow2(out, "wallpad_profile", prof_name);
+    CliFmt::PrintCardRow2(out, "uart_baud_rate (CH1)", v_uart);
+    CliFmt::PrintCardRow2(out, "ch2_baud_rate (CH2)", v_ch2);
+    CliFmt::PrintCardRow2(out, "ch3_baud_rate (CH3)", v_ch3);
+    CliFmt::PrintCardRow2(out, "doorphone_baud_rate (CH4)", v_ch4);
+    CliFmt::PrintCardRow2(out, "ch1_poll_interval", v_poll);
+    CliFmt::PrintCardRow2(out, "ch2_cache_delay", v_ack2);
+    CliFmt::PrintCardRow2(out, "ch3_cache_delay", v_ack3);
+    out.append("+---------------------------+--------------------------------------------------+\r\n");
+    CliFmt::PrintBoxFooter(out, "Use 'config set <key> <val>' and 'save' to persist to NVS");
+  });
 }
 
 void printConfigHelp(int sock) {
-  g_cli_scratch_buf[0] = '\0';
-  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
+  withScratchBuf(sock, [](AppendBuf &out) {
+    CliFmt::PrintBoxHeader(out, "CONFIGURABLE PARAMETERS GUIDE");
+    out.append("| Parameter Key    | Allowed Range / Type | Description                        |\r\n");
+    out.append("+------------------+----------------------+------------------------------------+\r\n");
 
-  out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                         CONFIGURABLE PARAMETERS GUIDE                          \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.appendFormat("%-14s %-16s %s\r\n", "Parameter Key", "Valid Range / Type", "Description");
-  out.append(Fmt::DIV80);
+    for (size_t i = 0; i < PARAM_COUNT; ++i) {
+      const auto &p = PARAM_TABLE[i];
+      char range_buf[24];
+      if (p.type == PARAM_UINT32 || p.type == PARAM_UINT16 || p.type == PARAM_UCHAR ||
+          p.type == PARAM_TIMING_CH1 || p.type == PARAM_TIMING_CH2 || p.type == PARAM_TIMING_CH3) {
+        snprintf(range_buf, sizeof(range_buf), "%lu ~ %lu", (unsigned long)p.minVal, (unsigned long)p.maxVal);
+      } else if (p.type >= PARAM_FRAMING_CH1 && p.type <= PARAM_FRAMING_CH4) {
+        snprintf(range_buf, sizeof(range_buf), "8N1,8E1,8O1,8N2");
+      } else if (p.type == PARAM_PASS_HASH) {
+        snprintf(range_buf, sizeof(range_buf), "string (raw)");
+      } else {
+        snprintf(range_buf, sizeof(range_buf), "string");
+      }
 
-  for (size_t i = 0; i < PARAM_COUNT; ++i) {
-    const auto &p = PARAM_TABLE[i];
-    char range_buf[24];
-    if (p.type == PARAM_UINT32 || p.type == PARAM_UINT16 || p.type == PARAM_UCHAR ||
-        p.type == PARAM_TIMING_CH1 || p.type == PARAM_TIMING_CH2 || p.type == PARAM_TIMING_CH3) {
-      snprintf(range_buf, sizeof(range_buf), "%lu ~ %lu", (unsigned long)p.minVal, (unsigned long)p.maxVal);
-    } else if (p.type >= PARAM_FRAMING_CH1 && p.type <= PARAM_FRAMING_CH4) {
-      snprintf(range_buf, sizeof(range_buf), "8N1,8E1,8O1,8N2");
-    } else if (p.type == PARAM_PASS_HASH) {
-      snprintf(range_buf, sizeof(range_buf), "string (raw)");
-    } else {
-      snprintf(range_buf, sizeof(range_buf), "string");
+      out.appendFormat("| %-16.16s | %-20.20s | %-34.34s |\r\n", p.name, range_buf, p.desc);
     }
 
-    out.appendFormat("%-14s %-18s %s\r\n", p.name, range_buf, p.desc);
-  }
-
-  out.append(Fmt::DIV80);
-  out.append("Usage:\r\n");
-  out.append("  config set <key> <value>   : Modify parameter (RAM only)\r\n");
-  out.append("  save                       : Commit modified parameters to NVS flash permanently\r\n");
-  out.append("  config reset               : Restore all configuration to factory defaults\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("\r\n");
-
-  sendTelnetMsgLen(sock, out.buf, out.offset);
+    out.append("+------------------+----------------------+------------------------------------+\r\n");
+    out.append("|  config set <key> <value>   : Modify parameter (RAM only)                    |\r\n");
+    out.append("|  save                       : Commit modified parameters to NVS flash        |\r\n");
+    out.append("|  config reset               : Restore all configuration to factory defaults  |\r\n");
+    CliFmt::PrintBoxFooter(out, "Tip: Use 'save' to commit changes to NVS flash");
+  });
 }
 
 template <typename T>
@@ -2067,7 +2107,7 @@ static bool applyFraming(uint8_t &dbits, uint8_t &parity, uint8_t &sbits, const 
 void setConfig(void *session_context, const char *key, const char *value) {
   int sock = getSock(session_context);
   if (!key || !value) {
-    sendTelnetMsg(sock, "[ERROR] Usage: config set <key> <value>\r\n");
+    sendTelnetMsg(sock, "[ERROR] Missing argument: config set <key> <value>\r\n");
     return;
   }
 
@@ -2148,7 +2188,7 @@ void cmdConfig(EmbeddedCli *cli, char *args, void *context) {
   }
 
   const char *sub = embeddedCliGetToken(args, 1);
-  if (strcmp(sub, "?") == 0 || strcasecmp(sub, "help") == 0) {
+  if (CliFmt::IsHelp(sub)) {
     printConfigHelp(sock);
     return;
   }
@@ -2158,7 +2198,7 @@ void cmdConfig(EmbeddedCli *cli, char *args, void *context) {
       setConfig(context, embeddedCliGetToken(args, 2),
                 embeddedCliGetToken(args, 3));
     } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: config set <key> <value>\r\n");
+      sendTelnetMsg(sock, "[ERROR] Missing argument: config set <key> <value>\r\n");
     }
     return;
   }
@@ -2169,7 +2209,7 @@ void cmdConfig(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  sendTelnetMsg(sock, "Usage: config [set <key> <value> | reset | ? | help]\r\n");
+  printConfigHelp(sock);
 }
 
 void cmdSave(EmbeddedCli *cli, char *args, void *context) {
@@ -2184,129 +2224,115 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   if (argc == 0 || (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "list") == 0) ||
       (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "status") == 0)) {
-    static char s_ew11_status_buf[2048];
-    AppendBuf out{s_ew11_status_buf, sizeof(s_ew11_status_buf)};
-    out.append("\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("|                      CH5 EW11 TCP CLIENT SOCKET STATUS                       |\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("| Slot |    Name    | Port |    Client IP    |   Status    |      Packets      |\r\n");
-    out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
+    withScratchBuf(sock, [](AppendBuf &out) {
+      CliFmt::PrintBoxHeader(out, "CH5 EW11 TCP CLIENT SOCKET STATUS");
+      out.append("| Slot |    Name    | Port |    Client IP    |   Status    |      Packets      |\r\n");
+      out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
 
-    {
-      MutexLocker lock(g_ch5_mutex);
-      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-        auto &slot = g_hub_slots[s];
-        const char *status_str = !slot.enabled ? "Disabled"
-                                 : !slot.is_connected ? "Listening"
-                                 : (slot.rx_pkts == 0) ? "Idle" : "Connected";
+      {
+        MutexLocker lock(g_ch5_mutex);
+        for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+          auto &slot = g_hub_slots[s];
+          const char *status_str = !slot.enabled ? "Disabled"
+                                   : !slot.is_connected ? "Listening"
+                                   : (slot.rx_pkts == 0) ? "Idle" : "Connected";
 
-        const char *ip_str = slot.is_connected ? (slot.target_ip[0] ? slot.target_ip : "Connected") : (slot.target_ip[0] ? slot.target_ip : "-");
+          const char *ip_str = slot.is_connected ? (slot.target_ip[0] ? slot.target_ip : "Connected") : (slot.target_ip[0] ? slot.target_ip : "-");
 
-        char s_buf[8];
-        snprintf(s_buf, sizeof(s_buf), "#%d", s);
-        int sl_l = (6 - strlen(s_buf)) / 2;
-        int sl_r = 6 - strlen(s_buf) - sl_l;
+          char s_buf[8], p_buf[8], s_c[8], p_c[8], ip_c[20], st_c[16];
+          snprintf(s_buf, sizeof(s_buf), "#%d", s);
+          snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
 
-        char p_buf[8];
-        snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
-        int pl_l = (6 - strlen(p_buf)) / 2;
-        int pl_r = 6 - strlen(p_buf) - pl_l;
+          CliFmt::CenterText(s_c, sizeof(s_c), s_buf, 6);
+          CliFmt::CenterText(p_c, sizeof(p_c), p_buf, 6);
+          CliFmt::CenterText(ip_c, sizeof(ip_c), ip_str, 17);
+          CliFmt::CenterText(st_c, sizeof(st_c), status_str, 13);
 
-        int il_l = (17 - strlen(ip_str)) / 2;
-        int il_r = 17 - strlen(ip_str) - il_l;
+          char pkt_buf[24];
+          snprintf(pkt_buf, sizeof(pkt_buf), "%8u / %-8u", static_cast<unsigned>(slot.rx_pkts), static_cast<unsigned>(slot.tx_pkts));
 
-        int st_l = (13 - strlen(status_str)) / 2;
-        int st_r = 13 - strlen(status_str) - st_l;
-
-        char pkt_buf[24];
-        snprintf(pkt_buf, sizeof(pkt_buf), "%8u / %-8u", static_cast<unsigned>(slot.rx_pkts), static_cast<unsigned>(slot.tx_pkts));
-
-        out.appendFormat("|%*s%s%*s| %-10.10s |%*s%s%*s|%*s%s%*s|%*s%s%*s|%19s|\r\n",
-                         sl_l, "", s_buf, sl_r, "",
-                         slot.name,
-                         pl_l, "", p_buf, pl_r, "",
-                         il_l, "", ip_str, il_r, "",
-                         st_l, "", status_str, st_r, "",
-                         pkt_buf);
-      }
-    }
-    out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
-    out.append("|             Configured Max Slots: 5 | Bridge Target: CH1 & CH2/3             |\r\n");
-    out.append("+==============================================================================+\r\n");
-
-    // ── FCU Modbus 실시간 상태 테이블 ──
-    out.append("\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("|                         CH5 FCU MODBUS DEVICE STATUS                         |\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("| Slot |  Name  | Port |   Client IP    | Pwr | Mode | Fan  | Swng | Tgt |Room |\r\n");
-    out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
-
-    {
-      MutexLocker lock(g_ch5_mutex);
-      for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
-        const HubClientSlot &slot = g_hub_slots[s];
-        Fcu::SlotRuntime rt;
-        Fcu::GetSlotRuntime(s, rt);
-
-        const char *pwr_str = rt.snap.power ? "ON" : "OFF";
-        const char *mode_str = (rt.snap.mode == Fcu::Mode::Cool) ? "Cool"
-                             : (rt.snap.mode == Fcu::Mode::Heat) ? "Heat"
-                             : (rt.snap.mode == Fcu::Mode::FanOnly) ? "Fan" : "-";
-        const char *fan_str = (rt.snap.fan_speed == Fcu::FanSpeed::Off) ? "OFF"
-                            : (rt.snap.fan_speed == Fcu::FanSpeed::Low) ? "Low"
-                            : (rt.snap.fan_speed == Fcu::FanSpeed::Mid) ? "Mid"
-                            : (rt.snap.fan_speed == Fcu::FanSpeed::High) ? "High"
-                            : (rt.snap.fan_speed == Fcu::FanSpeed::Auto) ? "Auto" : "-";
-        const char *swng_str = (rt.snap.swing == Fcu::Swing::On) ? "ON" : "OFF";
-
-        char tgt_str[8] = "-", room_str[8] = "-";
-        if (rt.is_online) {
-          snprintf(tgt_str, sizeof(tgt_str), "%uC", rt.snap.target_temp);
-          snprintf(room_str, sizeof(room_str), "%uC", rt.snap.room_temp);
+          out.appendFormat("|%s| %-10.10s |%s|%s|%s|%19s|\r\n",
+                           s_c, slot.name, p_c, ip_c, st_c, pkt_buf);
         }
-        const char *ip_str = (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
-
-        char s_buf[8];
-        snprintf(s_buf, sizeof(s_buf), "#%u", s);
-        int sl_l = (6 - strlen(s_buf)) / 2;
-        int sl_r = 6 - strlen(s_buf) - sl_l;
-
-        char p_buf[8];
-        snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
-        int pl_l = (6 - strlen(p_buf)) / 2;
-        int pl_r = 6 - strlen(p_buf) - pl_l;
-
-        int il_l = (16 - strlen(ip_str)) / 2;
-        int il_r = 16 - strlen(ip_str) - il_l;
-
-        out.appendFormat("|%*s%s%*s| %-6.6s |%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|\r\n",
-                         sl_l, "", s_buf, sl_r, "",
-                         slot.name,
-                         pl_l, "", p_buf, pl_r, "",
-                         il_l, "", ip_str, il_r, "",
-                         (int)(5 - strlen(pwr_str))/2, "", pwr_str, (int)(5 - strlen(pwr_str) - (5 - strlen(pwr_str))/2), "",
-                         (int)(6 - strlen(mode_str))/2, "", mode_str, (int)(6 - strlen(mode_str) - (6 - strlen(mode_str))/2), "",
-                         (int)(6 - strlen(fan_str))/2, "", fan_str, (int)(6 - strlen(fan_str) - (6 - strlen(fan_str))/2), "",
-                         (int)(6 - strlen(swng_str))/2, "", swng_str, (int)(6 - strlen(swng_str) - (6 - strlen(swng_str))/2), "",
-                         (int)(5 - strlen(tgt_str))/2, "", tgt_str, (int)(5 - strlen(tgt_str) - (5 - strlen(tgt_str))/2), "",
-                         (int)(5 - strlen(room_str))/2, "", room_str, (int)(5 - strlen(room_str) - (5 - strlen(room_str))/2), "");
       }
-    }
-    out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
-    out.append("+==============================================================================+\r\n");
-    out.append("\r\n");
+      out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
+      CliFmt::PrintBoxFooter(out, "Configured Max Slots: 5 | Bridge Target: CH1 & CH2/3");
 
-    sendTelnetMsgLen(sock, out.buf, out.offset);
+      // ── FCU Modbus 실시간 상태 테이블 ──
+      CliFmt::PrintBoxHeader(out, "CH5 FCU MODBUS DEVICE STATUS");
+      out.append("| Slot |  Name  | Port |   Client IP    | Pwr | Mode | Fan  | Swng | Tgt |Room |\r\n");
+      out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
+
+      {
+        MutexLocker lock(g_ch5_mutex);
+        for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
+          const HubClientSlot &slot = g_hub_slots[s];
+          Fcu::SlotRuntime rt;
+          Fcu::GetSlotRuntime(s, rt);
+
+          const char *pwr_str = rt.snap.power ? "ON" : "OFF";
+          const char *mode_str = (rt.snap.mode == Fcu::Mode::Cool) ? "Cool"
+                               : (rt.snap.mode == Fcu::Mode::Heat) ? "Heat"
+                               : (rt.snap.mode == Fcu::Mode::FanOnly) ? "Fan" : "-";
+          const char *fan_str = (rt.snap.fan_speed == Fcu::FanSpeed::Off) ? "OFF"
+                              : (rt.snap.fan_speed == Fcu::FanSpeed::Low) ? "Low"
+                              : (rt.snap.fan_speed == Fcu::FanSpeed::Mid) ? "Mid"
+                              : (rt.snap.fan_speed == Fcu::FanSpeed::High) ? "High"
+                              : (rt.snap.fan_speed == Fcu::FanSpeed::Auto) ? "Auto" : "-";
+          const char *swng_str = (rt.snap.swing == Fcu::Swing::On) ? "ON" : "OFF";
+
+          char tgt_str[8] = "-", room_str[8] = "-";
+          if (rt.is_online) {
+            snprintf(tgt_str, sizeof(tgt_str), "%uC", rt.snap.target_temp);
+            snprintf(room_str, sizeof(room_str), "%uC", rt.snap.room_temp);
+          }
+          const char *ip_str = (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
+
+          char s_buf[8], p_buf[8];
+          snprintf(s_buf, sizeof(s_buf), "#%u", s);
+          snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
+
+          char s_c[8], p_c[8], ip_c[18], pwr_c[8], mode_c[8], fan_c[8], swng_c[8], tgt_c[8], rm_c[8];
+          CliFmt::CenterText(s_c, sizeof(s_c), s_buf, 6);
+          CliFmt::CenterText(p_c, sizeof(p_c), p_buf, 6);
+          CliFmt::CenterText(ip_c, sizeof(ip_c), ip_str, 16);
+          CliFmt::CenterText(pwr_c, sizeof(pwr_c), pwr_str, 5);
+          CliFmt::CenterText(mode_c, sizeof(mode_c), mode_str, 6);
+          CliFmt::CenterText(fan_c, sizeof(fan_c), fan_str, 6);
+          CliFmt::CenterText(swng_c, sizeof(swng_c), swng_str, 6);
+          CliFmt::CenterText(tgt_c, sizeof(tgt_c), tgt_str, 5);
+          CliFmt::CenterText(rm_c, sizeof(rm_c), room_str, 5);
+
+          out.appendFormat("|%s| %-6.6s |%s|%s|%s|%s|%s|%s|%s|%s|\r\n",
+                           s_c, slot.name, p_c, ip_c, pwr_c, mode_c, fan_c, swng_c, tgt_c, rm_c);
+        }
+      }
+      out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
+      out.append(CliFmt::BOX80_EQ);
+      out.append("\r\n");
+    });
     return;
   }
 
   const char *sub = embeddedCliGetToken(args, 1);
+  static const CliFmt::SubCmdHelpItem items[] = {
+      {"list", "Show EW11 sockets & FCU runtime status"},
+      {"set <slot> [port] [ip] [name] [en]", "Configure EW11 bridge socket settings"},
+      {"frame <slot> <stx> <etx> [len]", "Set custom framing delimiters for slot"},
+      {"reset <slot>", "Reset EW11 socket slot to defaults"},
+      {"enable <slot>", "Enable specified EW11 socket slot"},
+      {"disable <slot>", "Disable specified EW11 socket slot"},
+  };
+
+  if (CliFmt::IsHelp(sub)) {
+    CliFmt::PrintCmdHelp(sock, "EW11 COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                         "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
+    return;
+  }
 
   if (strcasecmp(sub, "frame") == 0) {
     if (argc < 4) {
-      sendTelnetMsg(sock, "[ERROR] Usage: ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
+      sendTelnetMsg(sock, "[ERROR] Format: ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
       return;
     }
     int slot = atoi(embeddedCliGetToken(args, 2));
@@ -2332,7 +2358,7 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   if (strcasecmp(sub, "reset") == 0) {
     if (argc < 2) {
-      sendTelnetMsg(sock, "[ERROR] Usage: ew11 reset <slot:0-4>\r\n");
+      sendTelnetMsg(sock, "[ERROR] Missing slot: ew11 reset <slot:0-4>\r\n");
       return;
     }
     int slot = atoi(embeddedCliGetToken(args, 2));
@@ -2350,7 +2376,7 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   if (strcasecmp(sub, "set") == 0) {
     if (argc < 2) {
-      sendTelnetMsg(sock, "[ERROR] Usage: ew11 set <slot:0-4> [port] [allowed_ip] [name] [enable:1/0]\r\n");
+      sendTelnetMsg(sock, "[ERROR] Missing slot: ew11 set <slot:0-4> [port] [allowed_ip] [name] [enable:1/0]\r\n");
       return;
     }
     int slot = atoi(embeddedCliGetToken(args, 2));
@@ -2412,7 +2438,7 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
 
   if (strcasecmp(sub, "enable") == 0 || strcasecmp(sub, "disable") == 0) {
     if (argc < 2) {
-      sendTelnetMsgf(sock, "[ERROR] Usage: ew11 %s <slot:0-4>\r\n", sub);
+      sendTelnetMsgf(sock, "[ERROR] Missing slot: ew11 %s <slot:0-4>\r\n", sub);
       return;
     }
     int slot = atoi(embeddedCliGetToken(args, 2));
@@ -2436,7 +2462,8 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  sendTelnetMsg(sock, "Usage: ew11 [list | set <slot> [port] [allowed_ip] [name] [enable] | frame <slot> <stx> <etx> [len] | reset <slot> | enable <slot> | disable <slot>]\r\n");
+  CliFmt::PrintCmdHelp(sock, "EW11 COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                       "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
 }
 
 void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
@@ -2452,52 +2479,42 @@ void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
   static DeviceRouteEntry entries[DeviceRouteRegistry::MAX_ROUTES];
   size_t count = g_route_registry.getRoutes(entries, DeviceRouteRegistry::MAX_ROUTES);
 
-  g_cli_scratch_buf[0] = '\0';
-  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|             DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)             |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("| Target (DevID:Sub1:Sub2) |        Egress Destination         |   Last Seen   |\r\n");
-  out.append("+--------------------------+-----------------------------------+---------------+\r\n");
+  withScratchBuf(sock, [count](AppendBuf &out) {
+    CliFmt::PrintBoxHeader(out, "DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)");
+    out.append("| Target (DevID:Sub1:Sub2) |        Egress Destination         |   Last Seen   |\r\n");
+    out.append("+--------------------------+-----------------------------------+---------------+\r\n");
 
-  if (count == 0) {
-    out.append("|       (No device routes learned yet. Waiting for bus/EW11 packets...)        |\r\n");
-  } else {
-    uint32_t now = millis();
-    for (size_t i = 0; i < count; i++) {
-      const auto &e = entries[i];
-      char tgt_str[24];
-      snprintf(tgt_str, sizeof(tgt_str), "0x%02X:%02X:%02X", e.dev_id, e.sub1, e.sub2);
-      int t_len = strlen(tgt_str);
-      int tl_l = (26 - t_len) / 2;
-      int tl_r = 26 - t_len - tl_l;
+    if (count == 0) {
+      out.append("|       (No device routes learned yet. Waiting for bus/EW11 packets...)        |\r\n");
+    } else {
+      uint32_t now = millis();
+      for (size_t i = 0; i < count; i++) {
+        const auto &e = entries[i];
+        char tgt_str[24];
+        snprintf(tgt_str, sizeof(tgt_str), "0x%02X:%02X:%02X", e.dev_id, e.sub1, e.sub2);
+        char tgt_c[28];
+        CliFmt::CenterText(tgt_c, sizeof(tgt_c), tgt_str, 26);
 
-      char dst_str[36];
-      if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
-        snprintf(dst_str, sizeof(dst_str), "CH#5 Slot %d", e.endpoint.slot_idx);
-      } else {
-        snprintf(dst_str, sizeof(dst_str), "CH#%u", e.endpoint.channel_id);
+        char dst_str[36];
+        if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
+          snprintf(dst_str, sizeof(dst_str), "CH#5 Slot %d", e.endpoint.slot_idx);
+        } else {
+          snprintf(dst_str, sizeof(dst_str), "CH#%u", e.endpoint.channel_id);
+        }
+
+        char el_str[20];
+        Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str, sizeof(el_str));
+        char el_c[18];
+        CliFmt::CenterText(el_c, sizeof(el_c), el_str, 15);
+
+        out.appendFormat("|%s| %-33.33s |%s|\r\n",
+                         tgt_c, dst_str, el_c);
       }
-
-      char el_str[20];
-      Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str, sizeof(el_str));
-      int e_len = strlen(el_str);
-      int el_l = (15 - e_len) / 2;
-      int el_r = 15 - e_len - el_l;
-
-      out.appendFormat("|%*s%s%*s| %-33.33s |%*s%s%*s|\r\n",
-                       tl_l, "", tgt_str, tl_r, "",
-                       dst_str,
-                       el_l, "", el_str, el_r, "");
     }
-  }
 
-  out.append("+--------------------------+-----------------------------------+---------------+\r\n");
-  out.append("|               Use 'routes clear' to reset dynamic route table                |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("\r\n");
-  sendTelnetMsgLen(sock, out.buf, out.offset);
+    out.append("+--------------------------+-----------------------------------+---------------+\r\n");
+    CliFmt::PrintBoxFooter(out, "Use 'routes clear' to reset dynamic route table");
+  });
 }
 
 } // namespace ConfigCli
@@ -2545,10 +2562,7 @@ void wallpadPrintStatus(AppendBuf &out) {
     phase_str = "Phase 2/3: Cache Syncing";
   }
 
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|                 WALLPAD PROTOCOL AUTO-PROBING ENGINE STATUS                  |\r\n");
-  out.append("+==============================================================================+\r\n");
+  CliFmt::PrintBoxHeader(out, "WALLPAD PROTOCOL AUTO-PROBING ENGINE STATUS");
   char prof_key_buf[UniversalProtocolEngine::kProfileKeyMaxLen] = "Standard";
   if (active) {
     active->getActiveProfileKey(prof_key_buf, sizeof(prof_key_buf));
@@ -2585,21 +2599,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   auto print_row = [&](const char *f, const char *p, const char *v, const char *s) {
-    char clean_s[16] = {0};
-    if (s && s[0] == '[' && s[strlen(s)-1] == ']') {
-      size_t slen = strlen(s);
-      if (slen >= 2 && slen - 2 < sizeof(clean_s)) {
-        strncpy(clean_s, s + 1, slen - 2);
-        clean_s[slen - 2] = '\0';
-      }
-    } else if (s) {
-      strncpy(clean_s, s, sizeof(clean_s) - 1);
-    }
-    int s_len = strlen(clean_s);
-    int sl_l = (12 - s_len) / 2;
-    int sl_r = 12 - s_len - sl_l;
-    out.appendFormat("| %-12.12s | %-13.13s | %-32.32s |%*s%s%*s|\r\n",
-                     f, p, v, sl_l, "", clean_s, sl_r, "");
+    CliFmt::PrintCardRow4(out, f, p, v, s);
   };
 
   char stx_buf[16], etx_buf[16], len_buf[32], pkt_len_buf[32];
@@ -2985,10 +2985,7 @@ void wallpadPrintStatus(AppendBuf &out) {
 }
 
 void wallpadListProfiles(AppendBuf &out) {
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|                          WALLPAD PROTOCOL PROFILES                           |\r\n");
-  out.append("+==============================================================================+\r\n");
+  CliFmt::PrintBoxHeader(out, "WALLPAD PROTOCOL PROFILES");
   out.append("|  ID  | Profile Key | Protocol Specification / Description |      Status      |\r\n");
   out.append("+------+-------------+--------------------------------------+------------------+\r\n");
   for (size_t i = 0; i < ProfileRepository::getProfileCount(); ++i) {
@@ -2998,23 +2995,18 @@ void wallpadListProfiles(AppendBuf &out) {
       bool is_empty = (i > 0 && strncmp(p_desc.name, "[Empty", 6) == 0);
       const char *status_str = is_current ? ">> ACTIVE <<" : (is_empty ? "Available" : "Saved (NVS)");
       char st_buf[20];
-      int slen = static_cast<int>(strlen(status_str));
-      int pad_l = (16 - slen) / 2;
-      int pad_r = 16 - slen - pad_l;
-      snprintf(st_buf, sizeof(st_buf), "%*s%s%*s", pad_l, "", status_str, pad_r, "");
+      CliFmt::CenterText(st_buf, sizeof(st_buf), status_str, 16);
       out.appendFormat("|  %2u  | %-11s | %-36s | %s |\r\n",
                        static_cast<unsigned>(i), p_desc.key, p_desc.name, st_buf);
     }
   }
   out.append("+------+-------------+--------------------------------------+------------------+\r\n");
-  out.append("|        Use 'wallpad set <id>' to switch, 'wallpad save <name>' to store      |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("\r\n");
+  CliFmt::PrintBoxFooter(out, "Use 'wallpad set <id>' to switch, 'wallpad save <name>' to store");
 }
 
 void wallpadSaveProfile(int sock, const char *name) {
   if (!name || strlen(name) == 0) {
-    sendTelnetMsg(sock, "[ERROR] Usage: wallpad save <profile_name> (e.g. 'wallpad save MyHome')\r\n");
+    sendTelnetMsg(sock, "[ERROR] Missing profile name: wallpad save <profile_name>\r\n");
     return;
   }
   size_t saved_slot = 0;
@@ -3028,7 +3020,7 @@ void wallpadSaveProfile(int sock, const char *name) {
 
 void wallpadDeleteProfile(int sock, const char *target) {
   if (!target) {
-    sendTelnetMsg(sock, "[ERROR] Usage: wallpad delete <name|id>\r\n");
+    sendTelnetMsg(sock, "[ERROR] Missing target: wallpad delete <name|id>\r\n");
     return;
   }
   char *endp = nullptr;
@@ -3055,7 +3047,7 @@ void wallpadDeleteProfile(int sock, const char *target) {
 
 void wallpadSetProfile(int sock, const char *key) {
   if (!key) {
-    sendTelnetMsg(sock, "[ERROR] Usage: wallpad set <key|id>\r\n");
+    sendTelnetMsg(sock, "[ERROR] Missing profile key/id: wallpad set <key|id>\r\n");
     return;
   }
   bool ok = false;
@@ -3100,6 +3092,19 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
   int token_count = embeddedCliGetTokenCount(args);
   const char *sub = (token_count > 0) ? embeddedCliGetToken(args, 1) : "on";
 
+  static const CliFmt::SubCmdHelpItem items[] = {
+      {"on / off", "Start or stop real-time packet stream"},
+      {"ctl / ack / pol / rmt / drp", "Toggle packet type filter"},
+      {"ch <1-6>", "Filter packets by hardware channel"},
+      {"devid <hex>", "Filter packets by target device ID"},
+  };
+
+  if (CliFmt::IsHelp(sub)) {
+    CliFmt::PrintCmdHelp(sock, "TRACE COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                         "Tip: Use 'q' shortcut to quickly stop active tracing");
+    return;
+  }
+
   if (strcasecmp(sub, "off") == 0) {
     g_telnet_tracer.setTrace(false);
     sendTelnetMsg(sock, "Packet trace DISABLED.\r\n");
@@ -3109,25 +3114,29 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
   g_telnet_tracer.setClient(sock);
   g_telnet_tracer.setTrace(true);
 
-  if (strcasecmp(sub, "on") == 0) {
-    g_telnet_tracer.setFilter(TraceType::ALL);
-    sendTelnetMsg(sock, "Packet trace ENABLED: ALL packets.\r\n");
-  } else if (strcasecmp(sub, "ctl") == 0) {
-    g_telnet_tracer.setFilter(TraceType::CTL);
-    sendTelnetMsg(sock, "Packet trace ENABLED: CONTROL packets only.\r\n");
-  } else if (strcasecmp(sub, "ack") == 0) {
-    g_telnet_tracer.setFilter(TraceType::ACK);
-    sendTelnetMsg(sock, "Packet trace ENABLED: ACK/Response packets only.\r\n");
-  } else if (strcasecmp(sub, "pol") == 0) {
-    g_telnet_tracer.setFilter(TraceType::QRY);
-    sendTelnetMsg(sock, "Packet trace ENABLED: Polling queries only.\r\n");
-  } else if (strcasecmp(sub, "rmt") == 0) {
-    g_telnet_tracer.setFilter(TraceType::RMT);
-    sendTelnetMsg(sock, "Packet trace ENABLED: Doorphone packets only.\r\n");
-  } else if (strcasecmp(sub, "drp") == 0) {
-    g_telnet_tracer.setFilter(TraceType::DRP);
-    sendTelnetMsg(sock, "Packet trace ENABLED: Dropped packets only.\r\n");
-  } else if (strcasecmp(sub, "ch") == 0 || (strncasecmp(sub, "ch", 2) == 0 && isdigit(static_cast<unsigned char>(sub[2])))) {
+  struct TraceFilterDef {
+    const char *key;
+    TraceType type;
+    const char *desc;
+  };
+  static constexpr TraceFilterDef kTraceFilters[] = {
+      {"on",  TraceType::ALL, "ALL packets"},
+      {"ctl", TraceType::CTL, "CONTROL packets only"},
+      {"ack", TraceType::ACK, "ACK/Response packets only"},
+      {"pol", TraceType::QRY, "Polling queries only"},
+      {"rmt", TraceType::RMT, "Doorphone packets only"},
+      {"drp", TraceType::DRP, "Dropped packets only"},
+  };
+
+  for (const auto &f : kTraceFilters) {
+    if (strcasecmp(sub, f.key) == 0) {
+      g_telnet_tracer.setFilter(f.type);
+      sendTelnetMsgf(sock, "Packet trace ENABLED: %s.\r\n", f.desc);
+      return;
+    }
+  }
+
+  if (strcasecmp(sub, "ch") == 0 || (strncasecmp(sub, "ch", 2) == 0 && isdigit(static_cast<unsigned char>(sub[2])))) {
     uint8_t ch = 0;
     if (strcasecmp(sub, "ch") == 0 && token_count >= 2) {
       ch = static_cast<uint8_t>(atoi(embeddedCliGetToken(args, 2)));
@@ -3138,7 +3147,7 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
       g_telnet_tracer.setFilter(TraceType::CH, ch);
       sendTelnetMsgf(sock, "Packet trace ENABLED: Channel %u only.\r\n", ch);
     } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: trace ch <1-6>\r\n");
+      sendTelnetMsg(sock, "[ERROR] Invalid channel: trace ch <1-6>\r\n");
     }
   } else if (strcasecmp(sub, "devid") == 0 || strncasecmp(sub, "0x", 2) == 0) {
     uint8_t id = 0;
@@ -3149,8 +3158,8 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
     }
     g_telnet_tracer.setFilter(TraceType::DEVID, id);
     sendTelnetMsgf(sock, "Packet trace ENABLED: Device ID 0x%02X only.\r\n", id);
-  } else {
-    sendTelnetMsg(sock, "Usage: trace [on | off | ctl | ack | pol | rmt | drp | ch <1-6> | devid <hex>]\r\n");
+    CliFmt::PrintCmdHelp(sock, "TRACE COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                         "Tip: Use 'q' shortcut to quickly stop active tracing");
   }
 }
 
@@ -3189,36 +3198,34 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
   g_polling_targets.sweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
   size_t tgt_total = g_polling_targets.totalCount();
   size_t tgt_active = g_polling_targets.activeCount();
-
   const char *wc_src_str = (g_warm_cache_source == 1) ? "RTC SRAM" : (g_warm_cache_source == 2) ? "NVS Flash" : "Cold Start";
 
-  out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("          [1st-Tier Cache] Dynamic Polling Target Registry (Wallpad/App)      \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.appendFormat("  Active Polling Targets: %zu | Total Tracked: %zu | Warm Cache: %s (%u)\r\n",
-                   tgt_active, tgt_total, wc_src_str, static_cast<unsigned>(g_warm_cache_restored_count));
-  out.append(Fmt::DIV80);
-  out.append("No  Status   Last   Sources  Raw Query Frame (Template)\r\n");
-  out.append(Fmt::DIV80);
+  CliFmt::PrintBoxHeader(out, "[1ST-TIER CACHE] DYNAMIC POLLING TARGET REGISTRY");
+
+  char sub_buf[78];
+  snprintf(sub_buf, sizeof(sub_buf), "Active Targets: %zu | Tracked: %zu | Warm Cache: %s (%u)",
+           tgt_active, tgt_total, wc_src_str, static_cast<unsigned>(g_warm_cache_restored_count));
+  CliFmt::PrintBoxSubtitle(out, sub_buf);
+
+  out.append("+-----+----------+-------+-----------------------------------------------------+\r\n");
+  out.append("| No  |   Last   |  Src  | Raw Query Packet Frame                              |\r\n");
+  out.append("+-----+----------+-------+-----------------------------------------------------+\r\n");
 
   constexpr uint8_t ALLOWED_MASK = (1 << 2) | (1 << 3) | (1 << 5);
 
   if (tgt_total == 0) {
-    out.append("  (No polling targets registered yet. Waiting for Wallpad/App queries...)\r\n");
+    out.append("|      (No polling targets registered yet. Waiting for queries...)             |\r\n");
   } else {
     unsigned int display_idx = 1;
     for (size_t i = 0; i < tgt_total; ++i) {
       PollingTargetEntry tgt;
       if (!g_polling_targets.getEntry(i, tgt))
         continue;
-
-      // Display entries sourced from CH2, CH3, or CH5
       if (tgt.source_channels != 0 && (tgt.source_channels & ALLOWED_MASK) == 0) {
         continue;
       }
 
-      char src_buf[32] = {0};
+      char src_buf[16] = {0};
       formatSources(tgt.source_channels, src_buf, sizeof(src_buf));
 
       char last_req_str[16] = {0};
@@ -3228,39 +3235,40 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
       if (tgt.raw_query_len > 0) {
         Fmt::FormatHex(tgt.raw_query_data.data(), tgt.raw_query_len, q_hex, sizeof(q_hex));
       } else {
-        snprintf(q_hex, sizeof(q_hex), "[ %02X : %02X : %02X ]", tgt.dev_id,
-                 tgt.sub1, tgt.sub2);
+        snprintf(q_hex, sizeof(q_hex), "DevID 0x%02X (Sub1 0x%02X)", tgt.dev_id, tgt.sub1);
       }
 
-      const char *status_str = !tgt.is_active ? "OFFLINE" : (!tgt.is_verified ? "UNVERIF" : "ONLINE");
+      char no_c[8], last_c[12], src_c[10];
+      char no_s[8];
+      snprintf(no_s, sizeof(no_s), "#%02u", display_idx++);
+      CliFmt::CenterText(no_c, sizeof(no_c), no_s, 5);
+      CliFmt::CenterText(last_c, sizeof(last_c), last_req_str, 10);
+      CliFmt::CenterText(src_c, sizeof(src_c), src_buf, 7);
 
-      out.appendFormat(
-          "%02u  %-7s  %-5s  %-7s  %s [%02X:%02X]\r\n",
-          display_idx++, status_str, last_req_str,
-          src_buf, q_hex, tgt.dev_id, tgt.sub1);
+      out.appendFormat("|%s|%s|%s| %-51.51s |\r\n", no_c, last_c, src_c, q_hex);
     }
   }
-  out.append(Fmt::DIV80);
+  out.append("+-----+----------+-------+-----------------------------------------------------+\r\n");
+  CliFmt::PrintBoxFooter(out, "Tip: 1st-Tier cache monitors active queries from Wallpad & App");
 }
 
 void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
   size_t total_count = g_device_repo.count();
   size_t online_count = g_device_repo.getOnlineCount();
-  size_t tgt_total = g_polling_targets.totalCount();
 
-  out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("          [2nd-Tier Cache] Physical Device State & Health Monitor             \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.appendFormat(
-      "  Discovered Devices: %zu Nodes on Bus | Online [OK]: %zu | Offline: %zu\r\n",
-      total_count, online_count, (total_count >= online_count) ? (total_count - online_count) : 0);
-  out.append(Fmt::DIV80);
-  out.append("No  Status   Last   Raw Physical ACK (Response Frame)\r\n");
-  out.append(Fmt::DIV80);
+  CliFmt::PrintBoxHeader(out, "[2ND-TIER CACHE] PHYSICAL DEVICE HEALTH MONITOR");
+
+  char sub_buf[78];
+  snprintf(sub_buf, sizeof(sub_buf), "Discovered: %zu Nodes on Bus | Online [OK]: %zu | Offline: %zu",
+           total_count, online_count, (total_count >= online_count) ? (total_count - online_count) : 0);
+  CliFmt::PrintBoxSubtitle(out, sub_buf);
+
+  out.append("+-----+-----------+------------------------------------------------------------+\r\n");
+  out.append("| No  |   Last    | Raw Physical ACK Response Frame                            |\r\n");
+  out.append("+-----+-----------+------------------------------------------------------------+\r\n");
 
   if (total_count == 0) {
-    out.append("  (No physical devices discovered on RS-485 bus yet)\r\n");
+    out.append("|      (No physical devices discovered on RS-485 bus yet)                      |\r\n");
   } else {
     for (size_t i = 0; i < total_count; ++i) {
       DeviceStateEntry dev;
@@ -3279,23 +3287,21 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
         Fmt::FormatElapsed(now, dev.last_updated_ms, updated_str, sizeof(updated_str));
       }
 
-      const char *status_str = dev.is_online ? "ONLINE" : "OFFLINE";
+      char no_c[8], last_c[14];
+      char no_s[8];
+      snprintf(no_s, sizeof(no_s), "#%02u", static_cast<unsigned int>(i + 1));
+      CliFmt::CenterText(no_c, sizeof(no_c), no_s, 5);
+      CliFmt::CenterText(last_c, sizeof(last_c), updated_str, 11);
 
-      out.appendFormat("%02u  %-7s  %-5s  %s [%02X:%02X]\r\n",
-                       static_cast<unsigned int>(i + 1), status_str, updated_str, ack_hex,
-                       dev.dev_id, dev.sub1);
+      out.appendFormat("|%s|%s| %-58.58s |\r\n", no_c, last_c, ack_hex);
     }
   }
-  out.append(Fmt::DIV80);
-  out.append(Fmt::DIV80EQ);
-  out.append("\r\n");
+  out.append("+-----+-----------+------------------------------------------------------------+\r\n");
+  CliFmt::PrintBoxFooter(out, "Tip: 2nd-Tier cache reflects physical responses on RS-485");
 }
 
 void devsPrintSummary(AppendBuf &out, uint32_t now) {
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|                          REGISTERED DEVICE REGISTRY                          |\r\n");
-  out.append("+==============================================================================+\r\n");
+  CliFmt::PrintBoxHeader(out, "REGISTERED DEVICE REGISTRY");
 
   struct DevSummary {
     uint8_t dev_id{0};
@@ -3360,12 +3366,8 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
   }
 
   char sub_buf[78] = {0};
-  int sub_len = snprintf(sub_buf, sizeof(sub_buf), "Active Devices: %zu Cached | Ingress: CH1 Wallpad RS-485", dev_count);
-  if (sub_len < 0) sub_len = 0;
-  if (sub_len > 78) sub_len = 78;
-  int pad_left = (78 - sub_len) / 2;
-  int pad_right = 78 - sub_len - pad_left;
-  out.appendFormat("|%*s%s%*s|\r\n", pad_left, "", sub_buf, pad_right, "");
+  snprintf(sub_buf, sizeof(sub_buf), "Active Devices: %zu Cached | Ingress: CH1 Wallpad RS-485", dev_count);
+  CliFmt::PrintBoxSubtitle(out, sub_buf);
 
   out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
   out.append("| DevID  |    Name    | Class  |  State  | Ch  | SubCnt |  QryCnt   | LastSeen |\r\n");
@@ -3393,24 +3395,13 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
         if (ago_pos) *ago_pos = '\0';
       }
 
-      auto center_into = [](char *buf, size_t sz, const char *val, int width) {
-        int vlen = static_cast<int>(strlen(val));
-        if (vlen >= width) {
-          snprintf(buf, sz, "%.*s", width, val);
-          return;
-        }
-        int l = (width - vlen) / 2;
-        int r = width - vlen - l;
-        snprintf(buf, sz, "%*s%s%*s", l, "", val, r, "");
-      };
-
       char sub_cnt_centered[10];
       char qry_cnt_centered[14];
       char last_seen_centered[12];
 
-      center_into(sub_cnt_centered, sizeof(sub_cnt_centered), sub_str, 6);
-      center_into(qry_cnt_centered, sizeof(qry_cnt_centered), qry_str, 9);
-      center_into(last_seen_centered, sizeof(last_seen_centered), elapsed_raw, 8);
+      CliFmt::CenterText(sub_cnt_centered, sizeof(sub_cnt_centered), sub_str, 6);
+      CliFmt::CenterText(qry_cnt_centered, sizeof(qry_cnt_centered), qry_str, 9);
+      CliFmt::CenterText(last_seen_centered, sizeof(last_seen_centered), elapsed_raw, 8);
 
       const char *state_str = devs[d].online ? "ONLINE" : "OFFLINE";
 
@@ -3420,9 +3411,7 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
     }
   }
   out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
-  out.append("|           Use 'devs 1' for Polling Targets, 'devs 2' for Raw ACK Cache       |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("\r\n");
+  CliFmt::PrintBoxFooter(out, "Use 'devs 1' for Polling Targets, 'devs 2' for Raw ACK Cache");
 }
 
 void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
@@ -3430,35 +3419,34 @@ void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
   uint32_t now = millis();
   int argc = embeddedCliGetTokenCount(args);
 
-  g_cli_scratch_buf[0] = '\0';
-  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-
   if (argc == 0) {
-    devsPrintSummary(out, now);
-    sendTelnetMsgLen(client, out.buf, out.offset);
+    withScratchBuf(client, [now](AppendBuf &out) {
+      devsPrintSummary(out, now);
+    });
     return;
   }
 
   const char *sub = embeddedCliGetToken(args, 1);
-  if (strcasecmp(sub, "1") == 0) {
-    devsPrintTier1Targets(out, now);
-  } else if (strcasecmp(sub, "2") == 0) {
-    devsPrintTier2Cache(out, now);
-  } else if (strcasecmp(sub, "all") == 0) {
-    devsPrintSummary(out, now);
-    devsPrintTier1Targets(out, now);
-    devsPrintTier2Cache(out, now);
-  } else if (strcasecmp(sub, "clear") == 0) {
+  if (strcasecmp(sub, "clear") == 0) {
     g_polling_targets.clear();
     g_device_repo.clear();
     sendTelnetMsg(client, "All 1st-tier & 2nd-tier device caches CLEARED.\r\n");
     return;
-  } else {
-    sendTelnetMsg(client, "Usage: devs [1 | 2 | all | clear]\r\n");
-    return;
   }
 
-  sendTelnetMsgLen(client, out.buf, out.offset);
+  withScratchBuf(client, [now, sub](AppendBuf &out) {
+    if (strcasecmp(sub, "1") == 0) {
+      devsPrintTier1Targets(out, now);
+    } else if (strcasecmp(sub, "2") == 0) {
+      devsPrintTier2Cache(out, now);
+    } else if (strcasecmp(sub, "all") == 0) {
+      devsPrintSummary(out, now);
+      devsPrintTier1Targets(out, now);
+      devsPrintTier2Cache(out, now);
+    } else {
+      devsPrintSummary(out, now);
+    }
+  });
 }
 
 
@@ -3469,96 +3457,90 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
   const char *sub = (argc > 0) ? embeddedCliGetToken(args, 1) : "status";
 
   if (argc == 0 || strcasecmp(sub, "status") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-    wallpadPrintStatus(out);
-    sendTelnetMsgLen(sock, out.buf, out.offset);
+    withScratchBuf(sock, [](AppendBuf &out) {
+      wallpadPrintStatus(out);
+    });
     return;
   }
 
-  if (strcasecmp(sub, "list") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-    wallpadListProfiles(out);
-    sendTelnetMsgLen(sock, out.buf, out.offset);
-  } else if (strcasecmp(sub, "set") == 0) {
-    if (argc >= 2) {
-      wallpadSetProfile(sock, embeddedCliGetToken(args, 2));
-    } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: wallpad set <key|id>\r\n");
-    }
-  } else if (strcasecmp(sub, "save") == 0) {
-    if (argc >= 2) {
-      wallpadSaveProfile(sock, embeddedCliGetToken(args, 2));
-    } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: wallpad save <name>\r\n");
-    }
-  } else if (strcasecmp(sub, "delete") == 0) {
-    if (argc >= 2) {
-      wallpadDeleteProfile(sock, embeddedCliGetToken(args, 2));
-    } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: wallpad delete <id>\r\n");
-    }
-  } else if (strcasecmp(sub, "auto") == 0) {
-    char dp_ns[16];
-    Config::Doorphone::FramingTracker::getNvsNamespace(0, dp_ns, sizeof(dp_ns));
-    ProfileRepository::setActiveProfileIndex(0);
-    g_auto_probing_engine.reset();
-    g_doorphone_tracker.clearNvs(dp_ns);
-    sendTelnetMsg(sock, "[OK] Switched to Universal Auto-Probing mode (Wallpad & Doorphone framing reset).\r\n");
-  } else if (strcasecmp(sub, "reset") == 0) {
-    char dp_ns[16];
-    Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
-    g_auto_probing_engine.reset();
-    g_doorphone_tracker.clearNvs(dp_ns);
-    g_probe_convergence_reset.store(true, std::memory_order_release);
-  } else if (strcasecmp(sub, "simulate") == 0) {
-    if (argc < 2) {
-      sendTelnetMsg(sock, "[ERROR] Usage: wallpad simulate <hex_bytes...> (e.g. wallpad simulate F7 0E 01 19 01 40 11 01 00 B6 EE)\r\n");
+  struct WallpadCmdDef {
+    const char *name;
+    void (*handler)(int sock, int argc, char *args);
+  };
+
+  static const WallpadCmdDef kWallpadCmds[] = {
+      {"list", [](int s, int, char *) {
+         withScratchBuf(s, [](AppendBuf &out) { wallpadListProfiles(out); });
+       }},
+      {"set", [](int s, int ac, char *a) {
+         if (ac >= 2) wallpadSetProfile(s, embeddedCliGetToken(a, 2));
+         else sendTelnetMsg(s, "[ERROR] Missing profile key/id: wallpad set <key|id>\r\n");
+       }},
+      {"save", [](int s, int ac, char *a) {
+         if (ac >= 2) wallpadSaveProfile(s, embeddedCliGetToken(a, 2));
+         else sendTelnetMsg(s, "[ERROR] Missing name: wallpad save <name>\r\n");
+       }},
+      {"delete", [](int s, int ac, char *a) {
+         if (ac >= 2) wallpadDeleteProfile(s, embeddedCliGetToken(a, 2));
+         else sendTelnetMsg(s, "[ERROR] Missing profile id: wallpad delete <id>\r\n");
+       }},
+      {"auto", [](int s, int, char *) {
+         char dp_ns[16];
+         Config::Doorphone::FramingTracker::getNvsNamespace(0, dp_ns, sizeof(dp_ns));
+         ProfileRepository::setActiveProfileIndex(0);
+         g_auto_probing_engine.reset();
+         g_doorphone_tracker.clearNvs(dp_ns);
+         sendTelnetMsg(s, "[OK] Switched to Universal Auto-Probing mode (Wallpad & Doorphone framing reset).\r\n");
+       }},
+      {"reset", [](int s, int, char *) {
+         char dp_ns[16];
+         Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
+         g_auto_probing_engine.reset();
+         g_doorphone_tracker.clearNvs(dp_ns);
+         g_probe_convergence_reset.store(true, std::memory_order_release);
+       }},
+      {"simulate", [](int s, int ac, char *a) {
+         if (ac < 2) {
+           sendTelnetMsg(s, "[ERROR] Missing bytes: wallpad simulate <hex_bytes...>\r\n");
+           return;
+         }
+         uint8_t sim_buf[64]{0};
+         size_t sim_len = 0;
+         for (int i = 2; i <= ac && sim_len < sizeof(sim_buf); ++i) {
+           const char *tok = embeddedCliGetToken(a, i);
+           if (!tok) break;
+           char *endp = nullptr;
+           unsigned long val = strtoul(tok, &endp, 16);
+           if (endp != tok) sim_buf[sim_len++] = static_cast<uint8_t>(val);
+         }
+         if (sim_len < 3) {
+           sendTelnetMsg(s, "[ERROR] Simulated packet must be at least 3 bytes.\r\n");
+           return;
+         }
+         g_auto_probing_engine.feedFrame(span<const uint8_t>(sim_buf, sim_len));
+         sendTelnetMsgf(s, "[OK] Fed %u simulated bytes into Auto-Probing Engine.\r\n", sim_len);
+       }},
+  };
+
+  for (const auto &entry : kWallpadCmds) {
+    if (strcasecmp(sub, entry.name) == 0) {
+      entry.handler(sock, argc, args);
       return;
     }
-    uint8_t sim_buf[64]{0};
-    size_t sim_len = 0;
-    for (int i = 2; i <= argc && sim_len < sizeof(sim_buf); ++i) {
-      const char *tok = embeddedCliGetToken(args, i);
-      if (!tok) break;
-      char *endp = nullptr;
-      unsigned long val = strtoul(tok, &endp, 16);
-      if (endp != tok) {
-        sim_buf[sim_len++] = static_cast<uint8_t>(val);
-      }
-    }
-    if (sim_len < 3) {
-      sendTelnetMsg(sock, "[ERROR] Simulated packet must be at least 3 bytes.\r\n");
-      return;
-    }
-    g_auto_probing_engine.feedFrame(span<const uint8_t>(sim_buf, sim_len));
-    sendTelnetMsgf(sock, "[OK] Fed %u simulated bytes into Auto-Probing Engine.\r\n", sim_len);
-  } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-    out.append("\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("                    WALLPAD & PROTOCOL COMMAND REFERENCE                      \r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("Command                           Description\r\n");
-    out.append(Fmt::DIV80);
-    out.append("  wallpad [status]                Show auto-probing status, timings & locked profile\r\n");
-    out.append("  wallpad list                    List available vendor & saved NVS custom profiles\r\n");
-    out.append("  wallpad set <key|id>            Manually switch active wallpad vendor profile\r\n");
-    out.append("  wallpad save <name>             Save current auto-learned profile to NVS slot\r\n");
-    out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
-    out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
-    out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
-    out.append("  wallpad simulate <hex...>       Inject raw hex packet into auto-probing engine\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("Tip: Use 'ctl' for device control blueprints & learned slots.\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("\r\n");
-    sendTelnetMsgLen(sock, out.buf, out.offset);
-  } else {
-    sendTelnetMsg(sock, "Usage: wallpad [status | list | set <key|id> | save <name> | delete <id> | auto | reset | simulate <hex...> | help]\r\n");
   }
+
+  static const CliFmt::SubCmdHelpItem items[] = {
+      {"status", "Show auto-probing status & locked profile"},
+      {"list", "List available vendor & saved NVS profiles"},
+      {"set <key|id>", "Manually switch active wallpad profile"},
+      {"save <name>", "Save learned profile to NVS custom slot"},
+      {"delete <id>", "Reset a saved custom profile slot in NVS"},
+      {"auto", "Switch to Universal Auto-Probing mode"},
+      {"reset", "Reset auto-probing engine and re-learn"},
+      {"simulate <hex...>", "Inject raw hex packet into probing engine"},
+  };
+  CliFmt::PrintCmdHelp(sock, "WALLPAD COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                       "Tip: Use 'ctl' for device control blueprints & slots");
 }
 
 void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
@@ -3577,10 +3559,9 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
   int argc = embeddedCliGetTokenCount(args);
 
   if (argc == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-    wallpadPrintControlTable(out);
-    sendTelnetMsgLen(sock, out.buf, out.offset);
+    withScratchBuf(sock, [](AppendBuf &out) {
+      wallpadPrintControlTable(out);
+    });
     if (session) {
       session->txLen = 0;
       session->needsSend = false;
@@ -3591,13 +3572,14 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
   const char *sub = embeddedCliGetToken(args, 1);
 
   if (strcasecmp(sub, "table") == 0 || strcasecmp(sub, "list") == 0 || strcasecmp(sub, "view") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-    wallpadPrintControlTable(out);
-    sendTelnetMsgLen(sock, out.buf, out.offset);
-  } else if (strcasecmp(sub, "reset") == 0) {
+    withScratchBuf(sock, [](AppendBuf &out) {
+      wallpadPrintControlTable(out);
+    });
+    return;
+  }
+  if (strcasecmp(sub, "reset") == 0) {
     if (argc < 2) {
-      sendTelnetMsg(sock, "[ERROR] Usage: ctl reset <all | dev_id> (e.g. ctl reset all, ctl reset 0x18)\r\n");
+      sendTelnetMsg(sock, "[ERROR] Missing target: ctl reset <all | dev_id>\r\n");
       return;
     }
     const char *arg = embeddedCliGetToken(args, 2);
@@ -3614,12 +3596,14 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       g_control_registry.resetGroup(dev_id, false);
       sendTelnetMsgf(sock, "[OK] Control template for DevID 0x%02X action slots reset completed.\r\n", dev_id);
     }
-  } else if (strcasecmp(sub, "name") == 0 || strcasecmp(sub, "setname") == 0) {
+    return;
+  }
+  if (strcasecmp(sub, "name") == 0 || strcasecmp(sub, "setname") == 0) {
     if (argc >= 3) {
       uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
       const char *name = embeddedCliGetToken(args, 3);
       if (dev_id == 0 || !name || strlen(name) == 0) {
-        sendTelnetMsg(sock, "[ERROR] Usage: ctl name <dev_id> <custom_name> (e.g. ctl name 0x1B Gas)\r\n");
+        sendTelnetMsg(sock, "[ERROR] Missing name: ctl name <dev_id> <custom_name>\r\n");
       } else {
         if (g_control_registry.setGroupName(dev_id, name)) {
           sendTelnetMsgf(sock, "[OK] DevID 0x%02X group name set to '%s' and saved to NVS flash.\r\n", dev_id, name);
@@ -3628,9 +3612,11 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
         }
       }
     } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: ctl name <dev_id> <custom_name> (e.g. ctl name 0x1B Gas)\r\n");
+      sendTelnetMsg(sock, "[ERROR] Missing argument: ctl name <dev_id> <custom_name>\r\n");
     }
-  } else if (strcasecmp(sub, "class") == 0 || strcasecmp(sub, "setclass") == 0) {
+    return;
+  }
+  if (strcasecmp(sub, "class") == 0 || strcasecmp(sub, "setclass") == 0) {
     if (argc >= 3) {
       uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
       const char *cls_str = embeddedCliGetToken(args, 3);
@@ -3676,7 +3662,7 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       }
 
       if (dev_id == 0 || cls == DeviceClass::UNKNOWN) {
-        sendTelnetMsg(sock, "[ERROR] Usage: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
+        sendTelnetMsg(sock, "[ERROR] Missing class: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
       } else {
         const char *final_name = (custom_name && strlen(custom_name) > 0) ? custom_name : def_name;
         if (g_control_registry.setGroupClass(dev_id, cls, final_name)) {
@@ -3686,54 +3672,46 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
         }
       }
     } else {
-      sendTelnetMsg(sock, "[ERROR] Usage: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
+      sendTelnetMsg(sock, "[ERROR] Missing argument: ctl class <dev_id> <class> [name]\r\n");
     }
-  } else if (strcasecmp(sub, "help") == 0 || strcasecmp(sub, "?") == 0) {
-    g_cli_scratch_buf[0] = '\0';
-    AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
-    out.append("\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("             DEVICE GROUP CONTROL BLUEPRINT COMMANDS                          \r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("Command                           Description\r\n");
-    out.append("  ctl                             Display control blueprint table [view|list]\r\n");
-    out.append("  ctl <dev_id>                    Inspect packet blueprint & slots (e.g. ctl 0x18)\r\n");
-    out.append("  ctl name <dev_id> <name>        Set custom group name (e.g. Gas, Elevator)\r\n");
-    out.append("  ctl reset <dev_id>              Reset action slots for specific device\r\n");
-    out.append("  ctl reset all                   Factory wipe & re-inject blueprints from catalog\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("\r\n");
-    sendTelnetMsgLen(sock, out.buf, out.offset);
-  } else {
-    char *endp = nullptr;
-    uint8_t dev_id = static_cast<uint8_t>(strtoul(sub, &endp, 0));
-    if (endp != sub && dev_id != 0) {
-      g_cli_scratch_buf[0] = '\0';
-      AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
+    return;
+  }
+  static const CliFmt::SubCmdHelpItem items[] = {
+      {"ctl", "Display control blueprint table"},
+      {"<dev_id>", "Inspect blueprint & slots (e.g. ctl 0x18)"},
+      {"name <id> <name>", "Set custom group name (e.g. ctl name 0x18 Light)"},
+      {"class <id> <cls> [name]", "Set device class (light/outlet/vent/thermo...)"},
+      {"reset <id>", "Reset action slots for specific device"},
+      {"reset all", "Factory wipe & re-inject blueprints from catalog"},
+  };
+
+  if (CliFmt::IsHelp(sub)) {
+    CliFmt::PrintCmdHelp(sock, "CONTROL BLUEPRINT COMMANDS", items, sizeof(items) / sizeof(items[0]),
+                         "Tip: Use 'ctl 0x18' to view detailed frame action offsets");
+    return;
+  }
+
+  char *endp = nullptr;
+  uint8_t dev_id = static_cast<uint8_t>(strtoul(sub, &endp, 0));
+  if (endp != sub && dev_id != 0) {
+    withScratchBuf(sock, [dev_id](AppendBuf &out) {
       wallpadPrintControlDetail(out, dev_id);
-      sendTelnetMsgLen(sock, out.buf, out.offset);
-    } else {
-      sendTelnetMsg(sock, "Usage: ctl [<dev_id> | name <id> <name> | reset <all|id> | help]\r\n");
-    }
+    });
+  } else {
+    CliFmt::PrintCmdHelp(sock, "CONTROL BLUEPRINT COMMANDS", items, sizeof(items) / sizeof(items[0]),
+                         "Tip: Use 'ctl 0x18' to view detailed frame action offsets");
   }
 }
 
 void wallpadPrintControlTable(AppendBuf &out) {
-  out.append("\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("|                   DEVICE CONTROL BLUEPRINTS & ACTION SLOTS                   |\r\n");
-  out.append("+==============================================================================+\r\n");
+  CliFmt::PrintBoxHeader(out, "DEVICE CONTROL BLUEPRINTS & ACTION SLOTS");
 
   GroupControlTemplate grps[ControlTemplateRegistry::MAX_GROUPS];
   size_t count = g_control_registry.getGroupsSnapshot(grps, ControlTemplateRegistry::MAX_GROUPS);
 
   char sub_buf[78] = {0};
-  int sub_len = snprintf(sub_buf, sizeof(sub_buf), "Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted", count);
-  if (sub_len < 0) sub_len = 0;
-  if (sub_len > 78) sub_len = 78;
-  int pad_left = (78 - sub_len) / 2;
-  int pad_right = 78 - sub_len - pad_left;
-  out.appendFormat("|%*s%s%*s|\r\n", pad_left, "", sub_buf, pad_right, "");
+  snprintf(sub_buf, sizeof(sub_buf), "Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted", count);
+  CliFmt::PrintBoxSubtitle(out, sub_buf);
 
   out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
   out.append("| DevID |   Name   | Class  | CTL | Power Slot | QRY |     Status Offsets      |\r\n");
@@ -3741,7 +3719,8 @@ void wallpadPrintControlTable(AppendBuf &out) {
 
   if (count == 0) {
     out.append("|  (No control blueprints registered yet. Waiting for profile or learning...)   |\r\n");
-    out.append("+==============================================================================+\r\n\r\n");
+    out.append(CliFmt::BOX80_EQ);
+    out.append("\r\n");
     return;
   }
 
@@ -3825,75 +3804,84 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   char name_safe[17] = {0};
   strncpy(name_safe, grp.group_name, sizeof(name_safe) - 1);
 
-  out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.appendFormat("               DEVICE CONTROL BLUEPRINT DETAIL: 0x%02X (%s)                \r\n",
-                   grp.dev_id, name_safe);
-  out.append(Fmt::DIV80EQ);
-  out.appendFormat("  Frame Specs     : CTL Length = %u Bytes | QRY Response Length = %u Bytes\r\n",
-                   grp.frame_len, grp.query_slots.expected_len);
-  out.appendFormat("  Addressing      : Sub1 = Offset #%u | Sub2 = Offset #%u (Override = 0x%02X)\r\n",
-                   grp.sub1_offset, grp.sub2_offset, grp.ctl_sub1_override);
-  out.append(Fmt::DIV80);
+  char title[80];
+  snprintf(title, sizeof(title), "DEVICE CONTROL BLUEPRINT DETAIL: 0x%02X (%s)", grp.dev_id, name_safe);
+  CliFmt::PrintBoxHeader(out, title);
 
-  out.append("[Outbound Action Slots]\r\n");
+  char sub_buf[78];
+  snprintf(sub_buf, sizeof(sub_buf), "Frame: CTL %uB | QRY %uB | Sub1 Offset #%u | Sub2 Offset #%u",
+           grp.frame_len, grp.query_slots.expected_len, grp.sub1_offset, grp.sub2_offset);
+  CliFmt::PrintBoxSubtitle(out, sub_buf);
+
+  out.append("+---------------------------+--------------------------------------------------+\r\n");
+  out.append("| Action / Status Slot      | Discovered Configuration                         |\r\n");
+  out.append("+---------------------------+--------------------------------------------------+\r\n");
+
+  char v_buf[64];
   if (grp.power_slot.discovered) {
-    out.appendFormat("  Power Control : Offset #%u  [ ON: 0x%02X / OFF: 0x%02X ]\r\n",
-                     grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
+    snprintf(v_buf, sizeof(v_buf), "Offset #%u  [ ON: 0x%02X / OFF: 0x%02X ]",
+             grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
   } else {
-    out.append("  Power Control : None\r\n");
+    snprintf(v_buf, sizeof(v_buf), "None");
   }
+  CliFmt::PrintCardRow2(out, "Power Control Slot", v_buf);
 
   if (grp.temp_slot.discovered) {
-    out.appendFormat("  Temp Control  : Offset #%u  [ Range: %u ~ %u C ]\r\n",
-                     grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
+    snprintf(v_buf, sizeof(v_buf), "Offset #%u  [ Range: %u ~ %u C ]",
+             grp.temp_slot.action_offset, grp.temp_slot.min_val, grp.temp_slot.max_val);
   } else {
-    out.append("  Temp Control  : None\r\n");
+    snprintf(v_buf, sizeof(v_buf), "None");
   }
+  CliFmt::PrintCardRow2(out, "Temp Control Slot", v_buf);
 
   if (grp.speed_slot.discovered) {
     if (grp.speed_slot.level_count > 0) {
-      char tok_str[64] = {0};
+      char tok_str[48] = {0};
       for (uint8_t i = 0; i < grp.speed_slot.level_count; ++i) {
         char t_buf[16] = {0};
-        snprintf(t_buf, sizeof(t_buf), "%sL%u:0x%02X", (i > 0 ? ", " : ""), i + 1, grp.speed_slot.level_tokens[i]);
+        snprintf(t_buf, sizeof(t_buf), "%sL%u:0x%02X", (i > 0 ? "," : ""), i + 1, grp.speed_slot.level_tokens[i]);
         strncat(tok_str, t_buf, sizeof(tok_str) - strlen(tok_str) - 1);
       }
-      out.appendFormat("  Speed Control : Offset #%u  [ Levels: %s ]\r\n",
-                       grp.speed_slot.action_offset, tok_str);
+      snprintf(v_buf, sizeof(v_buf), "Offset #%u  [ %s ]", grp.speed_slot.action_offset, tok_str);
     } else {
-      out.appendFormat("  Speed Control : Offset #%u  [ Range: %u ~ %u ]\r\n",
-                       grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
+      snprintf(v_buf, sizeof(v_buf), "Offset #%u  [ Range: %u ~ %u ]",
+               grp.speed_slot.action_offset, grp.speed_slot.min_val, grp.speed_slot.max_val);
     }
   } else {
-    out.append("  Speed Control : None\r\n");
+    snprintf(v_buf, sizeof(v_buf), "None");
   }
+  CliFmt::PrintCardRow2(out, "Fan Speed Slot", v_buf);
 
   if (grp.close_slot.discovered) {
-    out.appendFormat("  Close Control : Offset #%u  [ Action: 0x%02X ]\r\n",
-                     grp.close_slot.action_offset, grp.close_slot.off_val);
+    snprintf(v_buf, sizeof(v_buf), "Offset #%u  [ Action: 0x%02X ]",
+             grp.close_slot.action_offset, grp.close_slot.off_val);
   } else {
-    out.append("  Close Control : None\r\n");
+    snprintf(v_buf, sizeof(v_buf), "None");
   }
+  CliFmt::PrintCardRow2(out, "Close Action Slot", v_buf);
 
-  out.append("\r\n[Inbound Status Slots]\r\n");
-  auto format_slot = [](AppendBuf &b, const char *label, uint8_t off) {
+  out.append("+---------------------------+--------------------------------------------------+\r\n");
+
+  auto print_inbound = [&](const char *label, uint8_t off) {
     if (off != 0xFF) {
-      b.appendFormat("  %-13s : Offset #%u\r\n", label, off);
+      snprintf(v_buf, sizeof(v_buf), "Offset #%u", off);
     } else {
-      b.appendFormat("  %-13s : None\r\n", label);
+      snprintf(v_buf, sizeof(v_buf), "None");
     }
+    CliFmt::PrintCardRow2(out, label, v_buf);
   };
 
-  format_slot(out, "Power State", grp.query_slots.power_offset);
-  format_slot(out, "Target Temp", grp.query_slots.target_temp_offset);
-  format_slot(out, "Ambient Temp", grp.query_slots.current_temp_offset);
-  format_slot(out, "Fan Speed", grp.query_slots.fan_speed_offset);
-  format_slot(out, "Power Wattage", grp.query_slots.power_w_offset);
-  format_slot(out, "CTL ACK State", grp.ack_slots.power_offset);
+  print_inbound("Power Status Offset", grp.query_slots.power_offset);
+  print_inbound("Target Temp Offset", grp.query_slots.target_temp_offset);
+  print_inbound("Ambient Temp Offset", grp.query_slots.current_temp_offset);
+  print_inbound("Fan Speed Offset", grp.query_slots.fan_speed_offset);
+  print_inbound("Power Wattage Offset", grp.query_slots.power_w_offset);
+  print_inbound("CTL ACK State Offset", grp.ack_slots.power_offset);
 
-  out.append(Fmt::DIV80EQ);
-  out.append("\r\n");
+  out.append("+---------------------------+--------------------------------------------------+\r\n");
+  char tip_buf[78];
+  snprintf(tip_buf, sizeof(tip_buf), "Tip: Use 'ctl reset 0x%02X' to re-probe or 'ctl name 0x%02X <name>'", grp.dev_id, grp.dev_id);
+  CliFmt::PrintBoxFooter(out, tip_buf);
 }
 
 } // namespace WallpadCli

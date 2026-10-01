@@ -129,9 +129,8 @@ private:
   static void writeCharToClient(EmbeddedCli *cli, char c);
   void bindCommands(TelnetSession *session);
 
-  static void cmdExit(EmbeddedCli *cli, char *args, void *context);
-
 public:
+  static void cmdExit(EmbeddedCli *cli, char *args, void *context);
   explicit TelnetManager(uint16_t port = Config::TCP::TELNET_PORT);
   void startServer();
   void tick();
