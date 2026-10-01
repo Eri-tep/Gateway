@@ -4399,3 +4399,124 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
 }
 
 } // namespace WallpadCli
+
+// ============================================================================
+// Telemetry & Statistics Formatters (namespace Fmt)
+// ============================================================================
+namespace Fmt {
+
+void FormatHwMetrics(AppendBuf &out, const HwSnapshot &hw) {
+  out.append(DIV80);
+  out.appendFormat("%-16s %11s  %11s  %11s  %11s  %11s\r\n", "Resource / Core", "Current",
+                   "15m Avg", "15m Peak", "24h Avg", "24h Peak");
+  out.append(DIV80);
+
+  struct HwRow {
+    const char *name;
+    uint16_t cur, a15, p15, a24, p24;
+    const char *suffix;
+  };
+  const HwRow rows[] = {
+      {"CPU0 (Net/WiFi)", hw.cpu0_cur, hw.cpu0_15m_avg, hw.cpu0_15m_peak, hw.cpu0_24h_avg, hw.cpu0_24h_peak, "%"},
+      {"CPU1 (RS485/IO)", hw.cpu1_cur, hw.cpu1_15m_avg, hw.cpu1_15m_peak, hw.cpu1_24h_avg, hw.cpu1_24h_peak, "%"},
+      {"RAM Used", hw.ram_cur, hw.ram_15m_avg, hw.ram_15m_peak, hw.ram_24h_avg, hw.ram_24h_peak, " KB"},
+      {"Temp", static_cast<uint16_t>(hw.temp_cur), static_cast<uint16_t>(hw.temp_15m_avg), static_cast<uint16_t>(hw.temp_15m_peak), static_cast<uint16_t>(hw.temp_24h_avg), static_cast<uint16_t>(hw.temp_24h_peak), " C"},
+  };
+
+  for (const auto &r : rows) {
+    char c[5][16];
+    snprintf(c[0], sizeof(c[0]), "%u%s", static_cast<unsigned>(r.cur), r.suffix);
+    snprintf(c[1], sizeof(c[1]), "%u%s", static_cast<unsigned>(r.a15), r.suffix);
+    snprintf(c[2], sizeof(c[2]), "%u%s", static_cast<unsigned>(r.p15), r.suffix);
+    snprintf(c[3], sizeof(c[3]), "%u%s", static_cast<unsigned>(r.a24), r.suffix);
+    snprintf(c[4], sizeof(c[4]), "%u%s", static_cast<unsigned>(r.p24), r.suffix);
+    out.appendFormat("%-16s %11s  %11s  %11s  %11s  %11s\r\n", r.name, c[0], c[1], c[2], c[3], c[4]);
+  }
+}
+
+void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt) {
+  out.append(DIV80);
+  out.appendFormat("%-10s %-6s %-13s %-7s %-11s %-11s %-8s %s\r\n", "Channel", "Port",
+                   "Status", "Conn", "RX Pkts", "TX Pkts", "Dropped", "Uncache");
+  out.append(DIV80);
+
+  bool is_conn = pkt.ch6.is_connected;
+  uint32_t rx = pkt.ch6.rx_pkts;
+  uint32_t tx = pkt.ch6.tx_pkts;
+  const char *status_str = !is_conn               ? "Disconnected"
+                           : (rx == 0 && tx == 0) ? "Idle"
+                                                   : "Connected";
+  out.appendFormat("%-10s %-6u %-14s %3u%12u%12u%10u%10u\r\n", "CH#6_Mgmt", Config::TCP::MGMT_PORT, status_str,
+                    static_cast<unsigned>(pkt.ch6.connection_count), static_cast<unsigned>(rx), static_cast<unsigned>(tx),
+                    static_cast<unsigned>(pkt.ch6.dropped_pkts), static_cast<unsigned>(pkt.ch6.uncached_pkts));
+}
+
+void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
+  out.append(DIV80);
+  out.appendFormat("%-10s %10s %12s %15s %10s %9s %8s\r\n", "Channel", "RX Pkts", "TX Pkts",
+                   "CRC Err", "Inv Frm", "Timeouts", "Uncache");
+  out.append(DIV80);
+
+  const char *rs_n[] = {"CH#1_IoT", "CH#2_WP#1", "CH#3_WP#2", "CH#4_WP#3"};
+  const ChanStats *rs_st[] = {&pkt.ch1, &pkt.ch2, &pkt.ch3, &pkt.ch4};
+  for (int i = 0; i < 4; ++i) {
+    uint32_t rx = rs_st[i]->rx_pkts, crc = rs_st[i]->crc_errors;
+    char r_str[24];
+    snprintf(r_str, sizeof(r_str), "%u (%.2f%%)", static_cast<unsigned>(crc),
+             rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", rs_n[i], static_cast<unsigned>(rx),
+                     static_cast<unsigned>(rs_st[i]->tx_pkts), r_str, static_cast<unsigned>(rs_st[i]->invalid_frames),
+                     static_cast<unsigned>(rs_st[i]->timeouts), static_cast<unsigned>(rs_st[i]->uncached_pkts));
+  }
+
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    auto &slot = g_hub_slots[s];
+    if (!slot.enabled && strlen(slot.target_ip) == 0 && slot.target_port == 0) continue;
+
+    char chan_name[16];
+    snprintf(chan_name, sizeof(chan_name), "CH#5_%u", slot.target_port ? slot.target_port : Config::TCP::EW11_SLOT_PORTS[s]);
+
+    uint32_t drp = slot.dropped_pkts;
+    char drp_str[24];
+    snprintf(drp_str, sizeof(drp_str), "%u", static_cast<unsigned>(drp));
+
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n",
+                     chan_name,
+                     static_cast<unsigned>(slot.rx_pkts),
+                     static_cast<unsigned>(slot.tx_pkts),
+                     drp > 0 ? drp_str : "0 (0.00%)",
+                     0u, 0u, 0u);
+  }
+}
+
+void FormatTaskStacks(AppendBuf &out, const StackSnapshot &st, const TaskWdtMonitor &wdt) {
+  auto gtag = [](uint16_t b) {
+    return b >= 1000 ? "SAFE" : b >= 500 ? "WARN" : "CRIT";
+  };
+
+  const uint16_t stacks[6] = {st.ch1_stack, st.ch2_stack, st.ch3_stack,
+                              st.ch4_stack, st.net_stack, st.telnet_stack};
+  const char *names[6] = {"CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
+                          "CH#4_WP#3", "Network",   "Telnet_CLI"};
+  const char *scopes[6] = {"IoT Master Comm",    "Wallpad#1 HW Slave",
+                           "Wallpad#2 HW Slave", "Wallpad#3 SW Slave",
+                           "WiFi & TCP Manager", "Telnet CLI Server"};
+
+  out.append(DIV80);
+  out.appendFormat("%-11s %-12s %-10s %-12s %-8s %-18s\r\n", "Task Name", "Min Stack",
+                   "Last Feed", "Peak Intvl", "Status", "Task Scope");
+  out.append(DIV80);
+
+  uint32_t now = millis();
+  for (size_t i = 0; i < 6; ++i) {
+    uint32_t last_feed = wdt.tasks[i].last_feed_ms.load(std::memory_order_relaxed);
+    uint32_t elapsed = (last_feed > 0 && now >= last_feed) ? (now - last_feed) : 0;
+    uint32_t peak = wdt.tasks[i].max_interval_ms.load(std::memory_order_relaxed);
+
+    out.appendFormat("%-11s %5u Bytes  %5u ms     %5u ms       %-7s %-18s\r\n", names[i],
+                     stacks[i], static_cast<unsigned>(elapsed), static_cast<unsigned>(peak), gtag(stacks[i]), scopes[i]);
+  }
+}
+
+} // namespace Fmt
+
