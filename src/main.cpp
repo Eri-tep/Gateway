@@ -285,12 +285,7 @@ static void Boot_InitWifiAndOta() {
       g_wdt_monitor.feed(4);
     });
     ArduinoOTA.onEnd([]() {
-      g_ota_in_progress.store(false, std::memory_order_release);
-      if (g_system_event_group) {
-        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-      }
       ::Serial.println(F("[ArduinoOTA] Finished successfully!"));
-      vTaskDelay(pdMS_TO_TICKS(200));
       System_Restart("OTA Firmware Update");
     });
     ArduinoOTA.onError([](ota_error_t error) {

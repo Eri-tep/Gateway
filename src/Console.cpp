@@ -3464,22 +3464,28 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
 
 void wallpadPrintControlTable(AppendBuf &out) {
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                 DEVICE CONTROL BLUEPRINTS & ACTION SLOTS                     \r\n");
-  out.append(Fmt::DIV80EQ);
+  out.append("+==============================================================================+\r\n");
+  out.append("|                   DEVICE CONTROL BLUEPRINTS & ACTION SLOTS                   |\r\n");
+  out.append("+==============================================================================+\r\n");
 
   GroupControlTemplate grps[ControlTemplateRegistry::MAX_GROUPS];
   size_t count = g_control_registry.getGroupsSnapshot(grps, ControlTemplateRegistry::MAX_GROUPS);
-  out.appendFormat("  Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted               \r\n", count);
-  out.append(Fmt::DIV80);
-  out.append("DevID  Name        Class      CTL_Len  Power Action Slot   QRY_Len  Status Offsets\r\n");
-  out.append(Fmt::DIV80);
+
+  char sub_buf[78] = {0};
+  int sub_len = snprintf(sub_buf, sizeof(sub_buf), "Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted", count);
+  if (sub_len < 0) sub_len = 0;
+  if (sub_len > 78) sub_len = 78;
+  int pad_left = (78 - sub_len) / 2;
+  int pad_right = 78 - sub_len - pad_left;
+  out.appendFormat("|%*s%s%*s|\r\n", pad_left, "", sub_buf, pad_right, "");
+
+  out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
+  out.append("| DevID | Name     | Class  | CTL | Power Slot | QRY | Status Offsets          |\r\n");
+  out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
 
   if (count == 0) {
-    out.append("  (No control blueprints registered yet. Waiting for profile or learning...)\r\n");
-    out.append(Fmt::DIV80);
-    out.append(Fmt::DIV80EQ);
-    out.append("\r\n");
+    out.append("|  (No control blueprints registered yet. Waiting for profile or learning...)   |\r\n");
+    out.append("+==============================================================================+\r\n\r\n");
     return;
   }
 
@@ -3489,23 +3495,23 @@ void wallpadPrintControlTable(AppendBuf &out) {
 
     const char *cls_str = DeviceClassToCliString(grp.coverage.dev_class);
 
-    char name_safe[17] = {0};
+    char name_safe[9] = {0};
     strncpy(name_safe, grp.group_name, sizeof(name_safe) - 1);
 
-    char pwr_buf[24] = {0};
+    char pwr_buf[16] = {0};
     if (grp.power_slot.discovered) {
-      snprintf(pwr_buf, sizeof(pwr_buf), "#%u [0x%02X/0x%02X]",
+      snprintf(pwr_buf, sizeof(pwr_buf), "#%u [%02X/%02X]",
                grp.power_slot.action_offset, grp.power_slot.on_val, grp.power_slot.off_val);
     } else {
       snprintf(pwr_buf, sizeof(pwr_buf), "-");
     }
 
-    char ctl_len_str[12] = {0};
-    if (grp.frame_len > 0) snprintf(ctl_len_str, sizeof(ctl_len_str), "%u Byte", grp.frame_len);
+    char ctl_len_str[8] = {0};
+    if (grp.frame_len > 0) snprintf(ctl_len_str, sizeof(ctl_len_str), "%uB", grp.frame_len);
     else snprintf(ctl_len_str, sizeof(ctl_len_str), "-");
 
-    char qry_len_str[12] = {0};
-    if (grp.query_slots.expected_len > 0) snprintf(qry_len_str, sizeof(qry_len_str), "%u Byte", grp.query_slots.expected_len);
+    char qry_len_str[8] = {0};
+    if (grp.query_slots.expected_len > 0) snprintf(qry_len_str, sizeof(qry_len_str), "%uB", grp.query_slots.expected_len);
     else snprintf(qry_len_str, sizeof(qry_len_str), "-");
 
     char extra_slots[40] = {0};
@@ -3516,28 +3522,40 @@ void wallpadPrintControlTable(AppendBuf &out) {
       e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, "-");
     }
 
-    if (grp.query_slots.target_temp_offset != 0xFF) {
-      e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, " (TT:#%u)", grp.query_slots.target_temp_offset);
-    }
-    if (grp.query_slots.current_temp_offset != 0xFF) {
-      e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, " (AT:#%u)", grp.query_slots.current_temp_offset);
-    }
-    if (grp.query_slots.fan_speed_offset != 0xFF) {
-      e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, " (FS:#%u)", grp.query_slots.fan_speed_offset);
-    }
-    if (grp.query_slots.power_w_offset != 0xFF) {
-      e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, " (W:#%u)", grp.query_slots.power_w_offset);
+    bool has_sub = (grp.query_slots.target_temp_offset != 0xFF ||
+                    grp.query_slots.current_temp_offset != 0xFF ||
+                    grp.query_slots.fan_speed_offset != 0xFF ||
+                    grp.query_slots.power_w_offset != 0xFF);
+    if (has_sub) {
+      e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, " (");
+      bool first = true;
+      if (grp.query_slots.target_temp_offset != 0xFF) {
+        e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, "TT:%u", grp.query_slots.target_temp_offset);
+        first = false;
+      }
+      if (grp.query_slots.current_temp_offset != 0xFF) {
+        e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, "%sAT:%u", first ? "" : ", ", grp.query_slots.current_temp_offset);
+        first = false;
+      }
+      if (grp.query_slots.fan_speed_offset != 0xFF) {
+        e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, "%sFS:%u", first ? "" : ", ", grp.query_slots.fan_speed_offset);
+        first = false;
+      }
+      if (grp.query_slots.power_w_offset != 0xFF) {
+        e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, "%sW:%u", first ? "" : ", ", grp.query_slots.power_w_offset);
+      }
+      e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, ")");
     }
 
-    out.appendFormat("0x%02X   %-11s %-10s %-8s %-19s %-8s %s\r\n",
+    out.appendFormat("| 0x%02X  | %-8.8s | %-6.6s | %-3s | %-10s | %-3s | %-24s|\r\n",
                      grp.dev_id, name_safe, cls_str,
                      ctl_len_str, pwr_buf,
                      qry_len_str, extra_slots);
   }
 
-  out.append(Fmt::DIV80);
-  out.append("  * TT: Target Temp, AT: Ambient Temp, FS: Fan Speed, W: Power Wattage\r\n");
-  out.append(Fmt::DIV80EQ);
+  out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
+  out.append("|      TT: Target Temp, AT: Ambient Temp, FS: Fan Speed, W: Power Wattage      |\r\n");
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
 }
 

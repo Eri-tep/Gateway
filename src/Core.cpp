@@ -357,6 +357,12 @@ void LogManager::clearRebootLog() {
 }
 
 void System_Restart(const char *reason) {
+  g_ota_in_progress.store(true, std::memory_order_release);
+  if (g_system_event_group) {
+    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+  vTaskDelay(pdMS_TO_TICKS(300));
+
   if (reason && strlen(reason) > 0) {
     LogManager::writeRebootLog(reason);
   }
@@ -646,11 +652,6 @@ void System_EnterRescueMode(const char *reason) {
     }
   });
   ArduinoOTA.onEnd([]() {
-    g_ota_in_progress.store(false, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
-    vTaskDelay(pdMS_TO_TICKS(200));
     System_Restart("OTA Firmware Update");
   });
   ArduinoOTA.onError([](ota_error_t error) {
