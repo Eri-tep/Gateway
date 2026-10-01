@@ -4,7 +4,6 @@
 #include "Bridge.h"
 #include "Protocol.h"
 #include "Service.h"
-#include "embedded_cli.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -12,6 +11,7 @@
 #include <ctime>
 #include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
+#include <initializer_list>
 #include <lwip/sockets.h>
 #include <memory>
 #include <WiFi.h>
@@ -35,45 +35,252 @@ TelnetManager::WifiScanReq g_wifi_scan_req;
 // TELNET LOW-LEVEL OUTPUT HELPERS
 // ============================================================================
 
-void sendTelnetMsg(int sock, const char *str) {
-  if (sock >= 0 && str) {
-    sendTelnetMsgLen(sock, str, strlen(str));
-  }
+namespace CliIO {
+
+static inline bool valid(int sock, const char *data, size_t len) noexcept {
+  return sock >= 0 && data != nullptr && len != 0;
 }
 
-void sendTelnetMsgLen(int sock, const char *str, size_t len) {
-  if (sock < 0 || !str || len == 0)
-    return;
+static void write(int sock, const char *data, size_t len) noexcept {
+  if (!valid(sock, data, len)) return;
 
   if (g_telnet_tx_sem && xSemaphoreTake(g_telnet_tx_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
     size_t sent = 0;
-    int retries = 0;
-
+    uint8_t retries = 0;
     while (sent < len && retries < 10) {
-      int r = send(sock, str + sent, len - sent, MSG_DONTWAIT);
-      if (r > 0) {
-        sent += r;
-        retries = 0;
-      } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        retries++;
+      const int r = send(sock, data + sent, len - sent, MSG_DONTWAIT);
+      if (r > 0) { sent += static_cast<size_t>(r); retries = 0; continue; }
+      if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        ++retries;
         vTaskDelay(pdMS_TO_TICKS(1));
-      } else {
-        break;
+        continue;
       }
+      break;
     }
     xSemaphoreGive(g_telnet_tx_sem);
   }
   g_wdt_monitor.feed(5);
 }
 
+static inline void text(int sock, const char *s) noexcept {
+  if (s) write(sock, s, strlen(s));
+}
+
+static void printf_(int sock, const char *fmt, ...) noexcept {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n > 0) write(sock, buf, static_cast<size_t>(n < static_cast<int>(sizeof(buf)) ? n : sizeof(buf) - 1));
+}
+
+} // namespace CliIO
+
+void sendTelnetMsg(int sock, const char *str) { CliIO::text(sock, str); }
+void sendTelnetMsgLen(int sock, const char *str, size_t len) { CliIO::write(sock, str, len); }
 void sendTelnetMsgf(int sock, const char *fmt, ...) {
   char buf[256];
-  va_list args;
-  va_start(args, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
-  sendTelnetMsg(sock, buf);
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n > 0) CliIO::write(sock, buf, static_cast<size_t>(n < static_cast<int>(sizeof(buf)) ? n : sizeof(buf) - 1));
 }
+
+class CliWriter {
+public:
+  int sock = -1;
+  AppendBuf *buf = nullptr;
+
+  explicit CliWriter(int s = -1, AppendBuf *b = nullptr) : sock(s), buf(b) {}
+
+  void write(const char *data, size_t len) {
+    if (buf) {
+      buf->append(std::string_view(data, len));
+    } else if (sock >= 0 && data && len > 0) {
+      CliIO::write(sock, data, len);
+    }
+  }
+
+  void text(const char *s) {
+    if (s) write(s, strlen(s));
+  }
+
+  void printf(const char *fmt, ...) {
+    char b[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof(b), fmt, ap);
+    va_end(ap);
+    if (n > 0) write(b, static_cast<size_t>(n < static_cast<int>(sizeof(b)) ? n : sizeof(b) - 1));
+  }
+
+  void line(const char *fmt = nullptr, ...) {
+    if (!fmt) {
+      text("\r\n");
+      return;
+    }
+    char b[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof(b) - 2, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+      size_t len = static_cast<size_t>(n < static_cast<int>(sizeof(b) - 2) ? n : sizeof(b) - 3);
+      b[len] = '\r';
+      b[len + 1] = '\n';
+      write(b, len + 2);
+    }
+  }
+
+  void ok(const char *msg) { printf("[OK] %s\r\n", msg ? msg : ""); }
+  void error(const char *msg) { printf("[ERROR] %s\r\n", msg ? msg : ""); }
+  void warn(const char *msg) { printf("[WARN] %s\r\n", msg ? msg : ""); }
+
+  void header(const char *title) {
+    text("\r\n+==============================================================================+\r\n");
+    centerBox(title);
+    text("+==============================================================================+\r\n");
+  }
+
+  void subtitle(const char *sub) {
+    centerBox(sub);
+  }
+
+  void footer(const char *tip = nullptr) {
+    if (tip && *tip) centerBox(tip);
+    text("+==============================================================================+\r\n\r\n");
+  }
+
+  void separator(char ch = '-') {
+    if (ch == '=') {
+      text("+==============================================================================+\r\n");
+    } else {
+      text("+------------------------------------------------------------------------------+\r\n");
+    }
+  }
+
+  void cardRow2(const char *key, const char *val) {
+    char line_buf[96];
+    int n = snprintf(line_buf, sizeof(line_buf), "| %-25.25s | %-48.48s |\r\n", key ? key : "", val ? val : "");
+    if (n > 0) write(line_buf, static_cast<size_t>(n));
+  }
+
+private:
+  void centerBox(const char *str) {
+    int len = str ? static_cast<int>(strlen(str)) : 0;
+    if (len > 78) len = 78;
+    int pad_l = (78 - len) / 2;
+    int pad_r = 78 - len - pad_l;
+    char line_buf[96];
+    int n = snprintf(line_buf, sizeof(line_buf), "|%*s%.*s%*s|\r\n", pad_l, "", len, str ? str : "", pad_r, "");
+    if (n > 0) write(line_buf, static_cast<size_t>(n));
+  }
+};
+
+enum class Align : uint8_t { LEFT, CENTER, RIGHT };
+
+struct Column {
+  const char *title;
+  uint8_t width;
+  Align align = Align::LEFT;
+  Align header_align = Align::CENTER;
+};
+
+class TableRenderer {
+public:
+  AppendBuf *buf = nullptr;
+  CliWriter *w = nullptr;
+  const Column *cols;
+  size_t count;
+
+  TableRenderer(AppendBuf &b, const Column *c, size_t n) : buf(&b), cols(c), count(n) {}
+  TableRenderer(CliWriter &writer, const Column *c, size_t n) : w(&writer), cols(c), count(n) {}
+
+  void writeRaw(const char *data, size_t len) {
+    if (buf) {
+      buf->append(std::string_view(data, len));
+    } else if (w) {
+      w->write(data, len);
+    }
+  }
+
+  void separator(char ch = '-') {
+    char sep[128];
+    size_t off = 0;
+    sep[off++] = '+';
+    for (size_t i = 0; i < count && off + cols[i].width + 4 < sizeof(sep); ++i) {
+      memset(sep + off, ch, cols[i].width + 2);
+      off += cols[i].width + 2;
+      sep[off++] = '+';
+    }
+    sep[off++] = '\r';
+    sep[off++] = '\n';
+    writeRaw(sep, off);
+  }
+
+  static int formatCell(char *dst, size_t sz, const char *txt, uint8_t width, Align align) {
+    int len = txt ? static_cast<int>(strlen(txt)) : 0;
+    if (len > width) len = width;
+    if (align == Align::CENTER) {
+      int l = (width - len) / 2;
+      return snprintf(dst, sz, "%*s%.*s%*s", l, "", len, txt ? txt : "", width - len - l, "");
+    }
+    return snprintf(dst, sz, (align == Align::RIGHT) ? "%*.*s" : "%-*.*s", width, width, txt ? txt : "");
+  }
+
+  void header(bool top_sep = false) {
+    if (top_sep) separator('-');
+    char line[128];
+    size_t off = 0;
+    line[off++] = '|';
+    for (size_t i = 0; i < count && off + cols[i].width + 4 < sizeof(line); ++i) {
+      line[off++] = ' ';
+      int n = formatCell(line + off, sizeof(line) - off, cols[i].title, cols[i].width, cols[i].header_align);
+      if (n > 0) off += static_cast<size_t>(n);
+      line[off++] = ' ';
+      line[off++] = '|';
+    }
+    line[off++] = '\r';
+    line[off++] = '\n';
+    writeRaw(line, off);
+    separator('-');
+  }
+
+  void row(std::initializer_list<const char *> cells) {
+    char line[128];
+    size_t off = 0;
+    line[off++] = '|';
+    size_t col_idx = 0;
+    for (const char *cell : cells) {
+      if (col_idx >= count) break;
+      const Column &c = cols[col_idx++];
+      line[off++] = ' ';
+      int n = formatCell(line + off, sizeof(line) - off, cell, c.width, c.align);
+      if (n > 0) off += static_cast<size_t>(n);
+      line[off++] = ' ';
+      line[off++] = '|';
+    }
+    line[off++] = '\r';
+    line[off++] = '\n';
+    writeRaw(line, off);
+  }
+
+  void empty(const char *msg) {
+    char line[96];
+    int len = msg ? static_cast<int>(strlen(msg)) : 0;
+    if (len > 78) len = 78;
+    int l = (78 - len) / 2;
+    int r = 78 - len - l;
+    int n = snprintf(line, sizeof(line), "|%*s%.*s%*s|\r\n", l, "", len, msg ? msg : "", r, "");
+    if (n > 0) writeRaw(line, static_cast<size_t>(n));
+  }
+
+  void end(char ch = '-') {
+    separator(ch);
+  }
+};
 
 // ============================================================================
 // TELNET AUTHENTICATION LOGIC
@@ -214,29 +421,10 @@ bool TelnetManager::handlePassword(TelnetSession *session,
                "================================================================================\r\n\r\n");
     }
 
-    EmbeddedCliConfig *config = embeddedCliDefaultConfig();
-    config->cliBuffer = nullptr;
-    config->cliBufferSize = 0;
-    config->rxBufferSize = 128;
-    config->cmdBufferSize = 128;
-    config->historyBufferSize = 256;
-    config->maxBindingCount = 32;
-    config->enableAutoComplete = true;
-
-    session->cli.reset(embeddedCliNew(config));
-    if (session->cli) {
-      session->cli->appContext = session;
-      session->cli->writeChar = writeCharToClient;
-      bindCommands(session);
-      embeddedCliProcess(session->cli.get());
-      session->needsSend = true;
-      return true;
-    } else {
-      session->sessionState = AWAITING_PASSWORD;
-      sendTelnetMsg(session->sock,
-                    "\r\n[ERROR] Out of memory to allocate CLI instance.\r\n");
-      return false;
-    }
+    session->sessionState = AUTHENTICATED;
+    session->lineLen = 0;
+    sendTelnetMsg(session->sock, "\r\n> ");
+    return true;
   }
 
   sendTelnetMsg(session->sock, "\r\nInvalid password.\r\n");
@@ -249,61 +437,13 @@ bool TelnetManager::handlePassword(TelnetSession *session,
 
 TelnetManager::TelnetManager(uint16_t port) : _port(port) {}
 
-void TelnetManager::writeCharToClient(EmbeddedCli *cli, char c) {
-  if (!cli)
-    return;
-  auto *session = static_cast<TelnetSession *>(cli->appContext);
-  if (!session || session->sock < 0)
-    return;
-
-  // Strip ANSI/VT100 escape sequences (ESC [ ... letter)
-  using EscState = TelnetSession::EscState;
-  if (c == '\x1B') {
-    session->esc_state = EscState::GOT_ESC;
-    return;
-  }
-  if (session->esc_state == EscState::GOT_ESC) {
-    session->esc_state = (c == '[') ? EscState::IN_CSI : EscState::NORMAL;
-    return;
-  }
-  if (session->esc_state == EscState::IN_CSI) {
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-      session->esc_state = EscState::NORMAL;
-    }
-    return;
-  }
-
-  uint8_t uc = static_cast<uint8_t>(c);
-  if ((uc < 0x20 && c != '\r' && c != '\n' && c != '\t') || uc == 0x7F) {
-    return;
-  }
-
-  if (c == '\t') {
-    for (int i = 0; i < 4; ++i) {
-      if (session->txLen < sizeof(session->txBuf)) {
-        session->txBuf[session->txLen++] = ' ';
-      }
-    }
-    return;
-  }
-
-  if (session->txLen < sizeof(session->txBuf)) {
-    session->txBuf[session->txLen++] = c;
-  }
-  if (session->txLen >= sizeof(session->txBuf) - 1 || c == '\n' || c == '\r') {
-    sendTelnetMsgLen(session->sock, session->txBuf, session->txLen);
-    session->txLen = 0;
-    session->needsSend = false;
-  }
-}
-
-struct CmdDef {
-  const char *n;
-  const char *h;
-  void (*b)(EmbeddedCli *, char *, void *);
+struct CommandDef {
+  const char *name;
+  const char *help;
+  void (*handler)(CliContext &ctx);
 };
 
-static const CmdDef kConsoleCmds[] = {
+static constexpr CommandDef kConsoleCmds[] = {
     {"stats",    "Show real-time HW metrics & traffic stats [clear]", SystemCli::cmdStats},
     {"devs",     "Show device registry & cache [1|2|all|clear]", WallpadCli::cmdDevs},
     {"wifi",     "Manage WiFi connection [status|scan|connect|disconnect]", WifiCli::cmdWifi},
@@ -322,37 +462,20 @@ static const CmdDef kConsoleCmds[] = {
     {"exit",     "Disconnect current Telnet CLI session", TelnetManager::cmdExit},
     {"help",     "Display comprehensive command reference and usage examples", SystemCli::cmdHelp}};
 
-void TelnetManager::bindCommands(TelnetSession *session) {
-  if (!session->cli)
+static void dispatchCommand(CliContext &ctx) {
+  if (ctx.args.argc == 0) return;
+  const char *cmd = ctx.args.argv[0];
+  if (strcmp(cmd, "?") == 0) {
+    SystemCli::cmdHelp(ctx);
     return;
-
-  for (const auto &c : kConsoleCmds) {
-    if (strcmp(c.n, "help") == 0) {
-      struct InternalCliImpl {
-        void *rxBuf;
-        void *cmdBuf;
-        uint16_t cmdSize;
-        uint16_t cmdMaxSize;
-        CliCommandBinding *bindings;
-      };
-      auto *impl = static_cast<InternalCliImpl *>(session->cli->_impl);
-      if (impl && impl->bindings) {
-        impl->bindings[0].name = c.n;
-        impl->bindings[0].help = c.h;
-        impl->bindings[0].tokenizeArgs = true;
-        impl->bindings[0].context = session;
-        impl->bindings[0].binding = c.b;
-      }
-      continue;
-    }
-    CliCommandBinding b;
-    b.name = c.n;
-    b.help = c.h;
-    b.tokenizeArgs = true;
-    b.context = session;
-    b.binding = c.b;
-    embeddedCliAddBinding(session->cli.get(), b);
   }
+  for (const auto &c : kConsoleCmds) {
+    if (strcasecmp(cmd, c.name) == 0) {
+      c.handler(ctx);
+      return;
+    }
+  }
+  ctx.out.printf("Unknown command: '%s'. Type 'help' for usage.\r\n", cmd);
 }
 
 void TelnetManager::onClientData(TelnetSession *session, const char *data,
@@ -405,25 +528,61 @@ void TelnetManager::onClientData(TelnetSession *session, const char *data,
       } else if (isprint(c) && session->pwLen < sizeof(session->pwBuffer) - 1) {
         session->pwBuffer[session->pwLen++] = c;
       }
-    } else if (session->cli) {
-      embeddedCliReceiveChar(session->cli.get(), (char)c);
+    } else if (session->sessionState == AUTHENTICATED) {
+      if (c == '\r' || c == '\n') {
+        if (session->lineLen > 0) {
+          session->lineBuf[session->lineLen] = '\0';
+          g_telnet_tracer.pause();
+          sendTelnetMsg(session->sock, "\r\n");
+
+          Args args;
+          char *p = session->lineBuf;
+          while (*p && args.argc < 8) {
+            while (*p && isspace((unsigned char)*p)) ++p;
+            if (!*p) break;
+            args.argv[args.argc++] = p;
+            while (*p && !isspace((unsigned char)*p)) ++p;
+            if (*p) {
+              *p = '\0';
+              ++p;
+            }
+          }
+
+          if (args.argc > 0) {
+            CliWriter writer(session->sock);
+            CliContext ctx{*session, session->sock, args, writer};
+            dispatchCommand(ctx);
+          }
+          session->lineLen = 0;
+          sendTelnetMsg(session->sock, "\r\n> ");
+          g_telnet_tracer.resume();
+        } else if (c == '\r') {
+          sendTelnetMsg(session->sock, "\r\n> ");
+        }
+      } else if (c == '\b' || c == 0x7F) {
+        if (session->lineLen > 0) {
+          session->lineLen--;
+          sendTelnetMsg(session->sock, "\b \b");
+        }
+      } else if (c == 0x1B) {
+        session->esc_state = TelnetSession::EscState::GOT_ESC;
+      } else if (session->esc_state == TelnetSession::EscState::GOT_ESC) {
+        session->esc_state = (c == '[') ? TelnetSession::EscState::IN_CSI : TelnetSession::EscState::NORMAL;
+      } else if (session->esc_state == TelnetSession::EscState::IN_CSI) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~') {
+          session->esc_state = TelnetSession::EscState::NORMAL;
+        }
+      } else if (isprint(c) && session->lineLen < sizeof(session->lineBuf) - 1) {
+        session->lineBuf[session->lineLen++] = c;
+        char echo[1] = { static_cast<char>(c) };
+        sendTelnetMsgLen(session->sock, echo, 1);
+      }
     }
   }
 
   if (should_close) {
     handleClientDisconnect(session);
     return;
-  }
-
-  if (session->sessionState == AUTHENTICATED && session->cli) {
-    g_telnet_tracer.pause();
-    embeddedCliProcess(session->cli.get());
-    if (session->txLen > 0) {
-      sendTelnetMsgLen(session->sock, session->txBuf, session->txLen);
-      session->txLen = 0;
-      session->needsSend = false;
-    }
-    g_telnet_tracer.resume();
   }
 }
 
@@ -439,12 +598,9 @@ void TelnetManager::sendScanResult(const WifiScanReq &req,
   }
 }
 
-void TelnetManager::cmdExit(EmbeddedCli *cli, char *args, void *context) {
-  auto *session = static_cast<TelnetSession *>(context);
-  if (session && session->sock >= 0) {
-    sendTelnetMsg(session->sock, "Goodbye!\r\n");
-    g_telnet_manager.handleClientDisconnect(session);
-  }
+void TelnetManager::cmdExit(CliContext &ctx) {
+  sendTelnetMsg(ctx.sock, "Goodbye!\r\n");
+  g_telnet_manager.handleClientDisconnect(&ctx.session);
 }
 
 // ============================================================================
@@ -581,9 +737,8 @@ void TelnetManager::startServer() {
 }
 
 void TelnetManager::tick() {
-  fd_set readfds, writefds, errorfds;
+  fd_set readfds, errorfds;
   FD_ZERO(&readfds);
-  FD_ZERO(&writefds);
   FD_ZERO(&errorfds);
 
   int max_fd = -1;
@@ -601,9 +756,6 @@ void TelnetManager::tick() {
         active_clients++;
         FD_SET(s, &readfds);
         FD_SET(s, &errorfds);
-        if (_sessions[i].needsSend || _sessions[i].txLen > 0) {
-          FD_SET(s, &writefds);
-        }
         max_fd = std::max(max_fd, s);
       }
     }
@@ -619,7 +771,7 @@ void TelnetManager::tick() {
   }
 
   TSTAGE(6);
-  int activity = select(max_fd + 1, &readfds, &writefds, &errorfds, &tv);
+  int activity = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
 
   if (activity < 0) {
     if (errno == EINTR)
@@ -661,7 +813,6 @@ void TelnetManager::tick() {
       continue;
     }
 
-    bool did_read = false;
     if (FD_ISSET(s.sock, &readfds)) {
       char rx_buf[128];
       TSTAGE(9);
@@ -669,27 +820,10 @@ void TelnetManager::tick() {
       if (len > 0) {
         rx_buf[len] = '\0';
         onClientData(&s, rx_buf, len);
-        did_read = true;
       } else if (len == 0 ||
                  (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         handleClientDisconnect(&s);
         continue;
-      }
-    }
-
-    if (!did_read && FD_ISSET(s.sock, &writefds) && s.txLen > 0) {
-      TSTAGE(10);
-      int sent = send(s.sock, s.txBuf, s.txLen, MSG_DONTWAIT);
-      if (sent > 0) {
-        if (static_cast<size_t>(sent) < s.txLen) {
-          memmove(s.txBuf, s.txBuf + sent, s.txLen - sent);
-          s.txLen -= sent;
-        } else {
-          s.txLen = 0;
-          s.needsSend = false;
-        }
-      } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        handleClientDisconnect(&s);
       }
     }
   }
@@ -877,42 +1011,21 @@ void TelnetTracer::trace(const char *fmt, ...) {
 }
 
 namespace {
-struct Ch1Tracker {
+struct ChannelTracker {
   uint8_t dev_id;
-  struct timeval t_bus_tx;
+  struct timeval tv;
+  bool is_query;
+  bool is_control;
   bool active;
 };
 
-struct SessionTracker {
-  uint8_t dev_id, sub1, sub2;
-  struct timeval t_req_rx, t_bus_tx, t_bus_rx;
-  bool is_query, is_control, active;
-};
-
-struct DoorTracker {
-  struct timeval t_rx;
-  uint8_t rx_channel;
-  bool active;
-};
-
-struct Ew11Tracker {
-  struct timeval t_rx;
-  uint8_t dev_id;
-  bool active;
-};
-
-static Ch1Tracker s_ch1_tracker = {0, {0, 0}, false};
-static SessionTracker s_wp_tracker[3] = {};
-static DoorTracker s_door_tracker = {{0, 0}, 0, false};
-static Ew11Tracker s_ew11_tracker = {{0, 0}, 0, false};
+static ChannelTracker s_trackers[7] = {};
 static struct timeval s_last_pkt_tv = {0, 0};
+static const char *const kCmdTags[7] = {nullptr, nullptr, "CMD_CH2", "CMD_CH3", "PASSTHRU", nullptr, "CMD_CH6"};
 } // anonymous namespace
 
 void TelnetTracer::resetTrackers() noexcept {
-  memset(&s_ch1_tracker, 0, sizeof(s_ch1_tracker));
-  memset(s_wp_tracker, 0, sizeof(s_wp_tracker));
-  memset(&s_door_tracker, 0, sizeof(s_door_tracker));
-  memset(&s_ew11_tracker, 0, sizeof(s_ew11_tracker));
+  memset(s_trackers, 0, sizeof(s_trackers));
   memset(&s_last_pkt_tv, 0, sizeof(s_last_pkt_tv));
 }
 
@@ -962,14 +1075,7 @@ void TelnetTracer::flushToClient() {
   if (batch_count == 0)
     return;
 
-  auto calc_delay_ms = [](const struct timeval &now,
-                          const struct timeval &prev) -> long {
-    if (prev.tv_sec == 0)
-      return -1;
-    long total_ms =
-        (now.tv_sec - prev.tv_sec) * 1000 + (now.tv_usec - prev.tv_usec) / 1000;
-    return (total_ms >= 0 && total_ms < 60000) ? total_ms : -1;
-  };
+
 
   for (size_t i = 0; i < batch_count; ++i) {
     TracePacketEntry &entry = local_batch[i];
@@ -986,106 +1092,75 @@ void TelnetTracer::flushToClient() {
     bool is_new_req = false;
     const char *delay_tag = nullptr;
 
-    auto init_tracker = [&](SessionTracker &tr, TraceType type) {
-      tr.dev_id = dev_id;
-      tr.sub1 = sub1;
-      tr.sub2 = sub2;
-      tr.t_req_rx = entry.tv;
-      tr.t_bus_tx = {0, 0};
-      tr.t_bus_rx = {0, 0};
-      tr.is_query = (type == TraceType::QRY);
-      tr.is_control = (type == TraceType::CTL);
-      tr.active = true;
-    };
-
-    auto processTx = [&](SessionTracker &tr) {
-      if (tr.active) {
-        delay_ms = calc_delay_ms(entry.tv, tr.t_req_rx);
-        delay_tag = tr.is_query ? "CACHE  " : "FWD ACK";
-        tr.active = false;
+    uint8_t ch = entry.channel;
+    auto find_wch = [&](const char *tag) {
+      for (uint8_t wch : {2, 3, 6}) {
+        if (s_trackers[wch].active && s_trackers[wch].dev_id == dev_id) {
+          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[wch].tv);
+          delay_tag = tag;
+          s_trackers[wch].active = false;
+          break;
+        }
       }
     };
 
-    if (entry.channel == 2 || entry.channel == 3 || entry.channel == 6) {
-      int wp_idx = (entry.channel == 2) ? 0 : (entry.channel == 3) ? 1 : 2;
+    if (ch == 2 || ch == 3 || ch == 6) {
       if (!entry.is_tx) {
         is_new_req = true;
-        init_tracker(s_wp_tracker[wp_idx], entry.type);
+        s_trackers[ch] = {dev_id, entry.tv, (entry.type == TraceType::QRY), (entry.type == TraceType::CTL), true};
         if (entry.type == TraceType::CTL) {
-          const char *tags[] = {"CMD_CH2", "CMD_CH3", "CMD_CH6"};
-          delay_tag = tags[wp_idx];
+          delay_tag = kCmdTags[ch];
           delay_ms = -2;
         }
       } else if (entry.type == TraceType::ACK) {
-        if (entry.channel == 6 && s_ew11_tracker.active && s_ew11_tracker.dev_id == dev_id) {
-          delay_ms = calc_delay_ms(entry.tv, s_ew11_tracker.t_rx);
+        if (ch == 6 && s_trackers[5].active && s_trackers[5].dev_id == dev_id) {
+          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[5].tv);
           delay_tag = "PASSTHRU";
-          s_ew11_tracker.active = false;
-        } else {
-          processTx(s_wp_tracker[wp_idx]);
+          s_trackers[5].active = false;
+        } else if (s_trackers[ch].active) {
+          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[ch].tv);
+          delay_tag = s_trackers[ch].is_query ? "CACHE  " : "FWD ACK";
+          s_trackers[ch].active = false;
         }
       }
-    } else if (entry.channel == 4) {
+    } else if (ch == 4) {
       if (!entry.is_tx) {
         is_new_req = true;
-        s_door_tracker.t_rx = entry.tv;
-        s_door_tracker.rx_channel = 4;
-        s_door_tracker.active = true;
+        s_trackers[4] = {dev_id, entry.tv, false, false, true};
         delay_tag = "PASSTHRU";
         delay_ms = -2;
       } else {
-        if (s_door_tracker.active) {
-          delay_ms = calc_delay_ms(entry.tv, s_door_tracker.t_rx);
-          delay_tag = "INJECT ";
-          s_door_tracker.active = false;
+        delay_tag = "INJECT ";
+        if (s_trackers[4].active) {
+          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[4].tv);
+          s_trackers[4].active = false;
         } else {
-          delay_tag = "INJECT ";
           delay_ms = -2;
         }
       }
-    } else if (entry.channel == 5) {
+    } else if (ch == 5) {
       if (!entry.is_tx) {
         is_new_req = true;
-        s_ew11_tracker.t_rx = entry.tv;
-        s_ew11_tracker.dev_id = dev_id;
-        s_ew11_tracker.active = true;
+        s_trackers[5] = {dev_id, entry.tv, false, false, true};
       } else {
-        for (auto &tr : s_wp_tracker) {
-          if (tr.active && tr.dev_id == dev_id) {
-            delay_ms = calc_delay_ms(entry.tv, tr.t_req_rx);
-            delay_tag = "INJECT ";
-            tr.active = false;
-            break;
-          }
-        }
+        find_wch("INJECT ");
       }
-    } else if (entry.channel == 1) {
+    } else if (ch == 1) {
       if (entry.is_tx) {
         is_new_req = true;
-        s_ch1_tracker.dev_id = dev_id;
-        s_ch1_tracker.t_bus_tx = entry.tv;
-        s_ch1_tracker.active = true;
-        if (entry.type == TraceType::CTL) {
-          for (auto &tr : s_wp_tracker) {
-            if (tr.active && tr.dev_id == dev_id) {
-              tr.t_bus_tx = entry.tv;
-              delay_ms = calc_delay_ms(entry.tv, tr.t_req_rx);
-              delay_tag = "GW FWD ";
-              break;
-            }
-          }
-        }
+        s_trackers[1] = {dev_id, entry.tv, false, (entry.type == TraceType::CTL), true};
+        if (entry.type == TraceType::CTL) find_wch("GW FWD ");
       } else if (entry.type == TraceType::ACK) {
-        if (s_ch1_tracker.active && s_ch1_tracker.dev_id == dev_id) {
-          delay_ms = calc_delay_ms(entry.tv, s_ch1_tracker.t_bus_tx);
+        if (s_trackers[1].active && s_trackers[1].dev_id == dev_id) {
+          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[1].tv);
           delay_tag = "DEV ACK";
-          s_ch1_tracker.active = false;
+          s_trackers[1].active = false;
         }
       }
     }
 
     if (is_new_req && s_last_pkt_tv.tv_sec > 0) {
-      long gap = calc_delay_ms(entry.tv, s_last_pkt_tv);
+      long gap = TimeUtils::elapsedMs(entry.tv, s_last_pkt_tv);
       if (gap > 50 || gap < 0) {
         TSTAGE(13);
         sendTelnetMsgLen(c_fd, "\r\n", 2);
@@ -1165,14 +1240,6 @@ void TelnetTracer::flushToClient() {
 // From src/CLI/Cli.cpp
 // ============================================================================
 
-static inline TelnetManager::TelnetSession *getSession(void *ctx) noexcept {
-  return static_cast<TelnetManager::TelnetSession *>(ctx);
-}
-
-static inline int getSock(void *ctx) noexcept {
-  auto *s = getSession(ctx);
-  return s ? s->sock : -1;
-}
 
 char g_cli_scratch_buf[5120];
 
@@ -1191,17 +1258,6 @@ inline bool ParseInt(const char *s, int &out_val, int min_v = INT_MIN, int max_v
   if (endp == s || *endp != '\0' || v < min_v || v > max_v) return false;
   out_val = static_cast<int>(v);
   return true;
-}
-
-inline void CenterText(char *out, size_t sz, const char *val, int width) noexcept {
-  int vlen = val ? static_cast<int>(strlen(val)) : 0;
-  if (vlen >= width) {
-    snprintf(out, sz, "%.*s", width, val ? val : "");
-    return;
-  }
-  int l = (width - vlen) / 2;
-  int r = width - vlen - l;
-  snprintf(out, sz, "%*s%s%*s", l, "", val ? val : "", r, "");
 }
 
 inline void PrintBoxHeader(AppendBuf &out, const char *title) {
@@ -1233,34 +1289,17 @@ inline void PrintBoxFooter(AppendBuf &out, const char *tip) {
   out.append("\r\n");
 }
 
-inline void PrintCardRow2(AppendBuf &out, const char *key, const char *val) {
-  out.appendFormat("| %-25.25s | %-48.48s |\r\n", key ? key : "", val ? val : "");
-}
-
-inline void PrintCardRow4(AppendBuf &out, const char *cat, const char *param, const char *val, const char *status) {
-  char clean_s[16] = {0};
-  if (status && status[0] == '[' && status[strlen(status) - 1] == ']') {
-    size_t slen = strlen(status);
-    if (slen >= 2 && slen - 2 < sizeof(clean_s)) {
-      strncpy(clean_s, status + 1, slen - 2);
-      clean_s[slen - 2] = '\0';
-    }
-  } else if (status) {
-    strncpy(clean_s, status, sizeof(clean_s) - 1);
-  }
-  char s_centered[14] = {0};
-  CenterText(s_centered, sizeof(s_centered), clean_s, 12);
-  out.appendFormat("| %-12.12s | %-13.13s | %-32.32s |%s|\r\n",
-                   cat ? cat : "", param ? param : "", val ? val : "", s_centered);
-}
-
 inline bool IsHelp(const char *s) {
   return s && (s[0] == '?' || strcasecmp(s, "help") == 0);
 }
 
-struct SubCmdHelpItem {
-  const char *syntax;
-  const char *desc;
+// Unified subcommand descriptor: carries dispatch handler AND help strings.
+// handler == nullptr marks a help-only (separator / header) row.
+struct SubCmdDef {
+  const char *name;    // token matched against args.get(1), e.g. "frame"
+  const char *syntax;  // help table left column
+  const char *desc;    // help table right column
+  void (*handler)(int sock, int argc, const Args &args);  // nullptr = help row only
 };
 
 } // namespace CliFmt
@@ -1277,15 +1316,20 @@ inline void withScratchBuf(int sock, F &&fn) {
 
 namespace CliFmt {
 
-inline void PrintCmdHelp(int sock, const char *title, const SubCmdHelpItem *items, size_t count, const char *tip = nullptr) {
-  withScratchBuf(sock, [title, items, count, tip](AppendBuf &out) {
+inline void PrintSubCmdHelp(int sock, const char *title, const SubCmdDef *defs, size_t count,
+                            const char *tip = nullptr) {
+  withScratchBuf(sock, [title, defs, count, tip](AppendBuf &out) {
     PrintBoxHeader(out, title);
-    out.append("| Subcommand / Syntax                | Description                             |\r\n");
-    out.append("+------------------------------------+-----------------------------------------+\r\n");
+    static constexpr Column SUB_HELP_COLS[] = {
+        {"Subcommand / Syntax", 34, Align::LEFT, Align::LEFT},
+        {"Description", 39, Align::LEFT, Align::LEFT},
+    };
+    TableRenderer table(out, SUB_HELP_COLS, 2);
+    table.header(false);
     for (size_t i = 0; i < count; ++i) {
-      out.appendFormat("| %-34.34s | %-39.39s |\r\n", items[i].syntax ? items[i].syntax : "", items[i].desc ? items[i].desc : "");
+      table.row({defs[i].syntax ? defs[i].syntax : "", defs[i].desc ? defs[i].desc : ""});
     }
-    out.append("+------------------------------------+-----------------------------------------+\r\n");
+    table.end('-');
     if (tip) {
       PrintBoxFooter(out, tip);
     } else {
@@ -1293,6 +1337,18 @@ inline void PrintCmdHelp(int sock, const char *title, const SubCmdHelpItem *item
       out.append("\r\n");
     }
   });
+}
+
+// Dispatch: scan defs[], call matching handler. Returns true if matched.
+inline bool DispatchSubCmd(const char *sub, int sock, int argc, const Args &args,
+                           const SubCmdDef *defs, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    if (defs[i].handler && defs[i].name && strcasecmp(sub, defs[i].name) == 0) {
+      defs[i].handler(sock, argc, args);
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace CliFmt
@@ -1316,21 +1372,28 @@ static void AsyncWifiScanTask(void *pvParameters) {
 
   int n = WiFi.scanNetworks(false, true);
 
-  auto scan_buf = std::make_unique<char[]>(4096);
-  scan_buf[0] = '\0';
-  AppendBuf out{scan_buf.get(), 4096};
+  g_cli_scratch_buf[0] = '\0';
+  AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
 
   out.append("\r\n");
   out.append("+==============================================================================+\r\n");
   out.append("|                          NEARBY WIFI ACCESS POINTS                           |\r\n");
   out.append("+==============================================================================+\r\n");
-  out.append("| No |        SSID        | Signal (RSSI) |  CH  |          Security           |\r\n");
-  out.append("+----+--------------------+---------------+------+-----------------------------+\r\n");
+  static constexpr Column SCAN_COLS[] = {
+      {"No", 2, Align::LEFT, Align::CENTER},
+      {"SSID", 18, Align::LEFT, Align::CENTER},
+      {"Signal (RSSI)", 13, Align::LEFT, Align::CENTER},
+      {"CH", 4, Align::LEFT, Align::CENTER},
+      {"Security", 27, Align::LEFT, Align::CENTER},
+  };
+
+  TableRenderer table(out, SCAN_COLS, 5);
+  table.header(false);
 
   if (n == 0) {
-    out.append("|                         (No wireless networks found)                         |\r\n");
+    table.empty("(No wireless networks found)");
   } else if (n < 0) {
-    out.append("|               [ERROR] Wi-Fi hardware scan failed or timed out.               |\r\n");
+    table.empty("[ERROR] Wi-Fi hardware scan failed or timed out.");
   } else {
     int max_display = std::min(n, 40);
     for (int i = 0; i < max_display; ++i) {
@@ -1345,60 +1408,55 @@ static void AsyncWifiScanTask(void *pvParameters) {
       case WIFI_AUTH_WPA2_WPA3_PSK: encType = "WPA2-PSK / WPA3-SAE"; break;
       default: break;
       }
-      char sig_buf[16], ch_buf[8];
+      char no_buf[4], sig_buf[16], ch_buf[8];
+      snprintf(no_buf, sizeof(no_buf), "%d", i + 1);
       int rssi = WiFi.RSSI(i);
       snprintf(sig_buf, sizeof(sig_buf), "%d dBm (%d%%)", rssi, std::min(std::max(2 * (rssi + 100), 0), 100));
       snprintf(ch_buf, sizeof(ch_buf), "%d", WiFi.channel(i));
-
-      out.appendFormat("| %-2d | %-18.18s | %-13.13s | %-4.4s | %-27.27s |\r\n",
-                       i + 1, WiFi.SSID(i).c_str(), sig_buf, ch_buf, encType);
+      table.row({no_buf, WiFi.SSID(i).c_str(), sig_buf, ch_buf, encType});
     }
   }
-  out.append("+----+--------------------+---------------+------+-----------------------------+\r\n");
+  table.end('-');
   CliFmt::PrintBoxFooter(out, "Use 'wifi connect <ssid> <password>' to switch AP");
   out.append("\r\n");
   WiFi.scanDelete();
 
   g_telnet_manager.sendScanResult(req, out.buf);
-  scan_buf.reset(); // FreeRTOS vTaskDelete 전 동적 힙 메모리 명시적 해제
   s_wifi_scan_running.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 
-void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
-  auto *sess = getSession(context);
-  int sock = sess ? sess->sock : -1;
-  uint8_t count = embeddedCliGetTokenCount(args);
-  const char *subCmd = (count > 0) ? embeddedCliGetToken(args, 1) : "status";
+void cmdWifi(CliContext &ctx) {
+  auto *sess = &ctx.session;
+  int sock = ctx.sock;
+  uint8_t count = ctx.args.count();
+  const char *subCmd = (count > 0) ? ctx.args.get(1) : "status";
 
   if (count == 0 || strcasecmp(subCmd, "status") == 0) {
     withScratchBuf(sock, [](AppendBuf &out) {
       CliFmt::PrintBoxHeader(out, "WI-FI HARDWARE & NETWORK STATUS");
-      out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
-      out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
+      static constexpr Column WIFI_COLS[] = {
+          {"Category", 13, Align::LEFT, Align::CENTER},
+          {"Parameter", 13, Align::LEFT, Align::CENTER},
+          {"Value / Target", 27, Align::LEFT, Align::CENTER},
+          {"Status", 14, Align::LEFT, Align::CENTER},
+      };
+      TableRenderer table(out, WIFI_COLS, 4);
+      table.header(false);
 
       bool sta_ok = (WiFi.status() == WL_CONNECTED);
-      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Station (STA)", "SSID",
-                       sta_ok ? WiFi.SSID().c_str() : g_config.wifi_ssid,
-                       sta_ok ? "[CONNECTED]" : "[DISCONNECTED]");
-      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "IP Address",
-                       sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0",
-                       sta_ok ? "[ACTIVE]" : "[IDLE]");
       char rssi_b[16];
       snprintf(rssi_b, sizeof(rssi_b), "%d dBm", WiFi.RSSI());
-      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Signal (RSSI)",
-                       sta_ok ? rssi_b : "N/A", sta_ok ? "[STABLE]" : "[IDLE]");
-      out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
+
+      table.row({"Station (STA)", "SSID", sta_ok ? WiFi.SSID().c_str() : g_config.wifi_ssid, sta_ok ? "[CONNECTED]" : "[DISCONNECTED]"});
+      table.row({"", "IP Address", sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0", sta_ok ? "[ACTIVE]" : "[IDLE]"});
+      table.row({"", "Signal (RSSI)", sta_ok ? rssi_b : "N/A", sta_ok ? "[STABLE]" : "[IDLE]"});
+      table.separator('-');
 
       bool ap_active = (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA);
-      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "SoftAP (AP)", "SSID",
-                       g_config.ap_ssid, ap_active ? "[BROADCASTING]" : "[DISABLED]");
-      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "AP IP",
-                       ap_active ? WiFi.softAPIP().toString().c_str() : "0.0.0.0",
-                       ap_active ? "[ACTIVE]" : "[INACTIVE]");
-      out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Clients",
-                       ap_active ? "Max 4 Clients" : "0 Clients",
-                       ap_active ? "[READY]" : "[OFF]");
+      table.row({"SoftAP (AP)", "SSID", g_config.ap_ssid, ap_active ? "[BROADCASTING]" : "[DISABLED]"});
+      table.row({"", "AP IP", ap_active ? WiFi.softAPIP().toString().c_str() : "0.0.0.0", ap_active ? "[ACTIVE]" : "[INACTIVE]"});
+      table.row({"", "Clients", ap_active ? "Max 4 Clients" : "0 Clients", ap_active ? "[READY]" : "[OFF]"});
       out.append(CliFmt::BOX80_EQ);
       out.append("\r\n");
     });
@@ -1422,8 +1480,8 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsg(sock, "[ERROR] Missing SSID: wifi connect <ssid> [password]\r\n");
       return;
     }
-    const char *ssid_arg = embeddedCliGetToken(args, 2);
-    const char *pass_arg = (count >= 3) ? embeddedCliGetToken(args, 3) : "";
+    const char *ssid_arg = ctx.args.get(2);
+    const char *pass_arg = (count >= 3) ? ctx.args.get(3) : "";
 
     {
       CriticalSectionLocker lock(&g_config_mux);
@@ -1442,11 +1500,13 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
     WiFi.disconnect(false);
     sendTelnetMsg(sock, "[WIFI] Disconnected from Wi-Fi AP.\r\n");
   } else {
-    static const CliFmt::SubCmdHelpItem items[] = {
-        {"status", "Show current Wi-Fi connection status"}, {"scan", "Scan nearby 2.4GHz Wi-Fi APs"},
-        {"connect <ssid> [password]", "Connect to specified AP and save to NVS"}, {"disconnect", "Disconnect from current Wi-Fi AP"}};
-    CliFmt::PrintCmdHelp(sock, "WIFI COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
-                         "Tip: Configuration persists to NVS flash memory");
+    static const CliFmt::SubCmdDef items[] = {
+        {"status",      "status",                      "Show current Wi-Fi connection status",       nullptr},
+        {"scan",        "scan",                        "Scan nearby 2.4GHz Wi-Fi APs",               nullptr},
+        {"connect",     "connect <ssid> [password]",   "Connect to specified AP and save to NVS",    nullptr},
+        {"disconnect",  "disconnect",                  "Disconnect from current Wi-Fi AP",            nullptr}};
+    CliFmt::PrintSubCmdHelp(sock, "WIFI COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                            "Tip: Configuration persists to NVS flash memory");
   }
 }
 
@@ -1592,12 +1652,12 @@ void printStats(int sock) {
   s_busy.store(false, std::memory_order_release);
 }
 
-void cmdStats(EmbeddedCli *cli, char *args, void *context) {
-  int client = getSock(context);
-  int argc = embeddedCliGetTokenCount(args);
+void cmdStats(CliContext &ctx) {
+  int client = ctx.sock;
+  int argc = ctx.args.count();
 
   if (argc > 0) {
-    const char *sub = embeddedCliGetToken(args, 1);
+    const char *sub = ctx.args.get(1);
     if (strcasecmp(sub, "clear") == 0) {
       g_pkt_stats.resetAll();
       g_polling_targets.resetHits();
@@ -1609,17 +1669,17 @@ void cmdStats(EmbeddedCli *cli, char *args, void *context) {
   printStats(client);
 }
 
-void cmdReboot(EmbeddedCli *cli, char *args, void *context) {
-  int client = getSock(context);
+void cmdReboot(CliContext &ctx) {
+  int client = ctx.sock;
   sendTelnetMsg(client, "Rebooting...\r\n");
   g_restart_reason = "Telnet Command";
   g_restart_pending.store(true, std::memory_order_release);
 }
 
-void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
-  int client = getSock(context);
-  const char *sub_cmd = (embeddedCliGetTokenCount(args) > 0)
-                            ? embeddedCliGetToken(args, 1)
+void cmdLogView(CliContext &ctx) {
+  int client = ctx.sock;
+  const char *sub_cmd = (ctx.args.count() > 0)
+                            ? ctx.args.get(1)
                             : "list";
 
   if (strcasecmp(sub_cmd, "clear") == 0) {
@@ -1642,9 +1702,14 @@ void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
                static_cast<unsigned>(count), static_cast<unsigned>(LogManager::MAX_LOG_ENTRIES));
       CliFmt::PrintBoxSubtitle(out, sub_buf);
 
-      out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
-      out.append("| No  |      Timestamp      |           Reboot Reason           |    Uptime    |\r\n");
-      out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
+      static constexpr Column REBOOT_COLS[] = {
+          {"No", 3, Align::CENTER, Align::CENTER},
+          {"Timestamp", 19, Align::CENTER, Align::CENTER},
+          {"Reboot Reason", 33, Align::LEFT, Align::CENTER},
+          {"Uptime", 12, Align::CENTER, Align::CENTER},
+      };
+      TableRenderer table(out, REBOOT_COLS, 4);
+      table.header(false);
 
       for (size_t i = 0; i < count; i++) {
         LogEntry entry;
@@ -1670,17 +1735,10 @@ void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
 
           char no_buf[8];
           snprintf(no_buf, sizeof(no_buf), "#%u", static_cast<unsigned>(i + 1));
-
-          char no_c[8], time_c[24], up_c[16];
-          CliFmt::CenterText(no_c, sizeof(no_c), no_buf, 5);
-          CliFmt::CenterText(time_c, sizeof(time_c), time_buf, 21);
-          CliFmt::CenterText(up_c, sizeof(up_c), up_buf, 14);
-
-          out.appendFormat("|%s|%s| %-33.33s |%s|\r\n",
-                           no_c, time_c, entry.reason, up_c);
+          table.row({no_buf, time_buf, entry.reason, up_buf});
         }
       }
-      out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
+      table.end('-');
       CliFmt::PrintBoxFooter(out, "Use 'logview <1-20>' for details, 'logview clear' to wipe history");
     });
     return;
@@ -1704,10 +1762,10 @@ void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
   sendTelnetMsg(client, g_cli_scratch_buf);
 }
 
-void cmdCoreDump(EmbeddedCli *cli, char *args, void *context) {
-  int client = getSock(context);
-  if (embeddedCliGetTokenCount(args) >= 1 &&
-      strcasecmp(embeddedCliGetToken(args, 1), "clear") == 0) {
+void cmdCoreDump(CliContext &ctx) {
+  int client = ctx.sock;
+  if (ctx.args.count() >= 1 &&
+      strcasecmp(ctx.args.get(1), "clear") == 0) {
     esp_core_dump_image_erase();
     sendTelnetMsg(client, "Crash core dump partition successfully ERASED.\r\n");
     return;
@@ -1772,11 +1830,18 @@ void otaPrintStatus(AppendBuf &out) {
   bool is_rescue = g_rescue_mode.load(std::memory_order_relaxed);
 
   CliFmt::PrintBoxHeader(out, "DUAL-PARTITION OTA & ROLLBACK MONITOR");
-  out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
-  out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
-  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Running App",    "Partition",     run_val,             "[ACTIVE]");
-  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "State",         state_desc,          state_status);
-  out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
+  static constexpr Column OTA_COLS[] = {
+      {"Category", 13, Align::LEFT, Align::CENTER},
+      {"Parameter", 13, Align::LEFT, Align::CENTER},
+      {"Value / Target", 27, Align::LEFT, Align::CENTER},
+      {"Status", 14, Align::LEFT, Align::CENTER},
+  };
+  TableRenderer table(out, OTA_COLS, 4);
+  table.header(false);
+
+  table.row({"Running App", "Partition", run_val, "[ACTIVE]"});
+  table.row({"", "State", state_desc, state_status});
+  table.separator('-');
 
   esp_ota_img_states_t next_state = ESP_OTA_IMG_UNDEFINED;
   if (next) {
@@ -1792,13 +1857,13 @@ void otaPrintStatus(AppendBuf &out) {
     next_status = "[ABORTED]";
   }
 
-  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Backup Target",  "Partition",     next_val,            "[STANDBY]");
-  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Rollback",      next_desc,           next_status);
-  out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
+  table.row({"Backup Target", "Partition", next_val, "[STANDBY]"});
+  table.row({"", "Rollback", next_desc, next_status});
+  table.separator('-');
 
-  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Safety Guard",   "Health Timer",  timer_val,           val_done ? "[STABLE]" : "[TESTING]");
-  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Crash Loop",    crash_val,           rtc_crash_counter == 0 ? "[STABLE]" : "[WARNING]");
-  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Rescue Mode",   is_rescue ? "Forced Safe SoftAP" : "Standard Boot", is_rescue ? "[RESCUE]" : "[STABLE]");
+  table.row({"Safety Guard", "Health Timer", timer_val, val_done ? "[STABLE]" : "[TESTING]"});
+  table.row({"", "Crash Loop", crash_val, rtc_crash_counter == 0 ? "[STABLE]" : "[WARNING]"});
+  table.row({"", "Rescue Mode", is_rescue ? "Forced Safe SoftAP" : "Standard Boot", is_rescue ? "[RESCUE]" : "[STABLE]"});
   out.append(CliFmt::BOX80_EQ);
   out.append("\r\n");
 }
@@ -1825,10 +1890,10 @@ void otaValidate(int sock) {
   }
 }
 
-void cmdOta(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
-  uint8_t count = embeddedCliGetTokenCount(args);
-  const char *subCmd = (count > 0) ? embeddedCliGetToken(args, 1) : "status";
+void cmdOta(CliContext &ctx) {
+  int sock = ctx.sock;
+  uint8_t count = ctx.args.count();
+  const char *subCmd = (count > 0) ? ctx.args.get(1) : "status";
 
   if (strcasecmp(subCmd, "status") == 0) {
     withScratchBuf(sock, [](AppendBuf &out) {
@@ -1839,28 +1904,34 @@ void cmdOta(EmbeddedCli *cli, char *args, void *context) {
   } else if (strcasecmp(subCmd, "validate") == 0) {
     otaValidate(sock);
   } else if (strcasecmp(subCmd, "cloud") == 0) {
-    const char *url = (count >= 2) ? embeddedCliGetToken(args, 2) : nullptr;
+    const char *url = (count >= 2) ? ctx.args.get(2) : nullptr;
     sendTelnetMsg(sock, "[OTA] Initiating GitHub Cloud HTTP(S) OTA in background...\r\n");
     Mgmt_StartHttpOta(url);
   } else {
-    static const CliFmt::SubCmdHelpItem items[] = {
-        {"status", "Show active partition & rollback state"}, {"rollback", "Rollback to previous firmware partition"},
-        {"validate", "Confirm current firmware running valid"}, {"cloud [url]", "Trigger cloud OTA download & update"}};
-    CliFmt::PrintCmdHelp(sock, "OTA COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
-                         "Tip: Unvalidated firmware auto-rolls back on reboot");
+    static const CliFmt::SubCmdDef items[] = {
+        {"status",   "status",       "Show active partition & rollback state",   nullptr},
+        {"rollback", "rollback",     "Rollback to previous firmware partition",   nullptr},
+        {"validate", "validate",     "Confirm current firmware running valid",    nullptr},
+        {"cloud",    "cloud [url]",  "Trigger cloud OTA download & update",      nullptr}};
+    CliFmt::PrintSubCmdHelp(sock, "OTA COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
+                            "Tip: Unvalidated firmware auto-rolls back on reboot");
   }
 }
 
-void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
-  int client = getSock(context);
+void cmdHelp(CliContext &ctx) {
+  int client = ctx.sock;
   withScratchBuf(client, [](AppendBuf &out) {
     CliFmt::PrintBoxHeader(out, "GATEWAY TELNET COMMAND REFERENCE");
-    out.append("| Command   | Description & Usage Syntax                                       |\r\n");
-    out.append("+-----------+------------------------------------------------------------------+\r\n");
+    static constexpr Column HELP_COLS[] = {
+        {"Command", 9, Align::LEFT, Align::LEFT},
+        {"Description & Usage Syntax", 64, Align::LEFT, Align::LEFT},
+    };
+    TableRenderer table(out, HELP_COLS, 2);
+    table.header(false);
     for (const auto &c : kConsoleCmds) {
-      out.appendFormat("| %-9.9s | %-64.64s |\r\n", c.n, c.h);
+      table.row({c.name, c.help});
     }
-    out.append("+-----------+------------------------------------------------------------------+\r\n");
+    table.end('-');
     CliFmt::PrintBoxFooter(out, "Type '<command> ?' or '<command> help' for detailed reference");
   });
 }
@@ -1937,45 +2008,43 @@ static const size_t PARAM_COUNT = sizeof(PARAM_TABLE) / sizeof(ConfigParamDef);
 
 void printConfig(int sock) {
   withScratchBuf(sock, [](AppendBuf &out) {
-    char f1[8], f2[8], f3[8], f4[8];
-    snprintf(f1, sizeof(f1), "%s", formatFramingStr(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits));
-    snprintf(f2, sizeof(f2), "%s", formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits));
-    snprintf(f3, sizeof(f3), "%s", formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits));
-    snprintf(f4, sizeof(f4), "%s", formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits));
-
-    const char *prof_name = "0 (Auto-Discovered & Learned)";
-    if (g_config.wallpad_profile == 1) prof_name = "1 (Custom Slot 1)";
-    else if (g_config.wallpad_profile == 2) prof_name = "2 (Custom Slot 2)";
-    else if (g_config.wallpad_profile == 3) prof_name = "3 (Custom Slot 3)";
-
-    char v_wifi[48], v_ap[48], v_tout[48], v_uart[48], v_ch2[48], v_ch3[48], v_ch4[48], v_poll[48], v_ack2[48], v_ack3[48];
-    snprintf(v_wifi, sizeof(v_wifi), "\"%s\"", g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(Not Configured)");
-    snprintf(v_ap, sizeof(v_ap), "\"%s\"", g_config.ap_ssid[0] ? g_config.ap_ssid : "(Disabled)");
-    snprintf(v_tout, sizeof(v_tout), "%u sec", g_config.wifi_connect_timeout_s);
-    snprintf(v_uart, sizeof(v_uart), "%u bps (%s)", static_cast<unsigned>(g_config.uart_baud_rate), f1);
-    snprintf(v_ch2, sizeof(v_ch2), "%u bps (%s)", static_cast<unsigned>(g_config.ch2_baud_rate), f2);
-    snprintf(v_ch3, sizeof(v_ch3), "%u bps (%s)", static_cast<unsigned>(g_config.ch3_baud_rate), f3);
-    snprintf(v_ch4, sizeof(v_ch4), "%u bps (%s)", static_cast<unsigned>(g_config.doorphone_baud_rate), f4);
-    snprintf(v_poll, sizeof(v_poll), "%u ms", g_timing_config.ch1_poll_interval_ms);
-    snprintf(v_ack2, sizeof(v_ack2), "%u ms", g_timing_config.ch2_cache_delay_ms);
-    snprintf(v_ack3, sizeof(v_ack3), "%u ms", g_timing_config.ch3_cache_delay_ms);
-
     CliFmt::PrintBoxHeader(out, "RUNTIME GATEWAY CONFIGURATION (NVS)");
-    out.append("|       Parameter Key       |                  Configured Value                |\r\n");
-    out.append("+---------------------------+--------------------------------------------------+\r\n");
-    CliFmt::PrintCardRow2(out, "wifi_ssid", v_wifi);
-    CliFmt::PrintCardRow2(out, "ap_ssid", v_ap);
-    CliFmt::PrintCardRow2(out, "wifi_timeout", v_tout);
-    CliFmt::PrintCardRow2(out, "telnet_pass", g_config.telnet_pass_hash[0] ? "Configured (SHA-256)" : "Default (None)");
-    CliFmt::PrintCardRow2(out, "wallpad_profile", prof_name);
-    CliFmt::PrintCardRow2(out, "uart_baud_rate (CH1)", v_uart);
-    CliFmt::PrintCardRow2(out, "ch2_baud_rate (CH2)", v_ch2);
-    CliFmt::PrintCardRow2(out, "ch3_baud_rate (CH3)", v_ch3);
-    CliFmt::PrintCardRow2(out, "doorphone_baud_rate (CH4)", v_ch4);
-    CliFmt::PrintCardRow2(out, "ch1_poll_interval", v_poll);
-    CliFmt::PrintCardRow2(out, "ch2_cache_delay", v_ack2);
-    CliFmt::PrintCardRow2(out, "ch3_cache_delay", v_ack3);
-    out.append("+---------------------------+--------------------------------------------------+\r\n");
+    static constexpr Column CFG_COLS[] = {
+        {"Parameter Key", 25, Align::LEFT, Align::CENTER},
+        {"Configured Value", 48, Align::LEFT, Align::CENTER},
+    };
+    TableRenderer table(out, CFG_COLS, 2);
+    table.header(false);
+
+    auto rowf = [&](const char *k, const char *fmt, ...) {
+      char v[64];
+      va_list va;
+      va_start(va, fmt);
+      vsnprintf(v, sizeof(v), fmt, va);
+      va_end(va);
+      table.row({k, v});
+    };
+
+    rowf("wifi_ssid", "\"%s\"", g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(Not Configured)");
+    rowf("ap_ssid", "\"%s\"", g_config.ap_ssid[0] ? g_config.ap_ssid : "(Disabled)");
+    rowf("wifi_timeout", "%u sec", g_config.wifi_connect_timeout_s);
+    table.row({"telnet_pass", g_config.telnet_pass_hash[0] ? "Configured (SHA-256)" : "Default (None)"});
+    table.row({"wallpad_profile", (g_config.wallpad_profile == 1) ? "1 (Custom Slot 1)" :
+                                  (g_config.wallpad_profile == 2) ? "2 (Custom Slot 2)" :
+                                  (g_config.wallpad_profile == 3) ? "3 (Custom Slot 3)" :
+                                  "0 (Auto-Discovered & Learned)"});
+    rowf("uart_baud_rate (CH1)", "%u bps (%s)", static_cast<unsigned>(g_config.uart_baud_rate),
+         formatFramingStr(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits));
+    rowf("ch2_baud_rate (CH2)", "%u bps (%s)", static_cast<unsigned>(g_config.ch2_baud_rate),
+         formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits));
+    rowf("ch3_baud_rate (CH3)", "%u bps (%s)", static_cast<unsigned>(g_config.ch3_baud_rate),
+         formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits));
+    rowf("doorphone_baud_rate (CH4)", "%u bps (%s)", static_cast<unsigned>(g_config.doorphone_baud_rate),
+         formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits));
+    rowf("ch1_poll_interval", "%u ms", g_timing_config.ch1_poll_interval_ms);
+    rowf("ch2_cache_delay", "%u ms", g_timing_config.ch2_cache_delay_ms);
+    rowf("ch3_cache_delay", "%u ms", g_timing_config.ch3_cache_delay_ms);
+    table.end('-');
     CliFmt::PrintBoxFooter(out, "Use 'config set <key> <val>' and 'save' to persist to NVS");
   });
 }
@@ -1983,27 +2052,28 @@ void printConfig(int sock) {
 void printConfigHelp(int sock) {
   withScratchBuf(sock, [](AppendBuf &out) {
     CliFmt::PrintBoxHeader(out, "CONFIGURABLE PARAMETERS GUIDE");
-    out.append("| Parameter Key    | Allowed Range / Type | Description                        |\r\n");
-    out.append("+------------------+----------------------+------------------------------------+\r\n");
+    static constexpr Column CONFIG_HELP_COLS[] = {
+        {"Parameter Key", 16, Align::LEFT, Align::LEFT},
+        {"Allowed Range / Type", 20, Align::LEFT, Align::LEFT},
+        {"Description", 34, Align::LEFT, Align::LEFT},
+    };
+    TableRenderer table(out, CONFIG_HELP_COLS, 3);
+    table.header(false);
 
     for (size_t i = 0; i < PARAM_COUNT; ++i) {
       const auto &p = PARAM_TABLE[i];
       char range_buf[24];
-      if (p.type == PARAM_UINT32 || p.type == PARAM_UINT16 || p.type == PARAM_UCHAR ||
-          p.type == PARAM_TIMING_CH1 || p.type == PARAM_TIMING_CH2 || p.type == PARAM_TIMING_CH3) {
+      if (p.type <= PARAM_UCHAR || (p.type >= PARAM_TIMING_CH1 && p.type <= PARAM_TIMING_CH3)) {
         snprintf(range_buf, sizeof(range_buf), "%lu ~ %lu", (unsigned long)p.minVal, (unsigned long)p.maxVal);
       } else if (p.type >= PARAM_FRAMING_CH1 && p.type <= PARAM_FRAMING_CH4) {
-        snprintf(range_buf, sizeof(range_buf), "8N1,8E1,8O1,8N2");
-      } else if (p.type == PARAM_PASS_HASH) {
-        snprintf(range_buf, sizeof(range_buf), "string (raw)");
+        strcpy(range_buf, "8N1,8E1,8O1,8N2");
       } else {
-        snprintf(range_buf, sizeof(range_buf), "string");
+        strcpy(range_buf, (p.type == PARAM_PASS_HASH) ? "string (raw)" : "string");
       }
-
-      out.appendFormat("| %-16.16s | %-20.20s | %-34.34s |\r\n", p.name, range_buf, p.desc);
+      table.row({p.name, range_buf, p.desc});
     }
 
-    out.append("+------------------+----------------------+------------------------------------+\r\n");
+    table.end('-');
     out.append("|  config set <key> <value>   : Modify parameter (RAM only)                    |\r\n");
     out.append("|  save                       : Commit modified parameters to NVS flash        |\r\n");
     out.append("|  config reset               : Restore all configuration to factory defaults  |\r\n");
@@ -2040,8 +2110,7 @@ static bool applyFraming(uint8_t &dbits, uint8_t &parity, uint8_t &sbits, const 
   return true;
 }
 
-void setConfig(void *session_context, const char *key, const char *value) {
-  int sock = getSock(session_context);
+void setConfig(int sock, const char *key, const char *value) {
   if (!key || !value) {
     sendTelnetMsg(sock, "[ERROR] Missing argument: config set <key> <value>\r\n");
     return;
@@ -2051,19 +2120,10 @@ void setConfig(void *session_context, const char *key, const char *value) {
     const auto &p = PARAM_TABLE[i];
     if (strcasecmp(p.name, key) == 0) {
       CriticalSectionLocker lock(&g_config_mux);
-      switch (p.type) {
-      case PARAM_UINT32:
-        applyUintParam(p.ptr.u32, value, p.minVal, p.maxVal, sock, key);
-        return;
-      case PARAM_UINT16:
-        applyUintParam(p.ptr.u16, value, p.minVal, p.maxVal, sock, key);
-        return;
-      case PARAM_UCHAR:
-        applyUintParam(p.ptr.u8, value, p.minVal, p.maxVal, sock, key);
-        return;
-      case PARAM_TIMING_CH1:
-      case PARAM_TIMING_CH2:
-      case PARAM_TIMING_CH3: {
+      if (p.type == PARAM_UINT32) return (void)applyUintParam(p.ptr.u32, value, p.minVal, p.maxVal, sock, key);
+      if (p.type == PARAM_UINT16) return (void)applyUintParam(p.ptr.u16, value, p.minVal, p.maxVal, sock, key);
+      if (p.type == PARAM_UCHAR)  return (void)applyUintParam(p.ptr.u8, value, p.minVal, p.maxVal, sock, key);
+      if (p.type >= PARAM_TIMING_CH1 && p.type <= PARAM_TIMING_CH3) {
         char *endp = nullptr;
         unsigned long v = strtoul(value, &endp, 10);
         if (!endp || *endp != '\0' || v < p.minVal || v > p.maxVal) {
@@ -2075,19 +2135,11 @@ void setConfig(void *session_context, const char *key, const char *value) {
         sendTelnetMsgf(sock, "[OK] Set %s = %lu ms (Saved to timing_cfg NVS immediately)\r\n", key, v);
         return;
       }
-      case PARAM_FRAMING_CH1:
-        applyFraming(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits, value, sock, key);
-        return;
-      case PARAM_FRAMING_CH2:
-        applyFraming(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits, value, sock, key);
-        return;
-      case PARAM_FRAMING_CH3:
-        applyFraming(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits, value, sock, key);
-        return;
-      case PARAM_FRAMING_CH4:
-        applyFraming(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits, value, sock, key);
-        return;
-      case PARAM_STRING: {
+      if (p.type == PARAM_FRAMING_CH1) return (void)applyFraming(g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits, value, sock, key);
+      if (p.type == PARAM_FRAMING_CH2) return (void)applyFraming(g_config.ch2_data_bits, g_config.ch2_parity, g_config.ch2_stop_bits, value, sock, key);
+      if (p.type == PARAM_FRAMING_CH3) return (void)applyFraming(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits, value, sock, key);
+      if (p.type == PARAM_FRAMING_CH4) return (void)applyFraming(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits, value, sock, key);
+      if (p.type == PARAM_STRING) {
         if (strlen(value) <= p.maxVal) {
           strncpy(p.ptr.str, value, p.maxVal);
           p.ptr.str[p.maxVal] = '\0';
@@ -2098,7 +2150,7 @@ void setConfig(void *session_context, const char *key, const char *value) {
         }
         return;
       }
-      case PARAM_PASS_HASH: {
+      if (p.type == PARAM_PASS_HASH) {
         char hash_hex[68];
         System_Sha256ToHex(value, hash_hex);
         strncpy(g_config.telnet_pass_hash, hash_hex, sizeof(g_config.telnet_pass_hash) - 1);
@@ -2107,23 +2159,22 @@ void setConfig(void *session_context, const char *key, const char *value) {
         sendTelnetMsg(sock, "[OK] Telnet password updated & SHA-256 hashed. Use 'save' to commit to NVS.\r\n");
         return;
       }
-      }
     }
   }
 
   sendTelnetMsgf(sock, "[ERROR] Unknown parameter '%s'. Type 'config ?' to list all valid parameters.\r\n", key);
 }
 
-void cmdConfig(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
-  int argc = embeddedCliGetTokenCount(args);
+void cmdConfig(CliContext &ctx) {
+  int sock = ctx.sock;
+  int argc = ctx.args.count();
 
   if (argc == 0) {
     printConfig(sock);
     return;
   }
 
-  const char *sub = embeddedCliGetToken(args, 1);
+  const char *sub = ctx.args.get(1);
   if (CliFmt::IsHelp(sub)) {
     printConfigHelp(sock);
     return;
@@ -2131,8 +2182,8 @@ void cmdConfig(EmbeddedCli *cli, char *args, void *context) {
 
   if (strcasecmp(sub, "set") == 0) {
     if (argc >= 3) {
-      setConfig(context, embeddedCliGetToken(args, 2),
-                embeddedCliGetToken(args, 3));
+      setConfig(sock, ctx.args.get(2),
+                ctx.args.get(3));
     } else {
       sendTelnetMsg(sock, "[ERROR] Missing argument: config set <key> <value>\r\n");
     }
@@ -2148,22 +2199,57 @@ void cmdConfig(EmbeddedCli *cli, char *args, void *context) {
   printConfigHelp(sock);
 }
 
-void cmdSave(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
+void cmdSave(CliContext &ctx) {
+  int sock = ctx.sock;
   Config_Save();
   sendTelnetMsg(sock, "[OK] Configuration successfully committed and saved to NVS flash!\r\n");
 }
 
-void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
-  int argc = embeddedCliGetTokenCount(args);
+static bool ew11ParseSlot(int sock, const char *arg, int &slot, const char *cmd) {
+  if (!arg) {
+    sendTelnetMsgf(sock, "[ERROR] Missing slot: ew11 %s <slot:0-4>\r\n", cmd);
+    return false;
+  }
+  if (!CliFmt::ParseInt(arg, slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
+    sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
+    return false;
+  }
+  return true;
+}
 
-  if (argc == 0 || (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "list") == 0) ||
-      (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "status") == 0)) {
+static void ew11SetEnable(int sock, int slot, bool enabled) {
+  {
+    MutexLocker lock(g_ch5_mutex);
+    g_hub_slots[slot].enabled = enabled;
+    if (!enabled && g_hub_slots[slot].sock >= 0) {
+      close(g_hub_slots[slot].sock);
+      g_hub_slots[slot].sock = -1;
+      g_hub_slots[slot].is_connected = false;
+      g_hub_slots[slot].rx_len = 0;
+    }
+  }
+  Hub_SaveConfig();
+  sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n", slot, enabled ? "ENABLED" : "DISABLED");
+}
+
+void cmdEw11(CliContext &ctx) {
+  int sock = ctx.sock;
+  int argc = ctx.args.count();
+
+  if (argc == 0 || (argc == 1 && strcasecmp(ctx.args.get(1), "list") == 0) ||
+      (argc == 1 && strcasecmp(ctx.args.get(1), "status") == 0)) {
     withScratchBuf(sock, [](AppendBuf &out) {
       CliFmt::PrintBoxHeader(out, "CH5 EW11 TCP CLIENT SOCKET STATUS");
-      out.append("| Slot |    Name    | Port |    Client IP    |   Status    |      Packets      |\r\n");
-      out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
+      static constexpr Column EW11_COLS[] = {
+          {"Slot", 4, Align::CENTER, Align::CENTER},
+          {"Name", 10, Align::LEFT, Align::CENTER},
+          {"Port", 4, Align::CENTER, Align::CENTER},
+          {"Client IP", 15, Align::CENTER, Align::CENTER},
+          {"Status", 11, Align::CENTER, Align::CENTER},
+          {"Packets", 17, Align::CENTER, Align::CENTER},
+      };
+      TableRenderer table_sock(out, EW11_COLS, 6);
+      table_sock.header(false);
 
       {
         MutexLocker lock(g_ch5_mutex);
@@ -2172,32 +2258,33 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
           const char *status_str = !slot.enabled ? "Disabled"
                                    : !slot.is_connected ? "Listening"
                                    : (slot.rx_pkts == 0) ? "Idle" : "Connected";
-
           const char *ip_str = slot.is_connected ? (slot.target_ip[0] ? slot.target_ip : "Connected") : (slot.target_ip[0] ? slot.target_ip : "-");
-
-          char s_buf[8], p_buf[8], s_c[8], p_c[8], ip_c[20], st_c[16];
+          char s_buf[8], p_buf[8], pkt_buf[24];
           snprintf(s_buf, sizeof(s_buf), "#%d", s);
           snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
-
-          CliFmt::CenterText(s_c, sizeof(s_c), s_buf, 6);
-          CliFmt::CenterText(p_c, sizeof(p_c), p_buf, 6);
-          CliFmt::CenterText(ip_c, sizeof(ip_c), ip_str, 17);
-          CliFmt::CenterText(st_c, sizeof(st_c), status_str, 13);
-
-          char pkt_buf[24];
           snprintf(pkt_buf, sizeof(pkt_buf), "%8u / %-8u", static_cast<unsigned>(slot.rx_pkts), static_cast<unsigned>(slot.tx_pkts));
-
-          out.appendFormat("|%s| %-10.10s |%s|%s|%s|%19s|\r\n",
-                           s_c, slot.name, p_c, ip_c, st_c, pkt_buf);
+          table_sock.row({s_buf, slot.name, p_buf, ip_str, status_str, pkt_buf});
         }
       }
-      out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
+      table_sock.end('-');
       CliFmt::PrintBoxFooter(out, "Configured Max Slots: 5 | Bridge Target: CH1 & CH2/3");
 
       // ── FCU Modbus 실시간 상태 테이블 ──
       CliFmt::PrintBoxHeader(out, "CH5 FCU MODBUS DEVICE STATUS");
-      out.append("| Slot |  Name  | Port |   Client IP    | Pwr | Mode | Fan  | Swng | Tgt |Room |\r\n");
-      out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
+      static constexpr Column FCU_COLS[] = {
+          {"Slot", 4, Align::CENTER, Align::CENTER},
+          {"Name", 6, Align::LEFT, Align::CENTER},
+          {"Port", 4, Align::CENTER, Align::CENTER},
+          {"Client IP", 14, Align::CENTER, Align::CENTER},
+          {"Pwr", 3, Align::CENTER, Align::CENTER},
+          {"Mode", 4, Align::CENTER, Align::CENTER},
+          {"Fan", 4, Align::CENTER, Align::CENTER},
+          {"Swng", 4, Align::CENTER, Align::CENTER},
+          {"Tgt", 3, Align::CENTER, Align::CENTER},
+          {"Room", 3, Align::CENTER, Align::CENTER},
+      };
+      TableRenderer table_fcu(out, FCU_COLS, 10);
+      table_fcu.header(false);
 
       {
         MutexLocker lock(g_ch5_mutex);
@@ -2228,189 +2315,134 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
           snprintf(s_buf, sizeof(s_buf), "#%u", s);
           snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
 
-          char s_c[8], p_c[8], ip_c[18], pwr_c[8], mode_c[8], fan_c[8], swng_c[8], tgt_c[8], rm_c[8];
-          CliFmt::CenterText(s_c, sizeof(s_c), s_buf, 6);
-          CliFmt::CenterText(p_c, sizeof(p_c), p_buf, 6);
-          CliFmt::CenterText(ip_c, sizeof(ip_c), ip_str, 16);
-          CliFmt::CenterText(pwr_c, sizeof(pwr_c), pwr_str, 5);
-          CliFmt::CenterText(mode_c, sizeof(mode_c), mode_str, 6);
-          CliFmt::CenterText(fan_c, sizeof(fan_c), fan_str, 6);
-          CliFmt::CenterText(swng_c, sizeof(swng_c), swng_str, 6);
-          CliFmt::CenterText(tgt_c, sizeof(tgt_c), tgt_str, 5);
-          CliFmt::CenterText(rm_c, sizeof(rm_c), room_str, 5);
-
-          out.appendFormat("|%s| %-6.6s |%s|%s|%s|%s|%s|%s|%s|%s|\r\n",
-                           s_c, slot.name, p_c, ip_c, pwr_c, mode_c, fan_c, swng_c, tgt_c, rm_c);
+          table_fcu.row({s_buf, slot.name, p_buf, ip_str, pwr_str, mode_str, fan_str, swng_str, tgt_str, room_str});
         }
       }
-      out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
+      table_fcu.end('-');
       out.append(CliFmt::BOX80_EQ);
       out.append("\r\n");
     });
     return;
   }
 
-  const char *sub = embeddedCliGetToken(args, 1);
-  static const CliFmt::SubCmdHelpItem items[] = {
-      {"list", "Show EW11 sockets & FCU runtime status"}, {"set <slot> [port] [ip] [name] [en]", "Configure EW11 bridge socket settings"},
-      {"frame <slot> <stx> <etx> [len]", "Set custom framing delimiters for slot"}, {"reset <slot>", "Reset EW11 socket slot to defaults"},
-      {"enable <slot>", "Enable specified EW11 socket slot"}, {"disable <slot>", "Disable specified EW11 socket slot"}};
+  const char *sub = ctx.args.get(1);
+
+  // Unified table: help strings + handlers in one place.
+  static const CliFmt::SubCmdDef kEw11Defs[] = {
+      {"list",    "list",                             "Show EW11 sockets & FCU runtime status",        nullptr},
+      {"set",     "set <slot> [port] [ip] [name] [en]", "Configure EW11 bridge socket settings",
+       [](int sock, int argc, const Args &args) {
+          int slot = -1;
+          if (!ew11ParseSlot(sock, args.get(2), slot, "set")) return;
+          uint16_t default_port = Config::TCP::EW11_SLOT_PORTS[slot];
+          uint16_t port = g_hub_slots[slot].target_port > 0 ? g_hub_slots[slot].target_port : default_port;
+          const char *ip_str = nullptr;
+          const char *name_str = nullptr;
+          bool enabled = g_hub_slots[slot].enabled;
+          if (argc >= 3) {
+            const char *tok3 = args.get(3);
+            if (strchr(tok3, '.') != nullptr) {
+              ip_str = (strcmp(tok3, "-") == 0 || strcmp(tok3, "none") == 0) ? "" : tok3;
+            } else {
+              int p_val = 0;
+              if (CliFmt::ParseInt(tok3, p_val, 1, 65535)) port = static_cast<uint16_t>(p_val);
+            }
+          }
+          if (argc >= 4) {
+            const char *tok4 = args.get(4);
+            int p_val = 0;
+            if (strchr(tok4, '.') != nullptr) {
+              ip_str = (strcmp(tok4, "-") == 0 || strcmp(tok4, "none") == 0) ? "" : tok4;
+            } else if (port == default_port && CliFmt::ParseInt(tok4, p_val, 1, 65535)) {
+              port = static_cast<uint16_t>(p_val);
+            } else {
+              name_str = tok4;
+            }
+          }
+          if (argc >= 5) {
+            const char *tok5 = args.get(5);
+            int en_val = 0;
+            if (name_str == nullptr && !isdigit(tok5[0])) {
+              name_str = tok5;
+            } else if (CliFmt::ParseInt(tok5, en_val, 0, 1)) {
+              enabled = (en_val != 0);
+            }
+          }
+          if (argc >= 6) {
+            int en_val = 0;
+            if (CliFmt::ParseInt(args.get(6), en_val, 0, 1)) enabled = (en_val != 0);
+          }
+          if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port, name_str)) {
+            sendTelnetMsgf(sock, "[OK] EW11 Slot #%d configured (Name: %s, Listen Port: %u, Allowed IP: %s, Enabled: %s) and saved to NVS!\r\n",
+                           slot, g_hub_slots[slot].name, g_hub_slots[slot].target_port,
+                           g_hub_slots[slot].target_ip[0] ? g_hub_slots[slot].target_ip : "Any",
+                           g_hub_slots[slot].enabled ? "true" : "false");
+          } else {
+            sendTelnetMsg(sock, "[ERROR] Failed to configure EW11 slot.\r\n");
+          }
+       }},
+      {"frame",   "frame <slot> <stx> <etx> [len]",  "Set custom framing delimiters for slot",
+       [](int sock, int argc, const Args &args) {
+          if (argc < 4) {
+            sendTelnetMsg(sock, "[ERROR] Format: ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
+            return;
+          }
+          int slot = -1;
+          if (!ew11ParseSlot(sock, args.get(2), slot, "frame")) return;
+          uint8_t stx = static_cast<uint8_t>(strtoul(args.get(3), nullptr, 16));
+          uint8_t etx = static_cast<uint8_t>(strtoul(args.get(4), nullptr, 16));
+          uint8_t len = 0;
+          if (argc >= 5) {
+            int parsed_len = 0;
+            if (CliFmt::ParseInt(args.get(5), parsed_len, 0, 255)) len = static_cast<uint8_t>(parsed_len);
+          }
+          char ns[16], tag[16];
+          snprintf(ns, sizeof(ns), "e%d_frame", slot);
+          snprintf(tag, sizeof(tag), "EW11_#%d", slot);
+          g_hub_slots[slot].tracker.setFixedLock(stx, etx, len);
+          g_hub_slots[slot].tracker.saveToNvs(ns, tag);
+          sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing permanently fixed to STX 0x%02X, ETX 0x%02X, Len %u.\r\n",
+                         slot, stx, etx, len);
+       }},
+      {"reset",   "reset <slot>",                     "Reset EW11 socket slot to defaults",
+       [](int sock, int, const Args &args) {
+          int slot = -1;
+          if (!ew11ParseSlot(sock, args.get(2), slot, "reset")) return;
+          char ns[16], tag[16];
+          snprintf(ns, sizeof(ns), "e%d_frame", slot);
+          snprintf(tag, sizeof(tag), "EW11_#%d", slot);
+          g_hub_slots[slot].tracker.clearNvs(ns, tag);
+          sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing tracker reset to autonomous auto-probing.\r\n", slot);
+       }},
+      {"enable",  "enable <slot>",                    "Enable specified EW11 socket slot",
+       [](int sock, int, const Args &args) {
+          int slot = -1;
+          if (ew11ParseSlot(sock, args.get(2), slot, "enable")) ew11SetEnable(sock, slot, true);
+       }},
+      {"disable", "disable <slot>",                   "Disable specified EW11 socket slot",
+       [](int sock, int, const Args &args) {
+          int slot = -1;
+          if (ew11ParseSlot(sock, args.get(2), slot, "disable")) ew11SetEnable(sock, slot, false);
+       }},
+  };
 
   if (CliFmt::IsHelp(sub)) {
-    CliFmt::PrintCmdHelp(sock, "EW11 COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
-                         "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
+    CliFmt::PrintSubCmdHelp(sock, "EW11 COMMAND REFERENCE", kEw11Defs, sizeof(kEw11Defs) / sizeof(kEw11Defs[0]),
+                            "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
     return;
   }
 
-  if (strcasecmp(sub, "frame") == 0) {
-    if (argc < 4) {
-      sendTelnetMsg(sock, "[ERROR] Format: ew11 frame <slot:0-4> <stx:hex> <etx:hex> [len:dec]\r\n");
-      return;
-    }
-    int slot = -1;
-    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
-      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
-      return;
-    }
-    uint8_t stx = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 3), nullptr, 16));
-    uint8_t etx = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 4), nullptr, 16));
-    uint8_t len = 0;
-    if (argc >= 5) {
-      int parsed_len = 0;
-      if (CliFmt::ParseInt(embeddedCliGetToken(args, 5), parsed_len, 0, 255)) {
-        len = static_cast<uint8_t>(parsed_len);
-      }
-    }
-    char ns[16], tag[16];
-    snprintf(ns, sizeof(ns), "e%d_frame", slot);
-    snprintf(tag, sizeof(tag), "EW11_#%d", slot);
-    g_hub_slots[slot].tracker.setFixedLock(stx, etx, len);
-    g_hub_slots[slot].tracker.saveToNvs(ns, tag);
-    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing permanently fixed to STX 0x%02X, ETX 0x%02X, Len %u.\r\n",
-                   slot, stx, etx, len);
-    return;
-  }
+  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kEw11Defs, sizeof(kEw11Defs) / sizeof(kEw11Defs[0]))) return;
 
-  if (strcasecmp(sub, "reset") == 0) {
-    if (argc < 2) {
-      sendTelnetMsg(sock, "[ERROR] Missing slot: ew11 reset <slot:0-4>\r\n");
-      return;
-    }
-    int slot = -1;
-    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
-      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
-      return;
-    }
-    char ns[16], tag[16];
-    snprintf(ns, sizeof(ns), "e%d_frame", slot);
-    snprintf(tag, sizeof(tag), "EW11_#%d", slot);
-    g_hub_slots[slot].tracker.clearNvs(ns, tag);
-    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d framing tracker reset to autonomous auto-probing.\r\n", slot);
-    return;
-  }
-
-  if (strcasecmp(sub, "set") == 0) {
-    if (argc < 2) {
-      sendTelnetMsg(sock, "[ERROR] Missing slot: ew11 set <slot:0-4> [port] [allowed_ip] [name] [enable:1/0]\r\n");
-      return;
-    }
-    int slot = -1;
-    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
-      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
-      return;
-    }
-
-    uint16_t default_port = Config::TCP::EW11_SLOT_PORTS[slot];
-    uint16_t port = g_hub_slots[slot].target_port > 0 ? g_hub_slots[slot].target_port : default_port;
-    const char *ip_str = nullptr;
-    const char *name_str = nullptr;
-    bool enabled = g_hub_slots[slot].enabled;
-
-    if (argc >= 3) {
-      const char *tok3 = embeddedCliGetToken(args, 3);
-      if (strchr(tok3, '.') != nullptr) {
-        ip_str = (strcmp(tok3, "-") == 0 || strcmp(tok3, "none") == 0) ? "" : tok3;
-      } else {
-        int p_val = 0;
-        if (CliFmt::ParseInt(tok3, p_val, 1, 65535)) port = static_cast<uint16_t>(p_val);
-      }
-    }
-
-    if (argc >= 4) {
-      const char *tok4 = embeddedCliGetToken(args, 4);
-      int p_val = 0;
-      if (strchr(tok4, '.') != nullptr) {
-        ip_str = (strcmp(tok4, "-") == 0 || strcmp(tok4, "none") == 0) ? "" : tok4;
-      } else if (port == default_port && CliFmt::ParseInt(tok4, p_val, 1, 65535)) {
-        port = static_cast<uint16_t>(p_val);
-      } else {
-        name_str = tok4;
-      }
-    }
-
-    if (argc >= 5) {
-      const char *tok5 = embeddedCliGetToken(args, 5);
-      int en_val = 0;
-      if (name_str == nullptr && !isdigit(tok5[0])) {
-        name_str = tok5;
-      } else if (CliFmt::ParseInt(tok5, en_val, 0, 1)) {
-        enabled = (en_val != 0);
-      }
-    }
-
-    if (argc >= 6) {
-      int en_val = 0;
-      if (CliFmt::ParseInt(embeddedCliGetToken(args, 6), en_val, 0, 1)) {
-        enabled = (en_val != 0);
-      }
-    }
-
-    if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port, name_str)) {
-      sendTelnetMsgf(sock, "[OK] EW11 Slot #%d configured (Name: %s, Listen Port: %u, Allowed IP: %s, Enabled: %s) and saved to NVS!\r\n",
-                     slot, g_hub_slots[slot].name, g_hub_slots[slot].target_port,
-                     g_hub_slots[slot].target_ip[0] ? g_hub_slots[slot].target_ip : "Any",
-                     g_hub_slots[slot].enabled ? "true" : "false");
-    } else {
-      sendTelnetMsg(sock, "[ERROR] Failed to configure EW11 slot.\r\n");
-    }
-    return;
-  }
-
-  if (strcasecmp(sub, "enable") == 0 || strcasecmp(sub, "disable") == 0) {
-    if (argc < 2) {
-      sendTelnetMsgf(sock, "[ERROR] Missing slot: ew11 %s <slot:0-4>\r\n", sub);
-      return;
-    }
-    int slot = -1;
-    if (!CliFmt::ParseInt(embeddedCliGetToken(args, 2), slot, 0, Config::TCP::MAX_EW11_SLOTS - 1)) {
-      sendTelnetMsgf(sock, "[ERROR] Slot index must be 0 to %d\r\n", Config::TCP::MAX_EW11_SLOTS - 1);
-      return;
-    }
-    bool enable = (strcasecmp(sub, "enable") == 0);
-    {
-      MutexLocker lock(g_ch5_mutex);
-      g_hub_slots[slot].enabled = enable;
-      if (!enable && g_hub_slots[slot].sock >= 0) {
-        close(g_hub_slots[slot].sock);
-        g_hub_slots[slot].sock = -1;
-        g_hub_slots[slot].is_connected = false;
-        g_hub_slots[slot].rx_len = 0;
-      }
-    }
-    Hub_SaveConfig();
-    sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n", slot, enable ? "ENABLED" : "DISABLED");
-    return;
-  }
-
-  CliFmt::PrintCmdHelp(sock, "EW11 COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
-                       "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
+  CliFmt::PrintSubCmdHelp(sock, "EW11 COMMAND REFERENCE", kEw11Defs, sizeof(kEw11Defs) / sizeof(kEw11Defs[0]),
+                          "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
 }
 
-void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
-  int argc = embeddedCliGetTokenCount(args);
+void cmdRoutes(CliContext &ctx) {
+  int sock = ctx.sock;
+  int argc = ctx.args.count();
 
-  if (argc == 1 && strcasecmp(embeddedCliGetToken(args, 1), "clear") == 0) {
+  if (argc == 1 && strcasecmp(ctx.args.get(1), "clear") == 0) {
     g_route_registry.clear();
     sendTelnetMsg(sock, "[OK] Dynamic device ingress routing table cleared.\r\n");
     return;
@@ -2421,38 +2453,32 @@ void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
 
   withScratchBuf(sock, [count](AppendBuf &out) {
     CliFmt::PrintBoxHeader(out, "DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)");
-    out.append("| Target (DevID:Sub1:Sub2) |        Egress Destination         |   Last Seen   |\r\n");
-    out.append("+--------------------------+-----------------------------------+---------------+\r\n");
+    static constexpr Column ROUTES_COLS[] = {
+        {"Target (DevID:Sub1:Sub2)", 24, Align::CENTER, Align::CENTER},
+        {"Egress Destination", 33, Align::LEFT, Align::CENTER},
+        {"Last Seen", 13, Align::CENTER, Align::CENTER},
+    };
+    TableRenderer table(out, ROUTES_COLS, 3);
+    table.header(false);
 
     if (count == 0) {
-      out.append("|       (No device routes learned yet. Waiting for bus/EW11 packets...)        |\r\n");
+      table.empty("(No device routes learned yet. Waiting for bus/EW11 packets...)");
     } else {
       uint32_t now = millis();
       for (size_t i = 0; i < count; i++) {
         const auto &e = entries[i];
-        char tgt_str[24];
+        char tgt_str[24], dst_str[36], el_str[20];
         snprintf(tgt_str, sizeof(tgt_str), "0x%02X:%02X:%02X", e.dev_id, e.sub1, e.sub2);
-        char tgt_c[28];
-        CliFmt::CenterText(tgt_c, sizeof(tgt_c), tgt_str, 26);
-
-        char dst_str[36];
         if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
           snprintf(dst_str, sizeof(dst_str), "CH#5 Slot %d", e.endpoint.slot_idx);
         } else {
           snprintf(dst_str, sizeof(dst_str), "CH#%u", e.endpoint.channel_id);
         }
-
-        char el_str[20];
         Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str, sizeof(el_str));
-        char el_c[18];
-        CliFmt::CenterText(el_c, sizeof(el_c), el_str, 15);
-
-        out.appendFormat("|%s| %-33.33s |%s|\r\n",
-                         tgt_c, dst_str, el_c);
+        table.row({tgt_str, dst_str, el_str});
       }
     }
-
-    out.append("+--------------------------+-----------------------------------+---------------+\r\n");
+    table.end('-');
     CliFmt::PrintBoxFooter(out, "Use 'routes clear' to reset dynamic route table");
   });
 }
@@ -2507,124 +2533,71 @@ void wallpadPrintStatus(AppendBuf &out) {
   if (active) {
     active->getActiveProfileKey(prof_key_buf, sizeof(prof_key_buf));
   }
-  char meta_buf[128];
-  snprintf(meta_buf, sizeof(meta_buf), "Active Profile  : %s (ID: %u)",
-           prof_key_buf, static_cast<unsigned>(g_config.wallpad_profile));
-  out.appendFormat("| %-76.76s |\r\n", meta_buf);
 
+  auto print_meta = [&](const char *fmt, ...) {
+    char buf[128];
+    va_list va;
+    va_start(va, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, va);
+    va_end(va);
+    out.appendFormat("| %-76.76s |\r\n", buf);
+  };
+
+  print_meta("Active Profile  : %s (ID: %u)", prof_key_buf, static_cast<unsigned>(g_config.wallpad_profile));
   if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
-    snprintf(meta_buf, sizeof(meta_buf), "Profile Mode    : Auto Adaptive [%s]", phase_str);
+    print_meta("Profile Mode    : Auto Adaptive [%s]", phase_str);
   } else {
-    snprintf(meta_buf, sizeof(meta_buf), "Profile Mode    : Manual Fixed");
+    print_meta("Profile Mode    : Manual Fixed");
   }
-  out.appendFormat("| %-76.76s |\r\n", meta_buf);
-
   const auto *matched_p = ProfileMatcher::getActiveProfile();
   if (matched_p) {
-    snprintf(meta_buf, sizeof(meta_buf), "Catalog Match   : %s (%u Devices Spec Injected)",
-             matched_p->vendor_name, static_cast<unsigned>(matched_p->device_count));
+    print_meta("Catalog Match   : %s (%u Devices Spec Injected)",
+               matched_p->vendor_name, static_cast<unsigned>(matched_p->device_count));
   } else {
-    snprintf(meta_buf, sizeof(meta_buf), "Catalog Match   : None (Generic Framing Only)");
+    print_meta("Catalog Match   : None (Generic Framing Only)");
   }
-  out.appendFormat("| %-76.76s |\r\n", meta_buf);
+  print_meta("Devices Tracked : %u Active / %u Online (%u Offline) [%s]",
+             static_cast<unsigned>(active_targets), static_cast<unsigned>(online_devs),
+             static_cast<unsigned>(g_device_repo.count() >= online_devs ? (g_device_repo.count() - online_devs) : 0),
+             (online_devs >= active_targets && active_targets > 0) ? "100% Synced" : "Syncing");
 
-  snprintf(meta_buf, sizeof(meta_buf), "Devices Tracked : %u Active / %u Online (%u Offline) [%s]",
-           static_cast<unsigned>(active_targets), static_cast<unsigned>(online_devs),
-           static_cast<unsigned>(g_device_repo.count() >= online_devs ? (g_device_repo.count() - online_devs) : 0),
-           (online_devs >= active_targets && active_targets > 0) ? "100% Synced" : "Syncing");
-  out.appendFormat("| %-76.76s |\r\n", meta_buf);
-
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
-  out.append("| Packet Field |   Parameter   |       Value / Layout Rule        |   Status   |\r\n");
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+  static constexpr Column WP_COLS[] = {
+      {"Packet Field", 12, Align::LEFT, Align::CENTER},
+      {"Parameter", 13, Align::LEFT, Align::CENTER},
+      {"Value / Layout Rule", 32, Align::LEFT, Align::CENTER},
+      {"Status", 10, Align::CENTER, Align::CENTER},
+  };
+  TableRenderer table(out, WP_COLS, 4);
+  table.header(false);
 
   auto print_row = [&](const char *f, const char *p, const char *v, const char *s) {
-    CliFmt::PrintCardRow4(out, f, p, v, s);
-  };
-
-  char stx_buf[16], etx_buf[16], len_buf[32], pkt_len_buf[32];
-  snprintf(stx_buf, sizeof(stx_buf), "%02X", active ? active->getStx() : 0xF7);
-  snprintf(etx_buf, sizeof(etx_buf), "%02X", active ? active->getEtx() : 0xEE);
-  snprintf(len_buf, sizeof(len_buf), "Byte #1");
-
-  size_t total_tgts = g_polling_targets.totalCount();
-
-  uint8_t q_lens[8], ack_lens[8];
-  size_t q_len_cnt = 0, ack_len_cnt = 0;
-
-  auto add_unique_len = [](uint8_t *arr, size_t &cnt, uint8_t len) {
-    if (len >= 3 && len <= 64 && cnt < 8) {
-      if (std::find(arr, arr + cnt, len) == arr + cnt) {
-        arr[cnt++] = len;
+    char clean_s[16] = {0};
+    if (s && s[0] == '[' && s[strlen(s) - 1] == ']') {
+      size_t slen = strlen(s);
+      if (slen >= 2 && slen - 2 < sizeof(clean_s)) {
+        strncpy(clean_s, s + 1, slen - 2);
+        clean_s[slen - 2] = '\0';
       }
+    } else if (s) {
+      strncpy(clean_s, s, sizeof(clean_s) - 1);
     }
+    table.row({f ? f : "", p ? p : "", v ? v : "", clean_s});
   };
 
-  constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
-  for (size_t i = 0; i < total_tgts; ++i) {
-    PollingTargetEntry entry;
-    if (g_polling_targets.getEntry(i, entry)) {
-      if ((entry.source_channels & CH23_MASK) == 0) continue;
-      if (entry.raw_query_len > 0) add_unique_len(q_lens, q_len_cnt, entry.raw_query_len);
-      if (entry.raw_ack_len > 0) add_unique_len(ack_lens, ack_len_cnt, entry.raw_ack_len);
-    }
-  }
-  std::sort(q_lens, q_lens + q_len_cnt);
-  std::sort(ack_lens, ack_lens + ack_len_cnt);
-
-  auto format_lens = [](const uint8_t *arr, size_t cnt, char *out, size_t out_sz, const char *fallback) {
-    if (cnt == 0) {
-      snprintf(out, out_sz, "%s", fallback);
-      return;
-    }
-    size_t off = 0;
-    for (size_t i = 0; i < cnt; ++i) {
-      off += snprintf(out + off, out_sz - off, "%s%u", (i == 0 ? "" : ", "), arr[i]);
-    }
-    snprintf(out + off, out_sz - off, " Byte");
+  auto rowf = [&](const char *f, const char *p, const char *s, const char *fmt, ...) {
+    char v[64];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(v, sizeof(v), fmt, args);
+    va_end(args);
+    print_row(f, p, v, s);
   };
-
-  char def_len_buf[16];
-  if (desc.learned_query_len > 0) {
-    snprintf(def_len_buf, sizeof(def_len_buf), "%u Byte", desc.learned_query_len);
-  } else {
-    snprintf(def_len_buf, sizeof(def_len_buf), "Waiting");
-  }
-
-  char q_str[32], ack_str[32];
-  format_lens(q_lens, q_len_cnt, q_str, sizeof(q_str), def_len_buf);
-  format_lens(ack_lens, ack_len_cnt, ack_str, sizeof(ack_str), def_len_buf);
-
-  char len_prefix[16];
-  if (desc.has_len_field) {
-    snprintf(len_prefix, sizeof(len_prefix), "Byte #%u", desc.len_offset);
-  } else {
-    snprintf(len_prefix, sizeof(len_prefix), desc.is_locked ? "Fixed" : "Waiting");
-  }
-
-  char q_val[48], cmd_val[48], ack_val[48];
-  snprintf(q_val, sizeof(q_val), "%s : %s", len_prefix, q_str);
-  if (desc.ctrl_len_cnt > 0) {
-    char cmd_lens_str[32];
-    format_lens(desc.learned_ctrl_lens, desc.ctrl_len_cnt, cmd_lens_str, sizeof(cmd_lens_str), def_len_buf);
-    snprintf(cmd_val, sizeof(cmd_val), "%s : %s", len_prefix, cmd_lens_str);
-  } else {
-    snprintf(cmd_val, sizeof(cmd_val), "%s : Waiting", len_prefix);
-  }
-  snprintf(ack_val, sizeof(ack_val), "%s : %s", len_prefix, ack_str);
-
-  const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
-  const char *cmd_status = (desc.control_seen && desc.ctrl_len_cnt > 0) ? "[LOCKED]" : "[WAITING]";
-
-  print_row("Header", "[ST] STX", stx_buf, len_status);
-  print_row("", "[LN] Query", q_val, len_status);
-  print_row("", "[LN] Command", cmd_val, cmd_status);
-  print_row("", "[LN] Response", ack_val, len_status);
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16];
   size_t dev_id_cnt = 0, sub1_cnt = 0, sub2_cnt = 0;
 
+  constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
+  size_t total_tgts = g_polling_targets.totalCount();
   for (size_t i = 0; i < total_tgts; ++i) {
     PollingTargetEntry entry;
     if (g_polling_targets.getEntry(i, entry)) {
@@ -2640,7 +2613,6 @@ void wallpadPrintStatus(AppendBuf &out) {
       }
     }
   }
-
   std::sort(dev_ids, dev_ids + dev_id_cnt);
   std::sort(sub1_ids, sub1_ids + sub1_cnt);
   std::sort(sub2_ids, sub2_ids + sub2_cnt);
@@ -2663,28 +2635,21 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(out, out_sz, "%s : %s", prefix, hex_str);
   };
 
-  char addr_mode_buf[48];
+  const char *addr_status = desc.offsets_locked ? "[LOCKED]" : (desc.is_locked ? "[LEARNING]" : "[WAITING]");
   if (desc.offsets_locked) {
     if (desc.is_swapped_addr) {
-      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Swapped (GW:Byte#%u <-> ID:Byte#%u)",
-               desc.gw_addr_offset, desc.dev_id_offset);
+      rowf("Addressing", "Addr Mode", addr_status, "Swapped (GW:Byte#%u <-> ID:Byte#%u)",
+           desc.gw_addr_offset, desc.dev_id_offset);
     } else {
-      snprintf(addr_mode_buf, sizeof(addr_mode_buf), "Direct (Single Address)");
+      print_row("Addressing", "Addr Mode", "Direct (Single Address)", addr_status);
     }
-  } else {
-    snprintf(addr_mode_buf, sizeof(addr_mode_buf), "%s", desc.is_locked ? "Probing..." : "Waiting");
-  }
-  const char *addr_status = desc.offsets_locked ? "[LOCKED]" : (desc.is_locked ? "[LEARNING]" : "[WAITING]");
-
-  char gw_val_buf[48];
-  if (desc.offsets_locked) {
     if (desc.gw_addr_offset != 0xFF) {
-      snprintf(gw_val_buf, sizeof(gw_val_buf), "Byte #%u : %02X", desc.gw_addr_offset, desc.gw_addr);
+      rowf("", "[GW] Master", addr_status, "Byte #%u : %02X", desc.gw_addr_offset, desc.gw_addr);
     } else {
-      snprintf(gw_val_buf, sizeof(gw_val_buf), "Val: %02X", desc.gw_addr);
+      rowf("", "[GW] Master", addr_status, "Val: %02X", desc.gw_addr);
     }
   } else {
-    snprintf(gw_val_buf, sizeof(gw_val_buf), "-");
+    print_row("Addressing", "Addr Mode", desc.is_locked ? "Probing..." : "Waiting", addr_status);
   }
 
   char dev_off_label[32], sub1_off_label[32], sub2_off_label[32];
@@ -2693,9 +2658,9 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(sub1_off_label, sizeof(sub1_off_label), "Byte #%u", desc.sub1_offset);
     snprintf(sub2_off_label, sizeof(sub2_off_label), "Byte #%u", desc.sub2_offset);
   } else {
-    snprintf(dev_off_label, sizeof(dev_off_label), "Probing...");
-    snprintf(sub1_off_label, sizeof(sub1_off_label), "Probing...");
-    snprintf(sub2_off_label, sizeof(sub2_off_label), "Probing...");
+    strcpy(dev_off_label, "Probing...");
+    strcpy(sub1_off_label, "Probing...");
+    strcpy(sub2_off_label, "Probing...");
   }
 
   char dev_list_buf[64], sub1_list_buf[64], sub2_list_buf[64];
@@ -2703,90 +2668,58 @@ void wallpadPrintStatus(AppendBuf &out) {
   format_hex_list(sub1_ids, sub1_cnt, sub1_off_label, sub1_list_buf, sizeof(sub1_list_buf));
   format_hex_list(sub2_ids, sub2_cnt, sub2_off_label, sub2_list_buf, sizeof(sub2_list_buf));
 
-  print_row("Addressing", "Addr Mode", addr_mode_buf, addr_status);
-  if (desc.offsets_locked) {
-    print_row("", "[GW] Master", gw_val_buf, addr_status);
-  }
   print_row("", "[ID] Device", dev_list_buf, addr_status);
   print_row("", "[S1] Sub Addr", sub1_list_buf, addr_status);
   if (desc.sub2_offset != 0xFF && desc.sub2_offset != desc.sub1_offset && sub2_cnt > 0) {
     print_row("", "[S2] Sub Addr", sub2_list_buf, addr_status);
   }
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+  table.separator('-');
 
-  char op_line_buf[48];
   char ctl_hex[8];
   if (desc.control_seen && desc.control_opcode != 0) {
     snprintf(ctl_hex, sizeof(ctl_hex), "%02X", desc.control_opcode);
   } else {
-    snprintf(ctl_hex, sizeof(ctl_hex), "??");
-  }
-  snprintf(op_line_buf, sizeof(op_line_buf), "Byte #%u : QRY:%02X, CTL:%s, ACK:%02X",
-           desc.opcode_offset, desc.query_opcode, ctl_hex, desc.ack_opcode);
-
-  const char *opcode_status;
-  if (!desc.opcodes_locked) {
-    opcode_status = "[LEARNING]";
-  } else if (!desc.control_seen || desc.control_opcode == 0) {
-    opcode_status = "[WAITING]";
-  } else {
-    opcode_status = "[LOCKED]";
+    strcpy(ctl_hex, "??");
   }
 
-  char seq_line_buf[32];
-  if (desc.has_seq_counter) {
-    snprintf(seq_line_buf, sizeof(seq_line_buf), "Byte #%u : +1 Counter", desc.seq_offset);
-  } else {
-    snprintf(seq_line_buf, sizeof(seq_line_buf), desc.offsets_locked ? "-" : "None");
-  }
+  const char *opcode_status = !desc.opcodes_locked ? "[LEARNING]"
+                            : (!desc.control_seen || desc.control_opcode == 0) ? "[WAITING]" : "[LOCKED]";
+  rowf("Command", "[OP] Opcode", opcode_status, "Byte #%u : QRY:%02X, CTL:%s, ACK:%02X",
+       desc.opcode_offset, desc.query_opcode, ctl_hex, desc.ack_opcode);
+
   const char *seq_status = desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[UNUSED]") : "[WAITING]";
-
-  print_row("Command", "[OP] Opcode", op_line_buf, opcode_status);
-  print_row("", "Sequence", seq_line_buf, seq_status);
+  if (desc.has_seq_counter) {
+    rowf("", "Sequence", seq_status, "Byte #%u : +1 Counter", desc.seq_offset);
+  } else {
+    print_row("", "Sequence", desc.offsets_locked ? "-" : "None", seq_status);
+  }
   print_row("", "[CX] Context", sub1_list_buf, addr_status);
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+  table.separator('-');
 
-  char payload_range_buf[48];
-  char payload_len_buf[32];
-  if (desc.offsets_locked) {
-    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #%u ~ #[N-3]", desc.payload_offset);
-    snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - %u] Byte", desc.payload_offset + 2);
-  } else {
-    snprintf(payload_range_buf, sizeof(payload_range_buf), "Byte #7 ~ #[N-3] : Est");
-    snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - 9] Byte : Est");
-  }
   const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
-  print_row("Payload", "[PL] Data Range", payload_range_buf, payload_status);
-  print_row("", "[PL] Length", payload_len_buf, payload_status);
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
-
-  char cs_algo_buf[48];
-  snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #[N-2] : %s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
-  char etx_line_buf[32];
-  snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #[N-1] : %s", etx_buf);
-
-  print_row("Tail", "[CS] Checksum", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  print_row("", "[ET] ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
-
-  uint32_t b1 = g_config.uart_baud_rate;
-  uint32_t b2 = g_config.ch2_baud_rate;
-  uint32_t b3 = g_config.ch3_baud_rate;
-
-  char baud_buf[48];
-  if (b1 == b2 && b2 == b3) {
-    snprintf(baud_buf, sizeof(baud_buf), "%u bps : CH1~3", static_cast<unsigned>(b1));
-    print_row("Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+  if (desc.offsets_locked) {
+    rowf("Payload", "[PL] Data Range", payload_status, "Byte #%u ~ #[N-3]", desc.payload_offset);
+    rowf("", "[PL] Length", payload_status, "Data = [LEN - %u] Byte", desc.payload_offset + 2);
   } else {
-    snprintf(baud_buf, sizeof(baud_buf), "CH1:%u, CH2:%u, CH3:%u",
-             static_cast<unsigned>(b1), static_cast<unsigned>(b2), static_cast<unsigned>(b3));
-    print_row("Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+    print_row("Payload", "[PL] Data Range", "Byte #7 ~ #[N-3] : Est", payload_status);
+    print_row("", "[PL] Length", "Data = [LEN - 9] Byte : Est", payload_status);
   }
-  char ipg_silence_buf[48];
-  snprintf(ipg_silence_buf, sizeof(ipg_silence_buf), "%u ms : CH1~3",
-           static_cast<unsigned>(Config::Timing::WALLPAD_AUTO_IPG_MS));
-  print_row("", "IPG Silence", ipg_silence_buf, "[CONFIG]");
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+  table.separator('-');
+
+  const char *tail_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
+  rowf("Tail", "[CS] Checksum", tail_status, "Byte #[N-2] : %s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
+  rowf("", "[ET] ETX", tail_status, "Byte #[N-1] : %02X", active ? active->getEtx() : 0xEE);
+  table.separator('-');
+
+  uint32_t b1 = g_config.uart_baud_rate, b2 = g_config.ch2_baud_rate, b3 = g_config.ch3_baud_rate;
+  if (b1 == b2 && b2 == b3) {
+    rowf("Bus Physical", "Baudrate", "[CONFIG]", "%u bps : CH1~3", static_cast<unsigned>(b1));
+  } else {
+    rowf("Bus Physical", "Baudrate", "[CONFIG]", "CH1:%u, CH2:%u, CH3:%u",
+         static_cast<unsigned>(b1), static_cast<unsigned>(b2), static_cast<unsigned>(b3));
+  }
+  rowf("", "IPG Silence", "[CONFIG]", "%u ms : CH1~3", static_cast<unsigned>(Config::Timing::WALLPAD_AUTO_IPG_MS));
+  table.separator('-');
 
   Config::Doorphone::FramingStatus dp_status = g_doorphone_tracker.status.load(std::memory_order_relaxed);
   const char *dp_status_str = (dp_status == Config::Doorphone::FramingStatus::LOCKED)   ? "[LOCKED]"
@@ -2794,69 +2727,40 @@ void wallpadPrintStatus(AppendBuf &out) {
                             : (dp_status == Config::Doorphone::FramingStatus::NOISY)    ? "[NOISY]"
                                                                                         : "[WAITING]";
 
-  char dp_frame_buf[48];
-  if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
-    snprintf(dp_frame_buf, sizeof(dp_frame_buf), "-- .. --");
-  } else {
-    uint8_t dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-    uint8_t dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-    uint8_t dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-    if (dp_len > 0) {
-      snprintf(dp_frame_buf, sizeof(dp_frame_buf), "%02X .. %02X (%u Bytes)", dp_stx, dp_etx, dp_len);
-    } else {
-      snprintf(dp_frame_buf, sizeof(dp_frame_buf), "%02X .. %02X", dp_stx, dp_etx);
-    }
-  }
-
-  char dp_baud_buf[32];
-  snprintf(dp_baud_buf, sizeof(dp_baud_buf), "%u bps", static_cast<unsigned>(g_config.doorphone_baud_rate));
-  char dp_ipg_buf[32];
-  snprintf(dp_ipg_buf, sizeof(dp_ipg_buf), "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_IPG_MS));
-  char dp_debounce_buf[32];
-  snprintf(dp_debounce_buf, sizeof(dp_debounce_buf), "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_DEBOUNCE_MS));
-
   uint8_t cur_dp_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
   uint8_t cur_dp_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
   uint8_t cur_dp_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-  const DoorphoneSpec *dp_prof =
-      ProfileMatcher::matchDoorphone(cur_dp_stx, cur_dp_etx, cur_dp_len);
 
-  char dp_match_buf[48];
-  char dp_ops_f_buf[64];
-  char dp_ops_l_buf[64];
-  const char *dp_match_status = "[WAITING]";
-  const char *dp_ops_status = "[WAITING]";
-
-  if (dp_prof) {
-    snprintf(dp_match_buf, sizeof(dp_match_buf), "%s", dp_prof->desc);
-    dp_match_status = (dp_status == Config::Doorphone::FramingStatus::LOCKED) ? "[LOCKED]" : "[LEARNING]";
-    dp_ops_status = dp_match_status;
-    snprintf(dp_ops_f_buf, sizeof(dp_ops_f_buf), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
-             dp_prof->bell_front, dp_prof->call_front, dp_prof->open_front, dp_prof->end_front);
-    snprintf(dp_ops_l_buf, sizeof(dp_ops_l_buf), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
-             dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby, dp_prof->end_lobby);
-  } else if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
-    snprintf(dp_match_buf, sizeof(dp_match_buf), "Waiting for traffic...");
-    snprintf(dp_ops_f_buf, sizeof(dp_ops_f_buf), "Waiting...");
-    snprintf(dp_ops_l_buf, sizeof(dp_ops_l_buf), "Waiting...");
-    dp_match_status = "[WAITING]";
-    dp_ops_status = "[WAITING]";
+  if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
+    print_row("Doorphone (CH4)", "Framing", "-- .. --", dp_status_str);
+  } else if (cur_dp_len > 0) {
+    rowf("Doorphone (CH4)", "Framing", dp_status_str, "%02X .. %02X (%u Bytes)", cur_dp_stx, cur_dp_etx, cur_dp_len);
   } else {
-    snprintf(dp_match_buf, sizeof(dp_match_buf), "No Catalog Match");
-    snprintf(dp_ops_f_buf, sizeof(dp_ops_f_buf), "Bell:B5, Call:B9, Open:B4, End:B8");
-    snprintf(dp_ops_l_buf, sizeof(dp_ops_l_buf), "Bell:5A, Call:5F, Open:61, End:60");
-    dp_match_status = "[UNKNOWN]";
-    dp_ops_status = "[UNKNOWN]";
+    rowf("Doorphone (CH4)", "Framing", dp_status_str, "%02X .. %02X", cur_dp_stx, cur_dp_etx);
   }
 
-  print_row("Doorphone (CH4)", "Framing", dp_frame_buf, dp_status_str);
-  print_row("", "Catalog Match", dp_match_buf, dp_match_status);
-  print_row("", "Opcodes(F)", dp_ops_f_buf, dp_ops_status);
-  print_row("", "Opcodes(L)", dp_ops_l_buf, dp_ops_status);
-  print_row("", "Baudrate", dp_baud_buf, "[CONFIG]");
-  print_row("", "Time-gap", dp_ipg_buf, "[CONFIG]");
-  print_row("", "Debounce", dp_debounce_buf, "[CONFIG]");
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+  const DoorphoneSpec *dp_prof = ProfileMatcher::matchDoorphone(cur_dp_stx, cur_dp_etx, cur_dp_len);
+  if (dp_prof) {
+    const char *dp_match_status = (dp_status == Config::Doorphone::FramingStatus::LOCKED) ? "[LOCKED]" : "[LEARNING]";
+    print_row("", "Catalog Match", dp_prof->desc, dp_match_status);
+    rowf("", "Opcodes(F)", dp_match_status, "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+         dp_prof->bell_front, dp_prof->call_front, dp_prof->open_front, dp_prof->end_front);
+    rowf("", "Opcodes(L)", dp_match_status, "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+         dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby, dp_prof->end_lobby);
+  } else if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
+    print_row("", "Catalog Match", "Waiting for traffic...", "[WAITING]");
+    print_row("", "Opcodes(F)", "Waiting...", "[WAITING]");
+    print_row("", "Opcodes(L)", "Waiting...", "[WAITING]");
+  } else {
+    print_row("", "Catalog Match", "No Catalog Match", "[UNKNOWN]");
+    print_row("", "Opcodes(F)", "Bell:B5, Call:B9, Open:B4, End:B8", "[UNKNOWN]");
+    print_row("", "Opcodes(L)", "Bell:5A, Call:5F, Open:61, End:60", "[UNKNOWN]");
+  }
+
+  rowf("", "Baudrate", "[CONFIG]", "%u bps", static_cast<unsigned>(g_config.doorphone_baud_rate));
+  rowf("", "Time-gap", "[CONFIG]", "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_IPG_MS));
+  rowf("", "Debounce", "[CONFIG]", "%u ms", static_cast<unsigned>(Config::Timing::DOORPHONE_DEBOUNCE_MS));
+  table.separator('-');
 
   {
     MutexLocker lock(g_ch5_mutex);
@@ -2864,83 +2768,72 @@ void wallpadPrintStatus(AppendBuf &out) {
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
       auto &slot = g_hub_slots[s];
       uint16_t listen_port = slot.target_port ? slot.target_port : Config::TCP::EW11_SLOT_PORTS[s];
-      char port_title[24];
-      snprintf(port_title, sizeof(port_title), "%u", listen_port);
+      char p_buf[16];
+      snprintf(p_buf, sizeof(p_buf), "%u", listen_port);
 
-      char slot_detail[48];
-      const char *slot_status_str = "[UNUSED]";
+      const char *f_label = first_ew11 ? "EW11 (CH5)" : "";
+      first_ew11 = false;
 
       if (!slot.enabled && !slot.is_connected && slot.target_ip[0] == '\0') {
-        snprintf(slot_detail, sizeof(slot_detail), "Disabled");
-        slot_status_str = "[UNUSED]";
+        print_row(f_label, p_buf, "Disabled", "[UNUSED]");
       } else {
         const char *ip_str = slot.target_ip[0] ? slot.target_ip : "-";
         if (slot.is_connected) {
-          snprintf(slot_detail, sizeof(slot_detail), "Connect: %s", ip_str);
-          slot_status_str = "[ACTIVE]";
+          rowf(f_label, p_buf, "[ACTIVE]", "Connect: %s", ip_str);
         } else {
-          snprintf(slot_detail, sizeof(slot_detail), "Listening");
-          slot_status_str = "[WAITING]";
+          print_row(f_label, p_buf, "Listening", "[WAITING]");
         }
       }
-
-      print_row(first_ew11 ? "EW11 (CH5)" : "", port_title, slot_detail, slot_status_str);
-      first_ew11 = false;
     }
   }
-  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+  table.separator('-');
 
-  char conv_buf[48];
   uint32_t conv_pct = active_targets ? (verified_targets * 100 / active_targets) : 0;
-  snprintf(conv_buf, sizeof(conv_buf), "%u / %u Targets (%u%%)",
-           static_cast<unsigned>(verified_targets), static_cast<unsigned>(active_targets),
-           static_cast<unsigned>(conv_pct));
   const char *conv_status = (verified_targets >= active_targets && active_targets > 0)
                                 ? "[SYNCED]"
                                 : (desc.is_locked ? "[SYNCING]" : "[WAITING]");
+  rowf("Runtime Sync", "Cache Sync", conv_status, "%u / %u Targets (%u%%)",
+       static_cast<unsigned>(verified_targets), static_cast<unsigned>(active_targets),
+       static_cast<unsigned>(conv_pct));
 
-  char cs_rate_buf[48];
   uint32_t cs_pct = desc.tested_packets ? (desc.matched_packets * 100 / desc.tested_packets) : 100;
   auto format_compact = [](char *buf, size_t sz, uint32_t count) {
-    if (count >= 1000000) {
-      snprintf(buf, sz, "%.1fM", count / 1000000.0);
-    } else if (count >= 1000) {
-      snprintf(buf, sz, "%.1fk", count / 1000.0);
-    } else {
-      snprintf(buf, sz, "%u", static_cast<unsigned>(count));
-    }
+    if (count >= 1000000) snprintf(buf, sz, "%.1fM", count / 1000000.0);
+    else if (count >= 1000) snprintf(buf, sz, "%.1fk", count / 1000.0);
+    else snprintf(buf, sz, "%u", static_cast<unsigned>(count));
   };
   char m_str[16], t_str[16];
   format_compact(m_str, sizeof(m_str), desc.matched_packets);
   format_compact(t_str, sizeof(t_str), desc.tested_packets);
-
-  snprintf(cs_rate_buf, sizeof(cs_rate_buf), "%s / %s Packets (%u%%)",
-           m_str, t_str, static_cast<unsigned>(cs_pct));
   const char *cs_status = (cs_pct >= 95) ? "[STABLE]" : (cs_pct >= 80 ? "[NOISY]" : "[ERROR]");
-
-  print_row("Runtime Sync", "Cache Sync", conv_buf, conv_status);
-  print_row("", "CS Validation", cs_rate_buf, cs_status);
-  out.append("+==============================================================================+\r\n");
+  rowf("", "CS Validation", cs_status, "%s / %s Packets (%u%%)", m_str, t_str, static_cast<unsigned>(cs_pct));
+  table.end('=');
   out.append("\r\n");
 }
 
 void wallpadListProfiles(AppendBuf &out) {
   CliFmt::PrintBoxHeader(out, "WALLPAD PROTOCOL PROFILES");
-  out.append("|  ID  | Profile Key | Protocol Specification / Description |      Status      |\r\n");
-  out.append("+------+-------------+--------------------------------------+------------------+\r\n");
+  static constexpr Column PROFILE_COLS[] = {
+      {"ID", 4, Align::CENTER, Align::CENTER},
+      {"Profile Key", 11, Align::LEFT, Align::CENTER},
+      {"Protocol Specification / Description", 36, Align::LEFT, Align::CENTER},
+      {"Status", 16, Align::CENTER, Align::CENTER},
+  };
+  TableRenderer table(out, PROFILE_COLS, 4);
+  table.header(false);
+
   for (size_t i = 0; i < ProfileRepository::getProfileCount(); ++i) {
     VendorProfileDescriptor p_desc;
     if (ProfileRepository::getProfile(i, p_desc)) {
       bool is_current = (g_config.wallpad_profile == i);
       bool is_empty = (i > 0 && strncmp(p_desc.name, "[Empty", 6) == 0);
       const char *status_str = is_current ? ">> ACTIVE <<" : (is_empty ? "Available" : "Saved (NVS)");
-      char st_buf[20];
-      CliFmt::CenterText(st_buf, sizeof(st_buf), status_str, 16);
-      out.appendFormat("|  %2u  | %-11s | %-36s | %s |\r\n",
-                       static_cast<unsigned>(i), p_desc.key, p_desc.name, st_buf);
+      char id_buf[8];
+      snprintf(id_buf, sizeof(id_buf), "%2u", static_cast<unsigned>(i));
+      table.row({id_buf, p_desc.key, p_desc.name, status_str});
     }
   }
-  out.append("+------+-------------+--------------------------------------+------------------+\r\n");
+  table.end('-');
   CliFmt::PrintBoxFooter(out, "Use 'wallpad set <id>' to switch, 'wallpad save <name>' to store");
 }
 
@@ -3027,18 +2920,20 @@ void wallpadSetProfile(int sock, const char *key) {
 
 namespace WallpadCli {
 
-void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
-  int token_count = embeddedCliGetTokenCount(args);
-  const char *sub = (token_count > 0) ? embeddedCliGetToken(args, 1) : "on";
+void cmdTrace(CliContext &ctx) {
+  int sock = ctx.sock;
+  int token_count = ctx.args.count();
+  const char *sub = (token_count > 0) ? ctx.args.get(1) : "on";
 
-  static const CliFmt::SubCmdHelpItem items[] = {
-      {"on / off", "Start or stop real-time packet stream"}, {"ctl / ack / pol / rmt / drp", "Toggle packet type filter"},
-      {"ch <1-6>", "Filter packets by hardware channel"}, {"devid <hex>", "Filter packets by target device ID"}};
+  static const CliFmt::SubCmdDef kTraceHelp[] = {
+      {nullptr, "on / off",              "Start or stop real-time packet stream",   nullptr},
+      {nullptr, "ctl / ack / pol / rmt / drp", "Toggle packet type filter",         nullptr},
+      {nullptr, "ch <1-6>",             "Filter packets by hardware channel",       nullptr},
+      {nullptr, "devid <hex>",          "Filter packets by target device ID",       nullptr}};
 
   if (CliFmt::IsHelp(sub)) {
-    CliFmt::PrintCmdHelp(sock, "TRACE COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
-                         "Tip: Use 'q' shortcut to quickly stop active tracing");
+    CliFmt::PrintSubCmdHelp(sock, "TRACE COMMAND REFERENCE", kTraceHelp, sizeof(kTraceHelp) / sizeof(kTraceHelp[0]),
+                            "Tip: Use 'q' shortcut to quickly stop active tracing");
     return;
   }
 
@@ -3077,7 +2972,7 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
     int ch_val = 0;
     bool ch_ok = false;
     if (strcasecmp(sub, "ch") == 0 && token_count >= 2) {
-      ch_ok = CliFmt::ParseInt(embeddedCliGetToken(args, 2), ch_val, 1, 6);
+      ch_ok = CliFmt::ParseInt(ctx.args.get(2), ch_val, 1, 6);
     } else if (strncasecmp(sub, "ch", 2) == 0 && isdigit(static_cast<unsigned char>(sub[2]))) {
       ch_val = sub[2] - '0';
       ch_ok = (ch_val >= 1 && ch_val <= 6);
@@ -3091,19 +2986,19 @@ void cmdTrace(EmbeddedCli *cli, char *args, void *context) {
   } else if (strcasecmp(sub, "devid") == 0 || strncasecmp(sub, "0x", 2) == 0) {
     uint8_t id = 0;
     if (strcasecmp(sub, "devid") == 0 && token_count >= 2) {
-      id = static_cast<uint8_t>(strtol(embeddedCliGetToken(args, 2), nullptr, 16));
+      id = static_cast<uint8_t>(strtol(ctx.args.get(2), nullptr, 16));
     } else if (strncasecmp(sub, "0x", 2) == 0) {
       id = static_cast<uint8_t>(strtol(sub, nullptr, 16));
     }
     g_telnet_tracer.setFilter(TraceType::DEVID, id);
     sendTelnetMsgf(sock, "Packet trace ENABLED: Device ID 0x%02X only.\r\n", id);
-    CliFmt::PrintCmdHelp(sock, "TRACE COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
-                         "Tip: Use 'q' shortcut to quickly stop active tracing");
+    CliFmt::PrintSubCmdHelp(sock, "TRACE COMMAND REFERENCE", kTraceHelp, sizeof(kTraceHelp) / sizeof(kTraceHelp[0]),
+                            "Tip: Use 'q' shortcut to quickly stop active tracing");
   }
 }
 
-void cmdStop(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
+void cmdStop(CliContext &ctx) {
+  int sock = ctx.sock;
   g_telnet_tracer.setTrace(false);
   sendTelnetMsg(sock, "Packet trace DISABLED.\r\n");
 }
@@ -3146,14 +3041,19 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
            tgt_active, tgt_total, wc_src_str, static_cast<unsigned>(g_warm_cache_restored_count));
   CliFmt::PrintBoxSubtitle(out, sub_buf);
 
-  out.append("+-----+----------+-------+-----------------------------------------------------+\r\n");
-  out.append("| No  |   Last   |  Src  | Raw Query Packet Frame                              |\r\n");
-  out.append("+-----+----------+-------+-----------------------------------------------------+\r\n");
+  static constexpr Column TIER1_COLS[] = {
+      {"No", 3, Align::CENTER, Align::CENTER},
+      {"Last", 8, Align::CENTER, Align::CENTER},
+      {"Src", 5, Align::CENTER, Align::CENTER},
+      {"Raw Query Packet Frame", 51, Align::LEFT, Align::LEFT},
+  };
+  TableRenderer table(out, TIER1_COLS, 4);
+  table.header(false);
 
   constexpr uint8_t ALLOWED_MASK = (1 << 2) | (1 << 3) | (1 << 5);
 
   if (tgt_total == 0) {
-    out.append("|      (No polling targets registered yet. Waiting for queries...)             |\r\n");
+    table.empty("(No polling targets registered yet. Waiting for queries...)");
   } else {
     unsigned int display_idx = 1;
     for (size_t i = 0; i < tgt_total; ++i) {
@@ -3177,17 +3077,12 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
         snprintf(q_hex, sizeof(q_hex), "DevID 0x%02X (Sub1 0x%02X)", tgt.dev_id, tgt.sub1);
       }
 
-      char no_c[8], last_c[12], src_c[10];
       char no_s[8];
       snprintf(no_s, sizeof(no_s), "#%02u", display_idx++);
-      CliFmt::CenterText(no_c, sizeof(no_c), no_s, 5);
-      CliFmt::CenterText(last_c, sizeof(last_c), last_req_str, 10);
-      CliFmt::CenterText(src_c, sizeof(src_c), src_buf, 7);
-
-      out.appendFormat("|%s|%s|%s| %-51.51s |\r\n", no_c, last_c, src_c, q_hex);
+      table.row({no_s, last_req_str, src_buf, q_hex});
     }
   }
-  out.append("+-----+----------+-------+-----------------------------------------------------+\r\n");
+  table.end('-');
   CliFmt::PrintBoxFooter(out, "Tip: 1st-Tier cache monitors active queries from Wallpad & App");
 }
 
@@ -3202,12 +3097,16 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
            total_count, online_count, (total_count >= online_count) ? (total_count - online_count) : 0);
   CliFmt::PrintBoxSubtitle(out, sub_buf);
 
-  out.append("+-----+-----------+------------------------------------------------------------+\r\n");
-  out.append("| No  |   Last    | Raw Physical ACK Response Frame                            |\r\n");
-  out.append("+-----+-----------+------------------------------------------------------------+\r\n");
+  static constexpr Column TIER2_COLS[] = {
+      {"No", 3, Align::CENTER, Align::CENTER},
+      {"Last", 9, Align::CENTER, Align::CENTER},
+      {"Raw Physical ACK Response Frame", 58, Align::LEFT, Align::LEFT},
+  };
+  TableRenderer table(out, TIER2_COLS, 3);
+  table.header(false);
 
   if (total_count == 0) {
-    out.append("|      (No physical devices discovered on RS-485 bus yet)                      |\r\n");
+    table.empty("(No physical devices discovered on RS-485 bus yet)");
   } else {
     for (size_t i = 0; i < total_count; ++i) {
       DeviceStateEntry dev;
@@ -3226,16 +3125,12 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
         Fmt::FormatElapsed(now, dev.last_updated_ms, updated_str, sizeof(updated_str));
       }
 
-      char no_c[8], last_c[14];
       char no_s[8];
       snprintf(no_s, sizeof(no_s), "#%02u", static_cast<unsigned int>(i + 1));
-      CliFmt::CenterText(no_c, sizeof(no_c), no_s, 5);
-      CliFmt::CenterText(last_c, sizeof(last_c), updated_str, 11);
-
-      out.appendFormat("|%s|%s| %-58.58s |\r\n", no_c, last_c, ack_hex);
+      table.row({no_s, updated_str, ack_hex});
     }
   }
-  out.append("+-----+-----------+------------------------------------------------------------+\r\n");
+  table.end('-');
   CliFmt::PrintBoxFooter(out, "Tip: 2nd-Tier cache reflects physical responses on RS-485");
 }
 
@@ -3308,24 +3203,27 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
   snprintf(sub_buf, sizeof(sub_buf), "Active Devices: %zu Cached | Ingress: CH1 Wallpad RS-485", dev_count);
   CliFmt::PrintBoxSubtitle(out, sub_buf);
 
-  out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
-  out.append("| DevID  |    Name    | Class  |  State  | Ch  | SubCnt |  QryCnt   | LastSeen |\r\n");
-  out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
+  static constexpr Column DEVS_COLS[] = {
+      {"DevID", 6, Align::LEFT, Align::CENTER},
+      {"Name", 10, Align::LEFT, Align::CENTER},
+      {"Class", 6, Align::LEFT, Align::CENTER},
+      {"State", 7, Align::LEFT, Align::CENTER},
+      {"Ch", 3, Align::LEFT, Align::CENTER},
+      {"SubCnt", 6, Align::CENTER, Align::CENTER},
+      {"QryCnt", 9, Align::CENTER, Align::CENTER},
+      {"LastSeen", 8, Align::CENTER, Align::CENTER},
+  };
+  TableRenderer table(out, DEVS_COLS, 8);
+  table.header(false);
 
   if (dev_count == 0) {
-    out.append("|             (No active devices registered in 1st/2nd tier cache)             |\r\n");
+    table.empty("(No active devices registered in 1st/2nd tier cache)");
   } else {
     for (size_t d = 0; d < dev_count; ++d) {
-      char dev_hex[10];
+      char dev_hex[10], sub_str[10], qry_str[12], elapsed_raw[16] = "-";
       snprintf(dev_hex, sizeof(dev_hex), "0x%02X", devs[d].dev_id);
-
-      char sub_str[10];
       snprintf(sub_str, sizeof(sub_str), "%u", devs[d].sub_cnt);
-
-      char qry_str[12];
       snprintf(qry_str, sizeof(qry_str), "%lu", (unsigned long)devs[d].qry_cnt);
-
-      char elapsed_raw[16] = "-";
       if (devs[d].last_seen_ms > 0) {
         Fmt::FormatElapsed(now, devs[d].last_seen_ms, elapsed_raw, sizeof(elapsed_raw));
         char *ago_pos = strstr(elapsed_raw, " ago");
@@ -3333,30 +3231,18 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
         ago_pos = strstr(elapsed_raw, "ago");
         if (ago_pos) *ago_pos = '\0';
       }
-
-      char sub_cnt_centered[10];
-      char qry_cnt_centered[14];
-      char last_seen_centered[12];
-
-      CliFmt::CenterText(sub_cnt_centered, sizeof(sub_cnt_centered), sub_str, 6);
-      CliFmt::CenterText(qry_cnt_centered, sizeof(qry_cnt_centered), qry_str, 9);
-      CliFmt::CenterText(last_seen_centered, sizeof(last_seen_centered), elapsed_raw, 8);
-
       const char *state_str = devs[d].online ? "ONLINE" : "OFFLINE";
-
-      out.appendFormat("| %-6s | %-10.10s | %-6.6s | %-7s | CH1 | %s | %s | %s |\r\n",
-                       dev_hex, devs[d].name, devs[d].cls_str, state_str,
-                       sub_cnt_centered, qry_cnt_centered, last_seen_centered);
+      table.row({dev_hex, devs[d].name, devs[d].cls_str, state_str, "CH1", sub_str, qry_str, elapsed_raw});
     }
   }
-  out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
+  table.end('-');
   CliFmt::PrintBoxFooter(out, "Use 'devs 1' for Polling Targets, 'devs 2' for Raw ACK Cache");
 }
 
-void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
-  int client = getSock(context);
+void cmdDevs(CliContext &ctx) {
+  int client = ctx.sock;
   uint32_t now = millis();
-  int argc = embeddedCliGetTokenCount(args);
+  int argc = ctx.args.count();
 
   if (argc == 0) {
     withScratchBuf(client, [now](AppendBuf &out) {
@@ -3365,7 +3251,7 @@ void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  const char *sub = embeddedCliGetToken(args, 1);
+  const char *sub = ctx.args.get(1);
   if (strcasecmp(sub, "clear") == 0) {
     g_polling_targets.clear();
     g_device_repo.clear();
@@ -3390,10 +3276,10 @@ void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
 
 
 
-void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
-  int sock = getSock(context);
-  int argc = embeddedCliGetTokenCount(args);
-  const char *sub = (argc > 0) ? embeddedCliGetToken(args, 1) : "status";
+void cmdWallpad(CliContext &ctx) {
+  int sock = ctx.sock;
+  int argc = ctx.args.count();
+  const char *sub = (argc > 0) ? ctx.args.get(1) : "status";
 
   if (argc == 0 || strcasecmp(sub, "status") == 0) {
     withScratchBuf(sock, [](AppendBuf &out) {
@@ -3402,26 +3288,28 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
     return;
   }
 
-  struct WallpadSubCmd {
-    const char *name;
-    void (*handler)(int sock, int argc, char *args);
-  };
-
-  static const WallpadSubCmd kWallpadCmds[] = {
-      {"list", [](int s, int, char *) { withScratchBuf(s, [](AppendBuf &out) { wallpadListProfiles(out); }); }},
-      {"set", [](int s, int ac, char *a) {
-         if (ac >= 2) wallpadSetProfile(s, embeddedCliGetToken(a, 2));
+  // Unified table: help strings + handlers in one place.
+  static const CliFmt::SubCmdDef kWallpadDefs[] = {
+      {"status",   "status",                "Show auto-probing status & locked profile",     nullptr},  // handled above
+      {"list",     "list",                  "List available vendor & saved NVS profiles",
+       [](int s, int, const Args &) { withScratchBuf(s, [](AppendBuf &out) { wallpadListProfiles(out); }); }},
+      {"set",      "set <key|id>",          "Manually switch active wallpad profile",
+       [](int s, int ac, const Args &a) {
+         if (ac >= 2) wallpadSetProfile(s, a.get(2));
          else sendTelnetMsg(s, "[ERROR] Missing profile key/id: wallpad set <key|id>\r\n");
        }},
-      {"save", [](int s, int ac, char *a) {
-         if (ac >= 2) wallpadSaveProfile(s, embeddedCliGetToken(a, 2));
+      {"save",     "save <name>",           "Save learned profile to NVS custom slot",
+       [](int s, int ac, const Args &a) {
+         if (ac >= 2) wallpadSaveProfile(s, a.get(2));
          else sendTelnetMsg(s, "[ERROR] Missing name: wallpad save <name>\r\n");
        }},
-      {"delete", [](int s, int ac, char *a) {
-         if (ac >= 2) wallpadDeleteProfile(s, embeddedCliGetToken(a, 2));
+      {"delete",   "delete <id>",           "Reset a saved custom profile slot in NVS",
+       [](int s, int ac, const Args &a) {
+         if (ac >= 2) wallpadDeleteProfile(s, a.get(2));
          else sendTelnetMsg(s, "[ERROR] Missing profile id: wallpad delete <id>\r\n");
        }},
-      {"auto", [](int s, int, char *) {
+      {"auto",     "auto",                  "Switch to Universal Auto-Probing mode",
+       [](int s, int, const Args &) {
          char dp_ns[16];
          Config::Doorphone::FramingTracker::getNvsNamespace(0, dp_ns, sizeof(dp_ns));
          ProfileRepository::setActiveProfileIndex(0);
@@ -3429,84 +3317,57 @@ void cmdWallpad(EmbeddedCli *cli, char *args, void *context) {
          g_doorphone_tracker.clearNvs(dp_ns);
          sendTelnetMsg(s, "[OK] Switched to Universal Auto-Probing mode (Wallpad & Doorphone framing reset).\r\n");
        }},
-      {"reset", [](int s, int, char *) {
+      {"reset",    "reset",                 "Reset auto-probing engine and re-learn",
+       [](int s, int, const Args &) {
          char dp_ns[16];
          Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
          g_auto_probing_engine.reset();
          g_doorphone_tracker.clearNvs(dp_ns);
          g_probe_convergence_reset.store(true, std::memory_order_release);
        }},
-      {"simulate", [](int s, int ac, char *a) {
-         if (ac < 2) {
-           sendTelnetMsg(s, "[ERROR] Missing bytes: wallpad simulate <hex_bytes...>\r\n");
-           return;
-         }
+      {"simulate", "simulate <hex...>",     "Inject raw hex packet into probing engine",
+       [](int s, int ac, const Args &a) {
+         if (ac < 2) { sendTelnetMsg(s, "[ERROR] Missing bytes: wallpad simulate <hex_bytes...>\r\n"); return; }
          uint8_t sim_buf[64]{0};
          size_t sim_len = 0;
          for (int i = 2; i <= ac && sim_len < sizeof(sim_buf); ++i) {
-           const char *tok = embeddedCliGetToken(a, i);
-           if (!tok) break;
+           const char *tok = a.get(i);
+           if (!tok || !tok[0]) break;
            char *endp = nullptr;
            unsigned long val = strtoul(tok, &endp, 16);
            if (endp != tok) sim_buf[sim_len++] = static_cast<uint8_t>(val);
          }
-         if (sim_len < 3) {
-           sendTelnetMsg(s, "[ERROR] Simulated packet must be at least 3 bytes.\r\n");
-           return;
-         }
+         if (sim_len < 3) { sendTelnetMsg(s, "[ERROR] Simulated packet must be at least 3 bytes.\r\n"); return; }
          g_auto_probing_engine.feedFrame(span<const uint8_t>(sim_buf, sim_len));
          sendTelnetMsgf(s, "[OK] Fed %u simulated bytes into Auto-Probing Engine.\r\n", sim_len);
        }},
   };
 
-  for (const auto &entry : kWallpadCmds) {
-    if (strcasecmp(sub, entry.name) == 0) {
-      entry.handler(sock, argc, args);
-      return;
-    }
-  }
-
-  static const CliFmt::SubCmdHelpItem items[] = {
-      {"status", "Show auto-probing status & locked profile"}, {"list", "List available vendor & saved NVS profiles"},
-      {"set <key|id>", "Manually switch active wallpad profile"}, {"save <name>", "Save learned profile to NVS custom slot"},
-      {"delete <id>", "Reset a saved custom profile slot in NVS"}, {"auto", "Switch to Universal Auto-Probing mode"},
-      {"reset", "Reset auto-probing engine and re-learn"}, {"simulate <hex...>", "Inject raw hex packet into probing engine"}};
-  CliFmt::PrintCmdHelp(sock, "WALLPAD COMMAND REFERENCE", items, sizeof(items) / sizeof(items[0]),
-                       "Tip: Use 'ctl' for device control blueprints & slots");
-}
-
-void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
-  auto *session = getSession(context);
-  int sock = session ? session->sock : -1;
-  if (sock < 0) return;
-
-  if (session) {
-    if (session->txLen > 0) {
-      sendTelnetMsgLen(session->sock, session->txBuf, session->txLen);
-      session->txLen = 0;
-      session->needsSend = false;
-    }
-  }
-
-  int argc = embeddedCliGetTokenCount(args);
-
-  if (argc == 0) {
-    withScratchBuf(sock, [](AppendBuf &out) {
-      wallpadPrintControlTable(out);
-    });
-    if (session) {
-      session->txLen = 0;
-      session->needsSend = false;
-    }
+  if (CliFmt::IsHelp(sub)) {
+    CliFmt::PrintSubCmdHelp(sock, "WALLPAD COMMAND REFERENCE", kWallpadDefs, sizeof(kWallpadDefs) / sizeof(kWallpadDefs[0]),
+                            "Tip: Use 'ctl' for device control blueprints & slots");
     return;
   }
 
-  const char *sub = embeddedCliGetToken(args, 1);
+  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kWallpadDefs, sizeof(kWallpadDefs) / sizeof(kWallpadDefs[0]))) return;
+
+  CliFmt::PrintSubCmdHelp(sock, "WALLPAD COMMAND REFERENCE", kWallpadDefs, sizeof(kWallpadDefs) / sizeof(kWallpadDefs[0]),
+                          "Tip: Use 'ctl' for device control blueprints & slots");
+}
+
+void cmdCtl(CliContext &ctx) {
+  int sock = ctx.sock;
+  if (sock < 0) return;
+  int argc = ctx.args.count();
+  if (argc == 0) {
+    withScratchBuf(sock, [](AppendBuf &out) { wallpadPrintControlTable(out); });
+    return;
+  }
+
+  const char *sub = ctx.args.get(1);
 
   if (strcasecmp(sub, "table") == 0 || strcasecmp(sub, "list") == 0 || strcasecmp(sub, "view") == 0) {
-    withScratchBuf(sock, [](AppendBuf &out) {
-      wallpadPrintControlTable(out);
-    });
+    withScratchBuf(sock, [](AppendBuf &out) { wallpadPrintControlTable(out); });
     return;
   }
   if (strcasecmp(sub, "reset") == 0) {
@@ -3514,7 +3375,7 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
       sendTelnetMsg(sock, "[ERROR] Missing target: ctl reset <all | dev_id>\r\n");
       return;
     }
-    const char *arg = embeddedCliGetToken(args, 2);
+    const char *arg = ctx.args.get(2);
     if (strcasecmp(arg, "all") == 0) {
       g_control_registry.resetGroup(0, true);
       sendTelnetMsg(sock, "[OK] All control blueprints reset & re-synthesized from catalog specs.\r\n");
@@ -3532,16 +3393,14 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
   }
   if (strcasecmp(sub, "name") == 0 || strcasecmp(sub, "setname") == 0) {
     if (argc >= 3) {
-      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
-      const char *name = embeddedCliGetToken(args, 3);
-      if (dev_id == 0 || !name || strlen(name) == 0) {
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(ctx.args.get(2), nullptr, 0));
+      const char *name = ctx.args.get(3);
+      if (dev_id == 0 || !name || !*name) {
         sendTelnetMsg(sock, "[ERROR] Missing name: ctl name <dev_id> <custom_name>\r\n");
+      } else if (g_control_registry.setGroupName(dev_id, name)) {
+        sendTelnetMsgf(sock, "[OK] DevID 0x%02X group name set to '%s' and saved to NVS flash.\r\n", dev_id, name);
       } else {
-        if (g_control_registry.setGroupName(dev_id, name)) {
-          sendTelnetMsgf(sock, "[OK] DevID 0x%02X group name set to '%s' and saved to NVS flash.\r\n", dev_id, name);
-        } else {
-          sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
-        }
+        sendTelnetMsgf(sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n", dev_id);
       }
     } else {
       sendTelnetMsg(sock, "[ERROR] Missing argument: ctl name <dev_id> <custom_name>\r\n");
@@ -3550,49 +3409,28 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
   }
   if (strcasecmp(sub, "class") == 0 || strcasecmp(sub, "setclass") == 0) {
     if (argc >= 3) {
-      uint8_t dev_id = static_cast<uint8_t>(strtoul(embeddedCliGetToken(args, 2), nullptr, 0));
-      const char *cls_str = embeddedCliGetToken(args, 3);
-      const char *custom_name = (argc >= 4) ? embeddedCliGetToken(args, 4) : nullptr;
-      struct DeviceClassEntry {
-        std::string_view key;
-        DeviceClass cls;
-        const char *def_name;
-      };
+      uint8_t dev_id = static_cast<uint8_t>(strtoul(ctx.args.get(2), nullptr, 0));
+      const char *cls_str = ctx.args.get(3);
+      const char *custom_name = (argc >= 4) ? ctx.args.get(4) : nullptr;
+      struct DeviceClassEntry { const char *key; DeviceClass cls; const char *def_name; };
       static constexpr DeviceClassEntry kDeviceClassTable[] = {
-          {"light",      DeviceClass::SWITCH,     "Light"},
-          {"switch",     DeviceClass::SWITCH,     "Light"},
-          {"outlet",     DeviceClass::SWITCH,     "Outlet"},
-          {"vent",       DeviceClass::VENT,       "Vent"},
-          {"fan",        DeviceClass::VENT,       "Vent"},
-          {"thermo",     DeviceClass::THERMOSTAT, "Thermo"},
-          {"thermostat", DeviceClass::THERMOSTAT, "Thermo"},
-          {"heat",       DeviceClass::THERMOSTAT, "Thermo"},
-          {"gas",        DeviceClass::GAS,        "Gas"},
-          {"aircon",     DeviceClass::AIRCON,     "Aircon"},
-          {"ac",         DeviceClass::AIRCON,     "Aircon"},
-          {"ev",         DeviceClass::MOMENTARY,  "Elevator"},
-          {"elevator",   DeviceClass::MOMENTARY,  "Elevator"},
+          {"light", DeviceClass::SWITCH, "Light"}, {"switch", DeviceClass::SWITCH, "Light"},
+          {"outlet", DeviceClass::SWITCH, "Outlet"}, {"vent", DeviceClass::VENT, "Vent"},
+          {"fan", DeviceClass::VENT, "Vent"}, {"thermo", DeviceClass::THERMOSTAT, "Thermo"},
+          {"thermostat", DeviceClass::THERMOSTAT, "Thermo"}, {"heat", DeviceClass::THERMOSTAT, "Thermo"},
+          {"gas", DeviceClass::GAS, "Gas"}, {"aircon", DeviceClass::AIRCON, "Aircon"},
+          {"ac", DeviceClass::AIRCON, "Aircon"}, {"ev", DeviceClass::MOMENTARY, "Elevator"},
+          {"elevator", DeviceClass::MOMENTARY, "Elevator"},
       };
-
-      char lower_cls[32] = {0};
-      size_t c_len = 0;
-      while (cls_str[c_len] && c_len < sizeof(lower_cls) - 1) {
-        lower_cls[c_len] = static_cast<char>(tolower(static_cast<unsigned char>(cls_str[c_len])));
-        c_len++;
-      }
-      lower_cls[c_len] = '\0';
-
       DeviceClass cls = DeviceClass::UNKNOWN;
       const char *def_name = cls_str;
-      std::string_view sv{lower_cls};
       for (const auto &entry : kDeviceClassTable) {
-        if (entry.key == sv) {
+        if (strcasecmp(cls_str, entry.key) == 0) {
           cls = entry.cls;
           def_name = entry.def_name;
           break;
         }
       }
-
       if (dev_id == 0 || cls == DeviceClass::UNKNOWN) {
         sendTelnetMsg(sock, "[ERROR] Missing class: ctl class <dev_id> <light|outlet|vent|thermo|gas|aircon|ev> [name]\r\n");
       } else {
@@ -3608,26 +3446,27 @@ void cmdCtl(EmbeddedCli *cli, char *args, void *context) {
     }
     return;
   }
-  static const CliFmt::SubCmdHelpItem items[] = {
-      {"ctl", "Display control blueprint table"}, {"<dev_id>", "Inspect blueprint & slots (e.g. ctl 0x18)"},
-      {"name <id> <name>", "Set custom group name"}, {"class <id> <cls> [name]", "Set device class (light/outlet/vent...)"},
-      {"reset <id>", "Reset action slots for device"}, {"reset all", "Factory wipe & re-inject blueprints from catalog"}};
+  static const CliFmt::SubCmdDef kCtlHelp[] = {
+      {nullptr, "ctl",                     "Display control blueprint table",                   nullptr},
+      {nullptr, "<dev_id>",                "Inspect blueprint & slots (e.g. ctl 0x18)",          nullptr},
+      {nullptr, "name <id> <name>",        "Set custom group name",                             nullptr},
+      {nullptr, "class <id> <cls> [name]", "Set device class (light/outlet/vent...)",           nullptr},
+      {nullptr, "reset <id>",              "Reset action slots for device",                     nullptr},
+      {nullptr, "reset all",               "Factory wipe & re-inject blueprints from catalog",  nullptr}};
 
   if (CliFmt::IsHelp(sub)) {
-    CliFmt::PrintCmdHelp(sock, "CONTROL BLUEPRINT COMMANDS", items, sizeof(items) / sizeof(items[0]),
-                         "Tip: Use 'ctl 0x18' to view detailed frame action offsets");
+    CliFmt::PrintSubCmdHelp(sock, "CONTROL BLUEPRINT COMMANDS", kCtlHelp, sizeof(kCtlHelp) / sizeof(kCtlHelp[0]),
+                            "Tip: Use 'ctl 0x18' to view detailed frame action offsets");
     return;
   }
 
   char *endp = nullptr;
   uint8_t dev_id = static_cast<uint8_t>(strtoul(sub, &endp, 0));
   if (endp != sub && dev_id != 0) {
-    withScratchBuf(sock, [dev_id](AppendBuf &out) {
-      wallpadPrintControlDetail(out, dev_id);
-    });
+    withScratchBuf(sock, [dev_id](AppendBuf &out) { wallpadPrintControlDetail(out, dev_id); });
   } else {
-    CliFmt::PrintCmdHelp(sock, "CONTROL BLUEPRINT COMMANDS", items, sizeof(items) / sizeof(items[0]),
-                         "Tip: Use 'ctl 0x18' to view detailed frame action offsets");
+    CliFmt::PrintSubCmdHelp(sock, "CONTROL BLUEPRINT COMMANDS", kCtlHelp, sizeof(kCtlHelp) / sizeof(kCtlHelp[0]),
+                            "Tip: Use 'ctl 0x18' to view detailed frame action offsets");
   }
 }
 
@@ -3641,12 +3480,20 @@ void wallpadPrintControlTable(AppendBuf &out) {
   snprintf(sub_buf, sizeof(sub_buf), "Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted", count);
   CliFmt::PrintBoxSubtitle(out, sub_buf);
 
-  out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
-  out.append("| DevID |   Name   | Class  | CTL | Power Slot | QRY |     Status Offsets      |\r\n");
-  out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
+  static constexpr Column CTL_COLS[] = {
+      {"DevID", 5, Align::LEFT, Align::CENTER},
+      {"Name", 8, Align::LEFT, Align::CENTER},
+      {"Class", 6, Align::LEFT, Align::CENTER},
+      {"CTL", 3, Align::LEFT, Align::CENTER},
+      {"Power Slot", 10, Align::LEFT, Align::CENTER},
+      {"QRY", 3, Align::LEFT, Align::CENTER},
+      {"Status Offsets", 23, Align::LEFT, Align::CENTER},
+  };
+  TableRenderer table(out, CTL_COLS, 7);
+  table.header(false);
 
   if (count == 0) {
-    out.append("|  (No control blueprints registered yet. Waiting for profile or learning...)   |\r\n");
+    table.empty("(No control blueprints registered yet. Waiting for profile or learning...)");
     out.append(CliFmt::BOX80_EQ);
     out.append("\r\n");
     return;
@@ -3710,16 +3557,13 @@ void wallpadPrintControlTable(AppendBuf &out) {
       e_off += snprintf(extra_slots + e_off, sizeof(extra_slots) - e_off, ")");
     }
 
-    out.appendFormat("| 0x%02X  | %-8.8s | %-6.6s | %-3s | %-10s | %-3s | %-24s|\r\n",
-                     grp.dev_id, name_safe, cls_str,
-                     ctl_len_str, pwr_buf,
-                     qry_len_str, extra_slots);
+    char id_str[8];
+    snprintf(id_str, sizeof(id_str), "0x%02X", grp.dev_id);
+    table.row({id_str, name_safe, cls_str, ctl_len_str, pwr_buf, qry_len_str, extra_slots});
   }
 
-  out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
-  out.append("|      TT: Target Temp, AT: Ambient Temp, FS: Fan Speed, W: Power Wattage      |\r\n");
-  out.append("+==============================================================================+\r\n");
-  out.append("\r\n");
+  table.end('-');
+  CliFmt::PrintBoxFooter(out, "TT: Target Temp, AT: Ambient Temp, FS: Fan Speed, W: Power Wattage");
 }
 
 void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
@@ -3741,9 +3585,12 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
            grp.frame_len, grp.query_slots.expected_len, grp.sub1_offset, grp.sub2_offset);
   CliFmt::PrintBoxSubtitle(out, sub_buf);
 
-  out.append("+---------------------------+--------------------------------------------------+\r\n");
-  out.append("| Action / Status Slot      | Discovered Configuration                         |\r\n");
-  out.append("+---------------------------+--------------------------------------------------+\r\n");
+  static constexpr Column DETAIL_COLS[] = {
+      {"Action / Status Slot", 25, Align::LEFT, Align::CENTER},
+      {"Discovered Configuration", 48, Align::LEFT, Align::CENTER},
+  };
+  TableRenderer table(out, DETAIL_COLS, 2);
+  table.header(false);
 
   char v_buf[64];
   if (grp.power_slot.discovered) {
@@ -3752,7 +3599,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   } else {
     snprintf(v_buf, sizeof(v_buf), "None");
   }
-  CliFmt::PrintCardRow2(out, "Power Control Slot", v_buf);
+  table.row({"Power Control Slot", v_buf});
 
   if (grp.temp_slot.discovered) {
     snprintf(v_buf, sizeof(v_buf), "Offset #%u  [ Range: %u ~ %u C ]",
@@ -3760,7 +3607,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   } else {
     snprintf(v_buf, sizeof(v_buf), "None");
   }
-  CliFmt::PrintCardRow2(out, "Temp Control Slot", v_buf);
+  table.row({"Temp Control Slot", v_buf});
 
   if (grp.speed_slot.discovered) {
     if (grp.speed_slot.level_count > 0) {
@@ -3778,7 +3625,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   } else {
     snprintf(v_buf, sizeof(v_buf), "None");
   }
-  CliFmt::PrintCardRow2(out, "Fan Speed Slot", v_buf);
+  table.row({"Fan Speed Slot", v_buf});
 
   if (grp.close_slot.discovered) {
     snprintf(v_buf, sizeof(v_buf), "Offset #%u  [ Action: 0x%02X ]",
@@ -3786,9 +3633,9 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   } else {
     snprintf(v_buf, sizeof(v_buf), "None");
   }
-  CliFmt::PrintCardRow2(out, "Close Action Slot", v_buf);
+  table.row({"Close Action Slot", v_buf});
 
-  out.append("+---------------------------+--------------------------------------------------+\r\n");
+  table.separator('-');
 
   auto print_inbound = [&](const char *label, uint8_t off) {
     if (off != 0xFF) {
@@ -3796,7 +3643,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     } else {
       snprintf(v_buf, sizeof(v_buf), "None");
     }
-    CliFmt::PrintCardRow2(out, label, v_buf);
+    table.row({label, v_buf});
   };
 
   print_inbound("Power Status Offset", grp.query_slots.power_offset);
@@ -3806,7 +3653,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
   print_inbound("Power Wattage Offset", grp.query_slots.power_w_offset);
   print_inbound("CTL ACK State Offset", grp.ack_slots.power_offset);
 
-  out.append("+---------------------------+--------------------------------------------------+\r\n");
+  table.end('-');
   char tip_buf[78];
   snprintf(tip_buf, sizeof(tip_buf), "Tip: Use 'ctl reset 0x%02X' to re-probe or 'ctl name 0x%02X <name>'", grp.dev_id, grp.dev_id);
   CliFmt::PrintBoxFooter(out, tip_buf);

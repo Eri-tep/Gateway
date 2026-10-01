@@ -176,6 +176,14 @@ namespace TimeUtils {
                                     uint32_t duration_ms) noexcept {
   return (millis() - start_ms) >= duration_ms;
 }
+[[nodiscard]] inline long elapsedMs(const struct timeval &now,
+                                    const struct timeval &prev) noexcept {
+  if (prev.tv_sec == 0)
+    return -1;
+  long total_ms =
+      (now.tv_sec - prev.tv_sec) * 1000 + (now.tv_usec - prev.tv_usec) / 1000;
+  return (total_ms >= 0 && total_ms < 60000) ? total_ms : -1;
+}
 } // namespace TimeUtils
 
 void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt);
@@ -191,7 +199,7 @@ void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt);
 
 namespace Config {
 // [시스템] 펌웨어 버전 문자열 (CLI/Log/OTA)
-constexpr const char *FIRMWARE_VERSION = "v1.5.9";
+constexpr const char *FIRMWARE_VERSION = "v1.6.0";
 } // namespace Config
 
 namespace Config::Task {

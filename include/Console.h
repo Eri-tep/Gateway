@@ -8,7 +8,6 @@
 // ============================================================================
 
 #include "Protocol.h"
-#include <embedded_cli.h>
 
 // ============================================================================
 // SECTION 1: TELNET PROTOCOL & IAC ENUMS
@@ -36,6 +35,23 @@ enum class IacState : uint8_t {
   IN_SUBNEG,  // SB(250) 이후 SE(240) 수신 전까지 서브 협상 데이터 처리 중
 };
 
+// Forward declaration
+class CliWriter;
+struct CliContext;
+
+struct Args {
+  int argc = 0;
+  const char *argv[8] = {nullptr};
+
+  int count() const noexcept { return argc > 1 ? argc - 1 : 0; }
+  const char *get(int idx) const noexcept {
+    return (idx >= 0 && idx < argc && argv[idx]) ? argv[idx] : "";
+  }
+  bool is(int idx, const char *val) const noexcept {
+    return (idx >= 0 && idx < argc && argv[idx] && val) && (strcasecmp(argv[idx], val) == 0);
+  }
+};
+
 // ============================================================================
 // SECTION 2: TELNET MANAGER CLASS DEFINITION
 // ============================================================================
@@ -43,13 +59,6 @@ enum class IacState : uint8_t {
 class TelnetManager {
 public:
   enum SessionState { AWAITING_PASSWORD, AUTHENTICATED };
-
-  struct CliDeleter {
-    void operator()(EmbeddedCli *p) const noexcept {
-      if (p)
-        embeddedCliFree(p);
-    }
-  };
 
   struct TelnetSession {
     int sock = -1;
@@ -64,12 +73,10 @@ public:
     size_t pwLen = 0;
     uint32_t sessionId = 0;
 
-    std::unique_ptr<EmbeddedCli, CliDeleter> cli;
-    bool needsSend = false;
-    char txBuf[256];
-    size_t txLen = 0;
+    char lineBuf[128];
+    uint8_t lineLen = 0;
 
-    // ANSI escape sequence filter state (for writeCharToClient)
+    // ANSI escape sequence filter state
     enum class EscState : uint8_t { NORMAL, GOT_ESC, IN_CSI } esc_state{EscState::NORMAL};
 
     void reset() {
@@ -85,10 +92,9 @@ public:
       clientIp = IPAddress(0, 0, 0, 0);
       memset(pwBuffer, 0, sizeof(pwBuffer));
       pwLen = 0;
-      needsSend = false;
-      txLen = 0;
+      memset(lineBuf, 0, sizeof(lineBuf));
+      lineLen = 0;
       esc_state = EscState::NORMAL;
-      cli.reset();
     }
   };
 
@@ -126,11 +132,8 @@ private:
   void handleClientDisconnect(TelnetSession *session);
   bool handlePassword(TelnetSession *session, const char *password);
 
-  static void writeCharToClient(EmbeddedCli *cli, char c);
-  void bindCommands(TelnetSession *session);
-
 public:
-  static void cmdExit(EmbeddedCli *cli, char *args, void *context);
+  static void cmdExit(CliContext &ctx);
   explicit TelnetManager(uint16_t port = Config::TCP::TELNET_PORT);
   void startServer();
   void tick();
@@ -233,20 +236,27 @@ extern TelnetTracer g_telnet_tracer;
 extern std::atomic<bool> g_restart_pending;
 extern const char *g_restart_reason;
 extern TelnetManager::WifiScanReq g_wifi_scan_req;
+struct CliContext {
+  TelnetManager::TelnetSession &session;
+  int sock;
+  const Args &args;
+  CliWriter &out;
+};
+
 // ============================================================================
 // From include/CliCommands.h
 // ============================================================================
 
 namespace WifiCli {
-void cmdWifi(EmbeddedCli *cli, char *args, void *context);
+void cmdWifi(CliContext &ctx);
 } // namespace WifiCli
 
 namespace WallpadCli {
-void cmdWallpad(EmbeddedCli *cli, char *args, void *context);
-void cmdCtl(EmbeddedCli *cli, char *args, void *context);
-void cmdTrace(EmbeddedCli *cli, char *args, void *context);
-void cmdStop(EmbeddedCli *cli, char *args, void *context);
-void cmdDevs(EmbeddedCli *cli, char *args, void *context);
+void cmdWallpad(CliContext &ctx);
+void cmdCtl(CliContext &ctx);
+void cmdTrace(CliContext &ctx);
+void cmdStop(CliContext &ctx);
+void cmdDevs(CliContext &ctx);
 
 void wallpadPrintStatus(AppendBuf &out);
 void wallpadListProfiles(AppendBuf &out);
@@ -263,12 +273,12 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id);
 } // namespace WallpadCli
 
 namespace SystemCli {
-void cmdStats(EmbeddedCli *cli, char *args, void *context);
-void cmdReboot(EmbeddedCli *cli, char *args, void *context);
-void cmdLogView(EmbeddedCli *cli, char *args, void *context);
-void cmdCoreDump(EmbeddedCli *cli, char *args, void *context);
-void cmdOta(EmbeddedCli *cli, char *args, void *context);
-void cmdHelp(EmbeddedCli *cli, char *args, void *context);
+void cmdStats(CliContext &ctx);
+void cmdReboot(CliContext &ctx);
+void cmdLogView(CliContext &ctx);
+void cmdCoreDump(CliContext &ctx);
+void cmdOta(CliContext &ctx);
+void cmdHelp(CliContext &ctx);
 
 void printStats(int sock);
 void printSystemOverview(AppendBuf &out);
@@ -278,10 +288,10 @@ void otaValidate(int sock);
 } // namespace SystemCli
 
 namespace ConfigCli {
-void cmdConfig(EmbeddedCli *cli, char *args, void *context);
-void cmdSave(EmbeddedCli *cli, char *args, void *context);
-void cmdEw11(EmbeddedCli *cli, char *args, void *context);
-void cmdRoutes(EmbeddedCli *cli, char *args, void *context);
+void cmdConfig(CliContext &ctx);
+void cmdSave(CliContext &ctx);
+void cmdEw11(CliContext &ctx);
+void cmdRoutes(CliContext &ctx);
 void printConfig(int sock);
-void setConfig(void *session_context, const char *key, const char *value);
+void setConfig(int sock, const char *key, const char *value);
 } // namespace ConfigCli
