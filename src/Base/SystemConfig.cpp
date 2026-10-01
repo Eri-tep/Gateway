@@ -21,7 +21,8 @@ uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
 } // namespace Config::Timing
 
 namespace Config::Doorphone {
-void FramingTracker::setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept {
+void FramingTracker::setFixedLock(uint8_t stx, uint8_t etx,
+                                  uint8_t len) noexcept {
   candidate_stx.store(stx, std::memory_order_relaxed);
   candidate_etx.store(etx, std::memory_order_relaxed);
   candidate_len.store(len, std::memory_order_relaxed);

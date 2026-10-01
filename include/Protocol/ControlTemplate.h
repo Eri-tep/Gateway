@@ -4,8 +4,8 @@
 // ControlTemplate: Level 3 Device Capability Blueprint & Group Control Engine
 // ============================================================================
 
-#include "Base/SystemPlatform.h"
 #include "Base/SystemConfig.h"
+#include "Base/SystemPlatform.h"
 #include "System/LockUtils.h"
 
 #include <Arduino.h>

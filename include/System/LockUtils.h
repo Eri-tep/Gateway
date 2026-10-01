@@ -1,10 +1,10 @@
 #pragma once
 
+#include "Base/SystemConfig.h"
 #include <Arduino.h>
+#include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#include <esp_log.h>
-#include "Base/SystemConfig.h"
 
 class CriticalSectionLocker {
 private:

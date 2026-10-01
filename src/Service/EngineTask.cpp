@@ -1,11 +1,11 @@
 // ============================================================================
-// EngineTask: Level 4 RTOS Task Scheduling, Queues & RS-485 Engine Implementation
+// EngineTask: Level 4 RTOS Task Scheduling, Queues & RS-485 Engine
+// Implementation
 // ============================================================================
 
 #include "Service/EngineTask.h"
-#include "Service/RemoteService.h"
 #include "Service/ConsoleCli.h"
-
+#include "Service/RemoteService.h"
 
 #include "esp_task_wdt.h"
 #include <WiFi.h>
@@ -58,14 +58,12 @@ SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
                   g_uart2_mutex = nullptr, g_tracer_sem = nullptr;
 Ch1StateMetrics g_ch1_state_metrics;
 
-std::atomic<bool> g_ota_in_progress{false},
-    g_initial_caching_complete{false}, g_probe_convergence_reset{false};
+std::atomic<bool> g_ota_in_progress{false}, g_initial_caching_complete{false},
+    g_probe_convergence_reset{false};
 WifiFallbackGuard g_wifi_guard;
 Config::Doorphone::DoorphoneState g_doorphone_state{};
 CoreDumpInfo g_coredump_info;
 Config::Doorphone::FramingTracker g_doorphone_tracker;
-
-
 
 bool Queue_EnqueueDropHead(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
@@ -78,10 +76,6 @@ bool Queue_EnqueueDropHead(QueueHandle_t queue,
   xQueueReceive(queue, &dummy, 0);
   return (xQueueSend(queue, &packet, 0) == pdTRUE);
 }
-
-
-
-
 
 // ============================================================================
 // Internal Types & Forward Declarations
@@ -106,8 +100,6 @@ namespace PacketBuilder {
 void Ch1_BuildQueryPacket(StaticPacket &out, uint8_t dev_id, uint8_t sub1,
                           uint8_t sub2);
 }
-
-
 
 // ============================================================================
 // 2. UART RX Stream Demux & Packet Validation (formerly UartRx.cpp)

@@ -4,8 +4,8 @@
 // DoorphoneTracker: Level 2 Doorphone Protocol Framing & State Machine (FSM)
 // ============================================================================
 
-#include "Base/SystemPlatform.h"
 #include "Base/SystemConfig.h"
+#include "Base/SystemPlatform.h"
 #include "System/LockUtils.h"
 
 #include <atomic>
@@ -15,11 +15,7 @@ namespace Transport {
 
 class DoorphoneController {
 public:
-  enum class Step : uint8_t {
-    IDLE = 0,
-    CALL_SENT,
-    OPEN_SENT
-  };
+  enum class Step : uint8_t { IDLE = 0, CALL_SENT, OPEN_SENT };
 
 private:
   std::atomic<Step> _step{Step::IDLE};

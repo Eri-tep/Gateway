@@ -4,11 +4,10 @@
 
 #include "Protocol/ControlTemplate.h"
 #include "Protocol/WallpadProtocol.h"
-#include "Service/EngineTask.h"
 #include "Service/ConsoleCli.h"
+#include "Service/EngineTask.h"
 #include "Service/RemoteService.h"
 #include "Transport/NetworkRouter.h"
-
 
 #include <Preferences.h>
 #include <algorithm>
@@ -624,7 +623,8 @@ uint8_t GroupControlTemplate::getPowerOffset(uint8_t pkt_len) const noexcept {
   return 0xFF;
 }
 
-uint8_t GroupControlTemplate::getTargetTempOffset(uint8_t pkt_len) const noexcept {
+uint8_t
+GroupControlTemplate::getTargetTempOffset(uint8_t pkt_len) const noexcept {
   if (pkt_len > 0) {
     if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
         ack_slots.target_temp_offset != 0xFF) {
@@ -641,7 +641,8 @@ uint8_t GroupControlTemplate::getTargetTempOffset(uint8_t pkt_len) const noexcep
   return 0xFF;
 }
 
-uint8_t GroupControlTemplate::getCurrentTempOffset(uint8_t pkt_len) const noexcept {
+uint8_t
+GroupControlTemplate::getCurrentTempOffset(uint8_t pkt_len) const noexcept {
   if (pkt_len > 0) {
     if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
         ack_slots.current_temp_offset != 0xFF) {
@@ -658,7 +659,8 @@ uint8_t GroupControlTemplate::getCurrentTempOffset(uint8_t pkt_len) const noexce
   return 0xFF;
 }
 
-uint8_t GroupControlTemplate::getFanSpeedOffset(uint8_t pkt_len) const noexcept {
+uint8_t
+GroupControlTemplate::getFanSpeedOffset(uint8_t pkt_len) const noexcept {
   if (pkt_len > 0) {
     if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
         ack_slots.fan_speed_offset != 0xFF) {
@@ -704,7 +706,8 @@ uint8_t GroupControlTemplate::decodeFanSpeed(uint8_t raw_token) const noexcept {
 }
 
 uint8_t GroupControlTemplate::decodeVentMode(uint8_t raw_byte) const noexcept {
-  // Byte #8 운전 모드 토큰 (1:일반, 2:바이패스, 3:자동, 4:공기청정, 0x81:Reject)
+  // Byte #8 운전 모드 토큰 (1:일반, 2:바이패스, 3:자동, 4:공기청정,
+  // 0x81:Reject)
   if (raw_byte >= 1 && raw_byte <= 4)
     return raw_byte;
   const uint8_t nibble = (raw_byte >> 4) & 0x0F;
@@ -713,7 +716,8 @@ uint8_t GroupControlTemplate::decodeVentMode(uint8_t raw_byte) const noexcept {
   return 1; // 기본 일반 환기 (0x01)
 }
 
-uint8_t GroupControlTemplate::getValveStateOffset(uint8_t pkt_len) const noexcept {
+uint8_t
+GroupControlTemplate::getValveStateOffset(uint8_t pkt_len) const noexcept {
   if (pkt_len > 0) {
     if (frame_len > 0 && pkt_len == frame_len && ack_slots.discovered &&
         ack_slots.valve_state_offset != 0xFF) {

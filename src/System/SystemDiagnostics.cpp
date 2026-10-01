@@ -1,18 +1,18 @@
 #include "System/SystemDiagnostics.h"
-#include "System/SystemStorage.h"
-#include "Base/SystemPlatform.h"
-#include "Base/SystemConfig.h"
 #include "Base/BufferUtils.h"
+#include "Base/SystemConfig.h"
+#include "Base/SystemPlatform.h"
 #include "System/LockUtils.h"
+#include "System/SystemStorage.h"
 #include <Arduino.h>
-#include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
+#include <WiFi.h>
+#include <driver/uart.h>
 #include <esp_ota_ops.h>
 #include <esp_wifi.h>
-#include <driver/uart.h>
-#include <time.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
 #include <esp_core_dump.h>
@@ -20,7 +20,6 @@
 
 #include "Service/ConsoleCli.h"
 #include "Service/RemoteService.h"
-
 
 extern uint32_t g_boot_start_ms;
 
@@ -192,10 +191,9 @@ void TaskWdtMonitor::feed(size_t index) noexcept {
     const uint32_t gap = (now >= prev) ? (now - prev) : 0;
     uint32_t cur_max =
         tasks[index].max_interval_ms.load(std::memory_order_relaxed);
-    while (gap > cur_max &&
-           !tasks[index].max_interval_ms.compare_exchange_weak(
-               cur_max, gap, std::memory_order_relaxed,
-               std::memory_order_relaxed)) {
+    while (gap > cur_max && !tasks[index].max_interval_ms.compare_exchange_weak(
+                                cur_max, gap, std::memory_order_relaxed,
+                                std::memory_order_relaxed)) {
     }
   }
   tasks[index].feed_count.fetch_add(1, std::memory_order_relaxed);
@@ -365,9 +363,7 @@ static StuckTaskDiag s_stuck_diag;
 static std::atomic<bool> s_ota_validated{false};
 } // anonymous namespace
 
-int8_t System_ReadTempC() {
-  return static_cast<int8_t>(temperatureRead());
-}
+int8_t System_ReadTempC() { return static_cast<int8_t>(temperatureRead()); }
 
 void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
   static std::atomic<uint32_t> s_last_time_ms{0}, s_last_ch1{0}, s_last_ch23{0},
@@ -496,9 +492,9 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
                            uxTaskGetStackHighWaterMark(g_network_task_handle))
                      : 0;
   st.telnet_stack = g_telnet_task_handle
-                         ? static_cast<uint16_t>(
-                               uxTaskGetStackHighWaterMark(g_telnet_task_handle))
-                         : 0;
+                        ? static_cast<uint16_t>(
+                              uxTaskGetStackHighWaterMark(g_telnet_task_handle))
+                        : 0;
 
   pkt.ch1 = g_pkt_stats.ch1;
   pkt.ch2 = g_pkt_stats.ch2;

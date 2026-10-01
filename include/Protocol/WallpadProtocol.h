@@ -4,17 +4,16 @@
 // WallpadProtocol: Level 3 Wallpad Profiles, Protocol Engine & Probing Cache
 // ============================================================================
 
-#include "Protocol/ControlTemplate.h"
-#include "Base/SystemPlatform.h"
 #include "Base/SystemConfig.h"
+#include "Base/SystemPlatform.h"
+#include "Protocol/ControlTemplate.h"
 #include "System/LockUtils.h"
 #include "System/SystemStorage.h"
 
-
-#include <cstddef>
-#include <cstdint>
 #include <array>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -34,9 +33,9 @@ struct DeviceSpec {
   uint8_t ctl_len;
   uint8_t ctl_payload_offset; // 제어 파라미터(Cmd/온도 등) 바이트 오프셋 (현대:
                               // Byte #7)
-  uint8_t pwr_on_val;   // 전원 ON 토큰 (0x01)
-  uint8_t pwr_off_val;  // 전원 OFF 토큰 (0x02, 0x04 등)
-  uint8_t pwr_away_val; // 외출 모드 토큰 (0x07, 미사용 시 0xFF)
+  uint8_t pwr_on_val;         // 전원 ON 토큰 (0x01)
+  uint8_t pwr_off_val;        // 전원 OFF 토큰 (0x02, 0x04 등)
+  uint8_t pwr_away_val;       // 외출 모드 토큰 (0x07, 미사용 시 0xFF)
 
   // 쿼리 응답 상태 슬롯 (QRY ACK)
   uint8_t qry_ack_len;      // 쿼리 응답 패킷 전체 길이

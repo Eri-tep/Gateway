@@ -1,5 +1,6 @@
 // ============================================================================
-// DoorphoneTracker: Level 2 Doorphone Protocol Framing & State Machine Implementation
+// DoorphoneTracker: Level 2 Doorphone Protocol Framing & State Machine
+// Implementation
 // ============================================================================
 
 #include "Transport/DoorphoneTracker.h"
@@ -32,8 +33,9 @@ void DoorphoneController::init() {
   }
 }
 
-bool DoorphoneController::startSequence(uint8_t stx, uint8_t etx, uint8_t op_call,
-                                        uint8_t op_open, uint8_t op_end) {
+bool DoorphoneController::startSequence(uint8_t stx, uint8_t etx,
+                                        uint8_t op_call, uint8_t op_open,
+                                        uint8_t op_end) {
   Step expected = Step::IDLE;
   if (!_step.compare_exchange_strong(expected, Step::CALL_SENT)) {
     return false;
@@ -62,13 +64,15 @@ void DoorphoneController::cancel() {
 void DoorphoneController::onTimerCallback(void * /*arg*/) {
   Step cur = g_doorphone_controller._step.load(std::memory_order_acquire);
   if (cur == Step::CALL_SENT) {
-    sendDpPacket(g_doorphone_controller._c_stx.load(std::memory_order_acquire),
-                 g_doorphone_controller._op_open.load(std::memory_order_acquire),
-                 g_doorphone_controller._c_etx.load(std::memory_order_acquire));
+    sendDpPacket(
+        g_doorphone_controller._c_stx.load(std::memory_order_acquire),
+        g_doorphone_controller._op_open.load(std::memory_order_acquire),
+        g_doorphone_controller._c_etx.load(std::memory_order_acquire));
     g_doorphone_controller._step.store(Step::OPEN_SENT,
                                        std::memory_order_release);
     if (g_doorphone_controller._timer) {
-      esp_timer_start_once(g_doorphone_controller._timer, 750000); // 750ms 후 종료 패킷
+      esp_timer_start_once(g_doorphone_controller._timer,
+                           750000); // 750ms 후 종료 패킷
     }
   } else if (cur == Step::OPEN_SENT) {
     sendDpPacket(g_doorphone_controller._c_stx.load(std::memory_order_acquire),

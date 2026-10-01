@@ -105,7 +105,8 @@ template <typename T> struct NvsEnvelope {
   }
 };
 
-template <class T> inline bool nvsGetEnv(Preferences &p, const char *key, T &out) {
+template <class T>
+inline bool nvsGetEnv(Preferences &p, const char *key, T &out) {
   NvsEnvelope<T> env{};
   if (p.getBytesLength(key) != sizeof(env))
     return false;
@@ -115,14 +116,16 @@ template <class T> inline bool nvsGetEnv(Preferences &p, const char *key, T &out
   return true;
 }
 
-template <class T> inline bool nvsPutEnv(Preferences &p, const char *key, const T &v) {
+template <class T>
+inline bool nvsPutEnv(Preferences &p, const char *key, const T &v) {
   NvsEnvelope<T> env{};
   env.payload = v;
   env.seal();
   return (p.putBytes(key, &env, sizeof(env)) == sizeof(env));
 }
 
-template <class T> inline bool nvsPutEnvNs(const char *ns, const char *key, const T &v) {
+template <class T>
+inline bool nvsPutEnvNs(const char *ns, const char *key, const T &v) {
   Preferences p;
   if (!p.begin(ns, false))
     return false;
@@ -134,8 +137,6 @@ template <class T> inline bool nvsPutEnvNs(const char *ns, const char *key, cons
 template <size_t N> inline void setStr(char (&dst)[N], const char *src) {
   snprintf(dst, N, "%s", src ? src : "");
 }
-
-
 
 struct CoreDumpInfo {
   bool valid{false};
@@ -179,4 +180,3 @@ struct StaticPacket {
   uint8_t length;
   std::array<uint8_t, 64> data;
 };
-

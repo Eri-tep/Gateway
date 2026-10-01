@@ -1,15 +1,15 @@
 #pragma once
 
+#include "Base/BufferUtils.h"
+#include "Base/SystemConfig.h"
+#include "Base/SystemPlatform.h"
+#include "System/LockUtils.h"
 #include <Arduino.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <esp_task_wdt.h>
 #include <esp_system.h>
-#include "Base/SystemPlatform.h"
-#include "Base/SystemConfig.h"
-#include "Base/BufferUtils.h"
-#include "System/LockUtils.h"
+#include <esp_task_wdt.h>
 
 // ── Snapshot & Metrics Data Structures ──
 

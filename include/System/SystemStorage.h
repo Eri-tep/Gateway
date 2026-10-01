@@ -1,12 +1,12 @@
 #pragma once
 
+#include "Base/BufferUtils.h"
+#include "Base/SystemConfig.h"
+#include "Base/SystemPlatform.h"
 #include <Arduino.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include "Base/SystemPlatform.h"
-#include "Base/SystemConfig.h"
-#include "Base/BufferUtils.h"
 
 // ── 1st Tier Warm-Start Cache Data Structures ──
 
@@ -27,10 +27,10 @@ struct RtcWarmCache {
   uint32_t crc32;
 };
 
-constexpr uint32_t RTC_MAGIC_WARM_CACHE = 0x57415243; // 'WARC'
+constexpr uint32_t RTC_MAGIC_WARM_CACHE = 0x57415243;    // 'WARC'
 constexpr uint32_t RTC_MAGIC_CLEAN_RESTART = 0x434C4E52; // 'CLNR'
-constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343; // 'RESC'
-constexpr uint32_t RTC_MAGIC_WDT = 0x57445431; // 'WDT1'
+constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343;        // 'RESC'
+constexpr uint32_t RTC_MAGIC_WDT = 0x57445431;           // 'WDT1'
 
 // ── RTC Fast SRAM Retention Variables ──
 

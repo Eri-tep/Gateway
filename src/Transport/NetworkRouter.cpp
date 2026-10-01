@@ -1,5 +1,6 @@
 // ============================================================================
-// NetworkRouter: Level 2 IP Routing, Subnet Whitelist & Port Mapping Implementation
+// NetworkRouter: Level 2 IP Routing, Subnet Whitelist & Port Mapping
+// Implementation
 // ============================================================================
 
 #include "Transport/NetworkRouter.h"

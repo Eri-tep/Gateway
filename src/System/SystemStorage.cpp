@@ -1,8 +1,7 @@
 #include "System/SystemStorage.h"
+#include "Protocol/WallpadProtocol.h"
 #include <Arduino.h>
 #include <Preferences.h>
-#include "Protocol/WallpadProtocol.h"
-
 
 RTC_NOINIT_ATTR uint32_t rtc_magic;
 RTC_NOINIT_ATTR uint32_t rtc_last_alive_ms[Config::Task::TASK_COUNT];
@@ -22,7 +21,8 @@ std::atomic<bool> g_warm_cache_dirty{false};
 std::atomic<uint32_t> g_warm_cache_dirty_ms{0};
 
 namespace {
-// Save와 Restore가 절대 동시 실행되지 않으므로 단일 정적 봉투를 공유하여 RAM 절감
+// Save와 Restore가 절대 동시 실행되지 않으므로 단일 정적 봉투를 공유하여 RAM
+// 절감
 static NvsEnvelope<RtcWarmCache> s_warm_cache_env;
 } // anonymous namespace
 

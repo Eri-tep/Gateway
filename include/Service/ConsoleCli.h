@@ -4,33 +4,30 @@
 // ConsoleCli: Level 4 Telnet Socket Server & Interactive Console Engine
 // ============================================================================
 
-#include "Service/RemoteService.h"
 #include "Service/EngineTask.h"
+#include "Service/RemoteService.h"
 
 // ============================================================================
 // SECTION 1: TELNET PROTOCOL & IAC ENUMS
 // ============================================================================
 
 namespace TelnetCmd {
-static constexpr uint8_t IAC =
-    255; // Interpret as Command (텔넷 프로토콜 제어 시작 바이트 0xFF)
-static constexpr uint8_t SE = 240; // Sub-negotiation End (서브 협상 종료 0xF0)
-static constexpr uint8_t SB =
-    250; // Sub-negotiation Begin (서브 협상 시작 0xFA)
-static constexpr uint8_t WILL = 251;   // Option 활성화 의사 표명 (0xFB)
-static constexpr uint8_t WONT = 252;   // Option 비활성화 의사 표명 (0xFC)
-static constexpr uint8_t DO = 253;     // 상대방에게 Option 활성화 요청 (0xFD)
-static constexpr uint8_t DONT = 254;   // 상대방에게 Option 비활성화 요청 (0xFE)
-static constexpr uint8_t OPT_ECHO = 1; // Telnet Local Echo 옵션 (0x01)
-static constexpr uint8_t OPT_SUPPRESS_GA =
-    3; // Telnet Suppress Go-Ahead 옵션 (0x03)
+static constexpr uint8_t IAC = 255;
+static constexpr uint8_t SE = 240;
+static constexpr uint8_t SB = 250;
+static constexpr uint8_t WILL = 251;
+static constexpr uint8_t WONT = 252;
+static constexpr uint8_t DO = 253;
+static constexpr uint8_t DONT = 254;
+static constexpr uint8_t OPT_ECHO = 1;
+static constexpr uint8_t OPT_SUPPRESS_GA = 3;
 } // namespace TelnetCmd
 
 enum class IacState : uint8_t {
-  NORMAL,     // 일반 CLI 텍스트 데이터 수신 상태
-  GOT_IAC,    // 0xFF(IAC) 수신 후 다음 텔넷 명령 바이트 대기
-  GOT_OPTION, // WILL/WONT/DO/DONT 수신 후 옵션 ID 바이트 대기
-  IN_SUBNEG,  // SB(250) 이후 SE(240) 수신 전까지 서브 협상 데이터 처리 중
+  NORMAL,
+  GOT_IAC,
+  GOT_OPTION,
+  IN_SUBNEG,
 };
 
 // Forward declaration
@@ -49,6 +46,67 @@ struct Args {
     return (idx >= 0 && idx < argc && argv[idx] && val) &&
            (strcasecmp(argv[idx], val) == 0);
   }
+};
+
+extern SemaphoreHandle_t g_telnet_tx_sem;
+void sendTelnetMsg(int sock, const char *str);
+void sendTelnetMsgLen(int sock, const char *str, size_t len);
+void sendTelnetMsgf(int sock, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+class CliWriter {
+public:
+  int sock = -1;
+  AppendBuf *buf = nullptr;
+
+  explicit CliWriter(int s = -1, AppendBuf *b = nullptr) : sock(s), buf(b) {}
+
+  void write(const char *data, size_t len);
+  void text(const char *s);
+  void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+  void line(const char *fmt = nullptr, ...);
+  void ok(const char *msg);
+  void error(const char *msg);
+  void warn(const char *msg);
+  void header(const char *title);
+  void subtitle(const char *sub);
+  void footer(const char *tip = nullptr);
+  void separator(char ch = '-');
+  void cardRow2(const char *key, const char *val);
+
+private:
+  void centerBox(const char *str);
+};
+
+enum class Align : uint8_t { LEFT, CENTER, RIGHT };
+
+struct Column {
+  const char *title;
+  uint8_t width;
+  Align align = Align::LEFT;
+  Align header_align = Align::CENTER;
+};
+
+class TableRenderer {
+public:
+  AppendBuf *buf = nullptr;
+  CliWriter *w = nullptr;
+  const Column *cols;
+  size_t count;
+
+  TableRenderer(AppendBuf &b, const Column *c, size_t n)
+      : buf(&b), cols(c), count(n) {}
+  TableRenderer(CliWriter &writer, const Column *c, size_t n)
+      : w(&writer), cols(c), count(n) {}
+
+  void writeRaw(const char *data, size_t len);
+  void separator(char ch = '-');
+  static int formatCell(char *dst, size_t sz, const char *txt, uint8_t width,
+                        Align align);
+  void header(bool top_sep = false);
+  void row(std::initializer_list<const char *> cells);
+  void empty(const char *msg);
+  void end(char ch = '-') { separator(ch); }
 };
 
 // ============================================================================
@@ -75,14 +133,12 @@ public:
     char lineBuf[128];
     uint8_t lineLen = 0;
 
-    // ANSI escape sequence filter state
     enum class EscState : uint8_t {
       NORMAL,
       GOT_ESC,
       IN_CSI
     } esc_state{EscState::NORMAL};
 
-    // ── Command History Ring Buffer (Zero-Heap, Fixed Size) ──
     static constexpr uint8_t HISTORY_MAX = 8;
     static constexpr uint8_t CMD_MAX_LEN = 64;
     char history[HISTORY_MAX][CMD_MAX_LEN]{{0}};
@@ -93,7 +149,6 @@ public:
     void addHistory(const char *cmd) {
       if (!cmd || !*cmd)
         return;
-      // Do not duplicate if identical to the latest entry
       if (hist_count > 0) {
         uint8_t prev = (hist_head + HISTORY_MAX - 1) % HISTORY_MAX;
         if (strncmp(history[prev], cmd, CMD_MAX_LEN - 1) == 0)
@@ -257,73 +312,15 @@ public:
   void flushToClient();
 };
 
-extern SemaphoreHandle_t g_telnet_tx_sem;
-void sendTelnetMsg(int sock, const char *str);
-void sendTelnetMsgLen(int sock, const char *str, size_t len);
-void sendTelnetMsgf(int sock, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
-
 extern TelnetManager g_telnet_manager;
 extern TelnetTracer g_telnet_tracer;
 extern std::atomic<bool> g_restart_pending;
 extern const char *g_restart_reason;
 extern TelnetManager::WifiScanReq g_wifi_scan_req;
+
 struct CliContext {
   TelnetManager::TelnetSession &session;
   int sock;
   const Args &args;
   CliWriter &out;
 };
-
-// ============================================================================
-// From include/CliCommands.h
-// ============================================================================
-
-namespace WifiCli {
-void cmdWifi(CliContext &ctx);
-} // namespace WifiCli
-
-namespace WallpadCli {
-void cmdWallpad(CliContext &ctx);
-void cmdCtl(CliContext &ctx);
-void cmdTrace(CliContext &ctx);
-void cmdStop(CliContext &ctx);
-void cmdDevs(CliContext &ctx);
-
-void wallpadPrintStatus(AppendBuf &out);
-void wallpadListProfiles(AppendBuf &out);
-void wallpadSaveProfile(int sock, const char *name);
-void wallpadDeleteProfile(int sock, const char *target);
-void wallpadSetProfile(int sock, const char *key);
-
-void devsPrintSummary(AppendBuf &out, uint32_t now);
-void devsPrintTier1Targets(AppendBuf &out, uint32_t now);
-void devsPrintTier2Cache(AppendBuf &out, uint32_t now);
-
-void wallpadPrintControlTable(AppendBuf &out);
-void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id);
-} // namespace WallpadCli
-
-namespace SystemCli {
-void cmdStats(CliContext &ctx);
-void cmdReboot(CliContext &ctx);
-void cmdLogView(CliContext &ctx);
-void cmdCoreDump(CliContext &ctx);
-void cmdOta(CliContext &ctx);
-void cmdHelp(CliContext &ctx);
-
-void printStats(int sock);
-void printSystemOverview(AppendBuf &out);
-void otaPrintStatus(AppendBuf &out);
-void otaTriggerRollback(int sock);
-void otaValidate(int sock);
-} // namespace SystemCli
-
-namespace ConfigCli {
-void cmdConfig(CliContext &ctx);
-void cmdSave(CliContext &ctx);
-void cmdEw11(CliContext &ctx);
-void cmdRoutes(CliContext &ctx);
-void printConfig(int sock);
-void setConfig(int sock, const char *key, const char *value);
-} // namespace ConfigCli

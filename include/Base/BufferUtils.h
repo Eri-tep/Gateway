@@ -5,10 +5,10 @@
 // ============================================================================
 
 #include "SystemPlatform.h"
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <algorithm>
 
 namespace HexLUT {
 constexpr auto generateLUT() {
@@ -56,8 +56,6 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt);
 void FormatTaskStacks(AppendBuf &out, const StackSnapshot &st,
                       const TaskWdtMonitor &wdt);
 } // namespace Fmt
-
-
 
 struct AppendBuf {
   char *buf;

@@ -4,9 +4,9 @@
 
 #include "Protocol/WallpadProtocol.h"
 #include "Protocol/ControlTemplate.h"
-#include "Service/RemoteService.h"
 #include "Service/ConsoleCli.h"
 #include "Service/EngineTask.h"
+#include "Service/RemoteService.h"
 
 #include "esp_log.h"
 #include <Preferences.h>
@@ -115,84 +115,115 @@ inline int opOf(span<const uint8_t> f, const EffProfile &e) {
 } // namespace
 
 // ============================================================================
-// HYUNDAI WALLPAD PROFILE (현대통신 실측 데이터 기반 정규화 - rodata 플래시 배치)
+// HYUNDAI WALLPAD PROFILE (현대통신 실측 데이터 기반 정규화 - rodata 플래시
+// 배치)
 // ============================================================================
 
 static constexpr DeviceSpec s_hyundai_devices[] = {
-  // 0x19 일반 조명 (Switch)
-  {
-    0x19, DeviceClass::SWITCH, "Light",
-    11, 7, 0x01, 0x02, 0xFF,
-    11, 8, 0xFF, 0xFF, 0xFF, false, 0xFF, 0xFF, 0xFF,
-    11, 7, 8, 0xFF
-  },
-  // 0x18 난방 / 보일러 (Thermostat)
-  {
-    0x18, DeviceClass::THERMOSTAT, "Thermo",
-    11, 7, 0x01, 0x04, 0x07,
-    18, 8, 10, 9, 0xFF, false, 0xFF, 0xFF, 0xFF,
-    13, 7, 8, 9
-  },
-  // 0x1F 콘센트 (Outlet)
-  {
-    0x1F, DeviceClass::OUTLET, "Outlet",
-    11, 7, 0x01, 0x02, 0xFF,
-    18, 8, 0xFF, 0xFF, 0xFF, false, 0xFF, 9, 10,
-    11, 7, 8, 0xFF
-  },
-  // 0x2B 환기 / 전열교환기 (Vent)
-  {
-    0x2B, DeviceClass::VENT, "Vent",
-    11, 7, 0x01, 0x02, 0xFF,
-    13, 8, 0xFF, 0xFF, 9, true, 0xFF, 0xFF, 0xFF,
-    13, 7, 8, 0xFF
-  },
-  // 0x1B 가스 차단기 (Gas)
-  {
-    0x1B, DeviceClass::GAS, "Gas",
-    11, 7, 0x00, 0x02, 0xFF,
-    13, 0xFF, 0xFF, 0xFF, 0xFF, false, 8, 0xFF, 0xFF,
-    13, 7, 8, 0xFF
-  },
-  // 0x34 엘리베이터 (Momentary)
-  {
-    0x34, DeviceClass::MOMENTARY, "Elevator",
-    11, 7, 0x06, 0x00, 0xFF,
-    13, 8, 0xFF, 0xFF, 0xFF, false, 0xFF, 0xFF, 0xFF,
-    11, 7, 8, 0xFF
-  },
-  // 0x1C 시스템 에어컨 / FCU (Aircon)
-  {
-    0x1C, DeviceClass::AIRCON, "Aircon",
-    11, 7, 0x01, 0x02, 0xFF,
-    15, 8, 12, 11, 10, true, 9, 0xFF, 0xFF,
-    11, 7, 8, 0xFF
-  }
-};
+    // 0x19 일반 조명 (Switch)
+    {0x19,    DeviceClass::SWITCH,
+     "Light", 11,
+     7,       0x01,
+     0x02,    0xFF,
+     11,      8,
+     0xFF,    0xFF,
+     0xFF,    false,
+     0xFF,    0xFF,
+     0xFF,    11,
+     7,       8,
+     0xFF},
+    // 0x18 난방 / 보일러 (Thermostat)
+    {0x18,     DeviceClass::THERMOSTAT,
+     "Thermo", 11,
+     7,        0x01,
+     0x04,     0x07,
+     18,       8,
+     10,       9,
+     0xFF,     false,
+     0xFF,     0xFF,
+     0xFF,     13,
+     7,        8,
+     9},
+    // 0x1F 콘센트 (Outlet)
+    {0x1F,     DeviceClass::OUTLET,
+     "Outlet", 11,
+     7,        0x01,
+     0x02,     0xFF,
+     18,       8,
+     0xFF,     0xFF,
+     0xFF,     false,
+     0xFF,     9,
+     10,       11,
+     7,        8,
+     0xFF},
+    // 0x2B 환기 / 전열교환기 (Vent)
+    {0x2B,   DeviceClass::VENT,
+     "Vent", 11,
+     7,      0x01,
+     0x02,   0xFF,
+     13,     8,
+     0xFF,   0xFF,
+     9,      true,
+     0xFF,   0xFF,
+     0xFF,   13,
+     7,      8,
+     0xFF},
+    // 0x1B 가스 차단기 (Gas)
+    {0x1B,  DeviceClass::GAS,
+     "Gas", 11,
+     7,     0x00,
+     0x02,  0xFF,
+     13,    0xFF,
+     0xFF,  0xFF,
+     0xFF,  false,
+     8,     0xFF,
+     0xFF,  13,
+     7,     8,
+     0xFF},
+    // 0x34 엘리베이터 (Momentary)
+    {0x34,       DeviceClass::MOMENTARY,
+     "Elevator", 11,
+     7,          0x06,
+     0x00,       0xFF,
+     13,         8,
+     0xFF,       0xFF,
+     0xFF,       false,
+     0xFF,       0xFF,
+     0xFF,       11,
+     7,          8,
+     0xFF},
+    // 0x1C 시스템 에어컨 / FCU (Aircon)
+    {0x1C,     DeviceClass::AIRCON,
+     "Aircon", 11,
+     7,        0x01,
+     0x02,     0xFF,
+     15,       8,
+     12,       11,
+     10,       true,
+     9,        0xFF,
+     0xFF,     11,
+     7,        8,
+     0xFF}};
 
 const WallpadProfile kHyundaiProfile = {
-  WallpadVendorId::HYUNDAI,
-  "Hyundai HT",
-  0xF7,
-  0xEE,
-  ChecksumAlgo::XOR_NO_STX,
-  4, // opcode_offset
-  2, // dev_id_offset
-  6, // sub1_offset
-  6, // sub2_offset
-  s_hyundai_devices,
-  sizeof(s_hyundai_devices) / sizeof(s_hyundai_devices[0]),
-  {
-    3860, 0x7F, 0xEE, 5, "Hyundai HT Standard",
-    0xB5, 0x5A, 0xB9, 0x5F, 0xB4, 0x61, 0xB8, 0x60
-  }
-};
+    WallpadVendorId::HYUNDAI,
+    "Hyundai HT",
+    0xF7,
+    0xEE,
+    ChecksumAlgo::XOR_NO_STX,
+    4, // opcode_offset
+    2, // dev_id_offset
+    6, // sub1_offset
+    6, // sub2_offset
+    s_hyundai_devices,
+    sizeof(s_hyundai_devices) / sizeof(s_hyundai_devices[0]),
+    {3860, 0x7F, 0xEE, 5, "Hyundai HT Standard", 0xB5, 0x5A, 0xB9, 0x5F, 0xB4,
+     0x61, 0xB8, 0x60}};
 
-const WallpadProfile *const kWallpadProfiles[] = {
-  &kHyundaiProfile
-};
+const WallpadProfile *const kWallpadProfiles[] = {&kHyundaiProfile};
 
-const size_t kWallpadProfileCount = sizeof(kWallpadProfiles) / sizeof(kWallpadProfiles[0]);
+const size_t kWallpadProfileCount =
+    sizeof(kWallpadProfiles) / sizeof(kWallpadProfiles[0]);
 
 // ============================================================================
 // ProfileMatcher
@@ -1886,4 +1917,3 @@ void AutoProbingEngine::reset() {
 // ============================================================================
 // Control: DeviceRouteRegistry
 // ============================================================================
-

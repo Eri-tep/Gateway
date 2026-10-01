@@ -4,16 +4,16 @@
 // EngineTask: Level 4 RTOS Task Scheduling, Queues & RS-485 Engine (CH1~CH4)
 // ============================================================================
 
-#include "Base/SystemPlatform.h"
-#include "Base/SystemConfig.h"
 #include "Base/BufferUtils.h"
+#include "Base/SystemConfig.h"
+#include "Base/SystemPlatform.h"
+#include "Protocol/ControlTemplate.h"
+#include "Protocol/WallpadProtocol.h"
 #include "System/LockUtils.h"
 #include "System/SystemDiagnostics.h"
 #include "System/SystemStorage.h"
-#include "Transport/NetworkRouter.h"
 #include "Transport/DoorphoneTracker.h"
-#include "Protocol/ControlTemplate.h"
-#include "Protocol/WallpadProtocol.h"
+#include "Transport/NetworkRouter.h"
 
 #include <array>
 #include <atomic>
@@ -251,4 +251,3 @@ void Hub_SaveConfig();
 bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
                  const char *name = nullptr);
 bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
-
