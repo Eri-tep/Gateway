@@ -21,11 +21,10 @@ Integrated project: **M5Stack AtomS3 Lite RS-485/TCP Gateway Firmware (C++17)** 
 | Domain | Reference | When to Inspect |
 |---|---|---|
 | **Workflow & Tools** | [`docs/AGENT_WORKFLOW_GUIDELINES.md`](docs/AGENT_WORKFLOW_GUIDELINES.md) | File inspection >300L, symbol indexing, IWYU cleanup |
-| **Gateway Architecture** | [`docs/ARCHITECTURE_AND_SPECIFICATIONS.md`](docs/ARCHITECTURE_AND_SPECIFICATIONS.md) | CH1~6 task structure, routing, lock hierarchy |
+| **Architecture & Philosophy** | [`docs/ARCHITECTURE_AND_SPECIFICATIONS.md`](docs/ARCHITECTURE_AND_SPECIFICATIONS.md) | Task topology, CH1~6 ports, lock hierarchy & 7 engineering pillars |
+| **C++ & Naming Standards** | [`docs/MODERN_CPP_GUIDELINES.md`](docs/MODERN_CPP_GUIDELINES.md) | C++17, AppendBuf, zero heap, naming conventions (`Domain_VerbNoun`, `g_`) |
+| **Code Review & Audit** | [`docs/EMBEDDED_CODE_REVIEW_AND_VERIFICATION_GUIDE.md`](docs/EMBEDDED_CODE_REVIEW_AND_VERIFICATION_GUIDE.md) | 8-Domain audit framework, RAM/stack/retention & shell audit commands |
 | **Protocol Specification** | [`docs/HYUNDAI_WALLPAD_PROTOCOL_SPECIFICATION.md`](docs/HYUNDAI_WALLPAD_PROTOCOL_SPECIFICATION.md) | Hyundai RS-485 packet frames, slots, doorphone FSM |
-| **Naming Conventions** | [`docs/NAMING_CONVENTIONS.md`](docs/NAMING_CONVENTIONS.md) | Symbol naming (`Domain_VerbNoun`), globals (`g_`), snapshots |
-| **Modern C++ Standards** | [`docs/MODERN_CPP_GUIDELINES.md`](docs/MODERN_CPP_GUIDELINES.md) | Packet buffer (`AppendBuf`), C++17, zero heap allocation |
-| **Code Review & Audit** | [`docs/EMBEDDED_CODE_REVIEW_AND_VERIFICATION_GUIDE.md`](docs/EMBEDDED_CODE_REVIEW_AND_VERIFICATION_GUIDE.md) | 8-Domain audit, RAM/stack/retention optimization |
 | **Edge Driver** | [`docs/SMARTTHINGS_EDGE_DRIVER_GUIDE.md`](docs/SMARTTHINGS_EDGE_DRIVER_GUIDE.md) | `Gateway-edge-driver/` Lua code, profiles, cosock |
 
 ---
