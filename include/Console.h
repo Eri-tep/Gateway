@@ -255,6 +255,7 @@ void wallpadSaveProfile(int sock, const char *name);
 void wallpadDeleteProfile(int sock, const char *target);
 void wallpadSetProfile(int sock, const char *key);
 
+void devsPrintSummary(AppendBuf &out, uint32_t now);
 void devsPrintTier1Targets(AppendBuf &out, uint32_t now);
 void devsPrintTier2Cache(AppendBuf &out, uint32_t now);
 

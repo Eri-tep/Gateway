@@ -1213,36 +1213,62 @@ static void AsyncWifiScanTask(void *pvParameters) {
   AppendBuf out{scan_buf.get(), 4096};
 
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                      2.4GHz WI-FI ACCESS POINT SCAN RESULTS                  \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("No   SSID                             RSSI      Channel  Encryption\r\n");
-  out.append(Fmt::DIV80);
+  out.append("+==============================================================================+\r\n");
+  out.append("|                          NEARBY WIFI ACCESS POINTS                           |\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("| No |        SSID        | Signal (RSSI) |  CH  |          Security           |\r\n");
+  out.append("+----+--------------------+---------------+------+-----------------------------+\r\n");
 
   if (n == 0) {
-    out.append("  (No wireless networks found)\r\n");
+    out.append("|                         (No wireless networks found)                         |\r\n");
   } else if (n < 0) {
-    out.append("  [ERROR] Wi-Fi hardware scan failed or timed out.\r\n");
+    out.append("|               [ERROR] Wi-Fi hardware scan failed or timed out.               |\r\n");
   } else {
     int max_display = std::min(n, 40);
     for (int i = 0; i < max_display; ++i) {
-      const char *encType = "Open";
+      const char *encType = "OPEN";
       switch (WiFi.encryptionType(i)) {
       case WIFI_AUTH_WEP: encType = "WEP"; break;
-      case WIFI_AUTH_WPA_PSK: encType = "WPA"; break;
-      case WIFI_AUTH_WPA2_PSK: encType = "WPA2"; break;
-      case WIFI_AUTH_WPA_WPA2_PSK: encType = "WPA/WPA2"; break;
-      case WIFI_AUTH_WPA2_ENTERPRISE: encType = "Enterprise"; break;
-      case WIFI_AUTH_WPA3_PSK: encType = "WPA3"; break;
-      case WIFI_AUTH_WPA2_WPA3_PSK: encType = "WPA2/WPA3"; break;
+      case WIFI_AUTH_WPA_PSK: encType = "WPA-PSK"; break;
+      case WIFI_AUTH_WPA2_PSK: encType = "WPA2-PSK"; break;
+      case WIFI_AUTH_WPA_WPA2_PSK: encType = "WPA / WPA2"; break;
+      case WIFI_AUTH_WPA2_ENTERPRISE: encType = "WPA2-Enterprise"; break;
+      case WIFI_AUTH_WPA3_PSK: encType = "WPA3-SAE"; break;
+      case WIFI_AUTH_WPA2_WPA3_PSK: encType = "WPA2-PSK / WPA3-SAE"; break;
       default: break;
       }
-      out.appendFormat("%02d   %-32s %4d dBm   %3d      %s\r\n", i + 1,
-                       WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i),
-                       encType);
+      char sig_buf[16];
+      int rssi = WiFi.RSSI(i);
+      int pct = std::min(std::max(2 * (rssi + 100), 0), 100);
+      snprintf(sig_buf, sizeof(sig_buf), "%d dBm (%d%%)", rssi, pct);
+
+      char ssid_buf[19] = {0};
+      strncpy(ssid_buf, WiFi.SSID(i).c_str(), sizeof(ssid_buf) - 1);
+
+      int s_len = strlen(sig_buf);
+      int sl_l = (15 - s_len) / 2;
+      int sl_r = 15 - s_len - sl_l;
+
+      int e_len = strlen(encType);
+      int el_l = (29 - e_len) / 2;
+      int el_r = 29 - e_len - el_l;
+
+      char ch_buf[8];
+      snprintf(ch_buf, sizeof(ch_buf), "%d", WiFi.channel(i));
+      int c_len = strlen(ch_buf);
+      int cl_l = (6 - c_len) / 2;
+      int cl_r = 6 - c_len - cl_l;
+
+      out.appendFormat("| %-2d | %-18.18s |%*s%s%*s|%*s%s%*s|%*s%s%*s|\r\n",
+                       i + 1, ssid_buf,
+                       sl_l, "", sig_buf, sl_r, "",
+                       cl_l, "", ch_buf, cl_r, "",
+                       el_l, "", encType, el_r, "");
     }
   }
-  out.append(Fmt::DIV80EQ);
+  out.append("+----+--------------------+---------------+------+-----------------------------+\r\n");
+  out.append("|              Use 'wifi connect <ssid> <password>' to switch AP               |\r\n");
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
   WiFi.scanDelete();
 
@@ -1263,35 +1289,35 @@ void cmdWifi(EmbeddedCli *cli, char *args, void *context) {
     AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
 
     out.append("\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("                      WI-FI HARDWARE & NETWORK STATUS                         \r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("Category            Parameter       Value / Target                        Status\r\n");
-    out.append(Fmt::DIV80);
+    out.append("+==============================================================================+\r\n");
+    out.append("|                       WI-FI HARDWARE & NETWORK STATUS                        |\r\n");
+    out.append("+==============================================================================+\r\n");
+    out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
+    out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
     bool sta_ok = (WiFi.status() == WL_CONNECTED);
-    out.appendFormat("%-20s%-16s%-32s%12s\r\n", "Station (STA)", "SSID",
+    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Station (STA)", "SSID",
                      sta_ok ? WiFi.SSID().c_str() : g_config.wifi_ssid,
                      sta_ok ? "[CONNECTED]" : "[DISCONNECTED]");
-    out.appendFormat("%-20s%-16s%-32s%12s\r\n", "", "IP Address",
+    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "IP Address",
                      sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0",
                      sta_ok ? "[ACTIVE]" : "[IDLE]");
     char rssi_b[16];
     snprintf(rssi_b, sizeof(rssi_b), "%d dBm", WiFi.RSSI());
-    out.appendFormat("%-20s%-16s%-32s%12s\r\n", "", "Signal (RSSI)",
+    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Signal (RSSI)",
                      sta_ok ? rssi_b : "N/A", sta_ok ? "[STABLE]" : "[IDLE]");
-    out.append(Fmt::DIV80);
+    out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
     bool ap_active = (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA);
-    out.appendFormat("%-20s%-16s%-32s%12s\r\n", "SoftAP (AP)", "SSID",
+    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "SoftAP (AP)", "SSID",
                      g_config.ap_ssid, ap_active ? "[BROADCASTING]" : "[DISABLED]");
-    out.appendFormat("%-20s%-16s%-32s%12s\r\n", "", "AP IP",
+    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "AP IP",
                      ap_active ? WiFi.softAPIP().toString().c_str() : "0.0.0.0",
                      ap_active ? "[ACTIVE]" : "[INACTIVE]");
-    out.appendFormat("%-20s%-16s%-32s%12s\r\n", "", "Clients",
+    out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "", "Clients",
                      ap_active ? "Max 4 Clients" : "0 Clients",
                      ap_active ? "[READY]" : "[OFF]");
-    out.append(Fmt::DIV80EQ);
+    out.append("+==============================================================================+\r\n");
     out.append("\r\n");
 
     sendTelnetMsgLen(sock, out.buf, out.offset);
@@ -1530,12 +1556,20 @@ void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
     AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
 
     out.append("\r\n");
-    out.append(Fmt::DIV80EQ);
-    char hdr[64];
-    snprintf(hdr, sizeof(hdr), "Persistent Reboot Log History (Total: %u / %u)",
+    out.append("+==============================================================================+\r\n");
+    out.append("|                        PERSISTENT REBOOT LOG HISTORY                         |\r\n");
+    out.append("+==============================================================================+\r\n");
+    char sub_buf[64];
+    snprintf(sub_buf, sizeof(sub_buf), "Total Stored: %u / %u Logs | Non-Volatile RTC/NVS",
              static_cast<unsigned>(count), static_cast<unsigned>(LogManager::MAX_LOG_ENTRIES));
-    out.appendFormat("%*s%s\r\n", std::max(0, (80 - static_cast<int>(strlen(hdr))) / 2), "", hdr);
-    out.append(Fmt::DIV80EQ);
+    int s_len = strlen(sub_buf);
+    int sl_l = (78 - s_len) / 2;
+    int sl_r = 78 - s_len - sl_l;
+    out.appendFormat("|%*s%s%*s|\r\n", sl_l, "", sub_buf, sl_r, "");
+
+    out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
+    out.append("| No  |      Timestamp      |           Reboot Reason           |    Uptime    |\r\n");
+    out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
 
     for (size_t i = 0; i < count; i++) {
       LogEntry entry;
@@ -1555,12 +1589,34 @@ void cmdLogView(EmbeddedCli *cli, char *args, void *context) {
           }
         }
         uint32_t sec = entry.stats_snapshot.uptime_ms / 1000;
-        out.appendFormat("  [#%-2u] %s | Reason: %-28s | Up: %02uh %02um\r\n",
-                         static_cast<unsigned>(i + 1), time_buf, entry.reason, sec / 3600,
-                         (sec % 3600) / 60);
+        char up_buf[16];
+        snprintf(up_buf, sizeof(up_buf), "%02uh %02um %02us",
+                 sec / 3600, (sec % 3600) / 60, sec % 60);
+
+        char no_buf[8];
+        snprintf(no_buf, sizeof(no_buf), "#%u", static_cast<unsigned>(i + 1));
+        int n_len = strlen(no_buf);
+        int nl_l = (5 - n_len) / 2;
+        int nl_r = 5 - n_len - nl_l;
+
+        int t_len = strlen(time_buf);
+        int tl_l = (21 - t_len) / 2;
+        int tl_r = 21 - t_len - tl_l;
+
+        int u_len = strlen(up_buf);
+        int ul_l = (14 - u_len) / 2;
+        int ul_r = 14 - u_len - ul_l;
+
+        out.appendFormat("|%*s%s%*s|%*s%s%*s| %-33.33s |%*s%s%*s|\r\n",
+                         nl_l, "", no_buf, nl_r, "",
+                         tl_l, "", time_buf, tl_r, "",
+                         entry.reason,
+                         ul_l, "", up_buf, ul_r, "");
       }
     }
-    out.append(Fmt::DIV80);
+    out.append("+-----+---------------------+-----------------------------------+--------------+\r\n");
+    out.append("|        Use 'logview <1-20>' for details, 'logview clear' to wipe history     |\r\n");
+    out.append("+==============================================================================+\r\n");
     out.append("\r\n");
     sendTelnetMsgLen(client, out.buf, out.offset);
     return;
@@ -1608,35 +1664,37 @@ void cmdCoreDump(EmbeddedCli *cli, char *args, void *context) {
 
   pos += snprintf(
       buf + pos, buf_size - pos,
-      "\r\n========================================================================"
-      "========\r\n"
-      "                    CRASH CORE DUMP BACKTRACE SUMMARY                   "
-      "       \r\n"
-      "========================================================================"
-      "========\r\n"
-      "Status          : Valid Core Dump Found\r\n"
-      "Crashed Task    : %s\r\n"
-      "Program Counter : 0x%08X\r\n"
-      "Exception Cause : %lu\r\n"
-      "Backtrace Depth : %d frames%s\r\n"
-      "Backtrace PCs   :\r\n",
-      summary.exc_task, static_cast<unsigned>(summary.exc_pc), static_cast<unsigned long>(summary.ex_info.exc_cause),
-      summary.exc_bt_info.depth,
-      summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
+      "\r\n+==============================================================================+\r\n"
+      "|                       CRASH CORE DUMP ANALYSIS SUMMARY                       |\r\n"
+      "+==============================================================================+\r\n"
+      "| Status          : Valid Core Dump Found                                      |\r\n");
 
-  for (int i = 0; i < summary.exc_bt_info.depth && pos < static_cast<int>(buf_size) - 64;
+  char line_buf[128];
+  snprintf(line_buf, sizeof(line_buf), "Crashed Task    : %s", summary.exc_task);
+  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+
+  snprintf(line_buf, sizeof(line_buf), "Program Counter : 0x%08X", static_cast<unsigned>(summary.exc_pc));
+  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+
+  snprintf(line_buf, sizeof(line_buf), "Exception Cause : %lu", static_cast<unsigned long>(summary.ex_info.exc_cause));
+  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+
+  snprintf(line_buf, sizeof(line_buf), "Backtrace Depth : %d frames%s", summary.exc_bt_info.depth, summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
+  pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
+
+  pos += snprintf(buf + pos, buf_size - pos, "| Backtrace PCs   :                                                            |\r\n");
+
+  for (int i = 0; i < summary.exc_bt_info.depth && pos < static_cast<int>(buf_size) - 128;
        ++i) {
-    pos += snprintf(buf + pos, buf_size - pos, "  [%2d] 0x%08X\r\n", i,
-                    static_cast<unsigned>(summary.exc_bt_info.bt[i]));
+    snprintf(line_buf, sizeof(line_buf), "  [%2d] 0x%08X", i, static_cast<unsigned>(summary.exc_bt_info.bt[i]));
+    pos += snprintf(buf + pos, buf_size - pos, "| %-76.76s |\r\n", line_buf);
   }
 
   pos += snprintf(
       buf + pos, buf_size - pos,
-      "\r\n===================================================================="
-      "============\r\n"
-      "Use: xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>\r\n"
-      "========================================================================"
-      "========\r\n\r\n");
+      "+------------------------------------------------------------------------------+\r\n"
+      "| Use: xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <PC>                |\r\n"
+      "+==============================================================================+\r\n\r\n");
   sendTelnetMsg(client, buf);
 }
 
@@ -1693,15 +1751,15 @@ void otaPrintStatus(AppendBuf &out) {
   bool is_rescue = g_rescue_mode.load(std::memory_order_relaxed);
 
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                    DUAL-PARTITION OTA & ROLLBACK MONITOR                     \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("Category            Parameter       Value / Target                        Status\r\n");
-  out.append(Fmt::DIV80);
+  out.append("+==============================================================================+\r\n");
+  out.append("|                    DUAL-PARTITION OTA & ROLLBACK MONITOR                     |\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("|   Category    |   Parameter   |       Value / Target        |     Status     |\r\n");
+  out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
-  out.appendFormat("%-20s%-16s%-32s%12s\r\n", "Running App",    "Partition",     run_val,             "[ACTIVE]");
-  out.appendFormat("%-20s%-16s%-32s%12s\r\n", "",               "State",         state_desc,          state_status);
-  out.append(Fmt::DIV80);
+  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Running App",    "Partition",     run_val,             "[ACTIVE]");
+  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "State",         state_desc,          state_status);
+  out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
   esp_ota_img_states_t next_state = ESP_OTA_IMG_UNDEFINED;
   if (next) {
@@ -1717,14 +1775,14 @@ void otaPrintStatus(AppendBuf &out) {
     next_status = "[ABORTED]";
   }
 
-  out.appendFormat("%-20s%-16s%-32s%12s\r\n", "Backup Target",  "Partition",     next_val,            "[STANDBY]");
-  out.appendFormat("%-20s%-16s%-32s%12s\r\n", "",               "Rollback",      next_desc,           next_status);
-  out.append(Fmt::DIV80);
+  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Backup Target",  "Partition",     next_val,            "[STANDBY]");
+  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Rollback",      next_desc,           next_status);
+  out.append("+---------------+---------------+-----------------------------+----------------+\r\n");
 
-  out.appendFormat("%-20s%-16s%-32s%12s\r\n", "Safety Guard",   "Health Timer",  timer_val,           val_done ? "[STABLE]" : "[TESTING]");
-  out.appendFormat("%-20s%-16s%-32s%12s\r\n", "",               "Crash Loop",    crash_val,           rtc_crash_counter == 0 ? "[STABLE]" : "[WARNING]");
-  out.appendFormat("%-20s%-16s%-32s%12s\r\n", "",               "Rescue Mode",   is_rescue ? "Forced Safe SoftAP" : "Standard Boot", is_rescue ? "[RESCUE]" : "[STABLE]");
-  out.append(Fmt::DIV80EQ);
+  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "Safety Guard",   "Health Timer",  timer_val,           val_done ? "[STABLE]" : "[TESTING]");
+  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Crash Loop",    crash_val,           rtc_crash_counter == 0 ? "[STABLE]" : "[WARNING]");
+  out.appendFormat("| %-13s | %-13s | %-27.27s | %-14s |\r\n", "",               "Rescue Mode",   is_rescue ? "Forced Safe SoftAP" : "Standard Boot", is_rescue ? "[RESCUE]" : "[STABLE]");
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
 }
 
@@ -1780,62 +1838,30 @@ void cmdHelp(EmbeddedCli *cli, char *args, void *context) {
   AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
 
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                       GATEWAY BRIDGE COMMAND REFERENCE                       \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("Command / Parameter               Description & Usage Example\r\n");
-  out.append(Fmt::DIV80);
-
-  out.append(" [ SYSTEM & DIAGNOSTICS ]\r\n");
-  out.append("  stats [clear]                   Show real-time HW metrics & traffic stats (or reset)\r\n");
-  out.append("  devs [1|2|clear]                Show device registry & cache (1: T1 Targets, 2: T2 Cache)\r\n");
-  out.append("  logview [list|<1-20>|last|clear] View persistent reboot log history from NVS\r\n");
-  out.append("  coredump [clear]                View crash core dump summary & backtrace\r\n");
-  out.append("  ota [status|rollback|validate]  Dual-partition OTA & auto-rollback management\r\n");
-  out.append("  reboot                          Safely commit buffers and reboot gateway hardware\r\n");
-  out.append(Fmt::DIV80);
-
-  out.append(" [ PROTOCOL & PROBING ]\r\n");
-  out.append("  wallpad [status]                Show wallpad profile learning status & parameters\r\n");
-  out.append("  wallpad list                    List available vendor & saved NVS custom profiles\r\n");
-  out.append("  wallpad set <key|id>            Manually switch active wallpad profile\r\n");
-  out.append("  wallpad save <name>             Save current auto-learned profile to NVS slot\r\n");
-  out.append("  wallpad delete <id>             Reset a saved custom profile slot in NVS\r\n");
-  out.append("  wallpad auto                    Switch to Universal Auto-Probing mode\r\n");
-  out.append("  wallpad reset                   Reset auto-probing engine and re-learn bus traffic\r\n");
-  out.append("  wallpad simulate <hex...>       Inject raw hex packet into auto-probing engine\r\n");
-  out.append(Fmt::DIV80);
-  out.append(" [ CONTROL BLUEPRINT & LEARNING ]\r\n");
-  out.append("  ctl [table|list]                Display learned control blueprint table\r\n");
-  out.append("  ctl <dev_id>                    Dump detailed packet blueprint & action slots (e.g. ctl 0x18)\r\n");
-  out.append("  ctl learn [id|all]              Active probing session (all groups if omitted)\r\n");
-  out.append("  ctl lock [dev_id|all]           Lock blueprint(s) into immutable state\r\n");
-  out.append("  ctl unlock [dev_id|all]         Unlock blueprint(s) for continuous learning\r\n");
-  out.append("  ctl name <dev_id> <name>        Assign custom group name (e.g. ctl name 0x1B Gas)\r\n");
-  out.append("  ctl class <dev_id> <class>      Assign device class (light|outlet|vent|thermo|gas|ev)\r\n");
-  out.append("  ctl status                      Show active probing real-time progress\r\n");
-  out.append("  ctl reset [id|all]              Reset blueprint(s) and wipe from NVS flash\r\n");
-  out.append("  trace [on|off|ctl|ack|pol|...]  Live packet stream monitoring with filters\r\n");
-  out.append("  q                               Shortcut to stop live tracing immediately\r\n");
-  out.append(Fmt::DIV80);
-
-  out.append(" [ NETWORK & CONFIG ]\r\n");
-  out.append("  wifi [status]                   Show Wi-Fi STA connection status & signal strength\r\n");
-  out.append("  wifi scan                       Scan surrounding 2.4GHz Wi-Fi AP networks\r\n");
-  out.append("  wifi connect <ssid> [password]  Connect to target Wi-Fi AP network\r\n");
-  out.append("  wifi disconnect                 Disconnect current Wi-Fi station\r\n");
-  out.append("  ew11 [list|status]              Show CH5 EW11 multi-client slots & framing status\r\n");
-  out.append("  ew11 set <slot> <ip> [port]     Configure EW11 slot IP & port (Saved to NVS)\r\n");
-  out.append("  ew11 frame <slot> <stx> <etx>   Manually fix slot packet framing in NVS\r\n");
-  out.append("  ew11 reset <slot>               Reset slot framing tracker to autonomous auto-probing\r\n");
-  out.append("  ew11 enable/disable <slot>      Enable or disable target EW11 client slot\r\n");
-  out.append("  routes [clear]                  Show dynamic device ingress routing table\r\n");
-  out.append("  config                          View all runtime configuration parameters\r\n");
-  out.append("  config set <key> <val>          Modify a configuration parameter (runtime)\r\n");
-  out.append("  config reset                    Reset runtime configuration to system defaults\r\n");
-  out.append("  save                            Commit and save all configuration to NVS flash\r\n");
-  out.append("  exit                            Disconnect current Telnet CLI session\r\n");
-  out.append(Fmt::DIV80EQ);
+  out.append("+==============================================================================+\r\n");
+  out.append("|                       GATEWAY TELNET COMMAND REFERENCE                       |\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("| Command   | Description & Usage Syntax                                       |\r\n");
+  out.append("+-----------+------------------------------------------------------------------+\r\n");
+  out.append("| stats     | Show real-time HW metrics & traffic stats [clear]                |\r\n");
+  out.append("| devs      | Show device registry & cache [1|2|clear]                         |\r\n");
+  out.append("| wifi      | Manage WiFi STA connection [status|scan|connect|disconnect]      |\r\n");
+  out.append("| trace     | Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]          |\r\n");
+  out.append("| wallpad   | Wallpad protocol & probing [status|list|set|save|delete|auto]    |\r\n");
+  out.append("| ctl       | Device control specs [view|reset|name|class]                     |\r\n");
+  out.append("| config    | View or modify runtime configuration [set|reset]                 |\r\n");
+  out.append("| save      | Save current runtime configuration to NVS flash                  |\r\n");
+  out.append("| ew11      | CH5 EW11 multi-client hub config [list|set|enable|disable]       |\r\n");
+  out.append("| routes    | Show dynamic device ingress routing table [clear]                |\r\n");
+  out.append("| logview   | Persistent reboot history & crash logs [list|<1-20>|last|clear]  |\r\n");
+  out.append("| coredump  | Show crash core dump summary or erase partition [clear]          |\r\n");
+  out.append("| ota       | Dual-partition OTA & auto-rollback management [status|rollback]  |\r\n");
+  out.append("| reboot    | Perform hardware system reboot with safe shutdown                |\r\n");
+  out.append("| q         | Stop active packet tracing (shortcut for 'trace off')            |\r\n");
+  out.append("| exit      | Disconnect current Telnet CLI session                            |\r\n");
+  out.append("+-----------+------------------------------------------------------------------+\r\n");
+  out.append("|         Type '<command> help' or refer to documentation for details          |\r\n");
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
 
   sendTelnetMsgLen(client, out.buf, out.offset);
@@ -1921,35 +1947,51 @@ void printConfig(int sock) {
   snprintf(f3, sizeof(f3), "%s", formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity, g_config.ch3_stop_bits));
   snprintf(f4, sizeof(f4), "%s", formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity, g_config.doorphone_stop_bits));
 
-  const char *prof_name = "Auto Detect (Slot 0)";
-  if (g_config.wallpad_profile == 1) prof_name = "Custom Slot 1";
-  else if (g_config.wallpad_profile == 2) prof_name = "Custom Slot 2";
-  else if (g_config.wallpad_profile == 3) prof_name = "Custom Slot 3";
+  const char *prof_name = "0 (Auto-Discovered & Learned)";
+  if (g_config.wallpad_profile == 1) prof_name = "1 (Custom Slot 1)";
+  else if (g_config.wallpad_profile == 2) prof_name = "2 (Custom Slot 2)";
+  else if (g_config.wallpad_profile == 3) prof_name = "3 (Custom Slot 3)";
+
+  char val_wifi_ssid[50], val_ap_ssid[50], val_wifi_tout[50], val_telnet_pass[50];
+  char val_uart[50], val_ch2[50], val_ch3[50], val_ch4[50];
+  char val_ch1_poll[50], val_ch2_ack[50], val_ch3_ack[50];
+
+  snprintf(val_wifi_ssid, sizeof(val_wifi_ssid), "\"%s\"", g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(Not Configured)");
+  snprintf(val_ap_ssid, sizeof(val_ap_ssid), "\"%s\"", g_config.ap_ssid[0] ? g_config.ap_ssid : "(Disabled)");
+  snprintf(val_wifi_tout, sizeof(val_wifi_tout), "%u sec", g_config.wifi_connect_timeout_s);
+  snprintf(val_telnet_pass, sizeof(val_telnet_pass), "%s", g_config.telnet_pass_hash[0] ? "Configured (SHA-256)" : "Default (None)");
+
+  snprintf(val_uart, sizeof(val_uart), "%u bps (%s)", static_cast<unsigned>(g_config.uart_baud_rate), f1);
+  snprintf(val_ch2, sizeof(val_ch2), "%u bps (%s)", static_cast<unsigned>(g_config.ch2_baud_rate), f2);
+  snprintf(val_ch3, sizeof(val_ch3), "%u bps (%s)", static_cast<unsigned>(g_config.ch3_baud_rate), f3);
+  snprintf(val_ch4, sizeof(val_ch4), "%u bps (%s)", static_cast<unsigned>(g_config.doorphone_baud_rate), f4);
+
+  snprintf(val_ch1_poll, sizeof(val_ch1_poll), "%u ms", g_timing_config.ch1_poll_interval_ms);
+  snprintf(val_ch2_ack, sizeof(val_ch2_ack), "%u ms", g_timing_config.ch2_cache_delay_ms);
+  snprintf(val_ch3_ack, sizeof(val_ch3_ack), "%u ms", g_timing_config.ch3_cache_delay_ms);
 
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                         GATEWAY CONFIGURATION (NVS Flash)              \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("[Network & Security]\r\n");
-  out.appendFormat("  WiFi Station SSID : %s\r\n", g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(Not Configured)");
-  out.appendFormat("  WiFi SoftAP SSID  : %s\r\n", g_config.ap_ssid[0] ? g_config.ap_ssid : "(Disabled)");
-  out.appendFormat("  WiFi Connect Tout : %u sec\r\n", g_config.wifi_connect_timeout_s);
-  out.appendFormat("  Telnet Password   : %s\r\n", g_config.telnet_pass_hash[0] ? "Configured (SHA-256)" : "Default (None)");
+  out.append("+==============================================================================+\r\n");
+  out.append("|                     RUNTIME GATEWAY CONFIGURATION (NVS)                      |\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("|       Parameter Key       |                  Configured Value                |\r\n");
+  out.append("+---------------------------+--------------------------------------------------+\r\n");
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "wifi_ssid", val_wifi_ssid);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ap_ssid", val_ap_ssid);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "wifi_timeout", val_wifi_tout);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "telnet_pass", val_telnet_pass);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "wallpad_profile", prof_name);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "uart_baud_rate (CH1)", val_uart);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch2_baud_rate (CH2)", val_ch2);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch3_baud_rate (CH3)", val_ch3);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "doorphone_baud_rate (CH4)", val_ch4);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch1_poll_interval", val_ch1_poll);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch2_cache_delay", val_ch2_ack);
+  out.appendFormat("| %-25.25s | %-48.48s |\r\n", "ch3_cache_delay", val_ch3_ack);
+  out.append("+---------------------------+--------------------------------------------------+\r\n");
+  out.append("|       Use 'config set <key> <val>' and 'save' to persist to NVS              |\r\n");
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
-  out.append("[Wallpad & Protocol]\r\n");
-  out.appendFormat("  Wallpad Profile   : %s\r\n", prof_name);
-  out.append("\r\n");
-  out.append("[Channels & RS-485 / Delays]\r\n");
-  out.appendFormat("  CH1 (Device Master) : %-6u bps, %-3s | Query Interval : %u ms\r\n",
-                   static_cast<unsigned>(g_config.uart_baud_rate), f1, g_timing_config.ch1_poll_interval_ms);
-  out.appendFormat("  CH2 (Main Wallpad)  : %-6u bps, %-3s | Virtual ACK    : %u ms\r\n",
-                   static_cast<unsigned>(g_config.ch2_baud_rate), f2, g_timing_config.ch2_cache_delay_ms);
-  out.appendFormat("  CH3 (Sub Wallpad)   : %-6u bps, %-3s | Virtual ACK    : %u ms\r\n",
-                   static_cast<unsigned>(g_config.ch3_baud_rate), f3, g_timing_config.ch3_cache_delay_ms);
-  out.appendFormat("  CH4 (Doorphone)     : %-6u bps, %-3s | RX/TX Isolated\r\n",
-                   static_cast<unsigned>(g_config.doorphone_baud_rate), f4);
-  out.append(Fmt::DIV80EQ);
-  out.append("Type 'config ?' or 'config help' to view all configurable parameter keys.\r\n\r\n");
 
   sendTelnetMsgLen(sock, out.buf, out.offset);
 }
@@ -2145,12 +2187,11 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
     static char s_ew11_status_buf[2048];
     AppendBuf out{s_ew11_status_buf, sizeof(s_ew11_status_buf)};
     out.append("\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("                      CH5 EW11 TCP CLIENT SOCKET STATUS                         \r\n");
-    out.append(Fmt::DIV80EQ);
-    out.appendFormat("%-6s %-13s %-6s %-18s %-14s %s\r\n",
-                     "Slot", "Name", "Port", "Client IP", "Status", "Packets(RX/TX)");
-    out.append(Fmt::DIV80);
+    out.append("+==============================================================================+\r\n");
+    out.append("|                      CH5 EW11 TCP CLIENT SOCKET STATUS                       |\r\n");
+    out.append("+==============================================================================+\r\n");
+    out.append("| Slot |    Name    | Port |    Client IP    |   Status    |      Packets      |\r\n");
+    out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
 
     {
       MutexLocker lock(g_ch5_mutex);
@@ -2160,26 +2201,47 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
                                  : !slot.is_connected ? "Listening"
                                  : (slot.rx_pkts == 0) ? "Idle" : "Connected";
 
-        out.appendFormat("#%-5d %-13s %-6u %-18s %-14s %u / %u\r\n",
-                         s, slot.name,
-                         slot.target_port,
-                         slot.is_connected ? (slot.target_ip[0] ? slot.target_ip : "Connected") : (slot.target_ip[0] ? slot.target_ip : "-"),
-                         status_str,
-                         static_cast<unsigned>(slot.rx_pkts),
-                         static_cast<unsigned>(slot.tx_pkts));
+        const char *ip_str = slot.is_connected ? (slot.target_ip[0] ? slot.target_ip : "Connected") : (slot.target_ip[0] ? slot.target_ip : "-");
+
+        char s_buf[8];
+        snprintf(s_buf, sizeof(s_buf), "#%d", s);
+        int sl_l = (6 - strlen(s_buf)) / 2;
+        int sl_r = 6 - strlen(s_buf) - sl_l;
+
+        char p_buf[8];
+        snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
+        int pl_l = (6 - strlen(p_buf)) / 2;
+        int pl_r = 6 - strlen(p_buf) - pl_l;
+
+        int il_l = (17 - strlen(ip_str)) / 2;
+        int il_r = 17 - strlen(ip_str) - il_l;
+
+        int st_l = (13 - strlen(status_str)) / 2;
+        int st_r = 13 - strlen(status_str) - st_l;
+
+        char pkt_buf[24];
+        snprintf(pkt_buf, sizeof(pkt_buf), "%8u / %-8u", static_cast<unsigned>(slot.rx_pkts), static_cast<unsigned>(slot.tx_pkts));
+
+        out.appendFormat("|%*s%s%*s| %-10.10s |%*s%s%*s|%*s%s%*s|%*s%s%*s|%19s|\r\n",
+                         sl_l, "", s_buf, sl_r, "",
+                         slot.name,
+                         pl_l, "", p_buf, pl_r, "",
+                         il_l, "", ip_str, il_r, "",
+                         st_l, "", status_str, st_r, "",
+                         pkt_buf);
       }
     }
-    out.append(Fmt::DIV80);
+    out.append("+------+------------+------+-----------------+-------------+-------------------+\r\n");
+    out.append("|             Configured Max Slots: 5 | Bridge Target: CH1 & CH2/3             |\r\n");
+    out.append("+==============================================================================+\r\n");
 
     // ── FCU Modbus 실시간 상태 테이블 ──
     out.append("\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.append("                    CH5 FCU MODBUS DEVICE STATUS\r\n");
-    out.append(Fmt::DIV80EQ);
-    out.appendFormat("%-6s %-7s %-6s %-16s %-6s %-6s %-6s %-6s %-5s %-5s %s\r\n",
-                     "Slot", "Name", "Port", "Client IP",
-                     "Power", "Mode", "Fan", "Swing", "Tgt", "Room", "Err");
-    out.append(Fmt::DIV80);
+    out.append("+==============================================================================+\r\n");
+    out.append("|                         CH5 FCU MODBUS DEVICE STATUS                         |\r\n");
+    out.append("+==============================================================================+\r\n");
+    out.append("| Slot |  Name  | Port |   Client IP    | Pwr | Mode | Fan  | Swng | Tgt |Room |\r\n");
+    out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
 
     {
       MutexLocker lock(g_ch5_mutex);
@@ -2198,20 +2260,42 @@ void cmdEw11(EmbeddedCli *cli, char *args, void *context) {
                             : (rt.snap.fan_speed == Fcu::FanSpeed::High) ? "High"
                             : (rt.snap.fan_speed == Fcu::FanSpeed::Auto) ? "Auto" : "-";
         const char *swng_str = (rt.snap.swing == Fcu::Swing::On) ? "ON" : "OFF";
-        const char *err_str = (rt.snap.error_code == 0) ? "OK" : "ERR";
 
         char tgt_str[8] = "-", room_str[8] = "-";
         if (rt.is_online) {
-          snprintf(tgt_str, sizeof(tgt_str), "%u C", rt.snap.target_temp);
-          snprintf(room_str, sizeof(room_str), "%u C", rt.snap.room_temp);
+          snprintf(tgt_str, sizeof(tgt_str), "%uC", rt.snap.target_temp);
+          snprintf(room_str, sizeof(room_str), "%uC", rt.snap.room_temp);
         }
         const char *ip_str = (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
-        out.appendFormat("#%-5u %-7s %-6u %-16s %-6s %-6s %-6s %-6s %-5s %-5s %s\r\n",
-                         s, slot.name, slot.target_port, ip_str,
-                         pwr_str, mode_str, fan_str, swng_str, tgt_str, room_str, err_str);
+
+        char s_buf[8];
+        snprintf(s_buf, sizeof(s_buf), "#%u", s);
+        int sl_l = (6 - strlen(s_buf)) / 2;
+        int sl_r = 6 - strlen(s_buf) - sl_l;
+
+        char p_buf[8];
+        snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
+        int pl_l = (6 - strlen(p_buf)) / 2;
+        int pl_r = 6 - strlen(p_buf) - pl_l;
+
+        int il_l = (16 - strlen(ip_str)) / 2;
+        int il_r = 16 - strlen(ip_str) - il_l;
+
+        out.appendFormat("|%*s%s%*s| %-6.6s |%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|%*s%s%*s|\r\n",
+                         sl_l, "", s_buf, sl_r, "",
+                         slot.name,
+                         pl_l, "", p_buf, pl_r, "",
+                         il_l, "", ip_str, il_r, "",
+                         (int)(5 - strlen(pwr_str))/2, "", pwr_str, (int)(5 - strlen(pwr_str) - (5 - strlen(pwr_str))/2), "",
+                         (int)(6 - strlen(mode_str))/2, "", mode_str, (int)(6 - strlen(mode_str) - (6 - strlen(mode_str))/2), "",
+                         (int)(6 - strlen(fan_str))/2, "", fan_str, (int)(6 - strlen(fan_str) - (6 - strlen(fan_str))/2), "",
+                         (int)(6 - strlen(swng_str))/2, "", swng_str, (int)(6 - strlen(swng_str) - (6 - strlen(swng_str))/2), "",
+                         (int)(5 - strlen(tgt_str))/2, "", tgt_str, (int)(5 - strlen(tgt_str) - (5 - strlen(tgt_str))/2), "",
+                         (int)(5 - strlen(room_str))/2, "", room_str, (int)(5 - strlen(room_str) - (5 - strlen(room_str))/2), "");
       }
     }
-    out.append(Fmt::DIV80EQ);
+    out.append("+------+--------+------+----------------+-----+------+------+------+-----+-----+\r\n");
+    out.append("+==============================================================================+\r\n");
     out.append("\r\n");
 
     sendTelnetMsgLen(sock, out.buf, out.offset);
@@ -2371,22 +2455,25 @@ void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
   g_cli_scratch_buf[0] = '\0';
   AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                 DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)         \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.appendFormat("%-22s %-25s %s\r\n", "Target [DevID:Sub1:Sub2]", "Egress Destination", "Last Seen");
-  out.append(Fmt::DIV80);
+  out.append("+==============================================================================+\r\n");
+  out.append("|             DYNAMIC DEVICE INGRESS ROUTING TABLE (Zero Hardcode)             |\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("| Target (DevID:Sub1:Sub2) |        Egress Destination         |   Last Seen   |\r\n");
+  out.append("+--------------------------+-----------------------------------+---------------+\r\n");
 
   if (count == 0) {
-    out.append("  (No device routes learned yet. Waiting for bus/EW11 packets...)\r\n");
+    out.append("|       (No device routes learned yet. Waiting for bus/EW11 packets...)        |\r\n");
   } else {
     uint32_t now = millis();
     for (size_t i = 0; i < count; i++) {
       const auto &e = entries[i];
       char tgt_str[24];
-      snprintf(tgt_str, sizeof(tgt_str), "[0x%02X:%02X:%02X]", e.dev_id, e.sub1, e.sub2);
+      snprintf(tgt_str, sizeof(tgt_str), "0x%02X:%02X:%02X", e.dev_id, e.sub1, e.sub2);
+      int t_len = strlen(tgt_str);
+      int tl_l = (26 - t_len) / 2;
+      int tl_r = 26 - t_len - tl_l;
 
-      char dst_str[32];
+      char dst_str[36];
       if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
         snprintf(dst_str, sizeof(dst_str), "CH#5 Slot %d", e.endpoint.slot_idx);
       } else {
@@ -2395,12 +2482,20 @@ void cmdRoutes(EmbeddedCli *cli, char *args, void *context) {
 
       char el_str[20];
       Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str, sizeof(el_str));
+      int e_len = strlen(el_str);
+      int el_l = (15 - e_len) / 2;
+      int el_r = 15 - e_len - el_l;
 
-      out.appendFormat("  %-20s -> %-23s (%s ago)\r\n", tgt_str, dst_str, el_str);
+      out.appendFormat("|%*s%s%*s| %-33.33s |%*s%s%*s|\r\n",
+                       tl_l, "", tgt_str, tl_r, "",
+                       dst_str,
+                       el_l, "", el_str, el_r, "");
     }
   }
 
-  out.append(Fmt::DIV80EQ);
+  out.append("+--------------------------+-----------------------------------+---------------+\r\n");
+  out.append("|               Use 'routes clear' to reset dynamic route table                |\r\n");
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
   sendTelnetMsgLen(sock, out.buf, out.offset);
 }
@@ -2451,35 +2546,61 @@ void wallpadPrintStatus(AppendBuf &out) {
   }
 
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                    WALLPAD PROTOCOL & PROFILE DIAGNOSTICS                   \r\n");
-  out.append(Fmt::DIV80EQ);
+  out.append("+==============================================================================+\r\n");
+  out.append("|                 WALLPAD PROTOCOL AUTO-PROBING ENGINE STATUS                  |\r\n");
+  out.append("+==============================================================================+\r\n");
   char prof_key_buf[UniversalProtocolEngine::kProfileKeyMaxLen] = "Standard";
   if (active) {
     active->getActiveProfileKey(prof_key_buf, sizeof(prof_key_buf));
   }
-  out.appendFormat("Active Profile  : %s (ID: %u)\r\n",
-                   prof_key_buf,
-                   static_cast<unsigned>(g_config.wallpad_profile));
+  char meta_buf[128];
+  snprintf(meta_buf, sizeof(meta_buf), "Active Profile  : %s (ID: %u)",
+           prof_key_buf, static_cast<unsigned>(g_config.wallpad_profile));
+  out.appendFormat("| %-76.76s |\r\n", meta_buf);
+
   if (g_config.wallpad_profile == static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
-    out.appendFormat("Profile Mode    : Auto Adaptive [%s]\r\n", phase_str);
+    snprintf(meta_buf, sizeof(meta_buf), "Profile Mode    : Auto Adaptive [%s]", phase_str);
   } else {
-    out.appendFormat("Profile Mode    : Manual Fixed\r\n");
+    snprintf(meta_buf, sizeof(meta_buf), "Profile Mode    : Manual Fixed");
   }
+  out.appendFormat("| %-76.76s |\r\n", meta_buf);
+
   const auto *matched_p = ProfileMatcher::getActiveProfile();
   if (matched_p) {
-    out.appendFormat("Catalog Match   : %s (%u Devices Spec Injected)\r\n",
-                     matched_p->vendor_name, static_cast<unsigned>(matched_p->device_count));
+    snprintf(meta_buf, sizeof(meta_buf), "Catalog Match   : %s (%u Devices Spec Injected)",
+             matched_p->vendor_name, static_cast<unsigned>(matched_p->device_count));
   } else {
-    out.append("Catalog Match   : None (Generic Framing Only)\r\n");
+    snprintf(meta_buf, sizeof(meta_buf), "Catalog Match   : None (Generic Framing Only)");
   }
-  out.appendFormat("Devices Tracked : %u Active / %u Online (%u Offline) [%s]\r\n",
-                   static_cast<unsigned>(active_targets), static_cast<unsigned>(online_devs),
-                   static_cast<unsigned>(g_device_repo.count() >= online_devs ? (g_device_repo.count() - online_devs) : 0),
-                   (online_devs >= active_targets && active_targets > 0) ? "100% Synced" : "Syncing");
-  out.append(Fmt::DIV80);
-  out.append("Packet Field    Parameter       Value / Layout Rule                       Status\r\n");
-  out.append(Fmt::DIV80);
+  out.appendFormat("| %-76.76s |\r\n", meta_buf);
+
+  snprintf(meta_buf, sizeof(meta_buf), "Devices Tracked : %u Active / %u Online (%u Offline) [%s]",
+           static_cast<unsigned>(active_targets), static_cast<unsigned>(online_devs),
+           static_cast<unsigned>(g_device_repo.count() >= online_devs ? (g_device_repo.count() - online_devs) : 0),
+           (online_devs >= active_targets && active_targets > 0) ? "100% Synced" : "Syncing");
+  out.appendFormat("| %-76.76s |\r\n", meta_buf);
+
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+  out.append("| Packet Field |   Parameter   |       Value / Layout Rule        |   Status   |\r\n");
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
+
+  auto print_row = [&](const char *f, const char *p, const char *v, const char *s) {
+    char clean_s[16] = {0};
+    if (s && s[0] == '[' && s[strlen(s)-1] == ']') {
+      size_t slen = strlen(s);
+      if (slen >= 2 && slen - 2 < sizeof(clean_s)) {
+        strncpy(clean_s, s + 1, slen - 2);
+        clean_s[slen - 2] = '\0';
+      }
+    } else if (s) {
+      strncpy(clean_s, s, sizeof(clean_s) - 1);
+    }
+    int s_len = strlen(clean_s);
+    int sl_l = (12 - s_len) / 2;
+    int sl_r = 12 - s_len - sl_l;
+    out.appendFormat("| %-12.12s | %-13.13s | %-32.32s |%*s%s%*s|\r\n",
+                     f, p, v, sl_l, "", clean_s, sl_r, "");
+  };
 
   char stx_buf[16], etx_buf[16], len_buf[32], pkt_len_buf[32];
   snprintf(stx_buf, sizeof(stx_buf), "%02X", active ? active->getStx() : 0xF7);
@@ -2555,11 +2676,11 @@ void wallpadPrintStatus(AppendBuf &out) {
   const char *len_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
   const char *cmd_status = (desc.control_seen && desc.ctrl_len_cnt > 0) ? "[LOCKED]" : "[WAITING]";
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Header", "[ST] STX", stx_buf, len_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Query", q_val, len_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Command", cmd_val, cmd_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[LN] Response", ack_val, len_status);
-  out.append(Fmt::DIV80);
+  print_row("Header", "[ST] STX", stx_buf, len_status);
+  print_row("", "[LN] Query", q_val, len_status);
+  print_row("", "[LN] Command", cmd_val, cmd_status);
+  print_row("", "[LN] Response", ack_val, len_status);
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16];
   size_t dev_id_cnt = 0, sub1_cnt = 0, sub2_cnt = 0;
@@ -2642,16 +2763,16 @@ void wallpadPrintStatus(AppendBuf &out) {
   format_hex_list(sub1_ids, sub1_cnt, sub1_off_label, sub1_list_buf, sizeof(sub1_list_buf));
   format_hex_list(sub2_ids, sub2_cnt, sub2_off_label, sub2_list_buf, sizeof(sub2_list_buf));
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Addressing", "Addr Mode", addr_mode_buf, addr_status);
+  print_row("Addressing", "Addr Mode", addr_mode_buf, addr_status);
   if (desc.offsets_locked) {
-    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[GW] Master", gw_val_buf, addr_status);
+    print_row("", "[GW] Master", gw_val_buf, addr_status);
   }
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[ID] Device", dev_list_buf, addr_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[S1] Sub Addr", sub1_list_buf, addr_status);
+  print_row("", "[ID] Device", dev_list_buf, addr_status);
+  print_row("", "[S1] Sub Addr", sub1_list_buf, addr_status);
   if (desc.sub2_offset != 0xFF && desc.sub2_offset != desc.sub1_offset && sub2_cnt > 0) {
-    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[S2] Sub Addr", sub2_list_buf, addr_status);
+    print_row("", "[S2] Sub Addr", sub2_list_buf, addr_status);
   }
-  out.append(Fmt::DIV80);
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   char op_line_buf[48];
   char ctl_hex[8];
@@ -2667,9 +2788,9 @@ void wallpadPrintStatus(AppendBuf &out) {
   if (!desc.opcodes_locked) {
     opcode_status = "[LEARNING]";
   } else if (!desc.control_seen || desc.control_opcode == 0) {
-    opcode_status = "[WAITING]";        // QRY+ACK 확정, CTL은 아직 미관측(대기)
+    opcode_status = "[WAITING]";
   } else {
-    opcode_status = "[LOCKED]";         // QRY+CTL+ACK 모두 확정
+    opcode_status = "[LOCKED]";
   }
 
   char seq_line_buf[32];
@@ -2680,10 +2801,10 @@ void wallpadPrintStatus(AppendBuf &out) {
   }
   const char *seq_status = desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[UNUSED]") : "[WAITING]";
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Command", "[OP] Opcode", op_line_buf, opcode_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Sequence", seq_line_buf, seq_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[CX] Context", sub1_list_buf, addr_status);
-  out.append(Fmt::DIV80);
+  print_row("Command", "[OP] Opcode", op_line_buf, opcode_status);
+  print_row("", "Sequence", seq_line_buf, seq_status);
+  print_row("", "[CX] Context", sub1_list_buf, addr_status);
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   char payload_range_buf[48];
   char payload_len_buf[32];
@@ -2695,18 +2816,18 @@ void wallpadPrintStatus(AppendBuf &out) {
     snprintf(payload_len_buf, sizeof(payload_len_buf), "Data = [LEN - 9] Byte : Est");
   }
   const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Payload", "[PL] Data Range", payload_range_buf, payload_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[PL] Length", payload_len_buf, payload_status);
-  out.append(Fmt::DIV80);
+  print_row("Payload", "[PL] Data Range", payload_range_buf, payload_status);
+  print_row("", "[PL] Length", payload_len_buf, payload_status);
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   char cs_algo_buf[48];
   snprintf(cs_algo_buf, sizeof(cs_algo_buf), "Byte #[N-2] : %s", AutoProbingEngine::getAlgoName(desc.checksum_algo));
   char etx_line_buf[32];
   snprintf(etx_line_buf, sizeof(etx_line_buf), "Byte #[N-1] : %s", etx_buf);
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Tail", "[CS] Checksum", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "[ET] ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
-  out.append(Fmt::DIV80);
+  print_row("Tail", "[CS] Checksum", cs_algo_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  print_row("", "[ET] ETX", etx_line_buf, desc.is_locked ? "[LOCKED]" : "[LEARNING]");
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   uint32_t b1 = g_config.uart_baud_rate;
   uint32_t b2 = g_config.ch2_baud_rate;
@@ -2715,17 +2836,17 @@ void wallpadPrintStatus(AppendBuf &out) {
   char baud_buf[48];
   if (b1 == b2 && b2 == b3) {
     snprintf(baud_buf, sizeof(baud_buf), "%u bps : CH1~3", static_cast<unsigned>(b1));
-    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+    print_row("Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
   } else {
     snprintf(baud_buf, sizeof(baud_buf), "CH1:%u, CH2:%u, CH3:%u",
              static_cast<unsigned>(b1), static_cast<unsigned>(b2), static_cast<unsigned>(b3));
-    out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
+    print_row("Bus Physical", "Baudrate", baud_buf, "[CONFIG]");
   }
   char ipg_silence_buf[48];
   snprintf(ipg_silence_buf, sizeof(ipg_silence_buf), "%u ms : CH1~3",
            static_cast<unsigned>(Config::Timing::WALLPAD_AUTO_IPG_MS));
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "IPG Silence", ipg_silence_buf, "[CONFIG]");
-  out.append(Fmt::DIV80);
+  print_row("", "IPG Silence", ipg_silence_buf, "[CONFIG]");
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   Config::Doorphone::FramingStatus dp_status = g_doorphone_tracker.status.load(std::memory_order_relaxed);
   const char *dp_status_str = (dp_status == Config::Doorphone::FramingStatus::LOCKED)   ? "[LOCKED]"
@@ -2788,14 +2909,14 @@ void wallpadPrintStatus(AppendBuf &out) {
     dp_ops_status = "[UNKNOWN]";
   }
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Doorphone (CH4)", "Framing", dp_frame_buf, dp_status_str);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Catalog Match", dp_match_buf, dp_match_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Opcodes(F)", dp_ops_f_buf, dp_ops_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Opcodes(L)", dp_ops_l_buf, dp_ops_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Baudrate", dp_baud_buf, "[CONFIG]");
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Time-gap", dp_ipg_buf, "[CONFIG]");
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "Debounce", dp_debounce_buf, "[CONFIG]");
-  out.append(Fmt::DIV80);
+  print_row("Doorphone (CH4)", "Framing", dp_frame_buf, dp_status_str);
+  print_row("", "Catalog Match", dp_match_buf, dp_match_status);
+  print_row("", "Opcodes(F)", dp_ops_f_buf, dp_ops_status);
+  print_row("", "Opcodes(L)", dp_ops_l_buf, dp_ops_status);
+  print_row("", "Baudrate", dp_baud_buf, "[CONFIG]");
+  print_row("", "Time-gap", dp_ipg_buf, "[CONFIG]");
+  print_row("", "Debounce", dp_debounce_buf, "[CONFIG]");
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   {
     MutexLocker lock(g_ch5_mutex);
@@ -2823,13 +2944,11 @@ void wallpadPrintStatus(AppendBuf &out) {
         }
       }
 
-      out.appendFormat("%-16s%-16s%-38s%10s\r\n",
-                       first_ew11 ? "EW11 (CH5)" : "",
-                       port_title, slot_detail, slot_status_str);
+      print_row(first_ew11 ? "EW11 (CH5)" : "", port_title, slot_detail, slot_status_str);
       first_ew11 = false;
     }
   }
-  out.append(Fmt::DIV80);
+  out.append("+--------------+---------------+----------------------------------+------------+\r\n");
 
   char conv_buf[48];
   uint32_t conv_pct = active_targets ? (verified_targets * 100 / active_targets) : 0;
@@ -2859,30 +2978,37 @@ void wallpadPrintStatus(AppendBuf &out) {
            m_str, t_str, static_cast<unsigned>(cs_pct));
   const char *cs_status = (cs_pct >= 95) ? "[STABLE]" : (cs_pct >= 80 ? "[NOISY]" : "[ERROR]");
 
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "Runtime Sync", "Cache Sync", conv_buf, conv_status);
-  out.appendFormat("%-16s%-16s%-38s%10s\r\n", "", "CS Validation", cs_rate_buf, cs_status);
-  out.append(Fmt::DIV80EQ);
+  print_row("Runtime Sync", "Cache Sync", conv_buf, conv_status);
+  print_row("", "CS Validation", cs_rate_buf, cs_status);
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
 }
 
 void wallpadListProfiles(AppendBuf &out) {
   out.append("\r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append("                        WALLPAD PROTOCOL PROFILES                               \r\n");
-  out.append(Fmt::DIV80EQ);
-  out.append(" ID  | Profile Key | Protocol Specification / Description | Status\r\n");
-  out.append(Fmt::DIV80);
+  out.append("+==============================================================================+\r\n");
+  out.append("|                          WALLPAD PROTOCOL PROFILES                           |\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("|  ID  | Profile Key | Protocol Specification / Description |      Status      |\r\n");
+  out.append("+------+-------------+--------------------------------------+------------------+\r\n");
   for (size_t i = 0; i < ProfileRepository::getProfileCount(); ++i) {
     VendorProfileDescriptor p_desc;
     if (ProfileRepository::getProfile(i, p_desc)) {
       bool is_current = (g_config.wallpad_profile == i);
       bool is_empty = (i > 0 && strncmp(p_desc.name, "[Empty", 6) == 0);
-      out.appendFormat(" %2u  | %-11s | %-36s | %s\r\n",
-                       static_cast<unsigned>(i), p_desc.key, p_desc.name,
-                       is_current ? ">> ACTIVE <<" : (is_empty ? "Available" : "Saved (NVS)"));
+      const char *status_str = is_current ? ">> ACTIVE <<" : (is_empty ? "Available" : "Saved (NVS)");
+      char st_buf[20];
+      int slen = static_cast<int>(strlen(status_str));
+      int pad_l = (16 - slen) / 2;
+      int pad_r = 16 - slen - pad_l;
+      snprintf(st_buf, sizeof(st_buf), "%*s%s%*s", pad_l, "", status_str, pad_r, "");
+      out.appendFormat("|  %2u  | %-11s | %-36s | %s |\r\n",
+                       static_cast<unsigned>(i), p_desc.key, p_desc.name, st_buf);
     }
   }
-  out.append(Fmt::DIV80EQ);
+  out.append("+------+-------------+--------------------------------------+------------------+\r\n");
+  out.append("|        Use 'wallpad set <id>' to switch, 'wallpad save <name>' to store      |\r\n");
+  out.append("+==============================================================================+\r\n");
   out.append("\r\n");
 }
 
@@ -3165,41 +3291,171 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
   out.append("\r\n");
 }
 
+void devsPrintSummary(AppendBuf &out, uint32_t now) {
+  out.append("\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("|                          REGISTERED DEVICE REGISTRY                          |\r\n");
+  out.append("+==============================================================================+\r\n");
+
+  struct DevSummary {
+    uint8_t dev_id{0};
+    char name[16]{0};
+    char cls_str[10]{0};
+    bool online{false};
+    uint8_t sub_cnt{0};
+    uint32_t qry_cnt{0};
+    uint32_t last_seen_ms{0};
+  };
+
+  DevSummary devs[16]{};
+  size_t dev_count = 0;
+
+  size_t tgt_total = g_polling_targets.totalCount();
+  for (size_t i = 0; i < tgt_total; ++i) {
+    PollingTargetEntry tgt;
+    if (!g_polling_targets.getEntry(i, tgt) || tgt.dev_id == 0) continue;
+
+    DevSummary *found = nullptr;
+    for (size_t d = 0; d < dev_count; ++d) {
+      if (devs[d].dev_id == tgt.dev_id) {
+        found = &devs[d];
+        break;
+      }
+    }
+    if (!found && dev_count < 16) {
+      found = &devs[dev_count++];
+      found->dev_id = tgt.dev_id;
+    }
+    if (found) {
+      found->sub_cnt++;
+      found->qry_cnt += tgt.hit_count;
+      if (tgt.is_active) found->online = true;
+      if (tgt.last_requested_ms > found->last_seen_ms) {
+        found->last_seen_ms = tgt.last_requested_ms;
+      }
+    }
+  }
+
+  GroupControlTemplate grps[ControlTemplateRegistry::MAX_GROUPS];
+  size_t grp_cnt = g_control_registry.getGroupsSnapshot(grps, ControlTemplateRegistry::MAX_GROUPS);
+  for (size_t d = 0; d < dev_count; ++d) {
+    for (size_t g = 0; g < grp_cnt; ++g) {
+      if (grps[g].dev_id == devs[d].dev_id) {
+        if (grps[g].group_name[0]) {
+          strncpy(devs[d].name, grps[g].group_name, sizeof(devs[d].name) - 1);
+        }
+        const char *c_str = DeviceClassToCliString(grps[g].coverage.dev_class);
+        if (c_str) {
+          strncpy(devs[d].cls_str, c_str, sizeof(devs[d].cls_str) - 1);
+        }
+        break;
+      }
+    }
+    if (devs[d].name[0] == '\0') {
+      snprintf(devs[d].name, sizeof(devs[d].name), "Dev_0x%02X", devs[d].dev_id);
+    }
+    if (devs[d].cls_str[0] == '\0') {
+      strncpy(devs[d].cls_str, "DEVICE", sizeof(devs[d].cls_str) - 1);
+    }
+  }
+
+  char sub_buf[78] = {0};
+  int sub_len = snprintf(sub_buf, sizeof(sub_buf), "Active Devices: %zu Cached | Ingress: CH1 Wallpad RS-485", dev_count);
+  if (sub_len < 0) sub_len = 0;
+  if (sub_len > 78) sub_len = 78;
+  int pad_left = (78 - sub_len) / 2;
+  int pad_right = 78 - sub_len - pad_left;
+  out.appendFormat("|%*s%s%*s|\r\n", pad_left, "", sub_buf, pad_right, "");
+
+  out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
+  out.append("| DevID  |    Name    | Class  |  State  | Ch  | SubCnt |  QryCnt   | LastSeen |\r\n");
+  out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
+
+  if (dev_count == 0) {
+    out.append("|             (No active devices registered in 1st/2nd tier cache)             |\r\n");
+  } else {
+    for (size_t d = 0; d < dev_count; ++d) {
+      char dev_hex[10];
+      snprintf(dev_hex, sizeof(dev_hex), "0x%02X", devs[d].dev_id);
+
+      char sub_str[10];
+      snprintf(sub_str, sizeof(sub_str), "%u", devs[d].sub_cnt);
+
+      char qry_str[12];
+      snprintf(qry_str, sizeof(qry_str), "%lu", (unsigned long)devs[d].qry_cnt);
+
+      char elapsed_raw[16] = "-";
+      if (devs[d].last_seen_ms > 0) {
+        Fmt::FormatElapsed(now, devs[d].last_seen_ms, elapsed_raw, sizeof(elapsed_raw));
+        char *ago_pos = strstr(elapsed_raw, " ago");
+        if (ago_pos) *ago_pos = '\0';
+        ago_pos = strstr(elapsed_raw, "ago");
+        if (ago_pos) *ago_pos = '\0';
+      }
+
+      auto center_into = [](char *buf, size_t sz, const char *val, int width) {
+        int vlen = static_cast<int>(strlen(val));
+        if (vlen >= width) {
+          snprintf(buf, sz, "%.*s", width, val);
+          return;
+        }
+        int l = (width - vlen) / 2;
+        int r = width - vlen - l;
+        snprintf(buf, sz, "%*s%s%*s", l, "", val, r, "");
+      };
+
+      char sub_cnt_centered[10];
+      char qry_cnt_centered[14];
+      char last_seen_centered[12];
+
+      center_into(sub_cnt_centered, sizeof(sub_cnt_centered), sub_str, 6);
+      center_into(qry_cnt_centered, sizeof(qry_cnt_centered), qry_str, 9);
+      center_into(last_seen_centered, sizeof(last_seen_centered), elapsed_raw, 8);
+
+      const char *state_str = devs[d].online ? "ONLINE" : "OFFLINE";
+
+      out.appendFormat("| %-6s | %-10.10s | %-6.6s | %-7s | CH1 | %s | %s | %s |\r\n",
+                       dev_hex, devs[d].name, devs[d].cls_str, state_str,
+                       sub_cnt_centered, qry_cnt_centered, last_seen_centered);
+    }
+  }
+  out.append("+--------+------------+--------+---------+-----+--------+-----------+----------+\r\n");
+  out.append("|           Use 'devs 1' for Polling Targets, 'devs 2' for Raw ACK Cache       |\r\n");
+  out.append("+==============================================================================+\r\n");
+  out.append("\r\n");
+}
+
 void cmdDevs(EmbeddedCli *cli, char *args, void *context) {
   int client = getSock(context);
   uint32_t now = millis();
   int argc = embeddedCliGetTokenCount(args);
 
-  bool show_tier1 = true;
-  bool show_tier2 = true;
-
-  if (argc > 0) {
-    const char *sub = embeddedCliGetToken(args, 1);
-    if (strcasecmp(sub, "1") == 0) {
-      show_tier1 = true;
-      show_tier2 = false;
-    } else if (strcasecmp(sub, "2") == 0) {
-      show_tier1 = false;
-      show_tier2 = true;
-    } else if (strcasecmp(sub, "clear") == 0) {
-      g_polling_targets.clear();
-      g_device_repo.clear();
-      sendTelnetMsg(client, "All 1st-tier & 2nd-tier device caches CLEARED.\r\n");
-      return;
-    } else {
-      sendTelnetMsg(client, "Usage: devs [1 | 2 | clear]\r\n");
-      return;
-    }
-  }
-
   g_cli_scratch_buf[0] = '\0';
   AppendBuf out{g_cli_scratch_buf, sizeof(g_cli_scratch_buf)};
 
-  if (show_tier1) {
-    devsPrintTier1Targets(out, now);
+  if (argc == 0) {
+    devsPrintSummary(out, now);
+    sendTelnetMsgLen(client, out.buf, out.offset);
+    return;
   }
-  if (show_tier2) {
+
+  const char *sub = embeddedCliGetToken(args, 1);
+  if (strcasecmp(sub, "1") == 0) {
+    devsPrintTier1Targets(out, now);
+  } else if (strcasecmp(sub, "2") == 0) {
     devsPrintTier2Cache(out, now);
+  } else if (strcasecmp(sub, "all") == 0) {
+    devsPrintSummary(out, now);
+    devsPrintTier1Targets(out, now);
+    devsPrintTier2Cache(out, now);
+  } else if (strcasecmp(sub, "clear") == 0) {
+    g_polling_targets.clear();
+    g_device_repo.clear();
+    sendTelnetMsg(client, "All 1st-tier & 2nd-tier device caches CLEARED.\r\n");
+    return;
+  } else {
+    sendTelnetMsg(client, "Usage: devs [1 | 2 | all | clear]\r\n");
+    return;
   }
 
   sendTelnetMsgLen(client, out.buf, out.offset);
@@ -3480,7 +3736,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
   out.appendFormat("|%*s%s%*s|\r\n", pad_left, "", sub_buf, pad_right, "");
 
   out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
-  out.append("| DevID | Name     | Class  | CTL | Power Slot | QRY | Status Offsets          |\r\n");
+  out.append("| DevID |   Name   | Class  | CTL | Power Slot | QRY |     Status Offsets      |\r\n");
   out.append("+-------+----------+--------+-----+------------+-----+-------------------------+\r\n");
 
   if (count == 0) {
