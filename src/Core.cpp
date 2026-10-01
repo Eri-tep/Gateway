@@ -25,7 +25,8 @@
 // Domain 1: Core Storage Pool & RTOS Global Buffers
 // ============================================================================
 
-// ── RTC Retention Fast SRAM Memory (Preserved across Software / WDT Reboots) ──
+// ── RTC Retention Fast SRAM Memory (Preserved across Software / WDT Reboots)
+// ──
 RTC_NOINIT_ATTR uint32_t rtc_magic;
 RTC_NOINIT_ATTR uint32_t rtc_last_alive_ms[Config::Task::TASK_COUNT];
 RTC_NOINIT_ATTR volatile uint32_t g_telnet_stage = 0;
@@ -53,8 +54,10 @@ TaskWdtMonitor g_wdt_monitor;
 
 // ── Static FreeRTOS Queues & Storage Pools ──
 StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf;
-uint8_t g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS * sizeof(StaticPacket)];
+uint8_t
+    g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS *
+                           sizeof(StaticPacket)];
 uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
 
 QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
@@ -92,7 +95,8 @@ SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
                   g_uart2_mutex = nullptr, g_tracer_sem = nullptr;
 Ch1StateMetrics g_ch1_state_metrics;
 
-// [Pillar 6] g_config R/W 보호: std::shared_mutex 기반 다중 동시 읽기 / 배타적 쓰기
+// [Pillar 6] g_config R/W 보호: std::shared_mutex 기반 다중 동시 읽기 / 배타적
+// 쓰기
 std::shared_mutex g_config_rw;
 // 하위 호환: g_config_mux는 ISR 컨텍스트 전용으로 유지
 portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -109,19 +113,21 @@ Config::Doorphone::FramingTracker g_doorphone_tracker;
 // ============================================================================
 
 namespace {
-// Save와 Restore가 절대 동시 실행되지 않으므로 단일 정적 봉투를 공유하여 RAM 절감
+// Save와 Restore가 절대 동시 실행되지 않으므로 단일 정적 봉투를 공유하여 RAM
+// 절감
 static NvsEnvelope<RtcWarmCache> s_warm_cache_env;
 } // anonymous namespace
 
 void Cache_SaveToRtc() {
   memset(&rtc_warm_cache, 0, sizeof(rtc_warm_cache));
   rtc_warm_cache.magic = RTC_MAGIC_WARM_CACHE;
-  rtc_warm_cache.count = static_cast<uint8_t>(g_polling_targets.getWarmCacheEntries(
-      rtc_warm_cache.entries, PollingTargetRegistry::MAX_TARGETS));
+  rtc_warm_cache.count =
+      static_cast<uint8_t>(g_polling_targets.getWarmCacheEntries(
+          rtc_warm_cache.entries, PollingTargetRegistry::MAX_TARGETS));
   if (rtc_warm_cache.count > 0) {
-    rtc_warm_cache.crc32 = FastCrc32(
-        reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
-        sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
+    rtc_warm_cache.crc32 =
+        FastCrc32(reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
+                  sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
   }
 }
 
@@ -134,8 +140,9 @@ void Cache_SaveToNvs() {
       s_warm_cache_env.seal();
       p.putBytes("wc_data", &s_warm_cache_env, sizeof(s_warm_cache_env));
       p.end();
-      ::Serial.printf("[WARM CACHE] Synced %u targets to NVS Flash snapshot.\r\n",
-                      rtc_warm_cache.count);
+      ::Serial.printf(
+          "[WARM CACHE] Synced %u targets to NVS Flash snapshot.\r\n",
+          rtc_warm_cache.count);
     }
   }
   g_warm_cache_dirty.store(false, std::memory_order_release);
@@ -150,16 +157,17 @@ void Cache_RestoreOnBoot() {
       rtc_warm_cache.magic == RTC_MAGIC_WARM_CACHE &&
       rtc_warm_cache.count > 0 &&
       rtc_warm_cache.count <= PollingTargetRegistry::MAX_TARGETS) {
-    uint32_t computed_crc = FastCrc32(
-        reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
-        sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
+    uint32_t computed_crc =
+        FastCrc32(reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
+                  sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
     if (computed_crc == rtc_warm_cache.crc32) {
       g_polling_targets.loadFromWarmCache(rtc_warm_cache.entries,
                                           rtc_warm_cache.count, now);
       g_warm_cache_loaded = true;
       g_warm_cache_source = 1;
       g_warm_cache_restored_count = rtc_warm_cache.count;
-      ::Serial.printf("[WARM CACHE] Restored %u targets from RTC Fast SRAM (0ms delay)!\r\n",
+      ::Serial.printf("[WARM CACHE] Restored %u targets from RTC Fast SRAM "
+                      "(0ms delay)!\r\n",
                       rtc_warm_cache.count);
       return;
     }
@@ -171,20 +179,25 @@ void Cache_RestoreOnBoot() {
     if (p.isKey("wc_data")) {
       size_t len = p.getBytesLength("wc_data");
       if (len == sizeof(s_warm_cache_env) &&
-          p.getBytes("wc_data", &s_warm_cache_env, sizeof(s_warm_cache_env)) == sizeof(s_warm_cache_env)) {
+          p.getBytes("wc_data", &s_warm_cache_env, sizeof(s_warm_cache_env)) ==
+              sizeof(s_warm_cache_env)) {
         if (s_warm_cache_env.verify() && s_warm_cache_env.payload.count > 0 &&
-            s_warm_cache_env.payload.count <= PollingTargetRegistry::MAX_TARGETS) {
+            s_warm_cache_env.payload.count <=
+                PollingTargetRegistry::MAX_TARGETS) {
           uint32_t computed_crc = FastCrc32(
-              reinterpret_cast<const uint8_t *>(s_warm_cache_env.payload.entries),
+              reinterpret_cast<const uint8_t *>(
+                  s_warm_cache_env.payload.entries),
               sizeof(RtcWarmCacheEntry) * s_warm_cache_env.payload.count);
           if (computed_crc == s_warm_cache_env.payload.crc32) {
-            g_polling_targets.loadFromWarmCache(s_warm_cache_env.payload.entries,
-                                                s_warm_cache_env.payload.count, now);
+            g_polling_targets.loadFromWarmCache(
+                s_warm_cache_env.payload.entries,
+                s_warm_cache_env.payload.count, now);
             g_warm_cache_loaded = true;
             g_warm_cache_source = 2;
             g_warm_cache_restored_count = s_warm_cache_env.payload.count;
-            ::Serial.printf("[WARM CACHE] Restored %u targets from NVS Flash snapshot!\r\n",
-                            s_warm_cache_env.payload.count);
+            ::Serial.printf(
+                "[WARM CACHE] Restored %u targets from NVS Flash snapshot!\r\n",
+                s_warm_cache_env.payload.count);
             p.end();
             return;
           }
@@ -197,14 +210,16 @@ void Cache_RestoreOnBoot() {
   g_warm_cache_loaded = false;
   g_warm_cache_source = 0;
   g_warm_cache_restored_count = 0;
-  ::Serial.println(F("[WARM CACHE] Cold start initialized (No prior cache found)."));
+  ::Serial.println(
+      F("[WARM CACHE] Cold start initialized (No prior cache found)."));
 }
 
 void Cache_CheckNvsDebounce() {
   if (g_warm_cache_dirty.load(std::memory_order_acquire)) {
     uint32_t dirty_ms = g_warm_cache_dirty_ms.load(std::memory_order_relaxed);
     if (dirty_ms > 0 &&
-        TimeUtils::isElapsed(dirty_ms, Config::Timing::WARM_CACHE_NVS_DEBOUNCE_MS)) {
+        TimeUtils::isElapsed(dirty_ms,
+                             Config::Timing::WARM_CACHE_NVS_DEBOUNCE_MS)) {
       Cache_SaveToNvs();
     }
   }
@@ -215,9 +230,11 @@ void Cache_CheckNvsDebounce() {
 // ============================================================================
 
 void LogManager::writeRebootLog(const char *reason) {
-  if (!reason || strlen(reason) == 0) return;
+  if (!reason || strlen(reason) == 0)
+    return;
   Preferences p;
-  if (!p.begin("logs", false)) return;
+  if (!p.begin("logs", false))
+    return;
 
   uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
 
@@ -247,16 +264,19 @@ void LogManager::writeRebootLog(const char *reason) {
 
 size_t LogManager::getLogCount() {
   Preferences p;
-  if (!p.begin("logs", true)) return 0;
+  if (!p.begin("logs", true))
+    return 0;
   size_t c = p.getUInt("count", 0);
   p.end();
   return c > MAX_LOG_ENTRIES ? MAX_LOG_ENTRIES : c;
 }
 
 bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) {
-  if (idx >= MAX_LOG_ENTRIES) return false;
+  if (idx >= MAX_LOG_ENTRIES)
+    return false;
   Preferences p;
-  if (!p.begin("logs", true)) return false;
+  if (!p.begin("logs", true))
+    return false;
 
   size_t count = p.getUInt("count", 0);
   if (idx >= count) {
@@ -284,15 +304,18 @@ bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) {
 }
 
 void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
-  if (!buf || max_len == 0) return;
+  if (!buf || max_len == 0)
+    return;
   buf[0] = '\0';
   LogEntry e;
   if (!getLogEntry(idx, e)) {
     size_t c = getLogCount();
     if (c == 0) {
-      snprintf(buf, max_len, "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
+      snprintf(buf, max_len,
+               "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
     } else {
-      snprintf(buf, max_len, "\r\n[LOGVIEW] Invalid log index #%u (Available: 1 ~ %u)\r\n",
+      snprintf(buf, max_len,
+               "\r\n[LOGVIEW] Invalid log index #%u (Available: 1 ~ %u)\r\n",
                static_cast<unsigned>(idx + 1), static_cast<unsigned>(c));
     }
     return;
@@ -323,7 +346,8 @@ void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
 
   AppendBuf add{buf, max_len};
   add.appendFormat("\r\n%s", Fmt::DIV80EQ);
-  add.appendFormat("                   GATEWAY BRIDGE REBOOT SNAPSHOT MONITOR                     \r\n");
+  add.appendFormat("                   GATEWAY BRIDGE REBOOT SNAPSHOT MONITOR  "
+                   "                   \r\n");
   add.appendFormat("%s", Fmt::DIV80EQ);
   add.appendFormat("Log Index       : #%zu / %zu\r\n", idx + 1, getLogCount());
   add.appendFormat("Reboot Reason   : %s\r\n", e.reason);
@@ -332,10 +356,11 @@ void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
   add.appendFormat("Uptime          : %ud %02uh %02um %02us\r\n", s / 86400,
                    (s % 86400) / 3600, (s % 3600) / 60, s % 60);
   add.appendFormat("WiFi Connection : %s\r\n", w_str);
-  add.appendFormat("Heap Memory     : Free %u KB / Min Free %u KB / Total %u KB\r\n",
-                   static_cast<unsigned>(e.stats_snapshot.free_heap / 1024),
-                   static_cast<unsigned>(e.stats_snapshot.min_free_heap / 1024),
-                   static_cast<unsigned>(e.stats_snapshot.total_heap / 1024));
+  add.appendFormat(
+      "Heap Memory     : Free %u KB / Min Free %u KB / Total %u KB\r\n",
+      static_cast<unsigned>(e.stats_snapshot.free_heap / 1024),
+      static_cast<unsigned>(e.stats_snapshot.min_free_heap / 1024),
+      static_cast<unsigned>(e.stats_snapshot.total_heap / 1024));
   add.appendFormat("Flash Storage   : Sketch %u KB / Total Flash %u KB\r\n\r\n",
                    static_cast<unsigned>(e.stats_snapshot.sketch_size_kb),
                    static_cast<unsigned>(e.stats_snapshot.flash_total_kb));
@@ -359,7 +384,10 @@ void LogManager::clearRebootLog() {
 // ============================================================================
 
 namespace {
-struct StuckTaskDiag { bool found{false}; char msg[36]{0}; };
+struct StuckTaskDiag {
+  bool found{false};
+  char msg[36]{0};
+};
 static StuckTaskDiag s_stuck_diag;
 static std::atomic<bool> s_ota_validated{false};
 } // anonymous namespace
@@ -431,7 +459,8 @@ void System_DiagnoseStuck() {
       max_val = rtc_last_alive_ms[i];
   }
 
-  if (max_val == 0) return;
+  if (max_val == 0)
+    return;
 
   uint32_t max_gap = 0;
   int found_idx = -1;
@@ -448,18 +477,22 @@ void System_DiagnoseStuck() {
   }
 
   s_stuck_diag.found = true;
-  if (found_idx >= 0 && found_idx < static_cast<int>(Config::Task::TASK_COUNT)) {
-    if (found_idx == Config::Task::WDT_ID_TELNET && ((saved_telnet_stage >> 16) == 0xA5A5)) {
+  if (found_idx >= 0 &&
+      found_idx < static_cast<int>(Config::Task::TASK_COUNT)) {
+    if (found_idx == Config::Task::WDT_ID_TELNET &&
+        ((saved_telnet_stage >> 16) == 0xA5A5)) {
       uint16_t stage = static_cast<uint16_t>(saved_telnet_stage & 0xFFFF);
       snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
                "Task WDT: %s (stage=%u, +%.1fs)", TASK_NAMES[found_idx],
                (unsigned)stage, max_gap / 1000.0f);
     } else {
       snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
-               "Task WDT: %s (+%.1fs)", TASK_NAMES[found_idx], max_gap / 1000.0f);
+               "Task WDT: %s (+%.1fs)", TASK_NAMES[found_idx],
+               max_gap / 1000.0f);
     }
   } else {
-    snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg), "Task WDT: All Tasks Stalled");
+    snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
+             "Task WDT: All Tasks Stalled");
   }
 
   memset(rtc_last_alive_ms, 0, sizeof(rtc_last_alive_ms));
@@ -480,15 +513,33 @@ void System_LogResetReason() {
 
   const char *reason_str = nullptr;
   switch (reason) {
-  case ESP_RST_POWERON:   reason_str = "Power-On Reset"; break;
-  case ESP_RST_EXT:       reason_str = "Hardware Reset Pin (EXT)"; break;
-  case ESP_RST_PANIC:     reason_str = "CPU Panic / Crash Exception"; break;
-  case ESP_RST_INT_WDT:   reason_str = "Interrupt Watchdog Reset"; break;
-  case ESP_RST_TASK_WDT:  reason_str = s_stuck_diag.found ? s_stuck_diag.msg : "Task Watchdog Reset"; break;
-  case ESP_RST_WDT:       reason_str = "Other Watchdog Reset"; break;
-  case ESP_RST_BROWNOUT:  reason_str = "HW: Brownout Reset (Low Voltage)"; break;
-  case ESP_RST_SDIO:      reason_str = "HW: SDIO Reset"; break;
-  default:                reason_str = "Unknown Hardware Reset"; break;
+  case ESP_RST_POWERON:
+    reason_str = "Power-On Reset";
+    break;
+  case ESP_RST_EXT:
+    reason_str = "Hardware Reset Pin (EXT)";
+    break;
+  case ESP_RST_PANIC:
+    reason_str = "CPU Panic / Crash Exception";
+    break;
+  case ESP_RST_INT_WDT:
+    reason_str = "Interrupt Watchdog Reset";
+    break;
+  case ESP_RST_TASK_WDT:
+    reason_str = s_stuck_diag.found ? s_stuck_diag.msg : "Task Watchdog Reset";
+    break;
+  case ESP_RST_WDT:
+    reason_str = "Other Watchdog Reset";
+    break;
+  case ESP_RST_BROWNOUT:
+    reason_str = "HW: Brownout Reset (Low Voltage)";
+    break;
+  case ESP_RST_SDIO:
+    reason_str = "HW: SDIO Reset";
+    break;
+  default:
+    reason_str = "Unknown Hardware Reset";
+    break;
   }
 
   if (reason != ESP_RST_POWERON) {
@@ -501,11 +552,13 @@ void System_CheckCoreDump() {
   esp_core_dump_summary_t s{};
   if (esp_core_dump_get_summary(&s) == ESP_OK) {
     g_coredump_info.valid = true;
-    strncpy(g_coredump_info.task_name, s.exc_task, sizeof(g_coredump_info.task_name) - 1);
+    strncpy(g_coredump_info.task_name, s.exc_task,
+            sizeof(g_coredump_info.task_name) - 1);
     g_coredump_info.exc_pc = s.exc_pc;
     g_coredump_info.exc_cause = s.ex_info.exc_cause;
     uint8_t depth = static_cast<uint8_t>(s.exc_bt_info.depth);
-    if (depth > 16) depth = 16;
+    if (depth > 16)
+      depth = 16;
     g_coredump_info.bt_depth = depth;
     g_coredump_info.bt_corrupted = s.exc_bt_info.corrupted;
     for (uint8_t i = 0; i < depth; i++) {
@@ -517,7 +570,8 @@ void System_CheckCoreDump() {
 
 bool System_IsOtaPendingVerify() {
   const esp_partition_t *running = esp_ota_get_running_partition();
-  if (!running) return false;
+  if (!running)
+    return false;
   esp_ota_img_states_t ota_state;
   if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
     return (ota_state == ESP_OTA_IMG_PENDING_VERIFY ||
@@ -527,7 +581,8 @@ bool System_IsOtaPendingVerify() {
 }
 
 void System_CheckOtaHealth() {
-  if (s_ota_validated.load(std::memory_order_relaxed)) return;
+  if (s_ota_validated.load(std::memory_order_relaxed))
+    return;
 
   // [H-2] 실질 헬스체크 3조건 (Wi-Fi, Hub 세션 연결, RS-485 패킷 유입)
   bool wifi_ok = (WiFi.status() == WL_CONNECTED);
@@ -535,18 +590,26 @@ void System_CheckOtaHealth() {
   {
     MutexLocker lock(g_mgmt_mutex);
     for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; ++i) {
-      if (g_mgmt_sessions[i].sock >= 0) { hub_ok = true; break; }
+      if (g_mgmt_sessions[i].sock >= 0) {
+        hub_ok = true;
+        break;
+      }
     }
   }
   if (!hub_ok) {
     MutexLocker lock(g_ch5_mutex);
     for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
-      if (g_hub_slots[i].is_connected) { hub_ok = true; break; }
+      if (g_hub_slots[i].is_connected) {
+        hub_ok = true;
+        break;
+      }
     }
   }
 
-  bool rs485_ok = (millis() - g_ch1_bus_ms.load(std::memory_order_relaxed) < 15000);
-  bool time_ok  = TimeUtils::isElapsed(g_boot_start_ms, Config::Timing::OTA_VALIDATION_PERIOD_MS);
+  bool rs485_ok =
+      (millis() - g_ch1_bus_ms.load(std::memory_order_relaxed) < 15000);
+  bool time_ok = TimeUtils::isElapsed(g_boot_start_ms,
+                                      Config::Timing::OTA_VALIDATION_PERIOD_MS);
   bool extended_time_ok = TimeUtils::isElapsed(g_boot_start_ms, 60000);
 
   if (!time_ok || !wifi_ok || (!hub_ok && !extended_time_ok) || !rs485_ok) {
@@ -562,8 +625,10 @@ void System_CheckOtaHealth() {
         ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
       esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
       if (err == ESP_OK) {
-        ::Serial.println(F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
-        g_telnet_tracer.trace("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
+        ::Serial.println(
+            F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
+        g_telnet_tracer.trace(
+            "[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
       } else {
         ::Serial.printf("[OTA] Failed to mark app valid: 0x%x\r\n", err);
       }
@@ -574,7 +639,8 @@ void System_CheckOtaHealth() {
 void System_EnterRescueMode(const char *reason) {
   g_rescue_mode.store(true, std::memory_order_release);
   ::Serial.println(F("\r\n========================================"));
-  ::Serial.printf("  🚨 RESCUE SAFE MODE ACTIVATED: %s\r\n", reason ? reason : "Unknown");
+  ::Serial.printf("  🚨 RESCUE SAFE MODE ACTIVATED: %s\r\n",
+                  reason ? reason : "Unknown");
   ::Serial.println(F("========================================"));
 
   WiFi.mode(WIFI_AP_STA);
@@ -586,15 +652,18 @@ void System_EnterRescueMode(const char *reason) {
   WiFi.setSleep(false);
   esp_wifi_set_max_tx_power(78);
 
-  ::Serial.printf("[RESCUE] SoftAP 'Sweet_Home_Rescue' started: %s (IP: %s)\r\n",
-                  ap_ok ? "SUCCESS" : "FAILED", WiFi.softAPIP().toString().c_str());
+  ::Serial.printf(
+      "[RESCUE] SoftAP 'Sweet_Home_Rescue' started: %s (IP: %s)\r\n",
+      ap_ok ? "SUCCESS" : "FAILED", WiFi.softAPIP().toString().c_str());
 
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
   wifi_config_t w_conf;
   memset(&w_conf, 0, sizeof(w_conf));
-  strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), g_config.wifi_ssid, sizeof(w_conf.sta.ssid) - 1);
-  strncpy(reinterpret_cast<char *>(w_conf.sta.password), g_config.wifi_password, sizeof(w_conf.sta.password) - 1);
+  strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), g_config.wifi_ssid,
+          sizeof(w_conf.sta.ssid) - 1);
+  strncpy(reinterpret_cast<char *>(w_conf.sta.password), g_config.wifi_password,
+          sizeof(w_conf.sta.password) - 1);
   esp_wifi_set_config(WIFI_IF_STA, &w_conf);
   esp_wifi_connect();
 
@@ -622,12 +691,14 @@ void System_EnterRescueMode(const char *reason) {
 }
 
 void System_Sha256ToHex(const char *input, char *output) {
-  if (!input || !output) return;
+  if (!input || !output)
+    return;
   uint8_t hash[32];
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
   mbedtls_sha256_starts_ret(&ctx, 0);
-  mbedtls_sha256_update_ret(&ctx, reinterpret_cast<const unsigned char *>(input), strlen(input));
+  mbedtls_sha256_update_ret(
+      &ctx, reinterpret_cast<const unsigned char *>(input), strlen(input));
   mbedtls_sha256_finish_ret(&ctx, hash);
   mbedtls_sha256_free(&ctx);
 
@@ -648,11 +719,13 @@ void Config_Load() {
   auto &c = g_config;
 
   c.uart_baud_rate = p.getULong("uart_baud", 9600);
-  c.ch2_baud_rate  = p.getULong("ch2_baud", 9600);
-  c.ch3_baud_rate  = p.getULong("ch3_baud", 9600);
-  c.doorphone_baud_rate = p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
+  c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
+  c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
+  c.doorphone_baud_rate =
+      p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
 
-  // [Pillar 3] 100% Zero-Heap 스택 추출: Preferences::getString(key, buf, max_len)
+  // [Pillar 3] 100% Zero-Heap 스택 추출: Preferences::getString(key, buf,
+  // max_len)
   c.wifi_ssid[0] = '\0';
   p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
   c.wifi_password[0] = '\0';
@@ -664,20 +737,24 @@ void Config_Load() {
   c.telnet_pass_hash[0] = '\0';
   p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
 
-  c.uart_parity          = p.getUChar("u_parity", 0);
-  c.uart_stop_bits       = p.getUChar("u_sbits", 1);
-  c.uart_data_bits       = p.getUChar("u_dbits", 8);
-  c.ch2_parity           = p.getUChar("ch2_parity", 0);
-  c.ch2_stop_bits        = p.getUChar("ch2_sbits", 1);
-  c.ch2_data_bits        = p.getUChar("ch2_dbits", 8);
-  c.ch3_parity           = p.getUChar("ch3_parity", 0);
-  c.ch3_stop_bits        = p.getUChar("ch3_sbits", 1);
-  c.ch3_data_bits        = p.getUChar("ch3_dbits", 8);
-  c.doorphone_data_bits  = p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
-  c.doorphone_parity     = p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
-  c.doorphone_stop_bits  = p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
+  c.uart_parity = p.getUChar("u_parity", 0);
+  c.uart_stop_bits = p.getUChar("u_sbits", 1);
+  c.uart_data_bits = p.getUChar("u_dbits", 8);
+  c.ch2_parity = p.getUChar("ch2_parity", 0);
+  c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
+  c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
+  c.ch3_parity = p.getUChar("ch3_parity", 0);
+  c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
+  c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
+  c.doorphone_data_bits =
+      p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
+  c.doorphone_parity =
+      p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
+  c.doorphone_stop_bits =
+      p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
   c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
-  c.wallpad_profile      = p.getUChar("w_prof", static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE));
+  c.wallpad_profile =
+      p.getUChar("w_prof", static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE));
   p.end();
 
   uint16_t mac_suffix = static_cast<uint16_t>(ESP.getEfuseMac() >> 32);
@@ -718,7 +795,8 @@ void Config_Load() {
 }
 
 void Config_Save() {
-  if (!g_config_dirty.load(std::memory_order_acquire)) return;
+  if (!g_config_dirty.load(std::memory_order_acquire))
+    return;
 
   RuntimeConfig snapshot;
   {
@@ -780,7 +858,8 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   sys.wifi_rssi = static_cast<int8_t>(WiFi.RSSI());
 
   if (sys.wifi_connected) {
-    strncpy(sys.wifi_ip, WiFi.localIP().toString().c_str(), sizeof(sys.wifi_ip) - 1);
+    strncpy(sys.wifi_ip, WiFi.localIP().toString().c_str(),
+            sizeof(sys.wifi_ip) - 1);
   } else {
     strncpy(sys.wifi_ip, "0.0.0.0", sizeof(sys.wifi_ip));
   }
@@ -814,12 +893,30 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   hw.temp_24h_avg = s24.count ? s24.temp_avg : hw.temp_cur;
   hw.temp_24h_peak = s24.count ? s24.temp_peak : hw.temp_cur;
 
-  st.ch1_stack    = g_ch1_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch1_task_handle)) : 0;
-  st.ch2_stack    = g_ch2_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch2_task_handle)) : 0;
-  st.ch3_stack    = g_ch3_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch3_task_handle)) : 0;
-  st.ch4_stack    = g_ch4_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_ch4_task_handle)) : 0;
-  st.net_stack    = g_network_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_network_task_handle)) : 0;
-  st.telnet_stack = g_telnet_task_handle ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(g_telnet_task_handle)) : 0;
+  st.ch1_stack = g_ch1_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch1_task_handle))
+                     : 0;
+  st.ch2_stack = g_ch2_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch2_task_handle))
+                     : 0;
+  st.ch3_stack = g_ch3_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch3_task_handle))
+                     : 0;
+  st.ch4_stack = g_ch4_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_ch4_task_handle))
+                     : 0;
+  st.net_stack = g_network_task_handle
+                     ? static_cast<uint16_t>(
+                           uxTaskGetStackHighWaterMark(g_network_task_handle))
+                     : 0;
+  st.telnet_stack = g_telnet_task_handle
+                        ? static_cast<uint16_t>(
+                              uxTaskGetStackHighWaterMark(g_telnet_task_handle))
+                        : 0;
 
   pkt.ch1 = g_pkt_stats.ch1;
   pkt.ch2 = g_pkt_stats.ch2;
@@ -831,11 +928,15 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
 
 bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format) {
   uint8_t db = 8, pr = 0, sb = 1;
-  if (!parseFramingStr(format, db, pr, sb)) return false;
-  if (baud < 1200 || baud > 921600) return false;
+  if (!parseFramingStr(format, db, pr, sb))
+    return false;
+  if (baud < 1200 || baud > 921600)
+    return false;
 
   auto to_uart_parity = [](uint8_t p) -> uart_parity_t {
-    return (p == 1) ? UART_PARITY_EVEN : (p == 2) ? UART_PARITY_ODD : UART_PARITY_DISABLE;
+    return (p == 1)   ? UART_PARITY_EVEN
+           : (p == 2) ? UART_PARITY_ODD
+                      : UART_PARITY_DISABLE;
   };
   auto to_uart_stopbits = [](uint8_t s) -> uart_stop_bits_t {
     return (s == 2) ? UART_STOP_BITS_2 : UART_STOP_BITS_1;
@@ -845,20 +946,28 @@ bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format) {
     std::unique_lock lock(g_config_rw);
     switch (ch) {
     case 1:
-      g_config.uart_baud_rate = baud; g_config.uart_data_bits = db;
-      g_config.uart_parity = pr;      g_config.uart_stop_bits = sb;
+      g_config.uart_baud_rate = baud;
+      g_config.uart_data_bits = db;
+      g_config.uart_parity = pr;
+      g_config.uart_stop_bits = sb;
       break;
     case 2:
-      g_config.ch2_baud_rate = baud;  g_config.ch2_data_bits = db;
-      g_config.ch2_parity = pr;       g_config.ch2_stop_bits = sb;
+      g_config.ch2_baud_rate = baud;
+      g_config.ch2_data_bits = db;
+      g_config.ch2_parity = pr;
+      g_config.ch2_stop_bits = sb;
       break;
     case 3:
-      g_config.ch3_baud_rate = baud;  g_config.ch3_data_bits = db;
-      g_config.ch3_parity = pr;       g_config.ch3_stop_bits = sb;
+      g_config.ch3_baud_rate = baud;
+      g_config.ch3_data_bits = db;
+      g_config.ch3_parity = pr;
+      g_config.ch3_stop_bits = sb;
       break;
     case 4:
-      g_config.doorphone_baud_rate = baud; g_config.doorphone_data_bits = db;
-      g_config.doorphone_parity = pr;      g_config.doorphone_stop_bits = sb;
+      g_config.doorphone_baud_rate = baud;
+      g_config.doorphone_data_bits = db;
+      g_config.doorphone_parity = pr;
+      g_config.doorphone_stop_bits = sb;
       break;
     default:
       return false;
@@ -867,7 +976,9 @@ bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format) {
   }
 
   if (ch >= 1 && ch <= 3) {
-    uart_port_t port = (ch == 1) ? UART_NUM_0 : (ch == 2) ? UART_NUM_1 : UART_NUM_2;
+    uart_port_t port = (ch == 1)   ? UART_NUM_0
+                       : (ch == 2) ? UART_NUM_1
+                                   : UART_NUM_2;
     uart_set_baudrate(port, baud);
     uart_set_word_length(port, (db == 7) ? UART_DATA_7_BITS : UART_DATA_8_BITS);
     uart_set_parity(port, to_uart_parity(pr));
@@ -901,7 +1012,8 @@ void FramingTracker::clearNvs(const char *nvs_ns, const char *tag) noexcept {
 }
 
 void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
-                                  const char *nvs_ns, const char *tag) noexcept {
+                                  const char *nvs_ns,
+                                  const char *tag) noexcept {
   if (is_custom_fixed.load(std::memory_order_relaxed)) {
     return;
   }
@@ -919,7 +1031,8 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
   if (cur == FramingStatus::WAITING) {
     candidate_stx.store(stx, std::memory_order_relaxed);
     candidate_etx.store(etx, std::memory_order_relaxed);
-    if (len > 0) candidate_len.store(len, std::memory_order_relaxed);
+    if (len > 0)
+      candidate_len.store(len, std::memory_order_relaxed);
     consecutive_matches.store(1, std::memory_order_relaxed);
     consecutive_mismatches.store(0, std::memory_order_relaxed);
     status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
@@ -931,7 +1044,8 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
 
   // 2단계: 후보 프레임 일치 검사
   if (stx == cand_s && etx == cand_e) {
-    if (len > 0) candidate_len.store(len, std::memory_order_relaxed);
+    if (len > 0)
+      candidate_len.store(len, std::memory_order_relaxed);
     consecutive_mismatches.store(0, std::memory_order_relaxed);
     uint8_t m = consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
     if (m >= 3) {
@@ -943,7 +1057,8 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
   } else {
     // 3단계: 불일치 처리 및 역수렴 방어
     consecutive_matches.store(0, std::memory_order_relaxed);
-    uint8_t m = consecutive_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+    uint8_t m =
+        consecutive_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
     if (cur == FramingStatus::LOCKED) {
       if (m >= 10) {
         status.store(FramingStatus::WAITING, std::memory_order_relaxed);
@@ -953,7 +1068,8 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
       if (m >= 5) {
         candidate_stx.store(stx, std::memory_order_relaxed);
         candidate_etx.store(etx, std::memory_order_relaxed);
-        if (len > 0) candidate_len.store(len, std::memory_order_relaxed);
+        if (len > 0)
+          candidate_len.store(len, std::memory_order_relaxed);
         consecutive_matches.store(1, std::memory_order_relaxed);
         consecutive_mismatches.store(0, std::memory_order_relaxed);
         status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
@@ -962,8 +1078,10 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
   }
 }
 
-void FramingTracker::restoreFromNvs(const char *nvs_ns, const char *tag) noexcept {
-  if (!nvs_ns) nvs_ns = "dp_frame_p0";
+void FramingTracker::restoreFromNvs(const char *nvs_ns,
+                                    const char *tag) noexcept {
+  if (!nvs_ns)
+    nvs_ns = "dp_frame_p0";
 
   Preferences prefs;
   if (prefs.begin(nvs_ns, true)) {
@@ -980,21 +1098,24 @@ void FramingTracker::restoreFromNvs(const char *nvs_ns, const char *tag) noexcep
       candidate_len.store(l, std::memory_order_relaxed);
       status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
       is_custom_fixed.store(fixed, std::memory_order_relaxed);
-      ::Serial.printf("[%s] Restored valid framing from NVS (%s): STX=0x%02X, ETX=0x%02X, LEN=%u\r\n",
+      ::Serial.printf("[%s] Restored valid framing from NVS (%s): STX=0x%02X, "
+                      "ETX=0x%02X, LEN=%u\r\n",
                       tag, nvs_ns, s, e, l);
     }
   }
 }
 
 void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
-  if (!nvs_ns) nvs_ns = "dp_frame_p0";
+  if (!nvs_ns)
+    nvs_ns = "dp_frame_p0";
 
   Preferences prefs;
   if (prefs.begin(nvs_ns, false)) {
     uint8_t s = candidate_stx.load(std::memory_order_relaxed);
     uint8_t e = candidate_etx.load(std::memory_order_relaxed);
     uint8_t l = candidate_len.load(std::memory_order_relaxed);
-    bool is_locked = (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
+    bool is_locked =
+        (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
     bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
 
     prefs.putUChar("stx", s);
@@ -1004,7 +1125,8 @@ void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
     prefs.putBool("fixed", fixed);
     prefs.end();
 
-    ::Serial.printf("[%s] Persisted framing to NVS (%s): STX=0x%02X, ETX=0x%02X, LEN=%u%s\r\n",
+    ::Serial.printf("[%s] Persisted framing to NVS (%s): STX=0x%02X, "
+                    "ETX=0x%02X, LEN=%u%s\r\n",
                     tag, nvs_ns, s, e, l, fixed ? " [FIXED]" : "");
   }
 }

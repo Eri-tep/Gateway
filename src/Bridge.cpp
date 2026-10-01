@@ -49,27 +49,33 @@ inline uint16_t calcCrc16(const uint8_t *buf, size_t len) {
 }
 
 // §4.1 상태 조회 쿼리 (8B 고정 프레임, Read Holding Registers 0x0000..0x0006)
-constexpr std::array<uint8_t, 8> kQueryPkt = {
-    0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08};
+constexpr std::array<uint8_t, 8> kQueryPkt = {0x01, 0x03, 0x00, 0x00,
+                                              0x00, 0x07, 0x04, 0x08};
 
 // §4.2 전원 OFF (8B 고정 프레임, Write Single Register 0x0002 = 0)
-constexpr std::array<uint8_t, 8> kPowerOffPkt = {
-    0x01, 0x06, 0x00, 0x02, 0x00, 0x00, 0x28, 0x0A};
+constexpr std::array<uint8_t, 8> kPowerOffPkt = {0x01, 0x06, 0x00, 0x02,
+                                                 0x00, 0x00, 0x28, 0x0A};
 
-// §4.2 전원 ON: Reg 0x0001(모드), 0x0002(풍량), 0x0003(스윙) 일괄 (15B FC 0x10, Reg 0 절대 보존)
-inline std::array<uint8_t, 15> buildWriteMultiplePowerOn(uint16_t mode, uint16_t fan, uint16_t swing) {
+// §4.2 전원 ON: Reg 0x0001(모드), 0x0002(풍량), 0x0003(스윙) 일괄 (15B FC 0x10,
+// Reg 0 절대 보존)
+inline std::array<uint8_t, 15>
+buildWriteMultiplePowerOn(uint16_t mode, uint16_t fan, uint16_t swing) {
   std::array<uint8_t, 15> frame = {
-      0x01, 0x10,
-      0x00, 0x01, // 시작 번지 0x0001 (Reg 0 절대 보존)
-      0x00, 0x03, // 레지스터 개수 3개
-      0x06,       // 데이터 바이트 수 6바이트
+      0x01,
+      0x10,
+      0x00,
+      0x01, // 시작 번지 0x0001 (Reg 0 절대 보존)
+      0x00,
+      0x03, // 레지스터 개수 3개
+      0x06, // 데이터 바이트 수 6바이트
       static_cast<uint8_t>((mode >> 8) & 0xFF),
       static_cast<uint8_t>(mode & 0xFF),
       static_cast<uint8_t>((fan >> 8) & 0xFF),
       static_cast<uint8_t>(fan & 0xFF),
       static_cast<uint8_t>((swing >> 8) & 0xFF),
       static_cast<uint8_t>(swing & 0xFF),
-      0x00, 0x00  // CRC 필드
+      0x00,
+      0x00 // CRC 필드
   };
   uint16_t crc = calcCrc16(frame.data(), 13);
   frame[13] = static_cast<uint8_t>(crc & 0xFF);
@@ -79,14 +85,14 @@ inline std::array<uint8_t, 15> buildWriteMultiplePowerOn(uint16_t mode, uint16_t
 
 // §4.3~§4.6 단일 레지스터 쓰기 (8B FC 0x06 표준 프레임)
 inline std::array<uint8_t, 8> buildWriteSingle(uint16_t reg, uint16_t val) {
-  std::array<uint8_t, 8> frame = {
-      0x01, 0x06,
-      static_cast<uint8_t>((reg >> 8) & 0xFF),
-      static_cast<uint8_t>(reg & 0xFF),
-      static_cast<uint8_t>((val >> 8) & 0xFF),
-      static_cast<uint8_t>(val & 0xFF),
-      0x00, 0x00
-  };
+  std::array<uint8_t, 8> frame = {0x01,
+                                  0x06,
+                                  static_cast<uint8_t>((reg >> 8) & 0xFF),
+                                  static_cast<uint8_t>(reg & 0xFF),
+                                  static_cast<uint8_t>((val >> 8) & 0xFF),
+                                  static_cast<uint8_t>(val & 0xFF),
+                                  0x00,
+                                  0x00};
   uint16_t crc = calcCrc16(frame.data(), 6);
   frame[6] = static_cast<uint8_t>(crc & 0xFF);
   frame[7] = static_cast<uint8_t>((crc >> 8) & 0xFF);
@@ -94,14 +100,16 @@ inline std::array<uint8_t, 8> buildWriteSingle(uint16_t reg, uint16_t val) {
 }
 
 // 19B 상태 쿼리 응답 파싱 및 CRC-16 Little-Endian 검증
-inline bool parseStatusResponse(const uint8_t *data, size_t len, Fcu::Snapshot &out) {
+inline bool parseStatusResponse(const uint8_t *data, size_t len,
+                                Fcu::Snapshot &out) {
   if (len < 19 || data[0] != 0x01 || data[1] != 0x03 || data[2] != 0x0E) {
     return false;
   }
 
   // CRC-16 검증: data[0..16] (17바이트) -> CRC at data[17..18]
   uint16_t calc_crc = calcCrc16(data, 17);
-  uint16_t pkt_crc = static_cast<uint16_t>(data[17]) | (static_cast<uint16_t>(data[18]) << 8);
+  uint16_t pkt_crc =
+      static_cast<uint16_t>(data[17]) | (static_cast<uint16_t>(data[18]) << 8);
   if (calc_crc != pkt_crc) {
     return false;
   }
@@ -111,15 +119,18 @@ inline bool parseStatusResponse(const uint8_t *data, size_t len, Fcu::Snapshot &
     return (static_cast<uint16_t>(p[0]) << 8) | p[1];
   };
 
-  uint16_t reg1 = unpackBe16(&data[5]);   // 운전 모드 (1: 냉방, 2: 난방, 3: 송풍)
-  uint16_t reg2 = unpackBe16(&data[7]);   // 풍량 / 전원 (0: 정지, 1: 미풍, 2: 약풍, 3: 강풍, 4: 자동)
-  uint16_t reg3 = unpackBe16(&data[9]);   // 스윙 (0: 고정, 2: 회전)
-  uint16_t reg4 = unpackBe16(&data[11]);  // 에러 코드
-  uint16_t reg5 = unpackBe16(&data[13]);  // 설정 희망 온도
-  uint16_t reg6 = unpackBe16(&data[15]);  // 실내 측정 온도
+  uint16_t reg1 = unpackBe16(&data[5]); // 운전 모드 (1: 냉방, 2: 난방, 3: 송풍)
+  uint16_t reg2 = unpackBe16(
+      &data[7]); // 풍량 / 전원 (0: 정지, 1: 미풍, 2: 약풍, 3: 강풍, 4: 자동)
+  uint16_t reg3 = unpackBe16(&data[9]);  // 스윙 (0: 고정, 2: 회전)
+  uint16_t reg4 = unpackBe16(&data[11]); // 에러 코드
+  uint16_t reg5 = unpackBe16(&data[13]); // 설정 희망 온도
+  uint16_t reg6 = unpackBe16(&data[15]); // 실내 측정 온도
 
-  out.mode = (reg1 >= 1 && reg1 <= 3) ? static_cast<Fcu::Mode>(reg1) : Fcu::Mode::Cool;
-  out.fan_speed = (reg2 <= 4) ? static_cast<Fcu::FanSpeed>(reg2) : Fcu::FanSpeed::Off;
+  out.mode =
+      (reg1 >= 1 && reg1 <= 3) ? static_cast<Fcu::Mode>(reg1) : Fcu::Mode::Cool;
+  out.fan_speed =
+      (reg2 <= 4) ? static_cast<Fcu::FanSpeed>(reg2) : Fcu::FanSpeed::Off;
   out.swing = (reg3 == 2) ? Fcu::Swing::On : Fcu::Swing::Off;
   out.error_code = static_cast<uint8_t>(reg4 & 0xFF);
   out.target_temp = static_cast<uint8_t>(reg5 & 0xFF);
@@ -136,7 +147,8 @@ inline bool parseStatusResponse(const uint8_t *data, size_t len, Fcu::Snapshot &
 namespace {
 
 inline void consumeRxBuffer(HubClientSlot *slot, size_t consumed) {
-  if (!slot || consumed == 0) return;
+  if (!slot || consumed == 0)
+    return;
   if (consumed >= slot->rx_len) {
     slot->rx_len = 0;
   } else {
@@ -158,8 +170,11 @@ void demuxElevatorStream(HubClientSlot *slot) {
       continue;
     }
 
-    int len_res = parser ? parser->extractPacketLength(slot->rx_buf, slot->rx_len, p) : -1;
-    if (len_res == 0) break; // 불완전 패킷: 추가 수신 대기
+    int len_res =
+        parser ? parser->extractPacketLength(slot->rx_buf, slot->rx_len, p)
+               : -1;
+    if (len_res == 0)
+      break; // 불완전 패킷: 추가 수신 대기
     if (len_res < 0) {
       p++;
       continue;
@@ -174,7 +189,8 @@ void demuxElevatorStream(HubClientSlot *slot) {
     span<const uint8_t> frame(&slot->rx_buf[p], p_len);
     if (!parser->validatePacket(frame)) {
       StaticPacket drp_pkt{5, p_len};
-      std::copy(&slot->rx_buf[p], &slot->rx_buf[p + p_len], drp_pkt.data.begin());
+      std::copy(&slot->rx_buf[p], &slot->rx_buf[p + p_len],
+                drp_pkt.data.begin());
       g_telnet_tracer.trace(5, false, TraceType::DRP, drp_pkt);
       g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
       p += p_len;
@@ -198,7 +214,8 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
 
     size_t rem = slot->rx_len - p;
     // 19바이트 0x03 상태 응답
-    if (rem >= 19 && slot->rx_buf[p + 1] == 0x03 && slot->rx_buf[p + 2] == 0x0E) {
+    if (rem >= 19 && slot->rx_buf[p + 1] == 0x03 &&
+        slot->rx_buf[p + 2] == 0x0E) {
       slot->rx_pkts++;
       g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
@@ -207,7 +224,8 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
     }
 
     // 8바이트 0x06 / 0x10 제어 ACK
-    if (rem >= 8 && (slot->rx_buf[p + 1] == 0x06 || slot->rx_buf[p + 1] == 0x10)) {
+    if (rem >= 8 &&
+        (slot->rx_buf[p + 1] == 0x06 || slot->rx_buf[p + 1] == 0x10)) {
       slot->rx_pkts++;
       g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
@@ -274,11 +292,15 @@ static void onBurstTimer(void *arg) {
   uint32_t rx_elapsed = (now >= last_rx) ? (now - last_rx) : 0;
   uint32_t tx_elapsed = (now >= last_tx) ? (now - last_tx) : 0;
 
-  uint32_t rx_rem_ms = (rx_elapsed < silence_req_ms) ? (silence_req_ms - rx_elapsed) : 0;
-  uint32_t tx_rem_ms = (last_tx > 0 && tx_elapsed < silence_req_ms) ? (silence_req_ms - tx_elapsed) : 0;
+  uint32_t rx_rem_ms =
+      (rx_elapsed < silence_req_ms) ? (silence_req_ms - rx_elapsed) : 0;
+  uint32_t tx_rem_ms = (last_tx > 0 && tx_elapsed < silence_req_ms)
+                           ? (silence_req_ms - tx_elapsed)
+                           : 0;
   uint32_t wait_ms = std::max(rx_rem_ms, tx_rem_ms);
 
-  // 2. 선로에 다른 패킷이 유입되었거나 이전 전송 후 지연 시간이 지나지 않은 경우 대기
+  // 2. 선로에 다른 패킷이 유입되었거나 이전 전송 후 지연 시간이 지나지 않은
+  // 경우 대기
   if (wait_ms > 0) {
     portENTER_CRITICAL(&s_burst_fsm.mux);
     if (s_burst_fsm.remaining_count > 0) {
@@ -290,7 +312,8 @@ static void onBurstTimer(void *arg) {
 
   // 3. 선로 유휴 상태 확인 -> 패킷 전송
   bool sent = Hub_SendPacket(slot, tx_pkt);
-  g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP, tx_pkt);
+  g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP,
+                        tx_pkt);
 
   portENTER_CRITICAL(&s_burst_fsm.mux);
   s_burst_fsm.last_tx_ms = millis();
@@ -318,9 +341,12 @@ void init() {
   }
 }
 
-bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count, uint32_t silence_ms) {
-  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS || count == 0) return false;
-  if (!s_burst_fsm.timer) init();
+bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count,
+                     uint32_t silence_ms) {
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS || count == 0)
+    return false;
+  if (!s_burst_fsm.timer)
+    init();
 
   esp_timer_stop(s_burst_fsm.timer);
 
@@ -345,12 +371,14 @@ bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count, u
 }
 
 void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
-  if (!pkt_data || pkt_len == 0) return;
+  if (!pkt_data || pkt_len == 0)
+    return;
 
   // Slot 0: 엘리베이터 (0x34) 전용 처리
   if (slot_idx == 0) {
     auto *parser = WallpadParserFactory::getActiveParser();
-    if (!parser) return;
+    if (!parser)
+      return;
 
     span<const uint8_t> frame(pkt_data, pkt_len);
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
@@ -358,11 +386,13 @@ void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
       g_route_registry.recordRoute(5, 0, 0x34, sub1, sub2);
 
       // 1) 11-byte 상태 응답 (호출 ACK / 대기 복귀)
-      // data[4] == 0x04: Byte #8 == 0x06 (호출 이동 중 / ON), 0x00 (대기 복귀 / OFF)
+      // data[4] == 0x04: Byte #8 == 0x06 (호출 이동 중 / ON), 0x00 (대기 복귀 /
+      // OFF)
       if (pkt_len == 11 && pkt_data[4] == 0x04) {
         static std::atomic<uint8_t> s_last_elev_pwr{0xFF};
         uint8_t new_pwr = (pkt_data[8] == 0x06) ? 1 : 0;
-        uint8_t prev = s_last_elev_pwr.exchange(new_pwr, std::memory_order_acq_rel);
+        uint8_t prev =
+            s_last_elev_pwr.exchange(new_pwr, std::memory_order_acq_rel);
         if (prev != new_pwr) {
           ESP_LOGI(TAG, "[CH5] Elevator State Changed -> Power: %u", new_pwr);
           Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY,
@@ -370,13 +400,15 @@ void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
         }
       }
       // 2) 13-byte 도착 감지 브로드캐스트
-      // data[4] == 0x01 && data[8] == 0x01: Byte #9 = 댁내 층수, Byte #10 = 호기 번호
+      // data[4] == 0x01 && data[8] == 0x01: Byte #9 = 댁내 층수, Byte #10 =
+      // 호기 번호
       else if (pkt_len == 13 && pkt_data[4] == 0x01 && pkt_data[8] == 0x01) {
         uint8_t floor = pkt_data[9];
         uint8_t ho = pkt_data[10];
-        ESP_LOGI(TAG, "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor, ho);
-        Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY,
-                                  0, 0, 0, 0, nullptr, 0.0f, floor, 0, ho);
+        ESP_LOGI(TAG, "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor,
+                 ho);
+        Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY, 0,
+                                  0, 0, 0, nullptr, 0.0f, floor, 0, ho);
       }
     }
     return;
@@ -388,7 +420,8 @@ void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
 }
 
 void processStream(int slot_idx, HubClientSlot *slot) {
-  if (!slot) return;
+  if (!slot)
+    return;
   if (slot_idx == 0) {
     demuxElevatorStream(slot);
   } else {
@@ -406,27 +439,34 @@ namespace {
 static Fcu::SlotRuntime s_fcu_slots[Config::TCP::MAX_EW11_SLOTS]{};
 
 void syncDeviceRepository(uint8_t slot_idx, const Fcu::Snapshot &snap) {
-  DeviceStateEntry *dev = g_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
-  if (!dev) return;
+  DeviceStateEntry *dev =
+      g_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
+  if (!dev)
+    return;
 
   dev->last_ack_len = 19;
-  dev->last_ack_data[6]  = static_cast<uint8_t>(snap.mode);
-  dev->last_ack_data[8]  = static_cast<uint8_t>(snap.fan_speed);
+  dev->last_ack_data[6] = static_cast<uint8_t>(snap.mode);
+  dev->last_ack_data[8] = static_cast<uint8_t>(snap.fan_speed);
   dev->last_ack_data[10] = static_cast<uint8_t>(snap.swing);
   dev->last_ack_data[14] = snap.target_temp;
-  dev->last_target_temp  = snap.target_temp;
-  dev->last_updated_ms   = millis();
-  dev->is_online         = true;
+  dev->last_target_temp = snap.target_temp;
+  dev->last_updated_ms = millis();
+  dev->is_online = true;
 }
 
-void applyOptimisticState(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing, uint8_t temp) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return;
+void applyOptimisticState(uint8_t slot_idx, uint16_t mode, uint16_t fan,
+                          uint16_t swing, uint8_t temp) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return;
   auto &rt = s_fcu_slots[slot_idx];
 
   rt.snap.power = (fan != 0);
-  if (mode >= 1 && mode <= 3) rt.snap.mode = static_cast<Fcu::Mode>(mode);
-  if (fan <= 4) rt.snap.fan_speed = static_cast<Fcu::FanSpeed>(fan);
-  if (swing == 0 || swing == 2) rt.snap.swing = static_cast<Fcu::Swing>(swing);
+  if (mode >= 1 && mode <= 3)
+    rt.snap.mode = static_cast<Fcu::Mode>(mode);
+  if (fan <= 4)
+    rt.snap.fan_speed = static_cast<Fcu::FanSpeed>(fan);
+  if (swing == 0 || swing == 2)
+    rt.snap.swing = static_cast<Fcu::Swing>(swing);
   if (temp >= Config::FCU::TEMP_MIN && temp <= Config::FCU::TEMP_MAX) {
     rt.snap.target_temp = temp;
   }
@@ -442,14 +482,18 @@ void applyOptimisticState(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_
   syncDeviceRepository(slot_idx, rt.snap);
 }
 
-// 슬롯 소켓에 직접 전송하거나, 선로 점유 중(waiting_response)이면 대기 큐에 보관 (Stop-and-Wait 규약)
+// 슬롯 소켓에 직접 전송하거나, 선로 점유 중(waiting_response)이면 대기 큐에
+// 보관 (Stop-and-Wait 규약)
 bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !pkt || len == 0 || len > 16)
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !pkt ||
+      len == 0 || len > 16)
     return false;
   auto &rt = s_fcu_slots[slot_idx];
 
-  // 선로가 응답 대기 중이거나 인터패킷 갭 진행 중인 경우: 대기 큐에 보관 (Stop-and-Wait 규약)
-  if (rt.waiting_response || rt.has_pending_temp || (millis() < rt.next_tx_ms)) {
+  // 선로가 응답 대기 중이거나 인터패킷 갭 진행 중인 경우: 대기 큐에 보관
+  // (Stop-and-Wait 규약)
+  if (rt.waiting_response || rt.has_pending_temp ||
+      (millis() < rt.next_tx_ms)) {
     memcpy(rt.pending_cmd_buf, pkt, len);
     rt.pending_cmd_len = static_cast<uint8_t>(len);
     return true;
@@ -457,9 +501,11 @@ bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
 
   MutexLocker lock(g_ch5_mutex);
   HubClientSlot &slot = g_hub_slots[slot_idx];
-  if (!slot.enabled || slot.sock < 0 || !slot.is_connected) return false;
+  if (!slot.enabled || slot.sock < 0 || !slot.is_connected)
+    return false;
 
-  bool ok = (send(slot.sock, pkt, len, MSG_DONTWAIT) == static_cast<ssize_t>(len));
+  bool ok =
+      (send(slot.sock, pkt, len, MSG_DONTWAIT) == static_cast<ssize_t>(len));
   if (ok) {
     slot.tx_pkts++;
     g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
@@ -472,8 +518,10 @@ bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
 
 // FCU 단일 레지스터 쓰기 공통 실행 파이프라인
 template <typename MutateFn>
-bool executeRegisterWrite(uint8_t slot_idx, uint16_t reg, uint16_t val, MutateFn &&mutate) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+bool executeRegisterWrite(uint8_t slot_idx, uint16_t reg, uint16_t val,
+                          MutateFn &&mutate) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
 
   auto frame = ModbusRtu::buildWriteSingle(reg, val);
   bool ok = Fcu_SendRaw(slot_idx, frame.data(), frame.size());
@@ -490,7 +538,8 @@ bool executeRegisterWrite(uint8_t slot_idx, uint16_t reg, uint16_t val, MutateFn
 namespace Fcu {
 
 void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !data) return;
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !data)
+    return;
   auto &rt = s_fcu_slots[slot_idx];
 
   // 1) 제어 명령(0x06, 0x10) ACK 수신 확인 (8바이트 에코 응답)
@@ -505,7 +554,8 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
   // 2) 19바이트 0x03 상태 쿼리 응답 처리
   if (len >= 19 && data[0] == 0x01 && data[1] == 0x03 && data[2] == 0x0E) {
     Fcu::Snapshot new_snap;
-    if (!ModbusRtu::parseStatusResponse(data, len, new_snap)) return; // CRC 불일치 시 드롭
+    if (!ModbusRtu::parseStatusResponse(data, len, new_snap))
+      return; // CRC 불일치 시 드롭
 
     rt.waiting_response = false;
     rt.timeout_count = 0;
@@ -522,11 +572,14 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
     rt.last_active_swing = new_snap.swing;
 
     // [펌웨어 레벨 스윙 자동 안착]
-    // 복원 명령으로 회전(2)을 지시받았으나 모터 원점 복귀로 인해 swing != 2로 보고된 경우 1회 자동 보정
-    // ※ Fcu_SendRaw 직접 호출 시 g_ch5_mutex 재귀 데드락이 발생하므로 대기 큐(pending_cmd_buf)에 적재
+    // 복원 명령으로 회전(2)을 지시받았으나 모터 원점 복귀로 인해 swing != 2로
+    // 보고된 경우 1회 자동 보정 ※ Fcu_SendRaw 직접 호출 시 g_ch5_mutex 재귀
+    // 데드락이 발생하므로 대기 큐(pending_cmd_buf)에 적재
     if (new_snap.power && rt.pending_restore_swing == 2) {
       if (new_snap.swing != Fcu::Swing::On) {
-        ESP_LOGI(TAG, "[FCU#%d] Flap motor calibrated. Queuing swing restore (2)...", slot_idx);
+        ESP_LOGI(TAG,
+                 "[FCU#%d] Flap motor calibrated. Queuing swing restore (2)...",
+                 slot_idx);
         auto sw_frame = ModbusRtu::buildWriteSingle(0x0003, 0x0002);
         memcpy(rt.pending_cmd_buf, sw_frame.data(), sw_frame.size());
         rt.pending_cmd_len = static_cast<uint8_t>(sw_frame.size());
@@ -541,8 +594,10 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
 }
 
 void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !slot) return;
-  if (!slot->enabled || slot->sock < 0 || !slot->is_connected) return;
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !slot)
+    return;
+  if (!slot->enabled || slot->sock < 0 || !slot->is_connected)
+    return;
 
   auto &rt = s_fcu_slots[slot_idx];
 
@@ -555,9 +610,10 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
   if (rt.has_pending_temp) {
     if (!rt.waiting_response) {
       rt.has_pending_temp = false;
-      auto temp_frame = ModbusRtu::buildWriteSingle(0x0005, static_cast<uint16_t>(rt.pending_temp));
-      if (send(slot->sock, temp_frame.data(), temp_frame.size(), MSG_DONTWAIT) ==
-          static_cast<ssize_t>(temp_frame.size())) {
+      auto temp_frame = ModbusRtu::buildWriteSingle(
+          0x0005, static_cast<uint16_t>(rt.pending_temp));
+      if (send(slot->sock, temp_frame.data(), temp_frame.size(),
+               MSG_DONTWAIT) == static_cast<ssize_t>(temp_frame.size())) {
         slot->tx_pkts++;
         g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
         rt.waiting_response = true;
@@ -573,7 +629,8 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
     if (!rt.waiting_response) {
       uint8_t len = rt.pending_cmd_len;
       rt.pending_cmd_len = 0;
-      if (send(slot->sock, rt.pending_cmd_buf, len, MSG_DONTWAIT) == static_cast<ssize_t>(len)) {
+      if (send(slot->sock, rt.pending_cmd_buf, len, MSG_DONTWAIT) ==
+          static_cast<ssize_t>(len)) {
         slot->tx_pkts++;
         g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
         rt.waiting_response = true;
@@ -597,16 +654,19 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
   }
 
   // ── Step 5: Periodic Polling Scheduler (슬롯별 독립 주기) ──
-  if (rt.last_poll_ms == 0 || (now - rt.last_poll_ms >= Config::FCU::POLL_INTERVAL_MS)) {
+  if (rt.last_poll_ms == 0 ||
+      (now - rt.last_poll_ms >= Config::FCU::POLL_INTERVAL_MS)) {
     rt.last_poll_ms = now;
     rt.query_sent_ms = now;
     rt.waiting_response = true;
 
     // 1st-Tier Polling Target 등록 (스핀락 경합 방지)
     g_polling_targets.registerOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
-                                     ModbusRtu::kQueryPkt.data(), ModbusRtu::kQueryPkt.size());
+                                      ModbusRtu::kQueryPkt.data(),
+                                      ModbusRtu::kQueryPkt.size());
 
-    if (send(slot->sock, ModbusRtu::kQueryPkt.data(), ModbusRtu::kQueryPkt.size(), MSG_DONTWAIT) ==
+    if (send(slot->sock, ModbusRtu::kQueryPkt.data(),
+             ModbusRtu::kQueryPkt.size(), MSG_DONTWAIT) ==
         static_cast<ssize_t>(ModbusRtu::kQueryPkt.size())) {
       slot->tx_pkts++;
       g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
@@ -614,17 +674,24 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
   }
 }
 
-bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing, uint8_t temp) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing,
+                  uint8_t temp) {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
   auto &rt = s_fcu_slots[slot_idx];
 
-  if (mode != 1 && mode != 2 && mode != 3) mode = 1; // 기본 냉방
-  if (fan == 0 || fan > 4) fan = 4;                  // 기본 자동
-  if (swing != 0 && swing != 2) swing = 0;           // 기본 고정
-  if (temp < Config::FCU::TEMP_MIN || temp > Config::FCU::TEMP_MAX) temp = 24;
+  if (mode != 1 && mode != 2 && mode != 3)
+    mode = 1; // 기본 냉방
+  if (fan == 0 || fan > 4)
+    fan = 4; // 기본 자동
+  if (swing != 0 && swing != 2)
+    swing = 0; // 기본 고정
+  if (temp < Config::FCU::TEMP_MIN || temp > Config::FCU::TEMP_MAX)
+    temp = 24;
 
   auto frame = ModbusRtu::buildWriteMultiplePowerOn(mode, fan, swing);
-  if (!Fcu_SendRaw(slot_idx, frame.data(), frame.size())) return false;
+  if (!Fcu_SendRaw(slot_idx, frame.data(), frame.size()))
+    return false;
 
   uint8_t prev_temp = rt.snap.target_temp;
   applyOptimisticState(slot_idx, mode, fan, swing, temp);
@@ -635,83 +702,96 @@ bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing,
     rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS;
   }
 
-  // 모터 캘리브레이션으로 인한 스윙 풀림 대비: 회전(2) 요구 시 pending_restore_swing 등록
+  // 모터 캘리브레이션으로 인한 스윙 풀림 대비: 회전(2) 요구 시
+  // pending_restore_swing 등록
   rt.pending_restore_swing = (swing == 2) ? 2 : 0;
   return true;
 }
 
 bool SetPower(uint8_t slot_idx, bool on) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
   auto &rt = s_fcu_slots[slot_idx];
 
   if (on) {
     Mode target_mode = rt.has_active_record ? rt.last_active_mode : Mode::Cool;
-    FanSpeed target_fan = rt.has_active_record ? rt.last_active_fan : FanSpeed::Low;
-    Swing target_swing = rt.has_active_record ? rt.last_active_swing : Swing::Off;
+    FanSpeed target_fan =
+        rt.has_active_record ? rt.last_active_fan : FanSpeed::Low;
+    Swing target_swing =
+        rt.has_active_record ? rt.last_active_swing : Swing::Off;
 
-    if (target_fan == FanSpeed::Off) target_fan = FanSpeed::Low;
+    if (target_fan == FanSpeed::Off)
+      target_fan = FanSpeed::Low;
     rt.pending_restore_swing = (target_swing == Swing::On) ? 2 : 0;
 
     auto frame = ModbusRtu::buildWriteMultiplePowerOn(
-        static_cast<uint16_t>(target_mode),
-        static_cast<uint16_t>(target_fan),
+        static_cast<uint16_t>(target_mode), static_cast<uint16_t>(target_fan),
         static_cast<uint16_t>(target_swing));
     bool ok = Fcu_SendRaw(slot_idx, frame.data(), frame.size());
     if (ok) {
       applyOptimisticState(slot_idx, static_cast<uint16_t>(target_mode),
                            static_cast<uint16_t>(target_fan),
-                           static_cast<uint16_t>(target_swing), rt.snap.target_temp);
+                           static_cast<uint16_t>(target_swing),
+                           rt.snap.target_temp);
     }
     return ok;
   } else {
     rt.pending_restore_swing = 0;
-    bool ok = Fcu_SendRaw(slot_idx, ModbusRtu::kPowerOffPkt.data(), ModbusRtu::kPowerOffPkt.size());
+    bool ok = Fcu_SendRaw(slot_idx, ModbusRtu::kPowerOffPkt.data(),
+                          ModbusRtu::kPowerOffPkt.size());
     if (ok) {
       applyOptimisticState(slot_idx, static_cast<uint16_t>(rt.snap.mode), 0,
-                           static_cast<uint16_t>(rt.snap.swing), rt.snap.target_temp);
+                           static_cast<uint16_t>(rt.snap.swing),
+                           rt.snap.target_temp);
     }
     return ok;
   }
 }
 
 bool SetMode(uint8_t slot_idx, Mode m) {
-  return executeRegisterWrite(slot_idx, 0x0001, static_cast<uint16_t>(m), [m](SlotRuntime &rt) {
-    rt.snap.mode = m;
-    if (m == Mode::Cool || m == Mode::Heat) {
-      rt.last_active_mode = m;
-      rt.has_active_record = true;
-    }
-  });
+  return executeRegisterWrite(slot_idx, 0x0001, static_cast<uint16_t>(m),
+                              [m](SlotRuntime &rt) {
+                                rt.snap.mode = m;
+                                if (m == Mode::Cool || m == Mode::Heat) {
+                                  rt.last_active_mode = m;
+                                  rt.has_active_record = true;
+                                }
+                              });
 }
 
 bool SetFanSpeed(uint8_t slot_idx, FanSpeed f) {
-  return executeRegisterWrite(slot_idx, 0x0002, static_cast<uint16_t>(f), [f](SlotRuntime &rt) {
-    rt.snap.fan_speed = f;
-    rt.snap.power = (f != FanSpeed::Off);
-    if (f != FanSpeed::Off) {
-      rt.last_active_fan = f;
-    }
-  });
+  return executeRegisterWrite(slot_idx, 0x0002, static_cast<uint16_t>(f),
+                              [f](SlotRuntime &rt) {
+                                rt.snap.fan_speed = f;
+                                rt.snap.power = (f != FanSpeed::Off);
+                                if (f != FanSpeed::Off) {
+                                  rt.last_active_fan = f;
+                                }
+                              });
 }
 
 bool SetSwing(uint8_t slot_idx, Swing s) {
-  return executeRegisterWrite(slot_idx, 0x0003, static_cast<uint16_t>(s), [s](SlotRuntime &rt) {
-    rt.snap.swing = s;
-    rt.last_active_swing = s;
-  });
+  return executeRegisterWrite(slot_idx, 0x0003, static_cast<uint16_t>(s),
+                              [s](SlotRuntime &rt) {
+                                rt.snap.swing = s;
+                                rt.last_active_swing = s;
+                              });
 }
 
 bool SetTargetTemp(uint8_t slot_idx, uint8_t temp_c) {
-  if (temp_c < Config::FCU::TEMP_MIN) temp_c = Config::FCU::TEMP_MIN;
-  if (temp_c > Config::FCU::TEMP_MAX) temp_c = Config::FCU::TEMP_MAX;
+  if (temp_c < Config::FCU::TEMP_MIN)
+    temp_c = Config::FCU::TEMP_MIN;
+  if (temp_c > Config::FCU::TEMP_MAX)
+    temp_c = Config::FCU::TEMP_MAX;
 
-  return executeRegisterWrite(slot_idx, 0x0005, static_cast<uint16_t>(temp_c), [temp_c](SlotRuntime &rt) {
-    rt.snap.target_temp = temp_c;
-  });
+  return executeRegisterWrite(
+      slot_idx, 0x0005, static_cast<uint16_t>(temp_c),
+      [temp_c](SlotRuntime &rt) { rt.snap.target_temp = temp_c; });
 }
 
 bool GetSlotRuntime(uint8_t slot_idx, SlotRuntime &out_rt) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
   out_rt = s_fcu_slots[slot_idx];
   return true;
 }
@@ -722,7 +802,8 @@ bool GetSlotRuntime(uint8_t slot_idx, SlotRuntime &out_rt) {
 // Domain 4: L4 TCP Hub Transport Layer (BSD Sockets & Lifecycle)
 // ============================================================================
 void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
-  if (sock < 0) return;
+  if (sock < 0)
+    return;
   int keepalive = 1;
   setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
   setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
@@ -738,8 +819,7 @@ static void configureClientSocket(int sock) {
   int sockbuf = Config::TCP::SOCKET_BUFFER_SIZE;
   setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &sockbuf, sizeof(sockbuf));
   setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sockbuf, sizeof(sockbuf));
-  Tcp_EnableKeepalive(sock, 30,
-                      Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
+  Tcp_EnableKeepalive(sock, 30, Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
                       Config::TCP::DEFAULT_KEEPALIVE_CNT);
 }
 
@@ -749,8 +829,10 @@ int Hub_AcceptClient(int slot_idx, int server_fd) {
 
   struct sockaddr_in caddr;
   socklen_t clen = sizeof(caddr);
-  int new_sock = accept(server_fd, reinterpret_cast<struct sockaddr *>(&caddr), &clen);
-  if (new_sock < 0) return -1;
+  int new_sock =
+      accept(server_fd, reinterpret_cast<struct sockaddr *>(&caddr), &clen);
+  if (new_sock < 0)
+    return -1;
 
   const uint8_t *b = reinterpret_cast<const uint8_t *>(&caddr.sin_addr.s_addr);
   IPAddress remote_ip(b[0], b[1], b[2], b[3]);
@@ -760,13 +842,15 @@ int Hub_AcceptClient(int slot_idx, int server_fd) {
   }
 
   char client_ip_str[16];
-  snprintf(client_ip_str, sizeof(client_ip_str), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+  snprintf(client_ip_str, sizeof(client_ip_str), "%u.%u.%u.%u", b[0], b[1],
+           b[2], b[3]);
 
   MutexLocker lock(g_ch5_mutex);
   auto &slot = g_hub_slots[slot_idx];
 
   if (slot.target_ip[0] != '\0' && strcmp(slot.target_ip, client_ip_str) != 0) {
-    ESP_LOGW(TAG, "[CH5] Client IP mismatch for Slot %d (%s): got %s, expected %s",
+    ESP_LOGW(TAG,
+             "[CH5] Client IP mismatch for Slot %d (%s): got %s, expected %s",
              slot_idx, slot.name, client_ip_str, slot.target_ip);
     close(new_sock);
     return -1;
@@ -793,8 +877,10 @@ int Hub_AcceptClient(int slot_idx, int server_fd) {
   return new_sock;
 }
 
-void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data, size_t pkt_len) {
-  if (!slot || !pkt_data || pkt_len == 0) return;
+void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
+                       size_t pkt_len) {
+  if (!slot || !pkt_data || pkt_len == 0)
+    return;
 
   StaticPacket pkt{5, static_cast<uint8_t>(pkt_len)};
   std::copy(pkt_data, pkt_data + pkt_len, pkt.data.begin());
@@ -814,12 +900,14 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data, size_t pkt_
       g_route_registry.recordRoute(5, s_idx, dev_id, sub1, sub2);
 
       bool is_query = parser->isQueryPacket(frame);
-      bool is_ack   = (pkt_len >= 5 && frame[4] == 0x04); // 표준 ACK Opcode(0x04)
+      bool is_ack = (pkt_len >= 5 && frame[4] == 0x04); // 표준 ACK Opcode(0x04)
 
-      // 0x2A (신발장 서브 패널 / 원격검침)는 폴링 대상 및 단말 제어 기기가 아니므로 캐시에서 완전 제외
+      // 0x2A (신발장 서브 패널 / 원격검침)는 폴링 대상 및 단말 제어 기기가
+      // 아니므로 캐시에서 완전 제외
       if (dev_id != 0x2A) {
         if (is_query) {
-          g_polling_targets.registerOrTouch(5, dev_id, sub1, sub2, pkt_data, pkt_len);
+          g_polling_targets.registerOrTouch(5, dev_id, sub1, sub2, pkt_data,
+                                            pkt_len);
         }
         if (is_ack) {
           g_device_repo.updateFromBus(pkt);
@@ -833,14 +921,17 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data, size_t pkt_
 }
 
 void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
-  if (!slot || slot->sock < 0 || !data || len == 0) return;
+  if (!slot || slot->sock < 0 || !data || len == 0)
+    return;
 
   slot->last_rx_ms = millis();
 
-  // 오버플로우 방어: 수신 버퍼 여유가 부족할 경우 미완성 패킷 시작 바이트 앞으로 슬라이딩
+  // 오버플로우 방어: 수신 버퍼 여유가 부족할 경우 미완성 패킷 시작 바이트
+  // 앞으로 슬라이딩
   if (slot->rx_len + len > sizeof(slot->rx_buf)) {
     uint8_t stx = slot->tracker.candidate_stx.load(std::memory_order_relaxed);
-    if (stx == 0) stx = PKT_STX;
+    if (stx == 0)
+      stx = PKT_STX;
     size_t stx_pos = 0;
     while (stx_pos < slot->rx_len && slot->rx_buf[stx_pos] != stx) {
       stx_pos++;
@@ -863,10 +954,13 @@ void Hub_LoadConfig() {
 
   // Slot 0 (엘리베이터)
   g_hub_slots[0].enabled = p.getBool("e0_en", true);
-  p.getString("e0_name", "Elevator").toCharArray(g_hub_slots[0].name, sizeof(g_hub_slots[0].name));
-  p.getString("e0_ip", "172.30.1.245").toCharArray(g_hub_slots[0].target_ip, sizeof(g_hub_slots[0].target_ip));
+  p.getString("e0_name", "Elevator")
+      .toCharArray(g_hub_slots[0].name, sizeof(g_hub_slots[0].name));
+  p.getString("e0_ip", "172.30.1.245")
+      .toCharArray(g_hub_slots[0].target_ip, sizeof(g_hub_slots[0].target_ip));
   uint16_t p0 = p.getUShort("e0_port", 8898);
-  if (p0 == 0 || p0 == 8899) p0 = 8898;
+  if (p0 == 0 || p0 == 8899)
+    p0 = 8898;
   g_hub_slots[0].target_port = p0;
   g_hub_slots[0].dev_type = HubDeviceType::WALLPAD_COMPATIBLE;
   g_hub_slots[0].sock = -1;
@@ -883,11 +977,15 @@ void Hub_LoadConfig() {
     snprintf(def_nm, sizeof(def_nm), "AC_%d", i);
 
     g_hub_slots[i].enabled = p.getBool(k_en, false);
-    p.getString(k_nm, def_nm).toCharArray(g_hub_slots[i].name, sizeof(g_hub_slots[i].name));
-    p.getString(k_ip, "").toCharArray(g_hub_slots[i].target_ip, sizeof(g_hub_slots[i].target_ip));
-    uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[i]; // 8891, 8892, 8893, 8894
+    p.getString(k_nm, def_nm)
+        .toCharArray(g_hub_slots[i].name, sizeof(g_hub_slots[i].name));
+    p.getString(k_ip, "").toCharArray(g_hub_slots[i].target_ip,
+                                      sizeof(g_hub_slots[i].target_ip));
+    uint16_t def_slot_port =
+        Config::TCP::EW11_SLOT_PORTS[i]; // 8891, 8892, 8893, 8894
     uint16_t pi = p.getUShort(k_pt, def_slot_port);
-    if (pi == 0 || pi == 8899) pi = def_slot_port;
+    if (pi == 0 || pi == 8899)
+      pi = def_slot_port;
     g_hub_slots[i].target_port = pi;
     g_hub_slots[i].dev_type = HubDeviceType::AIR_CONDITIONER;
     g_hub_slots[i].sock = -1;
@@ -924,8 +1022,10 @@ void Hub_SaveConfig() {
   p.end();
 }
 
-bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port, const char *name) {
-  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                 const char *name) {
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
 
   MutexLocker lock(g_ch5_mutex);
   auto &slot = g_hub_slots[slot_idx];
@@ -935,7 +1035,8 @@ bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port, 
                  (port > 0 && slot.target_port != port) ||
                  (name && strlen(name) > 0 && strcmp(slot.name, name) != 0);
 
-  if (!changed) return true;
+  if (!changed)
+    return true;
 
   bool reconnect_needed = (slot.enabled != enabled) ||
                           (strcmp(slot.target_ip, ip ? ip : "") != 0) ||
@@ -948,7 +1049,8 @@ bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port, 
   } else {
     slot.target_ip[0] = '\0';
   }
-  if (port > 0) slot.target_port = port;
+  if (port > 0)
+    slot.target_port = port;
   if (name && strlen(name) > 0) {
     strncpy(slot.name, name, sizeof(slot.name) - 1);
     slot.name[sizeof(slot.name) - 1] = '\0';
@@ -967,10 +1069,12 @@ bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port, 
 }
 
 bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
-  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) return false;
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
+    return false;
   MutexLocker lock(g_ch5_mutex);
   auto &slot = g_hub_slots[slot_idx];
-  if (!slot.enabled || slot.sock < 0 || !slot.is_connected) return false;
+  if (!slot.enabled || slot.sock < 0 || !slot.is_connected)
+    return false;
 
   int s = send(slot.sock, pkt.data.data(), pkt.length, MSG_DONTWAIT);
   if (s == static_cast<int>(pkt.length)) {

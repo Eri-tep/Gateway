@@ -1,7 +1,7 @@
 #include "Engine.h"
+#include "Console.h"
 #include "Core.h"
 #include "Protocol.h"
-#include "Console.h"
 #include "Service.h"
 
 #include "esp_task_wdt.h"
@@ -19,10 +19,10 @@ using UartPollCallback = void (*)(void *ctx);
 
 QueueHandle_t Uart_GetEventQueue(uart_port_t u_num);
 UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
-                            uint32_t tout_ms,
-                            UartPollCallback on_poll = nullptr,
-                            void *poll_ctx = nullptr,
-                            const StaticPacket *echo_match = nullptr);
+                             uint32_t tout_ms,
+                             UartPollCallback on_poll = nullptr,
+                             void *poll_ctx = nullptr,
+                             const StaticPacket *echo_match = nullptr);
 
 void Ch1_WaitBusIdle(uint32_t silence_ms);
 void Ch1_HandleCtrl(const StaticPacket &ctrlPacket);
@@ -57,7 +57,8 @@ float temperatureRead(void);
 int8_t System_ReadTempC() { return static_cast<int8_t>(temperatureRead()); }
 
 void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
-  static std::atomic<uint32_t> s_last_time_ms{0}, s_last_ch1{0}, s_last_ch23{0}, s_last_tcp{0};
+  static std::atomic<uint32_t> s_last_time_ms{0}, s_last_ch1{0}, s_last_ch23{0},
+      s_last_tcp{0};
 
   uint32_t now_ms = millis();
   uint32_t prev_ms = s_last_time_ms.load(std::memory_order_relaxed);
@@ -95,14 +96,19 @@ void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
 
   s_last_time_ms.store(now_ms, std::memory_order_relaxed);
   uint32_t delta_tcp = get_delta(cur_tcp, s_last_tcp);
-  uint32_t delta_uart = get_delta(cur_ch1, s_last_ch1) + get_delta(cur_ch23, s_last_ch23);
+  uint32_t delta_uart =
+      get_delta(cur_ch1, s_last_ch1) + get_delta(cur_ch23, s_last_ch23);
 
-  uint32_t tcp_pps = static_cast<uint32_t>((static_cast<uint64_t>(delta_tcp) * 1000) / elapsed_ms);
+  uint32_t tcp_pps = static_cast<uint32_t>(
+      (static_cast<uint64_t>(delta_tcp) * 1000) / elapsed_ms);
   uint32_t load0 = CPU0_BASE_LOAD + (tcp_pps / CPU0_PPS_DIVISOR);
-  if (WiFi.isConnected()) load0 += 1;
-  if (g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed)) load0 += 1;
+  if (WiFi.isConnected())
+    load0 += 1;
+  if (g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed))
+    load0 += 1;
 
-  uint32_t uart_pps = static_cast<uint32_t>((static_cast<uint64_t>(delta_uart) * 1000) / elapsed_ms);
+  uint32_t uart_pps = static_cast<uint32_t>(
+      (static_cast<uint64_t>(delta_uart) * 1000) / elapsed_ms);
   uint32_t load1 = CPU1_BASE_LOAD + (uart_pps / CPU1_PPS_DIVISOR);
 
   cpu0_out = static_cast<uint8_t>(std::min(load0, 99U));
@@ -112,7 +118,8 @@ void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
 void SystemMetricsTracker::init() {
   if (!_metrics_mutex)
     _metrics_mutex = xSemaphoreCreateMutex();
-  _cached_flash_kb = _current.flash_kb = static_cast<uint16_t>(ESP.getSketchSize() / 1024);
+  _cached_flash_kb = _current.flash_kb =
+      static_cast<uint16_t>(ESP.getSketchSize() / 1024);
   memset(&_cur_bucket, 0, sizeof(_cur_bucket));
 }
 
@@ -172,7 +179,11 @@ struct MetricAccumulator {
   uint32_t count = 0;
 
   void add(uint8_t c0, uint8_t c1, uint16_t ram, uint16_t flash, int8_t temp) {
-    cpu0_sum += c0; cpu1_sum += c1; ram_sum += ram; flash_sum += flash; temp_sum += temp;
+    cpu0_sum += c0;
+    cpu1_sum += c1;
+    ram_sum += ram;
+    flash_sum += flash;
+    temp_sum += temp;
     count++;
     cpu0_peak = std::max(cpu0_peak, c0);
     cpu1_peak = std::max(cpu1_peak, c1);
@@ -182,8 +193,12 @@ struct MetricAccumulator {
   }
 
   void addBucket(const MetricBucket &b) {
-    if (!b.count) return;
-    cpu0_sum += b.cpu0_sum; cpu1_sum += b.cpu1_sum; ram_sum += b.ram_sum; temp_sum += b.temp_sum;
+    if (!b.count)
+      return;
+    cpu0_sum += b.cpu0_sum;
+    cpu1_sum += b.cpu1_sum;
+    ram_sum += b.ram_sum;
+    temp_sum += b.temp_sum;
     count += b.count;
     cpu0_peak = std::max(cpu0_peak, b.cpu0_peak);
     cpu1_peak = std::max(cpu1_peak, b.cpu1_peak);
@@ -193,7 +208,8 @@ struct MetricAccumulator {
 
   StatSummary finalize(uint16_t fallback_flash = 0) const {
     StatSummary r = {};
-    if (!count) return r;
+    if (!count)
+      return r;
     r.cpu0_avg = cpu0_sum / count;
     r.cpu0_peak = cpu0_peak;
     r.cpu1_avg = cpu1_sum / count;
@@ -230,14 +246,14 @@ StatSummary SystemMetricsTracker::get24h() const {
   return acc.finalize(_cached_flash_kb);
 }
 
-
-
 // ============================================================================
 // 2. UART RX Stream Demux & Packet Validation (formerly UartRx.cpp)
 // ============================================================================
 
-static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream, size_t &stream_len,
-                                            size_t max_stream_buf, uint32_t &last_rx_ms) {
+static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
+                                            size_t &stream_len,
+                                            size_t max_stream_buf,
+                                            uint32_t &last_rx_ms) {
   size_t avail = 0;
   uart_get_buffered_data_len(u_num, &avail);
   if (avail == 0)
@@ -258,7 +274,8 @@ static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream, 
       stream_len = 0;
     }
   }
-  size_t copy_len = std::min(static_cast<size_t>(rx), max_stream_buf - stream_len);
+  size_t copy_len =
+      std::min(static_cast<size_t>(rx), max_stream_buf - stream_len);
   memcpy(stream + stream_len, temp, copy_len);
   stream_len += copy_len;
   last_rx_ms = millis();
@@ -267,24 +284,27 @@ static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream, 
 
 QueueHandle_t Uart_GetEventQueue(uart_port_t u_num) {
   switch (u_num) {
-  case UART_NUM_0: return g_uart0_event_queue;
-  case UART_NUM_1: return g_uart1_event_queue;
-  case UART_NUM_2: return g_uart2_event_queue;
-  default: return nullptr;
+  case UART_NUM_0:
+    return g_uart0_event_queue;
+  case UART_NUM_1:
+    return g_uart1_event_queue;
+  case UART_NUM_2:
+    return g_uart2_event_queue;
+  default:
+    return nullptr;
   }
 }
 
 UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
-                            uint32_t tout_ms,
-                            UartPollCallback on_poll,
-                            void *poll_ctx,
-                            const StaticPacket *echo_match) {
+                             uint32_t tout_ms, UartPollCallback on_poll,
+                             void *poll_ctx, const StaticPacket *echo_match) {
   uint8_t stream[Config::Packet::MAX_STREAM_BUF];
   size_t stream_len = 0;
   uint32_t start_ms = millis();
   uint32_t last_rx_ms = 0;
   auto *const parser = WallpadParserFactory::getActiveParser();
-  const bool is_auto_unlocked = (parser && parser->isAutoMode() && !parser->isLocked());
+  const bool is_auto_unlocked =
+      (parser && parser->isAutoMode() && !parser->isLocked());
   const uint8_t stx = parser ? parser->getStx() : PKT_STX;
   QueueHandle_t evt_q = Uart_GetEventQueue(u_num);
 
@@ -295,8 +315,11 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
     if (stream_len >= 3) {
       if (is_auto_unlocked) {
-        if (last_rx_ms > 0 && TimeUtils::isElapsed(last_rx_ms, Config::Timing::WALLPAD_AUTO_IPG_MS)) {
-          g_auto_probing_engine.feedFrame(span<const uint8_t>(stream, stream_len));
+        if (last_rx_ms > 0 &&
+            TimeUtils::isElapsed(last_rx_ms,
+                                 Config::Timing::WALLPAD_AUTO_IPG_MS)) {
+          g_auto_probing_engine.feedFrame(
+              span<const uint8_t>(stream, stream_len));
 
           if (echo_match && echo_match->length == stream_len &&
               memcmp(echo_match->data.data(), stream, stream_len) == 0) {
@@ -320,7 +343,9 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
             continue;
           }
 
-          int len_res = parser ? parser->extractPacketLength(stream, stream_len, idx) : -1;
+          int len_res =
+              parser ? parser->extractPacketLength(stream, stream_len, idx)
+                     : -1;
           if (len_res == 0) {
             break;
           }
@@ -333,7 +358,9 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
           uint8_t *pkt = &stream[idx];
           span<const uint8_t> pkt_span(pkt, pkt_len);
           if (!parser->validatePacket(pkt_span)) {
-            uint8_t ch = (u_num == UART_NUM_0) ? 1 : (u_num == UART_NUM_1) ? 2 : 3;
+            uint8_t ch = (u_num == UART_NUM_0)   ? 1
+                         : (u_num == UART_NUM_1) ? 2
+                                                 : 3;
             StaticPacket drp_pkt{ch, pkt_len};
             memcpy(drp_pkt.data.data(), pkt, pkt_len);
             g_telnet_tracer.trace(ch, false, TraceType::DRP, drp_pkt);
@@ -375,7 +402,8 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
       uart_event_t evt;
       if (xQueueReceive(evt_q, &evt, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
         if (evt.type == UART_DATA) {
-          received_new_bytes = Uart_DrainToStreamBuffer(u_num, stream, stream_len, sizeof(stream), last_rx_ms);
+          received_new_bytes = Uart_DrainToStreamBuffer(
+              u_num, stream, stream_len, sizeof(stream), last_rx_ms);
         } else if (evt.type == UART_FIFO_OVF || evt.type == UART_BUFFER_FULL) {
           uart_flush_input(u_num);
           xQueueReset(evt_q);
@@ -386,7 +414,8 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
     }
 
     if (!received_new_bytes) {
-      Uart_DrainToStreamBuffer(u_num, stream, stream_len, sizeof(stream), last_rx_ms);
+      Uart_DrainToStreamBuffer(u_num, stream, stream_len, sizeof(stream),
+                               last_rx_ms);
     }
   }
 
@@ -408,15 +437,18 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 // 3. Device State Repository & CH1 Control Pipeline (formerly Ch1Engine.cpp)
 // ============================================================================
 
-static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1,
+                                  uint8_t sub2) noexcept {
   return static_cast<uint8_t>(dev_id + sub1 * 3 + sub2 * 7);
 }
 
 static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
   GroupControlTemplate grp{};
   if (g_control_registry.findGroup(dev_id, grp)) {
-    if (grp.power_slot.category_val != 0 && grp.power_slot.category_val != 0xFF) {
-      if (sub1 == grp.temp_slot.category_val || sub1 == grp.speed_slot.category_val) {
+    if (grp.power_slot.category_val != 0 &&
+        grp.power_slot.category_val != 0xFF) {
+      if (sub1 == grp.temp_slot.category_val ||
+          sub1 == grp.speed_slot.category_val) {
         return grp.power_slot.category_val;
       }
     }
@@ -476,7 +508,8 @@ DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
 const DeviceStateEntry *DeviceRepository::find(uint8_t dev_id, uint8_t sub1,
                                                uint8_t sub2) const noexcept {
   MutexLocker lock(_cache_mutex);
-  return const_cast<DeviceRepository *>(this)->findMutable(dev_id, sub1, sub2, false);
+  return const_cast<DeviceRepository *>(this)->findMutable(dev_id, sub1, sub2,
+                                                           false);
 }
 
 const DeviceStateEntry *DeviceRepository::getAt(size_t index) const noexcept {
@@ -529,8 +562,7 @@ bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
 }
 
 void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
-                                          uint8_t sub2,
-                                          uint32_t ms) noexcept {
+                                          uint8_t sub2, uint32_t ms) noexcept {
   MutexLocker lock(_cache_mutex);
   auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev) {
@@ -562,17 +594,20 @@ void DeviceRepository::clear() {
 
 namespace {
 
-static void decodeOutlet(const GroupControlTemplate &grp, const StaticPacket &ack,
-                         const DeviceStateEntry *, DecodedDeviceState &out) {
+static void decodeOutlet(const GroupControlTemplate &grp,
+                         const StaticPacket &ack, const DeviceStateEntry *,
+                         DecodedDeviceState &out) {
   uint8_t w_off = grp.getWattageOffset(ack.length);
   if (w_off + 1 < ack.length) {
-    uint16_t raw_w = (static_cast<uint16_t>(ack.data[w_off]) << 8) | ack.data[w_off + 1];
+    uint16_t raw_w =
+        (static_cast<uint16_t>(ack.data[w_off]) << 8) | ack.data[w_off + 1];
     out.power_w = (raw_w < 50000) ? static_cast<float>(raw_w) : 0.0f;
   }
 }
 
-static void decodeSwitch(const GroupControlTemplate &grp, const StaticPacket &ack,
-                         const DeviceStateEntry *dev, DecodedDeviceState &out) {
+static void decodeSwitch(const GroupControlTemplate &grp,
+                         const StaticPacket &ack, const DeviceStateEntry *dev,
+                         DecodedDeviceState &out) {
   if (grp.frame_len >= 17) {
     out.dev_class = DeviceClass::OUTLET;
     decodeOutlet(grp, ack, dev, out);
@@ -582,44 +617,57 @@ static void decodeSwitch(const GroupControlTemplate &grp, const StaticPacket &ac
 static void decodeGas(const GroupControlTemplate &grp, const StaticPacket &ack,
                       const DeviceStateEntry *, DecodedDeviceState &out) {
   uint8_t v_off = grp.getValveStateOffset(ack.length);
-  bool is_closed = (v_off >= ack.length || ack.data[v_off] == grp.close_slot.off_val);
-  snprintf(out.valve_state, sizeof(out.valve_state), "%s", is_closed ? "closed" : "open");
+  bool is_closed =
+      (v_off >= ack.length || ack.data[v_off] == grp.close_slot.off_val);
+  snprintf(out.valve_state, sizeof(out.valve_state), "%s",
+           is_closed ? "closed" : "open");
 }
 
-static void decodeMomentary(const GroupControlTemplate &grp, const StaticPacket &ack,
-                           const DeviceStateEntry *dev, DecodedDeviceState &out) {
+static void decodeMomentary(const GroupControlTemplate &grp,
+                            const StaticPacket &ack,
+                            const DeviceStateEntry *dev,
+                            DecodedDeviceState &out) {
   out.floor = 15;
   out.direction = 0;
   out.ho = 0;
   if (grp.dev_id == 0x34) {
-    out.power = (ack.length == 11 && ack.data[4] == 0x04)
-                ? ((ack.data[8] == 0x06) ? 1 : 0)
-                : ((dev && dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01) : 0);
+    out.power =
+        (ack.length == 11 && ack.data[4] == 0x04)
+            ? ((ack.data[8] == 0x06) ? 1 : 0)
+            : ((dev && dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01)
+                                              : 0);
   } else if (ack.length >= 6) {
     out.floor = constrain(static_cast<int>(ack.data[5]), 1, 60);
     out.direction = (ack.length >= 7) ? ack.data[6] : 0;
   }
 }
 
-static void decodeThermostat(const GroupControlTemplate &grp, const StaticPacket &ack,
-                             const DeviceStateEntry *dev, DecodedDeviceState &out) {
+static void decodeThermostat(const GroupControlTemplate &grp,
+                             const StaticPacket &ack,
+                             const DeviceStateEntry *dev,
+                             DecodedDeviceState &out) {
   out.target_temp = dev ? dev->last_target_temp : 0;
-  out.current_temp = (dev && dev->last_current_temp > 0) ? dev->last_current_temp : out.target_temp;
+  out.current_temp = (dev && dev->last_current_temp > 0)
+                         ? dev->last_current_temp
+                         : out.target_temp;
 
   uint8_t p_off = grp.getPowerOffset(ack.length);
-  if (p_off < ack.length && grp.away_mode_token != 0 && ack.data[p_off] == grp.away_mode_token)
+  if (p_off < ack.length && grp.away_mode_token != 0 &&
+      ack.data[p_off] == grp.away_mode_token)
     out.power = 2;
 
   uint8_t t_off = grp.getTargetTempOffset(ack.length);
   if (t_off < ack.length && ack.data[t_off] >= 5 && ack.data[t_off] <= 35) {
     out.target_temp = ack.data[t_off];
-    if (dev) const_cast<DeviceStateEntry *>(dev)->last_target_temp = ack.data[t_off];
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_target_temp = ack.data[t_off];
   }
 
   uint8_t c_off = grp.getCurrentTempOffset(ack.length);
   if (c_off < ack.length && ack.data[c_off] >= 5 && ack.data[c_off] <= 50) {
     out.current_temp = ack.data[c_off];
-    if (dev) const_cast<DeviceStateEntry *>(dev)->last_current_temp = ack.data[c_off];
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_current_temp = ack.data[c_off];
   }
 }
 
@@ -634,48 +682,57 @@ static void decodeVent(const GroupControlTemplate &grp, const StaticPacket &ack,
   if (spd_off < ack.length)
     out.fan_speed = grp.decodeFanSpeed(ack.data[spd_off]);
 
-  if (out.power == 1 && (ack.length >= 6 && ack.data[5] == 0x43) && p_off < ack.length) {
+  if (out.power == 1 && (ack.length >= 6 && ack.data[5] == 0x43) &&
+      p_off < ack.length) {
     uint8_t m = ack.data[p_off];
-    if (m >= 1 && m <= 4) out.vent_mode = m;
+    if (m >= 1 && m <= 4)
+      out.vent_mode = m;
   }
 }
 
 static void decodeAircon(const GroupControlTemplate &, const StaticPacket &ack,
                          const DeviceStateEntry *dev, DecodedDeviceState &out) {
   size_t base = (ack.length == 14) ? 7 : 8;
-  if (base + 4 >= ack.length) return;
+  if (base + 4 >= ack.length)
+    return;
 
   out.power = ((ack.data[base] & 0x7F) == 0x01) ? 1 : 0;
   out.vent_mode = constrain(static_cast<int>(ack.data[base + 1]), 1, 5);
-  out.fan_speed = (ack.data[base + 2] >= 1 && ack.data[base + 2] <= 4) ? ack.data[base + 2] : 4;
+  out.fan_speed = (ack.data[base + 2] >= 1 && ack.data[base + 2] <= 4)
+                      ? ack.data[base + 2]
+                      : 4;
 
   uint8_t amb = ack.data[base + 3];
   if (amb >= 5 && amb <= 50) {
     out.current_temp = amb;
-    if (dev) const_cast<DeviceStateEntry *>(dev)->last_current_temp = amb;
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_current_temp = amb;
   }
   uint8_t tgt = ack.data[base + 4] & 0x7F;
   if (tgt >= 5 && tgt <= 35) {
     out.target_temp = tgt;
-    if (dev) const_cast<DeviceStateEntry *>(dev)->last_target_temp = tgt;
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_target_temp = tgt;
   }
 }
 
 static void decodeUnknown(const GroupControlTemplate &, const StaticPacket &,
                           const DeviceStateEntry *, DecodedDeviceState &) {}
 
-using ClassDecoderFn = void (*)(const GroupControlTemplate &grp, const StaticPacket &ack,
-                                const DeviceStateEntry *dev, DecodedDeviceState &out);
+using ClassDecoderFn = void (*)(const GroupControlTemplate &grp,
+                                const StaticPacket &ack,
+                                const DeviceStateEntry *dev,
+                                DecodedDeviceState &out);
 
 static constexpr ClassDecoderFn kClassDecoders[] = {
-  decodeUnknown,    // UNKNOWN = 0
-  decodeSwitch,     // SWITCH = 1
-  decodeOutlet,     // OUTLET = 2
-  decodeGas,        // GAS = 3
-  decodeMomentary,  // MOMENTARY = 4
-  decodeThermostat, // THERMOSTAT = 5
-  decodeVent,       // VENT = 6
-  decodeAircon      // AIRCON = 7
+    decodeUnknown,    // UNKNOWN = 0
+    decodeSwitch,     // SWITCH = 1
+    decodeOutlet,     // OUTLET = 2
+    decodeGas,        // GAS = 3
+    decodeMomentary,  // MOMENTARY = 4
+    decodeThermostat, // THERMOSTAT = 5
+    decodeVent,       // VENT = 6
+    decodeAircon      // AIRCON = 7
 };
 
 } // anonymous namespace
@@ -713,16 +770,19 @@ void DeviceRepository::decodeDeviceState(const GroupControlTemplate &grp,
 }
 
 namespace {
-static bool handleLegacyThermostatBroadcast(DeviceRepository &repo, const StaticPacket &ack, SemaphoreHandle_t mutex) {
+static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
+                                            const StaticPacket &ack,
+                                            SemaphoreHandle_t mutex) {
   if (ack.length != 34 || ack.data[3] != 0x18 || ack.data[4] != 0x04)
     return false;
 
   for (uint8_t r = 1; r <= 8; ++r) {
     size_t base = 8 + (r - 1) * 3;
     uint8_t r_state = ack.data[base];
-    uint8_t r_amb   = ack.data[base + 1];
-    uint8_t r_tgt   = ack.data[base + 2];
-    if (r_state == 0x00) continue;
+    uint8_t r_amb = ack.data[base + 1];
+    uint8_t r_tgt = ack.data[base + 2];
+    if (r_state == 0x00)
+      continue;
 
     uint8_t r_sub1 = 0x10 + r;
     int r_pwr = (r_state == 0x01) ? 1 : ((r_state == 0x07) ? 2 : 0);
@@ -737,14 +797,18 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo, const Static
         r_dev->last_target_temp = r_tgt;
       }
     }
-    Mgmt_BroadcastDeviceState(0x18, r_sub1, 0, DeviceClass::THERMOSTAT, r_pwr, r_tgt, r_amb, 0, "closed", 0.0f, 1, 0, 0, 1);
+    Mgmt_BroadcastDeviceState(0x18, r_sub1, 0, DeviceClass::THERMOSTAT, r_pwr,
+                              r_tgt, r_amb, 0, "closed", 0.0f, 1, 0, 0, 1);
   }
   return true;
 }
 
-static inline void handleElevatorSpecialState(DeviceStateEntry *dev, DecodedDeviceState &st,
-                                             bool prev_pwr, uint8_t prev_dir, uint8_t prev_ho) {
-  bool ev_state_changed = (st.power != prev_pwr) || (st.direction != prev_dir) || (st.ho != prev_ho);
+static inline void handleElevatorSpecialState(DeviceStateEntry *dev,
+                                              DecodedDeviceState &st,
+                                              bool prev_pwr, uint8_t prev_dir,
+                                              uint8_t prev_ho) {
+  bool ev_state_changed = (st.power != prev_pwr) ||
+                          (st.direction != prev_dir) || (st.ho != prev_ho);
   if (ev_state_changed) {
     st.should_broadcast = true;
     dev->last_current_temp = static_cast<uint8_t>(st.floor);
@@ -756,7 +820,8 @@ static inline void handleElevatorSpecialState(DeviceStateEntry *dev, DecodedDevi
 } // namespace
 
 void DeviceRepository::updateFromBus(StaticPacket &ack) {
-  // 2차 캐시는 CH#1 (물리 서브기기 응답) 및 CH#5 (EW11 스니핑 응답)만 등록 허용 (CH2, CH3, CH4, CH6 금지)
+  // 2차 캐시는 CH#1 (물리 서브기기 응답) 및 CH#5 (EW11 스니핑 응답)만 등록 허용
+  // (CH2, CH3, CH4, CH6 금지)
   if (ack.channel_id != 1 && ack.channel_id != 5) {
     return;
   }
@@ -764,26 +829,32 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
   if (UNLIKELY(ack.length < 5))
     return;
 
-  // 구형(Legacy) 34B 난방 브로드캐스트 처리 (Packet[1]==0x22 && Dev==0x18 && Opcode==0x04)
+  // 구형(Legacy) 34B 난방 브로드캐스트 처리 (Packet[1]==0x22 && Dev==0x18 &&
+  // Opcode==0x04)
   if (handleLegacyThermostatBroadcast(*this, ack, _cache_mutex)) {
     return;
   }
 
   auto *parser = WallpadParserFactory::getActiveParser();
-  if (!parser || !parser->isAckPacket(span<const uint8_t>(ack.data.data(), ack.length)))
+  if (!parser ||
+      !parser->isAckPacket(span<const uint8_t>(ack.data.data(), ack.length)))
     return;
 
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  if (!parser->extractDeviceKey(span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1, sub2)) {
+  if (!parser->extractDeviceKey(
+          span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1,
+          sub2)) {
     return;
   }
 
-  // 0x2A (신발장 서브 패널 / 원격검침)는 제어 단말기가 아니므로 상태 캐시에서 완전 제외
+  // 0x2A (신발장 서브 패널 / 원격검침)는 제어 단말기가 아니므로 상태 캐시에서
+  // 완전 제외
   if (dev_id == 0x2A) {
     return;
   }
 
-  // 0x81 / NAK / 에러 패킷 필터링 (장비의 명령 거부 응답이 정상 캐시를 오염시키거나 UI를 끄지 않도록 방어)
+  // 0x81 / NAK / 에러 패킷 필터링 (장비의 명령 거부 응답이 정상 캐시를
+  // 오염시키거나 UI를 끄지 않도록 방어)
   if (ack.length >= 7 && (ack.data[5] == 0x81 || ack.data[6] == 0x81)) {
     return;
   }
@@ -797,22 +868,28 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
       return;
     }
 
-    // 현대통신 환기(0x2B) 운전 모드(0x43) 패킷의 경우 월패드 가상 응답(0x40 기본 쿼리 응답) 캐시를 덮어쓰지 않음
-    bool is_vent_mode_ack = (dev_id == 0x2B && ack.length >= 6 && ack.data[5] == 0x43);
+    // 현대통신 환기(0x2B) 운전 모드(0x43) 패킷의 경우 월패드 가상 응답(0x40
+    // 기본 쿼리 응답) 캐시를 덮어쓰지 않음
+    bool is_vent_mode_ack =
+        (dev_id == 0x2B && ack.length >= 6 && ack.data[5] == 0x43);
     bool ack_changed = false;
 
-    // 엘리베이터(0x34) 이전 상태 백업: memcpy로 dev->last_ack_data를 덮어쓰기 전에 반드시 수행
+    // 엘리베이터(0x34) 이전 상태 백업: memcpy로 dev->last_ack_data를 덮어쓰기
+    // 전에 반드시 수행
     bool prev_pwr = false;
     uint8_t prev_dir = 0;
     uint8_t prev_ho = 0;
     if (dev_id == 0x34) {
-      prev_pwr = (dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01) : false;
+      prev_pwr =
+          (dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01) : false;
       prev_dir = dev->last_target_temp;
       prev_ho = (dev->last_ack_len > 1) ? dev->last_ack_data[1] : 0;
     }
 
     if (!is_vent_mode_ack) {
-      ack_changed = (dev->last_ack_len != ack.length || memcmp(dev->last_ack_data.data(), ack.data.data(), ack.length) != 0);
+      ack_changed =
+          (dev->last_ack_len != ack.length ||
+           memcmp(dev->last_ack_data.data(), ack.data.data(), ack.length) != 0);
       dev->last_ack_len = ack.length;
       memcpy(dev->last_ack_data.data(), ack.data.data(), ack.length);
     } else {
@@ -844,8 +921,10 @@ void DeviceRepository::updateFromBus(StaticPacket &ack) {
   } // _cache_mutex unlocked
 
   if (st.should_broadcast) {
-    Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, st.dev_class, st.power, st.target_temp, st.current_temp,
-                              st.fan_speed, st.valve_state, st.power_w, st.floor, st.direction, st.ho, st.vent_mode);
+    Mgmt_BroadcastDeviceState(dev_id, sub1, sub2, st.dev_class, st.power,
+                              st.target_temp, st.current_temp, st.fan_speed,
+                              st.valve_state, st.power_w, st.floor,
+                              st.direction, st.ho, st.vent_mode);
   }
 }
 
@@ -858,7 +937,8 @@ void DeviceRepository::handlePollingTimeout(const DeviceStateEntry *dev) {
     mdev->is_online = false;
 }
 
-void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2) {
+void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
+                                            uint8_t sub2) {
   MutexLocker lock(_cache_mutex);
   auto *mdev = findMutable(dev_id, sub1, sub2, true);
   if (mdev) {
@@ -952,18 +1032,16 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
 
     uart_flush_input(UART_NUM_0);
     uart_write_bytes(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
-    uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
+    uart_wait_tx_done(UART_NUM_0,
+                      pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
     g_ch1_bus_ms.store(millis(), std::memory_order_release);
     Ch1_RecordTxFinish();
     g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
   }
 
   StaticPacket ack;
-  if (Uart_RecvPacket(UART_NUM_0, ack,
-                      Config::Timing::CH1_POLL_TIMEOUT_MS,
-                      nullptr, nullptr,
-                      &ctrlPacket) ==
-      UartRxStatus::SUCCESS) {
+  if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
+                      nullptr, nullptr, &ctrlPacket) == UartRxStatus::SUCCESS) {
     g_ch1_bus_ms.store(millis(), std::memory_order_release);
     g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
     g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
@@ -984,14 +1062,16 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
         {UART_NUM_2, g_uart2_mutex, g_pkt_stats.ch3}, // CH3
     };
 
-    int wp_idx = static_cast<int>(ctrlPacket.channel_id) - 2; // CH2 → 0, CH3 → 1
+    int wp_idx =
+        static_cast<int>(ctrlPacket.channel_id) - 2; // CH2 → 0, CH3 → 1
     if (wp_idx >= 0 && wp_idx <= 1) {
       const WallpadForwardConfig &cfg = wp_cfg[wp_idx];
       {
         MutexLocker lock(cfg.mutex, pdMS_TO_TICKS(100));
         if (lock.isLocked()) {
           uart_write_bytes(cfg.uart_num, ack.data.data(), ack.length);
-          g_telnet_tracer.trace(ctrlPacket.channel_id, true, TraceType::ACK, ack);
+          g_telnet_tracer.trace(ctrlPacket.channel_id, true, TraceType::ACK,
+                                ack);
           cfg.stats.tx_pkts.fetch_add(1, std::memory_order_relaxed);
         } else {
           g_telnet_tracer.trace("[WARN] UART mutex timeout forwarding ACK\r\n");
@@ -1000,7 +1080,8 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     }
   } else {
     g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
-    g_telnet_tracer.trace("[WARN] Device did not ACK control packet in time.\r\n");
+    g_telnet_tracer.trace(
+        "[WARN] Device did not ACK control packet in time.\r\n");
   }
 }
 
@@ -1033,15 +1114,17 @@ constexpr uint32_t CACHE_CONVERGENCE_STABLE_MS = 1500;
 } // namespace
 
 namespace {
-static inline int Ch1_ScoreCandidate(const PollingTargetRegistry::PollingCandidate &tgt,
-                                     const DeviceStateEntry *cached_dev) {
+static inline int
+Ch1_ScoreCandidate(const PollingTargetRegistry::PollingCandidate &tgt,
+                   const DeviceStateEntry *cached_dev) {
   constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
   if (tgt.source_channels != 0 && (tgt.source_channels & CH23_MASK) == 0) {
     return 999;
   }
 
   RouteEndpoint ep;
-  if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) && ep.channel_id == 5) {
+  if (g_route_registry.lookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) &&
+      ep.channel_id == 5) {
     return 999;
   }
 
@@ -1051,7 +1134,8 @@ static inline int Ch1_ScoreCandidate(const PollingTargetRegistry::PollingCandida
   if (cached_dev->is_online) {
     return 2;
   }
-  if (TimeUtils::isElapsed(cached_dev->last_stale_poll_ms, Config::Timing::CH1_STALE_POLL_INTERVAL_MS)) {
+  if (TimeUtils::isElapsed(cached_dev->last_stale_poll_ms,
+                           Config::Timing::CH1_STALE_POLL_INTERVAL_MS)) {
     return 3;
   }
   return 999;
@@ -1062,8 +1146,10 @@ void Ch1_PollNext(size_t &current_dev_idx) {
   g_polling_targets.sweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
 
   // 불필요한 9.7KB BSS 버퍼를 제거하고 224B 경량 메타데이터 스택 배열 활용
-  PollingTargetRegistry::PollingCandidate candidates[PollingTargetRegistry::MAX_TARGETS];
-  size_t active_cnt = g_polling_targets.getActiveCandidates(candidates, PollingTargetRegistry::MAX_TARGETS);
+  PollingTargetRegistry::PollingCandidate
+      candidates[PollingTargetRegistry::MAX_TARGETS];
+  size_t active_cnt = g_polling_targets.getActiveCandidates(
+      candidates, PollingTargetRegistry::MAX_TARGETS);
 
   uint8_t poll_dev_id = 0, poll_sub1 = 0, poll_sub2 = 0;
   const uint8_t *poll_raw_ptr = nullptr;
@@ -1078,7 +1164,8 @@ void Ch1_PollNext(size_t &current_dev_idx) {
     for (size_t i = 0; i < active_cnt; i++) {
       size_t idx = (current_dev_idx + i) % active_cnt;
       const auto &tgt = candidates[idx];
-      const auto *cached_dev = g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
+      const auto *cached_dev =
+          g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
       int score = Ch1_ScoreCandidate(tgt, cached_dev);
 
       if (score < best_prio) {
@@ -1096,12 +1183,14 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       poll_sub2 = tgt.sub2;
       poll_raw_len = tgt.raw_query_len;
       if (poll_raw_len > 0) {
-        g_polling_targets.getQueryData(tgt.entry_idx, poll_raw_ptr, poll_raw_len);
+        g_polling_targets.getQueryData(tgt.entry_idx, poll_raw_ptr,
+                                       poll_raw_len);
       }
 
       if (best_prio == 3) {
         g_device_repo.setLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
-        g_ch1_state_metrics.stale_poll_cnt.fetch_add(1, std::memory_order_relaxed);
+        g_ch1_state_metrics.stale_poll_cnt.fetch_add(1,
+                                                     std::memory_order_relaxed);
       }
 
       current_dev_idx = (best_idx + 1) % active_cnt;
@@ -1115,10 +1204,14 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       size_t idx = current_dev_idx % dev_cnt;
       auto *dev = g_device_repo.getAt(idx);
       current_dev_idx = (idx + 1) % dev_cnt;
-      if (dev && (dev->is_online || dev->last_updated_ms == 0 ||
-                  TimeUtils::isElapsed(dev->last_stale_poll_ms, Config::Timing::CH1_STALE_POLL_INTERVAL_MS))) {
+      if (dev &&
+          (dev->is_online || dev->last_updated_ms == 0 ||
+           TimeUtils::isElapsed(dev->last_stale_poll_ms,
+                                Config::Timing::CH1_STALE_POLL_INTERVAL_MS))) {
         RouteEndpoint ep;
-        if (!g_route_registry.lookupRoute(dev->dev_id, dev->sub1, dev->sub2, ep) || ep.channel_id != 5) {
+        if (!g_route_registry.lookupRoute(dev->dev_id, dev->sub1, dev->sub2,
+                                          ep) ||
+            ep.channel_id != 5) {
           poll_dev_id = dev->dev_id;
           poll_sub1 = dev->sub1;
           poll_sub2 = dev->sub2;
@@ -1141,7 +1234,8 @@ void Ch1_PollNext(size_t &current_dev_idx) {
 
       MutexLocker lock(g_uart0_mutex, kUartLockTimeout);
       if (!lock.isLocked()) {
-        // High-priority control transaction in progress on UART0 (Policy A: abort poll cycle)
+        // High-priority control transaction in progress on UART0 (Policy A:
+        // abort poll cycle)
         return;
       }
 
@@ -1159,22 +1253,20 @@ void Ch1_PollNext(size_t &current_dev_idx) {
         memcpy(q_pkt.data.data(), poll_raw_ptr, poll_raw_len);
       } else {
         PacketBuilder::Ch1_BuildQueryPacket(q_pkt, poll_dev_id, poll_sub1,
-                                             poll_sub2);
+                                            poll_sub2);
       }
       g_telnet_tracer.trace(1, true, TraceType::QRY, q_pkt);
 
       uart_flush_input(UART_NUM_0);
       uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
-      uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
+      uart_wait_tx_done(UART_NUM_0,
+                        pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
       g_ch1_bus_ms.store(millis(), std::memory_order_release);
       g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
 
       StaticPacket ack;
-      if (Uart_RecvPacket(UART_NUM_0, ack,
-                          Config::Timing::CH1_POLL_TIMEOUT_MS,
-                          nullptr, nullptr,
-                          &q_pkt) ==
-          UartRxStatus::SUCCESS) {
+      if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
+                          nullptr, nullptr, &q_pkt) == UartRxStatus::SUCCESS) {
         g_ch1_bus_ms.store(millis(), std::memory_order_release);
         g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
         g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
@@ -1206,7 +1298,8 @@ void Ch1_PollNext(size_t &current_dev_idx) {
 void Task_Ch1(void *pvParameters) {
   esp_task_wdt_add(nullptr);
   if (g_system_event_group) {
-    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
+                        pdFALSE, portMAX_DELAY);
   }
   StaticPacket ctrlPacket;
   size_t current_dev_idx = 0;
@@ -1222,7 +1315,8 @@ void Task_Ch1(void *pvParameters) {
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       Ch1_SetState(current_state, Ch1State::IDLE);
       if (g_system_event_group) {
-        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
+                            pdFALSE, pdMS_TO_TICKS(1000));
       } else {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
@@ -1250,7 +1344,8 @@ void Task_Ch1(void *pvParameters) {
       if (g_system_event_group) {
         xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
       }
-      g_telnet_tracer.trace("[AUTO PROBE] Convergence state reset. Re-learning bus offsets...\r\n");
+      g_telnet_tracer.trace("[AUTO PROBE] Convergence state reset. Re-learning "
+                            "bus offsets...\r\n");
     }
 
     if (!s_convergence_done) {
@@ -1264,20 +1359,26 @@ void Task_Ch1(void *pvParameters) {
 
       bool is_all_online = (online_devs >= active_tgts);
       auto *parser = WallpadParserFactory::getActiveParser();
-      if (parser && parser->isAutoMode() && !g_auto_probing_engine.isOffsetsLocked()) {
+      if (parser && parser->isAutoMode() &&
+          !g_auto_probing_engine.isOffsetsLocked()) {
         is_all_online = (g_polling_targets.verifiedCount() >= active_tgts);
       }
 
       if (active_tgts > 0 && is_all_online) {
         if (s_stable_start_ms == 0) {
           s_stable_start_ms = millis();
-        } else if (TimeUtils::isElapsed(s_stable_start_ms, CACHE_CONVERGENCE_STABLE_MS)) { // 1.5초간 신규 기기 증가 멈춤 & 전원 온라인 확인 시 최종 수렴!
+        } else if (TimeUtils::isElapsed(
+                       s_stable_start_ms,
+                       CACHE_CONVERGENCE_STABLE_MS)) { // 1.5초간 신규 기기 증가
+                                                       // 멈춤 & 전원 온라인
+                                                       // 확인 시 최종 수렴!
           s_convergence_done = true;
           g_initial_caching_complete.store(true, std::memory_order_release);
           if (g_system_event_group) {
             xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
           }
-          if (parser && parser->isAutoMode() && !g_auto_probing_engine.isOffsetsLocked()) {
+          if (parser && parser->isAutoMode() &&
+              !g_auto_probing_engine.isOffsetsLocked()) {
             g_auto_probing_engine.analyzeCacheMatrix();
           }
           g_pkt_stats.resetAll();
@@ -1285,9 +1386,12 @@ void Task_Ch1(void *pvParameters) {
           g_metrics.reset();
           g_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
           g_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
-          g_telnet_tracer.trace("[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). Runtime metrics synchronized.\r\n");
+          g_telnet_tracer.trace(
+              "[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). "
+              "Runtime metrics synchronized.\r\n");
           g_control_registry.synthesizeFromConvergedCache();
-          g_telnet_tracer.trace("[CTL] Control template synthesis triggered.\r\n");
+          g_telnet_tracer.trace(
+              "[CTL] Control template synthesis triggered.\r\n");
         }
       } else {
         s_stable_start_ms = 0;
@@ -1295,10 +1399,9 @@ void Task_Ch1(void *pvParameters) {
     }
 
     size_t active_tgts = g_polling_targets.activeCount();
-    const uint32_t poll_interval =
-        (s_convergence_done || active_tgts == 0)
-            ? g_timing_config.ch1_poll_interval_ms
-            : 20;
+    const uint32_t poll_interval = (s_convergence_done || active_tgts == 0)
+                                       ? g_timing_config.ch1_poll_interval_ms
+                                       : 20;
 
     uint32_t now = millis();
     uint32_t rem_ms = (now < next_poll_due_ms) ? (next_poll_due_ms - now) : 0;
@@ -1311,7 +1414,8 @@ void Task_Ch1(void *pvParameters) {
       vTaskDelay(wait_ticks);
     }
 
-    if (g_ch1_vip_queue && xQueueReceive(g_ch1_vip_queue, &ctrlPacket, 0) == pdTRUE) {
+    if (g_ch1_vip_queue &&
+        xQueueReceive(g_ch1_vip_queue, &ctrlPacket, 0) == pdTRUE) {
       Ch1_SetState(current_state, Ch1State::VIP_CONTROL);
       Ch1_HandleCtrl(ctrlPacket);
       Ch1_SetState(current_state, Ch1State::IDLE);
@@ -1324,7 +1428,8 @@ void Task_Ch1(void *pvParameters) {
       span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
       bool is_query = parser && parser->isQueryPacket(frame);
 
-      Ch1_SetState(current_state, is_query ? Ch1State::POLL_DEVICE : Ch1State::NORMAL_CONTROL);
+      Ch1_SetState(current_state,
+                   is_query ? Ch1State::POLL_DEVICE : Ch1State::NORMAL_CONTROL);
       Ch1_HandleCtrl(ctrlPacket);
       Ch1_SetState(current_state, Ch1State::IDLE);
       continue; // 일반 제어 처리 완료 후 다음 루프로 즉시 재평가
@@ -1362,19 +1467,23 @@ static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
     if (now < next_due)
       break;
     if (ctx->ack_q->dequeue(next_ack, next_due)) {
-      SemaphoreHandle_t u_mux = (ctx->cfg->uart_num == UART_NUM_1) ? g_uart1_mutex : g_uart2_mutex;
+      SemaphoreHandle_t u_mux =
+          (ctx->cfg->uart_num == UART_NUM_1) ? g_uart1_mutex : g_uart2_mutex;
       if (u_mux) {
         MutexLocker lock(u_mux, pdMS_TO_TICKS(100));
         if (lock.isLocked()) {
-          uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(), next_ack.length);
+          uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
+                           next_ack.length);
         } else {
           ctx->stats->timeouts.fetch_add(1, std::memory_order_relaxed);
           g_telnet_tracer.trace("[WARN] UART mutex timeout on virtual ACK\r\n");
         }
       } else {
-        uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(), next_ack.length);
+        uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
+                         next_ack.length);
       }
-      g_telnet_tracer.trace(ctx->cfg->channel_id, true, TraceType::ACK, next_ack);
+      g_telnet_tracer.trace(ctx->cfg->channel_id, true, TraceType::ACK,
+                            next_ack);
       ctx->stats->tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1400,7 +1509,8 @@ void Task_Ch2Ch3(void *pvParameters) {
   TimestampedPacketQueue<8> ack_queue;
 
   if (g_system_event_group) {
-    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
+                        pdFALSE, portMAX_DELAY);
   }
 
   TaskAckPollContext poll_ctx{&ack_queue, cfg, stats};
@@ -1409,7 +1519,8 @@ void Task_Ch2Ch3(void *pvParameters) {
     g_wdt_monitor.feed(task_idx);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       if (g_system_event_group) {
-        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
+                            pdFALSE, pdMS_TO_TICKS(1000));
       } else {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
@@ -1419,8 +1530,8 @@ void Task_Ch2Ch3(void *pvParameters) {
     Ch2Ch3_DrainVirtualAckQueue(&poll_ctx);
 
     StaticPacket req;
-    if (Uart_RecvPacket(cfg->uart_num, req, 100, Ch2Ch3_DrainVirtualAckQueue, &poll_ctx) ==
-        UartRxStatus::SUCCESS) {
+    if (Uart_RecvPacket(cfg->uart_num, req, 100, Ch2Ch3_DrainVirtualAckQueue,
+                        &poll_ctx) == UartRxStatus::SUCCESS) {
       stats->rx_pkts.fetch_add(1, std::memory_order_relaxed);
       req.channel_id = cfg->channel_id;
 
@@ -1429,7 +1540,7 @@ void Task_Ch2Ch3(void *pvParameters) {
 
       bool is_query = parser->isQueryPacket(frame);
       g_telnet_tracer.trace(cfg->channel_id, false,
-                         is_query ? TraceType::QRY : TraceType::CTL, req);
+                            is_query ? TraceType::QRY : TraceType::CTL, req);
 
       if (is_query) {
         uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
@@ -1445,13 +1556,14 @@ void Task_Ch2Ch3(void *pvParameters) {
           if (!ack_queue.enqueue(virtual_ack, target_due)) {
             stats->uncached_pkts.fetch_add(1, std::memory_order_relaxed);
             g_telnet_tracer.trace("[WARN] Wallpad virtual ACK queue overflow, "
-                               "packet dropped.\r\n");
+                                  "packet dropped.\r\n");
           }
         } else {
           stats->uncached_pkts.fetch_add(1, std::memory_order_relaxed);
         }
       } else {
-        // CH2 및 CH3에서 쿼리가 아닌 제어 패킷이 수신되면 Auto Probing Engine에 학습 전달
+        // CH2 및 CH3에서 쿼리가 아닌 제어 패킷이 수신되면 Auto Probing Engine에
+        // 학습 전달
         g_auto_probing_engine.feedControlFrame(frame);
         if (parser->isControlPacket(frame)) {
           StaticPacket dummy_ack;
@@ -1466,25 +1578,34 @@ void Task_Ch2Ch3(void *pvParameters) {
 // 6. Channel 4 Sub-Wallpad Passthrough & Doorphone Bridge Engine
 // ============================================================================
 
-static inline void Ch4_SendPassthrough(const StaticPacket &pkt, StaticPacket &last_tx_pkt,
+static inline void Ch4_SendPassthrough(const StaticPacket &pkt,
+                                       StaticPacket &last_tx_pkt,
                                        uint32_t &last_tx_ms, char *cur_dp_ns) {
   if (pkt.length >= 3) {
-    Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns, 16);
-    g_doorphone_tracker.processFrame(pkt.data[0], pkt.data[pkt.length - 1], pkt.length, cur_dp_ns);
+    Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile,
+                                                       cur_dp_ns, 16);
+    g_doorphone_tracker.processFrame(pkt.data[0], pkt.data[pkt.length - 1],
+                                     pkt.length, cur_dp_ns);
   }
   g_telnet_tracer.trace(4, true, TraceType::RMT, pkt);
-  last_tx_pkt = pkt; // Correctly recorded in all code paths to avoid echo reflection misinterpretation
+  last_tx_pkt = pkt; // Correctly recorded in all code paths to avoid echo
+                     // reflection misinterpretation
   g_doorphone_serial.write(pkt.data.data(), pkt.length);
   last_tx_ms = millis();
   g_pkt_stats.ch4.tx_pkts.fetch_add(1, std::memory_order_relaxed);
 }
 
-static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet, StaticPacket &last_pkt,
-                                            uint32_t &last_pkt_ms, uint32_t now) {
-  bool is_debounce = (packet.length == last_pkt.length &&
-                      memcmp(packet.data.data(), last_pkt.data.data(), packet.length) == 0 &&
-                      !TimeUtils::isElapsed(last_pkt_ms, Config::Timing::DOORPHONE_DEBOUNCE_MS));
-  if (is_debounce) return;
+static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
+                                            StaticPacket &last_pkt,
+                                            uint32_t &last_pkt_ms,
+                                            uint32_t now) {
+  bool is_debounce =
+      (packet.length == last_pkt.length &&
+       memcmp(packet.data.data(), last_pkt.data.data(), packet.length) == 0 &&
+       !TimeUtils::isElapsed(last_pkt_ms,
+                             Config::Timing::DOORPHONE_DEBOUNCE_MS));
+  if (is_debounce)
+    return;
 
   last_pkt = packet;
   last_pkt_ms = now;
@@ -1499,8 +1620,8 @@ static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet, StaticPa
 
     uint8_t bell_front = dp_prof ? dp_prof->bell_front : 0xB5;
     uint8_t bell_lobby = dp_prof ? dp_prof->bell_lobby : 0x5A;
-    uint8_t end_front  = dp_prof ? dp_prof->end_front  : 0xB8;
-    uint8_t end_lobby  = dp_prof ? dp_prof->end_lobby  : 0x60;
+    uint8_t end_front = dp_prof ? dp_prof->end_front : 0xB8;
+    uint8_t end_lobby = dp_prof ? dp_prof->end_lobby : 0x60;
 
     if (opcode == bell_front) { // 현관 벨 호출
       g_doorphone_state.front_bell.store(true, std::memory_order_release);
@@ -1542,24 +1663,28 @@ void Task_Ch4(void *pvParameters) {
 
   uint8_t buf[128] = {0};
   size_t buf_len = 0;
-  uint32_t last_byte_ms = 0;  // 마지막 수신 바이트 타임스탬프
+  uint32_t last_byte_ms = 0; // 마지막 수신 바이트 타임스탬프
   StaticPacket last_tx_pkt{};
   uint32_t last_tx_ms = 0;
   StaticPacket last_pkt{};
   uint32_t last_pkt_ms = 0;
   char cur_dp_ns[16];
-  Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
+  Config::Doorphone::FramingTracker::getNvsNamespace(
+      g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
 
   if (g_system_event_group) {
-    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE, pdFALSE, portMAX_DELAY);
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
+                        pdFALSE, portMAX_DELAY);
   }
 
   if (!g_initial_caching_complete.load(std::memory_order_acquire)) {
     if (g_system_event_group) {
-      xEventGroupWaitBits(g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
-                          pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
+      xEventGroupWaitBits(
+          g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
+          pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
     } else {
-      vTaskDelay(pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
+      vTaskDelay(
+          pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
     }
     g_wdt_monitor.feed(3);
   }
@@ -1568,7 +1693,8 @@ void Task_Ch4(void *pvParameters) {
     g_wdt_monitor.feed(3);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       if (g_system_event_group) {
-        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
+                            pdFALSE, pdMS_TO_TICKS(1000));
       } else {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
@@ -1579,13 +1705,15 @@ void Task_Ch4(void *pvParameters) {
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms, cur_dp_ns);
     }
 
-    const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(g_config.doorphone_baud_rate);
+    const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
+        g_config.doorphone_baud_rate);
     uint32_t burst_spin_total = 0;
     while (g_doorphone_serial.available() > 0) {
       uint8_t byte = static_cast<uint8_t>(g_doorphone_serial.read());
       uint32_t now = millis();
 
-      if (buf_len > 0 && last_byte_ms > 0 && TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
+      if (buf_len > 0 && last_byte_ms > 0 &&
+          TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
         buf_len = 0;
       }
 
@@ -1600,18 +1728,24 @@ void Task_Ch4(void *pvParameters) {
 
       if (burst_spin_total < 20) {
         uint32_t drain_start = millis();
-        while (g_doorphone_serial.available() == 0 && (millis() - drain_start < 6)) {
+        while (g_doorphone_serial.available() == 0 &&
+               (millis() - drain_start < 6)) {
           esp_rom_delay_us(100);
         }
         burst_spin_total += (millis() - drain_start);
       }
     }
 
-    Config::Doorphone::FramingStatus cur_status = g_doorphone_tracker.status.load(std::memory_order_relaxed);
-    if (cur_status == Config::Doorphone::FramingStatus::LOCKED && buf_len >= 3) {
-      uint8_t target_stx = g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-      uint8_t target_etx = g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-      uint8_t target_len = g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+    Config::Doorphone::FramingStatus cur_status =
+        g_doorphone_tracker.status.load(std::memory_order_relaxed);
+    if (cur_status == Config::Doorphone::FramingStatus::LOCKED &&
+        buf_len >= 3) {
+      uint8_t target_stx =
+          g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
+      uint8_t target_etx =
+          g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
+      uint8_t target_len =
+          g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
 
       size_t p = 0;
       while (p < buf_len) {
@@ -1695,21 +1829,30 @@ void Task_Ch4(void *pvParameters) {
           uint8_t pkt_stx = packet.data[0];
           uint8_t pkt_etx = packet.data[packet.length - 1];
 
-          Config::Doorphone::FramingStatus prev_status = g_doorphone_tracker.status.load(std::memory_order_relaxed);
-          
-          // 프로파일 카탈로그에 일치하는 도어폰 규격이 있으면 즉시 영구 잠금(LOCKED)
-          const DoorphoneSpec *dp_spec = ProfileMatcher::matchDoorphone(pkt_stx, pkt_etx, 5);
-          char cur_dp_ns_local[16];
-          Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns_local, sizeof(cur_dp_ns_local));
+          Config::Doorphone::FramingStatus prev_status =
+              g_doorphone_tracker.status.load(std::memory_order_relaxed);
 
-          if (dp_spec && pkt_stx == dp_spec->stx && pkt_etx == dp_spec->etx && packet.length >= 5) {
+          // 프로파일 카탈로그에 일치하는 도어폰 규격이 있으면 즉시 영구
+          // 잠금(LOCKED)
+          const DoorphoneSpec *dp_spec =
+              ProfileMatcher::matchDoorphone(pkt_stx, pkt_etx, 5);
+          char cur_dp_ns_local[16];
+          Config::Doorphone::FramingTracker::getNvsNamespace(
+              g_config.wallpad_profile, cur_dp_ns_local,
+              sizeof(cur_dp_ns_local));
+
+          if (dp_spec && pkt_stx == dp_spec->stx && pkt_etx == dp_spec->etx &&
+              packet.length >= 5) {
             if (prev_status != Config::Doorphone::FramingStatus::LOCKED) {
-              g_doorphone_tracker.setFixedLock(dp_spec->stx, dp_spec->etx, dp_spec->len);
+              g_doorphone_tracker.setFixedLock(dp_spec->stx, dp_spec->etx,
+                                               dp_spec->len);
               g_doorphone_tracker.saveToNvs(cur_dp_ns_local);
             }
           } else {
-            g_doorphone_tracker.processFrame(pkt_stx, pkt_etx, packet.length, cur_dp_ns_local);
-            Config::Doorphone::FramingStatus status = g_doorphone_tracker.status.load(std::memory_order_relaxed);
+            g_doorphone_tracker.processFrame(pkt_stx, pkt_etx, packet.length,
+                                             cur_dp_ns_local);
+            Config::Doorphone::FramingStatus status =
+                g_doorphone_tracker.status.load(std::memory_order_relaxed);
             if (prev_status != Config::Doorphone::FramingStatus::LOCKED &&
                 status == Config::Doorphone::FramingStatus::LOCKED) {
               g_doorphone_tracker.saveToNvs(cur_dp_ns_local);
@@ -1727,14 +1870,16 @@ void Task_Ch4(void *pvParameters) {
     if (last_byte_ms > 0) {
       uint32_t elapsed = millis() - last_byte_ms;
       if (elapsed < Config::Timing::DOORPHONE_IPG_MS) {
-        wait_ms = (buf_len > 0) ? 1 : (Config::Timing::DOORPHONE_IPG_MS - elapsed);
+        wait_ms =
+            (buf_len > 0) ? 1 : (Config::Timing::DOORPHONE_IPG_MS - elapsed);
       } else {
         wait_ms = 1;
       }
     }
     wait_ms = std::max<uint32_t>(wait_ms, 1);
 
-    if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+    if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx,
+                      pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms, cur_dp_ns);
     }
   }
