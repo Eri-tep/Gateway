@@ -74,8 +74,6 @@ public:
   }
 };
 
-extern SemaphoreHandle_t g_ctrl_queue_mutex;
-
 [[nodiscard]] bool Queue_EnqueueDropHead(QueueHandle_t queue,
                                          const StaticPacket &packet) noexcept;
 
@@ -101,21 +99,9 @@ enum class Ch1State : uint8_t {
   POLL_DEVICE
 };
 
-// ── Global Instances & RTOS Primitives ──
-extern DeviceRepository g_device_repo;
+// ── Engine Subsystem Interfaces ──
 extern ControlDispatcher g_control_dispatcher;
-extern QueueHandle_t g_ch1_control_queue, g_ch1_vip_queue;
-extern EventGroupHandle_t g_wifi_event_group;
-extern QueueSetHandle_t g_ch1_queue_set;
-extern QueueHandle_t g_uart0_event_queue, g_uart1_event_queue,
-    g_uart2_event_queue;
-extern QueueHandle_t g_ch4_passthrough_queue;
-extern std::atomic<bool> g_initial_caching_complete;
-extern uint32_t g_boot_start_ms;
-extern SoftwareSerial g_doorphone_serial;
-extern SemaphoreHandle_t g_tracer_sem;
-
-extern SemaphoreHandle_t g_uart0_mutex, g_uart1_mutex, g_uart2_mutex;
+QueueHandle_t *Engine_GetUartEventQueuePtr(uint8_t uart_num) noexcept;
 
 // ── Lifecycle Initialization ──
 void Engine_InitQueues();

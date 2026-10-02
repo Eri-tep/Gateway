@@ -8,6 +8,8 @@
 #include "Base/SystemConfig.h"
 #include "Protocol/DeviceRegistry.h"
 #include "Protocol/ModbusProtocol.h"
+#include "Transport/TransportTypes.h"
+#include <sys/select.h>
 
 namespace Fcu {
 
@@ -39,29 +41,29 @@ bool SetFanSpeed(uint8_t slot_idx, FanSpeed f);
 bool SetSwing(uint8_t slot_idx, Swing s);
 bool SetTargetTemp(uint8_t slot_idx, uint8_t temp_c);
 bool GetSlotRuntime(uint8_t slot_idx, SlotRuntime &out_rt);
-void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now);
 void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len);
 
 } // namespace Fcu
 
-namespace Ew11Manager {
-void init();
-void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len);
-void processStream(int slot_idx, HubClientSlot *slot);
-bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt,
-                     uint8_t count = 2, uint32_t silence_ms = 20);
-} // namespace Ew11Manager
+// ── EW11 Slot Snapshot & Management API (0-extern 정보 은닉) ──
+bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out);
+bool Bridge_SetSlotEnabled(uint8_t slot_idx, bool enabled);
+bool Bridge_SetFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len);
+bool Bridge_ResetFramingTracker(uint8_t slot_idx);
 
-int Hub_AcceptClient(int slot_idx, int server_fd);
-void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
-                       size_t pkt_len);
-void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len);
 void Hub_LoadConfig();
 void Hub_SaveConfig();
 bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
                  const char *name = nullptr);
 bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
+
+void Bridge_Init();
 void Bridge_ShutdownSockets() noexcept;
+
+// ── Core 0 Network Reactor Interface ──
+void Bridge_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
+void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
+void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept;
 
 // ── Bridge Event Listeners & Forwarding API ──
 using BridgeDeviceStateListener = void (*)(const DeviceUpdateResult &res) noexcept;

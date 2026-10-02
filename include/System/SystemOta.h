@@ -23,3 +23,7 @@ static constexpr const char *DEFAULT_CLOUD_OTA_URL =
 
 // Cloud/HTTP(S) OTA 비동기 시작 함수
 void System_StartHttpOta(const char *url);
+
+// OTA 시작 전 네트워크/소켓 정리 훅 등록
+using PreOtaHookFn = void (*)() noexcept;
+void SystemOta_RegisterPreOtaHook(PreOtaHookFn hook) noexcept;

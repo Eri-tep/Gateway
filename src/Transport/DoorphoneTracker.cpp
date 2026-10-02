@@ -4,10 +4,7 @@
 // ============================================================================
 
 #include "Transport/DoorphoneTracker.h"
-#include "Protocol/WallpadProtocol.h"
 #include <esp_timer.h>
-
-extern QueueHandle_t g_ch4_passthrough_queue;
 
 Doorphone::DoorphoneState g_doorphone_state{};
 FramingTracker g_doorphone_tracker;
@@ -15,8 +12,13 @@ FramingTracker g_doorphone_tracker;
 namespace Transport {
 
 DoorphoneController g_doorphone_controller;
+static DoorphoneTxHandler s_tx_handler = nullptr;
 
-static void onProfileChanged(uint8_t old_idx, uint8_t new_idx) {
+void Doorphone_RegisterTxHandler(DoorphoneTxHandler handler) noexcept {
+  s_tx_handler = handler;
+}
+
+void Doorphone_OnProfileChanged(uint8_t old_idx, uint8_t new_idx) {
   if (old_idx != new_idx) {
     char old_ns[16], new_ns[16];
     FramingTracker::getNvsNamespace(old_idx, old_ns, sizeof(old_ns));
@@ -34,13 +36,12 @@ static void sendDpPacket(uint8_t stx, uint8_t op, uint8_t etx) {
   pkt.data[2] = 0x00;
   pkt.data[3] = 0x00;
   pkt.data[4] = etx;
-  if (g_ch4_passthrough_queue) {
-    xQueueSend(g_ch4_passthrough_queue, &pkt, 0);
+  if (s_tx_handler) {
+    s_tx_handler(pkt);
   }
 }
 
 void DoorphoneController::init() {
-  ProfileRepository::addProfileChangeListener(onProfileChanged);
   if (!_timer) {
     esp_timer_create_args_t timer_args{};
     timer_args.callback = onTimerCallback;

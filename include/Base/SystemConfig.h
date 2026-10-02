@@ -9,7 +9,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.7.4";
+constexpr const char *FIRMWARE_VERSION = "v1.7.5";
 } // namespace Config
 
 namespace Config::Task {
@@ -163,34 +163,6 @@ struct FramingTracker {
 
   [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
 };
-
-enum class HubDeviceType : uint8_t {
-  WALLPAD_COMPATIBLE = 0,
-  AIR_CONDITIONER = 1
-};
-
-struct HubClientSlot {
-  bool enabled{false};
-  char name[16]{""};
-  char target_ip[16]{""};
-  uint16_t target_port{8898};
-  HubDeviceType dev_type{HubDeviceType::WALLPAD_COMPATIBLE};
-  FramingTracker tracker;
-  int sock{-1};
-  bool is_connected{false};
-  uint32_t last_reconnect_ms{0};
-  uint8_t rx_buf[Config::TCP::HUB_RX_BUFFER_SIZE];
-  size_t rx_len{0};
-  uint32_t last_rx_ms{0};
-  uint32_t rx_pkts{0};
-  uint32_t tx_pkts{0};
-  uint32_t dropped_pkts{0};
-  uint8_t last_query_data[64]{0};
-  uint8_t last_query_len{0};
-};
-
-extern HubClientSlot g_hub_slots[Config::TCP::MAX_EW11_SLOTS];
-extern SemaphoreHandle_t g_ch5_mutex;
 
 enum class WallpadProfileIndex : uint8_t {
   ADAPTIVE = 0,

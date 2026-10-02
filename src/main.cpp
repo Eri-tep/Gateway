@@ -9,9 +9,11 @@
 #include "Service/RemoteService.h"
 #include "System/LockUtils.h"
 #include "System/SystemDiagnostics.h"
+#include "System/SystemOta.h"
 #include "System/SystemStorage.h"
 #include "Transport/DoorphoneTracker.h"
 #include "Transport/NetworkRouter.h"
+#include "Transport/TcpReactor.h"
 
 #include "esp_attr.h"
 #include "esp_ota_ops.h"
@@ -54,13 +56,13 @@ struct TaskSpawnDescriptor {
 
 static WallpadChannelConfig ch2_config = {
     .uart_num = UART_NUM_1,
-    .event_queue_ptr = &g_uart1_event_queue,
+    .event_queue_ptr = nullptr,
     .channel_id = 2,
 };
 
 static WallpadChannelConfig ch3_config = {
     .uart_num = UART_NUM_2,
-    .event_queue_ptr = &g_uart2_event_queue,
+    .event_queue_ptr = nullptr,
     .channel_id = 3,
 };
 
@@ -70,7 +72,7 @@ static WallpadChannelConfig ch3_config = {
 static void Boot_CheckCrashLoop() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
-  g_boot_start_ms = millis();
+  Diag_SetBootTimeMs(millis());
   System_DiagnoseStuck();
   System_CheckCoreDump();
   System_LogResetReason();
@@ -80,8 +82,8 @@ static void Boot_CheckCrashLoop() {
   Serial.printf("  GATEWAY BRIDGE %s BOOT INITIALIZATION\r\n",
                 Config::FIRMWARE_VERSION);
   Serial.println(F("========================================"));
-  if (s_pending_reboot_reason) {
-    Serial.printf("[BOOT] Last Reset Reason: %s\r\n", s_pending_reboot_reason);
+  if (const char *reason = Diag_GetPendingRebootReason()) {
+    Serial.printf("[BOOT] Last Reset Reason: %s\r\n", reason);
   }
 
   const esp_partition_t *next_p = esp_ota_get_next_update_partition(nullptr);
@@ -170,10 +172,8 @@ static void Boot_CheckCrashLoop() {
 static void Boot_InitSyncPrimitives() {
   Engine_InitQueues();
 
-  if (!g_ctrl_queue_mutex)
-    g_ctrl_queue_mutex = xSemaphoreCreateMutex();
-  if (!g_ch5_mutex)
-    g_ch5_mutex = xSemaphoreCreateMutex();
+  ch2_config.event_queue_ptr = Engine_GetUartEventQueuePtr(1);
+  ch3_config.event_queue_ptr = Engine_GetUartEventQueuePtr(2);
 
   if (!g_wifi_event_group)
     g_wifi_event_group = xEventGroupCreate();
@@ -217,11 +217,14 @@ static void Boot_InitSubsystems() {
   Remote_RegisterControlHandler(HandleRemoteControl);
 
   Transport::g_doorphone_controller.init();
+  ProfileRepository::addProfileChangeListener(Transport::Doorphone_OnProfileChanged);
 
   g_control_registry.init();
+  Remote_Init();
+  Bridge_Init();
   Mgmt_Init();
-  Ew11Manager::init();
   System_RegisterShutdownHook(Bridge_ShutdownSockets);
+  SystemOta_RegisterPreOtaHook(Bridge_ShutdownSockets);
 }
 
 // ============================================================================
@@ -260,13 +263,13 @@ static void initUartChannel(uart_port_t port, int tx, int rx, uint32_t baud,
 static void Boot_InitHardwareAndDevices() {
   initUartChannel(UART_NUM_0, 2, 1, g_config.uart_baud_rate,
                   g_config.uart_data_bits, g_config.uart_parity,
-                  g_config.uart_stop_bits, &g_uart0_event_queue);
+                  g_config.uart_stop_bits, Engine_GetUartEventQueuePtr(0));
   initUartChannel(UART_NUM_1, 6, 5, g_config.ch2_baud_rate,
                   g_config.ch2_data_bits, g_config.ch2_parity,
-                  g_config.ch2_stop_bits, &g_uart1_event_queue);
+                  g_config.ch2_stop_bits, Engine_GetUartEventQueuePtr(1));
   initUartChannel(UART_NUM_2, 8, 7, g_config.ch3_baud_rate,
                   g_config.ch3_data_bits, g_config.ch3_parity,
-                  g_config.ch3_stop_bits, &g_uart2_event_queue);
+                  g_config.ch3_stop_bits, Engine_GetUartEventQueuePtr(2));
 
   g_doorphone_serial.begin(g_config.doorphone_baud_rate,
                            Door_SerialConfig(g_config.doorphone_data_bits,
@@ -395,7 +398,7 @@ static const TaskSpawnDescriptor kTaskDescriptors[] = {
     {Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,
      TaskPriority::CH4_SUBWALLPAD, 1, s_stackCore1Ch4, &s_task_core1_ch4_buf,
      SystemTaskId::CH4, true},
-    {Task_Network, "Network", Config::Task::STACK_SIZE_CORE0, nullptr,
+    {Transport::TcpReactor::runTask, "Network", Config::Task::STACK_SIZE_CORE0, nullptr,
      TaskPriority::NETWORK, 0, s_stackCore0Net, &s_task_core0_net_buf,
      SystemTaskId::NETWORK, false},
     {Task_Telnet, "Telnet_CLI", Config::Task::STACK_SIZE_TELNET, nullptr,

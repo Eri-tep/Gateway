@@ -30,7 +30,8 @@
 
 TelnetManager g_telnet_manager(Config::TCP::TELNET_PORT);
 TelnetTracer g_telnet_tracer;
-SemaphoreHandle_t g_telnet_tx_sem = nullptr;
+static SemaphoreHandle_t s_telnet_tx_sem = nullptr;
+static SemaphoreHandle_t s_tracer_sem = nullptr;
 std::atomic<bool> g_restart_pending{false};
 const char *g_restart_reason = nullptr;
 TelnetManager::WifiScanReq g_wifi_scan_req;
@@ -49,8 +50,8 @@ static void write(int sock, const char *data, size_t len) noexcept {
   if (!valid(sock, data, len))
     return;
 
-  if (g_telnet_tx_sem &&
-      xSemaphoreTake(g_telnet_tx_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
+  if (s_telnet_tx_sem &&
+      xSemaphoreTake(s_telnet_tx_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
     size_t sent = 0;
     uint8_t retries = 0;
     while (sent < len && retries < 10) {
@@ -67,7 +68,7 @@ static void write(int sock, const char *data, size_t len) noexcept {
       }
       break;
     }
-    xSemaphoreGive(g_telnet_tx_sem);
+    xSemaphoreGive(s_telnet_tx_sem);
   }
   g_wdt_monitor.feed(5);
 }
@@ -827,8 +828,8 @@ void TelnetManager::startServer() {
   if (!_cli_mutex)
     _cli_mutex = xSemaphoreCreateMutex();
 
-  if (!g_telnet_tx_sem)
-    g_telnet_tx_sem = xSemaphoreCreateMutex();
+  if (!s_telnet_tx_sem)
+    s_telnet_tx_sem = xSemaphoreCreateMutex();
 
   if (_server_fd < 0) {
     _server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -975,8 +976,8 @@ void Task_Telnet(void *pvParameters) {
   const esp_err_t wdt_ret = esp_task_wdt_add(nullptr);
   const bool twdt_registered = (wdt_ret == ESP_OK);
   TSTAGE(2);
-  if (!g_tracer_sem)
-    g_tracer_sem = xSemaphoreCreateBinary();
+  if (!s_tracer_sem)
+    s_tracer_sem = xSemaphoreCreateBinary();
   g_telnet_manager.startServer();
 
   SystemTraceSink sink;
@@ -1050,10 +1051,10 @@ void Task_Telnet(void *pvParameters) {
     if (g_telnet_manager.hasActiveClients()) {
       g_telnet_tracer.flushToClient();
       TSTAGE(14);
-      xSemaphoreTake(g_tracer_sem, pdMS_TO_TICKS(5));
+      xSemaphoreTake(s_tracer_sem, pdMS_TO_TICKS(5));
     } else {
       TSTAGE(14);
-      xSemaphoreTake(g_tracer_sem, 0);
+      xSemaphoreTake(s_tracer_sem, 0);
     }
   }
 }
@@ -1117,8 +1118,8 @@ void TelnetTracer::trace(uint8_t channel, bool is_tx, TraceType type,
 
   _traceRing[idx].seq.store(ticket + 1, std::memory_order_release);
 
-  if (g_tracer_sem)
-    xSemaphoreGive(g_tracer_sem);
+  if (s_tracer_sem)
+    xSemaphoreGive(s_tracer_sem);
 }
 
 void TelnetTracer::trace(const char *fmt, ...) {
@@ -1148,8 +1149,8 @@ void TelnetTracer::trace(const char *fmt, ...) {
     _traceRing[idx].seq.store(ticket + 1, std::memory_order_release);
   }
 
-  if (g_tracer_sem)
-    xSemaphoreGive(g_tracer_sem);
+  if (s_tracer_sem)
+    xSemaphoreGive(s_tracer_sem);
 }
 
 namespace {
@@ -1186,7 +1187,7 @@ void TelnetTracer::flushToClient() {
     return;
 
   TSTAGE(12);
-  if (g_telnet_tx_sem && xSemaphoreTake(g_telnet_tx_sem, 0) != pdTRUE) {
+  if (s_telnet_tx_sem && xSemaphoreTake(s_telnet_tx_sem, 0) != pdTRUE) {
     return;
   }
   struct TxSemGuard {
@@ -1195,7 +1196,7 @@ void TelnetTracer::flushToClient() {
       if (sem)
         xSemaphoreGive(sem);
     }
-  } sem_guard{g_telnet_tx_sem};
+  } sem_guard{s_telnet_tx_sem};
 
   constexpr size_t BATCH_SIZE = 8;
   TracePacketEntry local_batch[BATCH_SIZE];

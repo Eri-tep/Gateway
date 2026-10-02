@@ -12,7 +12,7 @@
 #include <mutex>
 #include <shared_mutex>
 
-extern SoftwareSerial g_doorphone_serial;
+SoftwareSerial g_doorphone_serial;
 
 // ── IP Subnet Whitelist Filters ──
 

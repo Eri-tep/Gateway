@@ -29,8 +29,6 @@ struct MgmtSession {
   uint32_t connected_at_ms{0};
 };
 
-extern MgmtSession g_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
-
 // ============================================================================
 // 4. Management JSON-RPC Functions
 // ============================================================================
@@ -56,19 +54,14 @@ void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
 
 // ── Network Subsystem Entry Points ──
-void Task_Network(void *pvParameters);
+void Remote_Init();
+void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
+void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
+void Remote_Tick(bool ota_now, uint32_t now_ms) noexcept;
+
 extern EventGroupHandle_t g_wifi_event_group;
 
 // ── Remote Control Handler Registration ──
-extern SemaphoreHandle_t g_mgmt_mutex;
 using DeviceControlHandler = bool (*)(StaticPacket &req,
                                       StaticPacket &out_ack) noexcept;
 void Remote_RegisterControlHandler(DeviceControlHandler handler) noexcept;
-
-struct WifiFallbackGuard {
-  std::atomic<bool> testing{false};
-  uint32_t start_ms{0};
-  char prev_ssid[64]{0};
-  char prev_pass[64]{0};
-};
-extern WifiFallbackGuard g_wifi_guard;

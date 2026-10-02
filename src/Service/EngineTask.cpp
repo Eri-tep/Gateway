@@ -41,46 +41,56 @@ static uint8_t s_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS *
                                   sizeof(StaticPacket)];
 static uint8_t s_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
 
-QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
-QueueSetHandle_t g_ch1_queue_set = nullptr;
-QueueHandle_t g_uart0_event_queue = nullptr, g_uart1_event_queue = nullptr,
-              g_uart2_event_queue = nullptr;
-QueueHandle_t g_ch4_passthrough_queue = nullptr;
+static QueueHandle_t s_ch1_control_queue = nullptr, s_ch1_vip_queue = nullptr;
+static QueueSetHandle_t s_ch1_queue_set = nullptr;
+static QueueHandle_t s_uart0_event_queue = nullptr, s_uart1_event_queue = nullptr,
+                     s_uart2_event_queue = nullptr;
+static QueueHandle_t s_ch4_passthrough_queue = nullptr;
+static SemaphoreHandle_t s_ctrl_queue_mutex = nullptr;
+static SemaphoreHandle_t s_uart0_mutex = nullptr, s_uart1_mutex = nullptr,
+                         s_uart2_mutex = nullptr;
+static std::atomic<bool> s_initial_caching_complete{false};
 
-SoftwareSerial g_doorphone_serial;
-SemaphoreHandle_t g_ctrl_queue_mutex = nullptr;
-
-void Engine_InitQueues() {
-  g_uart0_mutex = xSemaphoreCreateMutex();
-  g_uart1_mutex = xSemaphoreCreateMutex();
-  g_uart2_mutex = xSemaphoreCreateMutex();
-
-  g_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
-                                           s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
-  g_ch1_vip_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_VIP, sizeof(StaticPacket),
-                                       s_ch1_vip_storage, &s_ch1_vip_queue_buf);
-  g_ch4_passthrough_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CH4_PASS, sizeof(StaticPacket),
-                                               s_ch4_pass_storage, &s_ch4_pass_queue_buf);
-
-  g_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL + Config::Queue::POOL_SIZE_VIP);
-  if (g_ch1_queue_set) {
-    xQueueAddToSet(g_ch1_vip_queue, g_ch1_queue_set);
-    xQueueAddToSet(g_ch1_control_queue, g_ch1_queue_set);
-  }
+QueueHandle_t *Engine_GetUartEventQueuePtr(uint8_t uart_num) noexcept {
+  if (uart_num == 0) return &s_uart0_event_queue;
+  if (uart_num == 1) return &s_uart1_event_queue;
+  if (uart_num == 2) return &s_uart2_event_queue;
+  return nullptr;
 }
 
-uint32_t g_boot_start_ms = 0;
-SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
-                  g_uart2_mutex = nullptr, g_tracer_sem = nullptr;
+void Engine_InitQueues() {
+  s_uart0_mutex = xSemaphoreCreateMutex();
+  s_uart1_mutex = xSemaphoreCreateMutex();
+  s_uart2_mutex = xSemaphoreCreateMutex();
+  s_ctrl_queue_mutex = xSemaphoreCreateMutex();
 
-std::atomic<bool> g_initial_caching_complete{false};
+  s_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
+                                           s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
+  s_ch1_vip_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_VIP, sizeof(StaticPacket),
+                                       s_ch1_vip_storage, &s_ch1_vip_queue_buf);
+  s_ch4_passthrough_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CH4_PASS, sizeof(StaticPacket),
+                                               s_ch4_pass_storage, &s_ch4_pass_queue_buf);
+
+  s_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL + Config::Queue::POOL_SIZE_VIP);
+  if (s_ch1_queue_set) {
+    xQueueAddToSet(s_ch1_vip_queue, s_ch1_queue_set);
+    xQueueAddToSet(s_ch1_control_queue, s_ch1_queue_set);
+  }
+
+  Transport::Doorphone_RegisterTxHandler([](const StaticPacket &pkt) noexcept {
+    if (s_ch4_passthrough_queue) {
+      xQueueSend(s_ch4_passthrough_queue, &pkt, 0);
+    }
+  });
+}
+
 CoreDumpInfo g_coredump_info;
 
 bool Queue_EnqueueDropHead(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
   if (UNLIKELY(!queue))
     return false;
-  MutexLocker lock(g_ctrl_queue_mutex);
+  MutexLocker lock(s_ctrl_queue_mutex);
   if (xQueueSend(queue, &packet, 0) == pdTRUE)
     return true;
   StaticPacket dummy;
@@ -151,11 +161,11 @@ static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
 QueueHandle_t Uart_GetEventQueue(uart_port_t u_num) {
   switch (u_num) {
   case UART_NUM_0:
-    return g_uart0_event_queue;
+    return s_uart0_event_queue;
   case UART_NUM_1:
-    return g_uart1_event_queue;
+    return s_uart1_event_queue;
   case UART_NUM_2:
-    return g_uart2_event_queue;
+    return s_uart2_event_queue;
   default:
     return nullptr;
   }
@@ -376,7 +386,7 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
   }
 
   QueueHandle_t q =
-      (req.channel_id == 6) ? g_ch1_vip_queue : g_ch1_control_queue;
+      (req.channel_id == 6) ? s_ch1_vip_queue : s_ch1_control_queue;
   if (Queue_EnqueueDropHead(q, req))
     System_TracePacket(1, true, TraceType::CTL, req);
   return false;
@@ -442,7 +452,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
   Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
 
   {
-    MutexLocker lock(g_uart0_mutex, pdMS_TO_TICKS(100));
+    MutexLocker lock(s_uart0_mutex, pdMS_TO_TICKS(100));
     if (!lock.isLocked()) {
       g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
       System_TraceMessage(
@@ -480,8 +490,8 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
       SingleChannelStats &stats;
     };
     const WallpadForwardConfig wp_cfg[] = {
-        {UART_NUM_1, g_uart1_mutex, g_pkt_stats.ch2}, // CH2
-        {UART_NUM_2, g_uart2_mutex, g_pkt_stats.ch3}, // CH3
+        {UART_NUM_1, s_uart1_mutex, g_pkt_stats.ch2}, // CH2
+        {UART_NUM_2, s_uart2_mutex, g_pkt_stats.ch3}, // CH3
     };
 
     int wp_idx =
@@ -655,7 +665,7 @@ void Ch1_PollNext(size_t &current_dev_idx) {
     for (uint8_t retry = 0; retry < kMaxRetries; ++retry) {
       Ch1_WaitBusIdle(kDelayMs);
 
-      MutexLocker lock(g_uart0_mutex, kUartLockTimeout);
+      MutexLocker lock(s_uart0_mutex, kUartLockTimeout);
       if (!lock.isLocked()) {
         // High-priority control transaction in progress on UART0 (Policy A:
         // abort poll cycle)
@@ -750,7 +760,7 @@ void Task_Ch1(void *pvParameters) {
     }
 
     uart_event_t u_evt;
-    while (xQueueReceive(g_uart0_event_queue, (void *)&u_evt, 0) == pdTRUE) {
+    while (xQueueReceive(s_uart0_event_queue, (void *)&u_evt, 0) == pdTRUE) {
       if (u_evt.type == UART_FIFO_OVF || u_evt.type == UART_BUFFER_FULL) {
         g_pkt_stats.ch1.invalid_frames.fetch_add(1, std::memory_order_relaxed);
         uart_flush_input(UART_NUM_0);
@@ -765,7 +775,7 @@ void Task_Ch1(void *pvParameters) {
       s_convergence_done = false;
       s_stable_start_ms = 0;
       s_last_active_tgts = 0;
-      g_initial_caching_complete.store(false, std::memory_order_release);
+      s_initial_caching_complete.store(false, std::memory_order_release);
       if (g_system_event_group) {
         xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
       }
@@ -798,7 +808,7 @@ void Task_Ch1(void *pvParameters) {
                                                        // 멈춤 & 전원 온라인
                                                        // 확인 시 최종 수렴!
           s_convergence_done = true;
-          g_initial_caching_complete.store(true, std::memory_order_release);
+          s_initial_caching_complete.store(true, std::memory_order_release);
           if (g_system_event_group) {
             xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
           }
@@ -833,22 +843,22 @@ void Task_Ch1(void *pvParameters) {
     TickType_t wait_ticks = (rem_ms > 0) ? pdMS_TO_TICKS(rem_ms) : 1;
 
     QueueSetMemberHandle_t activated = nullptr;
-    if (g_ch1_queue_set) {
-      activated = xQueueSelectFromSet(g_ch1_queue_set, wait_ticks);
+    if (s_ch1_queue_set) {
+      activated = xQueueSelectFromSet(s_ch1_queue_set, wait_ticks);
     } else {
       vTaskDelay(wait_ticks);
     }
 
-    if (g_ch1_vip_queue &&
-        xQueueReceive(g_ch1_vip_queue, &ctrlPacket, 0) == pdTRUE) {
+    if (s_ch1_vip_queue &&
+        xQueueReceive(s_ch1_vip_queue, &ctrlPacket, 0) == pdTRUE) {
       Ch1_SetState(current_state, Ch1State::VIP_CONTROL);
       Ch1_HandleCtrl(ctrlPacket);
       Ch1_SetState(current_state, Ch1State::IDLE);
       continue; // VIP 처리 완료 후 다음 루프로 즉시 재평가
     }
 
-    if (activated == g_ch1_control_queue && g_ch1_control_queue &&
-        xQueueReceive(g_ch1_control_queue, &ctrlPacket, 0) == pdTRUE) {
+    if (activated == s_ch1_control_queue && s_ch1_control_queue &&
+        xQueueReceive(s_ch1_control_queue, &ctrlPacket, 0) == pdTRUE) {
       auto *parser = WallpadParserFactory::getActiveParser();
       span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
       bool is_query = parser && parser->isQueryPacket(frame);
@@ -893,7 +903,7 @@ static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
       break;
     if (ctx->ack_q->dequeue(next_ack, next_due)) {
       SemaphoreHandle_t u_mux =
-          (ctx->cfg->uart_num == UART_NUM_1) ? g_uart1_mutex : g_uart2_mutex;
+          (ctx->cfg->uart_num == UART_NUM_1) ? s_uart1_mutex : s_uart2_mutex;
       if (u_mux) {
         MutexLocker lock(u_mux, pdMS_TO_TICKS(100));
         if (lock.isLocked()) {
@@ -1104,7 +1114,7 @@ void Task_Ch4(void *pvParameters) {
                         pdFALSE, portMAX_DELAY);
   }
 
-  if (!g_initial_caching_complete.load(std::memory_order_acquire)) {
+  if (!s_initial_caching_complete.load(std::memory_order_acquire)) {
     if (g_system_event_group) {
       xEventGroupWaitBits(
           g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
@@ -1128,7 +1138,7 @@ void Task_Ch4(void *pvParameters) {
       continue;
     }
 
-    if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx, 0) == pdTRUE) {
+    if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx, 0) == pdTRUE) {
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms, cur_dp_ns);
     }
 
@@ -1305,7 +1315,7 @@ void Task_Ch4(void *pvParameters) {
     }
     wait_ms = std::max<uint32_t>(wait_ms, 1);
 
-    if (xQueueReceive(g_ch4_passthrough_queue, &packet_to_tx,
+    if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx,
                       pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms, cur_dp_ns);
     }

@@ -4,11 +4,59 @@ This document defines the system specifications, runtime topology, channel mappi
 
 ---
 
+## 0. Canonical Clean Architecture Topology (4-Tier + 1 Foundation Soil)
+
+> **Mandatory Architectural Standard (v3.1.0 Canonical)**:
+> 1. **Foundation Soil (L0 Base 전역 순수 기반 Leaf)**: 수직 파이프라인의 층이 아니며, 전 계층($L1 \sim L4$)이 딛고 서 있는 불변의 전역 Leaf(Universal Soil). 컴파일 타임 상수, 핀맵, 고정 버퍼 규격 제공.
+> 2. **4-Tier Strict Vertical Pipeline ($L4 ightarrow L3 ightarrow L2 ightarrow L1$)**: 
+>    - **L4 Service**: 비즈니스 애플리케이션 (`EngineTask`, `BridgeService`, `RemoteService`, `ConsoleCli`)
+>    - **L3 Protocol**: 패킷 코덱 & 장치 모델 (`WallpadProtocol`, `ModbusProtocol`, `DeviceRegistry`, Leaf: `ProtocolTypes.h`)
+>    - **L2 Transport**: 물리 채널 & 소켓 엔진 (`NetworkEngine`, `TcpReactor`, `DoorphoneTracker`, Leaf: `TransportTypes.h`)
+>    - **L1 System**: OS 프리미티브 & 인프라 (`LockUtils`, `SystemStorage`, `SystemDiagnostics`, `SystemOta`)
+> 3. **Zero Upward Includes**: 하위 계층이 상위 계층을 include하는 행위 수학적으로 0건.
+> 4. **No Middle-Man Pass-Through**: L0 Foundation Soil에 접근하기 위해 중간 계층이 불필요한 패스스루 래퍼를 두는 안티패턴 배제.
+> 5. **Complete Information Hiding (0-extern)**: 모든 런타임 전역 통신 배열(`g_hub_slots`) 및 락(`g_ch5_mutex`) 노출을 전면 폐기하고, `.cpp` 내부 `static` 번역 단위 변수로 완전 은닉. 외부는 읽기 전용 Snapshot API로만 소비.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ L4 Service: 도메인 비즈니스 로직 (EngineTask, BridgeService, Remote, CLI)│
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │ (수직 런타임: 오직 L3만 호출)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ L3 Protocol: 패킷 프레이밍, 코덱, 장치 레지스트리 (Wallpad, Modbus, Registry)│
+│ └─▶ [L3.0 Leaf: ProtocolTypes.h] (StaticPacket, DecodedDeviceState 등) │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │ (수직 런타임: 오직 L2만 호출)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ L2 Transport: 물리 버스, 소켓 I/O, Core0 루프 (TcpReactor, NetworkRouter)│
+│ └─▶ [L2.0 Leaf: TransportTypes.h] (HubClientSlotSnapshot, RouteEndpoint)│
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │ (수직 런타임: 오직 L1만 호출)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ L1 System: OS 프리미티브, NVS, WDT, OTA (LockUtils, Storage, Diagnostics)│
+└─────────────────────────────────────────────────────────────────────────┘
+  ▲                         ▲                         ▲                ▲
+  │ (컴파일 타임 Leaf 참조)   │ (컴파일 타임 Leaf 참조)   │                │
+  └─────────────────────────┴─────────────┬───────────┴────────────────┘
+                                          │
+┌─────────────────────────────────────────┴───────────────────────────────┐
+│              L0 Base: Foundation Soil (전역 순수 기반 Leaf)              │
+│  - SystemConfig.h: 네트워크 포트, 버퍼 크기, 불변 타이밍 파라미터         │
+│  - SystemPlatform.h: ESP32-S3 GPIO 핀 매핑, StaticPacket 구조체         │
+│  - BufferUtils.h: Zero-Allocation 스크래치 버퍼 AppendBuf<N>            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 1. System Architecture & Immutable Constraints
 
 ### 1.1 Runtime Reliability Principles
 - **24/7 Uninterrupted Operation**: Maintain zero ESP32 Task Watchdog Timer (WDT) resets across all operational conditions.
-- **Zero Real-time Loop Dynamic Allocation**: Heap allocations (`new`, `malloc`, dynamic `String`) are strictly forbidden in real-time execution paths (`Task_Ch1`, `Task_Ch2Ch3`, `Task_Network`). Use stack-allocated or fixed-size buffers (`StaticPacket`, `AppendBuf`, `std::array`).
+- **Zero Real-time Loop Dynamic Allocation**: Heap allocations (`new`, `malloc`, dynamic `String`) are strictly forbidden in real-time execution paths (`Task_Ch1`, `Task_Ch2Ch3`, `TcpReactor::runTask`). Use stack-allocated or fixed-size buffers (`StaticPacket`, `AppendBuf`, `std::array`).
 - **LOCKED Device Push Isolation**: To prevent propagation of noisy or unverified bus packets, real-time push to SmartThings (CH6 / TCP 8900) is strictly restricted to verified state changes from `LOCKED` devices.
 
 ### 1.2 FreeRTOS Task Topology (Immutable)
@@ -19,7 +67,7 @@ This document defines the system specifications, runtime topology, channel mappi
 | `CH#2_WP#1` | Core 1 | 18 (High) | `Task_Ch2Ch3()` | Warm Path | Wallpad #1 RS-485 slave virtual ACK immediate response |
 | `CH#3_WP#2` | Core 1 | 18 (High) | `Task_Ch2Ch3()` | Warm Path | Wallpad #2 RS-485 slave virtual ACK immediate response |
 | `CH#4_WP#3` | Core 1 | 10 (Med) | `Task_Ch4()` | Warm Path | Doorphone SoftwareSerial bidirectional communication |
-| `Network` | Core 0 | 5 (Med) | `Task_Network()` | Warm Path | Wi-Fi connectivity, CH5 EW11 hub client, CH6 Mgmt RPC |
+| `Network` | Core 0 | 5 (Med) | `TcpReactor::runTask()` (Core 0 Network Reactor) | Warm Path | Wi-Fi connectivity, CH5 EW11 hub client, CH6 Mgmt RPC |
 | `Telnet_CLI` | Core 0 | 2 (Low) | `Task_Telnet()` | Cold Path | Telnet CLI diagnostics, packet tracing, administration |
 
 ---
@@ -45,7 +93,7 @@ This document defines the system specifications, runtime topology, channel mappi
    - Strictly prohibit I/O operations (`Serial.print`), memory allocations, NVS access, and blocking function calls inside critical sections.
    - High-speed asynchronous timers (`BurstTxFsm` via `esp_timer`) must be guarded strictly with isolated spinlocks.
 2. **Mutexes (`SemaphoreHandle_t`, `MutexLocker`)**:
-   - Use dedicated mutexes (`g_ch5_mutex`, etc.) for TCP socket transmissions and shared buffer synchronization.
+   - Use dedicated mutexes (internal channel mutexes, etc.) for TCP socket transmissions and shared buffer synchronization.
    - Lock acquisition timeout must never exceed `Config::Timing::MAX_LOCK_HOLD_MS`.
    - **Non-reentrant Socket Lock Standard**: Never invoke socket transmission functions directly from inside a packet reception callback or parser while holding locks. Instead, enqueue the request into a pending buffer (`pending_cmd_buf`) and dispatch sequentially in the main loop to completely eliminate self-deadlocks.
 3. **Read/Write Shared State (`std::shared_mutex`)**:

@@ -18,6 +18,11 @@ static char s_ota_target_url[256] = {0};
 static constexpr char OTA_REPO_PREFIX[] = "/Eri-tep/Gateway/";
 static constexpr size_t MAX_REDIRECT_LOCATION_LEN = 1024;
 
+static PreOtaHookFn s_pre_ota_hook = nullptr;
+void SystemOta_RegisterPreOtaHook(PreOtaHookFn hook) noexcept {
+  s_pre_ota_hook = hook;
+}
+
 enum class OtaUrlContext { Initial, Redirect };
 
 static void configure_public_tls(WiFiClientSecure &client) {
@@ -237,22 +242,9 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
   g_http_ota_state.progress_pct = 0;
   g_http_ota_state.last_error[0] = '\0';
 
-  // EW11 소켓 일시 해제 (lwIP pcb + 소켓 수신 버퍼 힙 확보)
-  {
-    MutexLocker lock(g_ch5_mutex, pdMS_TO_TICKS(2000));
-    if (!lock.isLocked()) {
-      ota_fail("CH5 lock timeout (2s)");
-      return false;
-    }
-    for (int s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
-      auto &slot = g_hub_slots[s];
-      if (slot.sock >= 0) {
-        close(slot.sock);
-        slot.sock = -1;
-        slot.is_connected = false;
-        slot.rx_len = 0;
-      }
-    }
+  // 사전 등록된 정리 훅 실행 (소켓 일시 해제 및 lwIP pcb + 수신 버퍼 힙 확보)
+  if (s_pre_ota_hook) {
+    s_pre_ota_hook();
   }
 
   esp_task_wdt_reset();

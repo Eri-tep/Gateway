@@ -38,8 +38,17 @@
 #include "System/SystemStorage.h"
 #include "Transport/DoorphoneTracker.h"
 #include "Transport/NetworkRouter.h"
+#include "Transport/TcpReactor.h"
 
-WifiFallbackGuard g_wifi_guard;
+struct WifiFallbackGuard {
+  std::atomic<bool> testing{false};
+  uint32_t start_ms{0};
+  char prev_ssid[64]{0};
+  char prev_pass[64]{0};
+};
+static WifiFallbackGuard s_wifi_guard;
+static MgmtSession s_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
+static SemaphoreHandle_t s_mgmt_mutex = nullptr;
 namespace {
 DeviceControlHandler s_control_handler = nullptr;
 } // namespace
@@ -411,9 +420,9 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
   // ── CH5 FCU 슬롯(1~4) 활성 기기 직렬화 (SmartThings get_devices 자식 기기
   // 목록 추가) ──
   {
-    MutexLocker lock(g_ch5_mutex);
     for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
-      const auto &slot = g_hub_slots[s];
+      HubClientSlotSnapshot slot;
+      Bridge_GetSlotSnapshot(s, slot);
       const DeviceStateEntry *fcu_dev =
           g_device_repo.find(Config::FCU::DEV_ID, s, 0);
 
@@ -461,13 +470,13 @@ void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
       buf, sizeof(buf),
       "{\"event\":\"doorphone\",\"front_bell\":%s,\"lobby_bell\":%s}\n",
       front_bell ? "true" : "false", lobby_bell ? "true" : "false");
-  if (len <= 0 || !g_mgmt_mutex)
+  if (len <= 0 || !s_mgmt_mutex)
     return;
 
-  MutexLocker lock(g_mgmt_mutex);
+  MutexLocker lock(s_mgmt_mutex);
   for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
-    if (g_mgmt_sessions[i].sock >= 0) {
-      send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
+    if (s_mgmt_sessions[i].sock >= 0) {
+      send(s_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
       g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -524,13 +533,13 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
     break;
   }
 
-  if (len <= 0 || !g_mgmt_mutex)
+  if (len <= 0 || !s_mgmt_mutex)
     return;
 
-  MutexLocker lock(g_mgmt_mutex);
+  MutexLocker lock(s_mgmt_mutex);
   for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
-    if (g_mgmt_sessions[i].sock >= 0) {
-      send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
+    if (s_mgmt_sessions[i].sock >= 0) {
+      send(s_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
       g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -571,20 +580,20 @@ void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
 void Mgmt_BroadcastDevicesUpdated() {
   const char *msg = "{\"event\":\"devices_updated\"}\n";
   size_t len = strlen(msg);
-  if (!g_mgmt_mutex)
+  if (!s_mgmt_mutex)
     return;
 
-  MutexLocker lock(g_mgmt_mutex);
+  MutexLocker lock(s_mgmt_mutex);
   for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
-    if (g_mgmt_sessions[i].sock >= 0) {
-      send(g_mgmt_sessions[i].sock, msg, len, MSG_DONTWAIT);
+    if (s_mgmt_sessions[i].sock >= 0) {
+      send(s_mgmt_sessions[i].sock, msg, len, MSG_DONTWAIT);
       g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
 }
 
 void Mgmt_BroadcastRawJson(const char *json_payload) {
-  if (!json_payload || !g_mgmt_mutex)
+  if (!json_payload || !s_mgmt_mutex)
     return;
 
   char buf[256];
@@ -592,10 +601,10 @@ void Mgmt_BroadcastRawJson(const char *json_payload) {
   if (len <= 0)
     return;
 
-  MutexLocker lock(g_mgmt_mutex);
+  MutexLocker lock(s_mgmt_mutex);
   for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
-    if (g_mgmt_sessions[i].sock >= 0) {
-      send(g_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
+    if (s_mgmt_sessions[i].sock >= 0) {
+      send(s_mgmt_sessions[i].sock, buf, len, MSG_DONTWAIT);
       g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -618,19 +627,14 @@ static IPAddress get_client_ip(int sock) {
   return IPAddress(0, 0, 0, 0);
 }
 
-MgmtSession g_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
-SemaphoreHandle_t g_mgmt_mutex = nullptr;
-
-
-
 void Mgmt_Init() {
-  if (!g_mgmt_mutex) {
-    g_mgmt_mutex = xSemaphoreCreateMutex();
+  if (!s_mgmt_mutex) {
+    s_mgmt_mutex = xSemaphoreCreateMutex();
   }
   for (size_t i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
-    g_mgmt_sessions[i].sock = -1;
-    g_mgmt_sessions[i].len = 0;
-    g_mgmt_sessions[i].connected_at_ms = 0;
+    s_mgmt_sessions[i].sock = -1;
+    s_mgmt_sessions[i].len = 0;
+    s_mgmt_sessions[i].connected_at_ms = 0;
   }
   TimingConfig_Load();
 }
@@ -1014,12 +1018,12 @@ static void HandleRpc_SetWifi(int sock, long req_id, const char *json_str,
     return;
   }
 
-  strncpy(g_wifi_guard.prev_ssid, g_config.wifi_ssid,
-          sizeof(g_wifi_guard.prev_ssid) - 1);
-  strncpy(g_wifi_guard.prev_pass, g_config.wifi_password,
-          sizeof(g_wifi_guard.prev_pass) - 1);
-  g_wifi_guard.start_ms = millis();
-  g_wifi_guard.testing.store(true, std::memory_order_release);
+  strncpy(s_wifi_guard.prev_ssid, g_config.wifi_ssid,
+          sizeof(s_wifi_guard.prev_ssid) - 1);
+  strncpy(s_wifi_guard.prev_pass, g_config.wifi_password,
+          sizeof(s_wifi_guard.prev_pass) - 1);
+  s_wifi_guard.start_ms = millis();
+  s_wifi_guard.testing.store(true, std::memory_order_release);
 
   strncpy(g_config.wifi_ssid, new_ssid, sizeof(g_config.wifi_ssid) - 1);
   strncpy(g_config.wifi_password, new_pass, sizeof(g_config.wifi_password) - 1);
@@ -1128,11 +1132,13 @@ static void HandleRpc_SetEw11(int sock, long req_id, const char *json_str,
 
   if (slot >= 0 && slot < Config::TCP::MAX_EW11_SLOTS) {
     uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[slot];
+    HubClientSlotSnapshot slot_snap;
+    Bridge_GetSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
     uint16_t target_port =
         (port > 0 && port <= 65535)
             ? static_cast<uint16_t>(port)
-            : (g_hub_slots[slot].target_port > 0 ? g_hub_slots[slot].target_port
-                                                 : def_slot_port);
+            : (slot_snap.target_port > 0 ? slot_snap.target_port
+                                         : def_slot_port);
     if (target_port == 8899)
       target_port = def_slot_port; // 구버전 8899 기본값 보정
     if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr,
@@ -1478,8 +1484,6 @@ void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
 // From src/Network/Network.cpp
 // ============================================================================
 
-extern const char *s_pending_reboot_reason;
-extern EventGroupHandle_t g_wifi_event_group;
 static constexpr EventBits_t WIFI_BIT_CONNECTED = BIT0;
 static constexpr EventBits_t WIFI_BIT_DISCONNECTED = BIT1;
 static constexpr EventBits_t WIFI_BIT_GOT_IP = BIT2;
@@ -1599,8 +1603,6 @@ int Tcp_AcceptAndAssignSlot(int server_fd, SessionType (&sessions)[N],
   return new_sock;
 }
 
-int Hub_AcceptClient(int slot_idx, int server_fd);
-
 // From src/Network/NetworkManager.cpp
 // ============================================================================
 
@@ -1675,75 +1677,8 @@ void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   }
 }
 
-static void
-Network_ProcessSockets(int mgmt_server_fd,
-                       const int ew11_server_fds[Config::TCP::MAX_EW11_SLOTS],
-                       fd_set &readfds, fd_set &errorfds, bool ota_now) {
-  if (mgmt_server_fd >= 0 && FD_ISSET(mgmt_server_fd, &readfds)) {
-    Tcp_AcceptAndAssignSlot(mgmt_server_fd, g_mgmt_sessions, g_mgmt_mutex,
-                            Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
-                            Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
-                            Config::TCP::DEFAULT_KEEPALIVE_CNT,
-                            g_pkt_stats.ch6);
-  }
-
-  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-    if (!ota_now && ew11_server_fds[s] >= 0 &&
-        FD_ISSET(ew11_server_fds[s], &readfds)) {
-      Hub_AcceptClient(s, ew11_server_fds[s]);
-    }
-  }
-
-  Tcp_PollAndReceive(g_mgmt_sessions, g_mgmt_mutex, readfds, errorfds,
-                     [](MgmtSession *sess, const uint8_t *data, size_t len) {
-                       Mgmt_Data(sess, data, len);
-                     });
-
-  if (!ota_now) {
-    MutexLocker lock(g_ch5_mutex);
-    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      auto &slot = g_hub_slots[s];
-      if (slot.sock < 0)
-        continue;
-
-      if (FD_ISSET(slot.sock, &errorfds)) {
-        close(slot.sock);
-        slot.sock = -1;
-        slot.is_connected = false;
-        slot.rx_len = 0;
-        ESP_LOGW("EW11", "[CH5] Slot %d (%s) socket error detected. Closed.", s,
-                 slot.name);
-        continue;
-      }
-
-      if (FD_ISSET(slot.sock, &readfds)) {
-        uint8_t temp_buf[Config::TCP::POLL_RX_CHUNK_SIZE];
-        int r = recv(slot.sock, temp_buf, sizeof(temp_buf), 0);
-        if (r > 0) {
-          Hub_Data(&slot, temp_buf, r);
-        } else if (r == 0 ||
-                   (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-          close(slot.sock);
-          slot.sock = -1;
-          slot.is_connected = false;
-          slot.rx_len = 0;
-        }
-      }
-    }
-  }
-}
-
-static void Network_HandleFcuLoop(bool ota_now, uint32_t now_ms) {
-  if (!ota_now) {
-    MutexLocker lock(g_ch5_mutex);
-    for (int s = 1; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      auto &slot = g_hub_slots[s];
-      if (slot.sock >= 0 && slot.is_connected) {
-        Fcu::handleSlotLoop(static_cast<uint8_t>(s), &slot, now_ms);
-      }
-    }
-  }
-}
+static int s_mgmt_server_fd = -1;
+static uint32_t s_chk_ms = 0, s_met_ms = 0, s_tcp_ms = 0;
 
 static void Network_HandleMaintenance(uint32_t &t_chk, uint32_t &t_met,
                                       uint32_t &t_tcp, uint32_t now) {
@@ -1773,229 +1708,145 @@ static void Network_HandleMaintenance(uint32_t &t_chk, uint32_t &t_met,
 
   if (TimeUtils::isElapsed(t_tcp, Config::TCP::CLEANUP_INTERVAL_MS)) {
     t_tcp = now;
-    bool any_ew11_conn = false;
-    {
-      MutexLocker lock(g_ch5_mutex);
-      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-        if (g_hub_slots[s].is_connected) {
-          any_ew11_conn = true;
-          break;
-        }
-      }
-    }
-    g_pkt_stats.ch5.is_connected.store(any_ew11_conn,
-                                       std::memory_order_relaxed);
     g_pkt_stats.ch6.is_connected.store(
-        Tcp_HasActiveSession(g_mgmt_sessions, g_mgmt_mutex),
+        Tcp_HasActiveSession(s_mgmt_sessions, s_mgmt_mutex),
         std::memory_order_relaxed);
   }
 }
 
-void Task_Network(void *pvParameters) {
-  esp_task_wdt_add(nullptr);
-  uint32_t t_chk = millis(), t_met = millis(), t_tcp = millis();
+void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept {
+  auto add_fd = [&](int fd) {
+    if (fd >= 0) {
+      FD_SET(fd, &readfds);
+      FD_SET(fd, &errorfds);
+      if (fd > max_fd)
+        max_fd = fd;
+    }
+  };
 
-  int mgmt_server_fd = -1;
-  int ew11_server_fds[Config::TCP::MAX_EW11_SLOTS];
-  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-    ew11_server_fds[s] = -1;
+  add_fd(s_mgmt_server_fd);
+
+  MutexLocker lock(s_mgmt_mutex);
+  for (int m = 0; m < Config::TCP::MAX_MGMT_CLIENTS; m++) {
+    add_fd(s_mgmt_sessions[m].sock);
+  }
+}
+
+void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds,
+                          bool /*ota_now*/) noexcept {
+  if (s_mgmt_server_fd >= 0 && FD_ISSET(s_mgmt_server_fd, &readfds)) {
+    Tcp_AcceptAndAssignSlot(s_mgmt_server_fd, s_mgmt_sessions, s_mgmt_mutex,
+                            Config::TCP::DEFAULT_KEEPALIVE_IDLE_SEC,
+                            Config::TCP::DEFAULT_KEEPALIVE_INTVL_SEC,
+                            Config::TCP::DEFAULT_KEEPALIVE_CNT,
+                            g_pkt_stats.ch6);
   }
 
+  Tcp_PollAndReceive(s_mgmt_sessions, s_mgmt_mutex, readfds, errorfds,
+                     [](MgmtSession *sess, const uint8_t *data, size_t len) {
+                       Mgmt_Data(sess, data, len);
+                     });
+}
+
+void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
+  if (!g_rescue_mode.load(std::memory_order_relaxed) && g_wifi_event_group) {
+    EventBits_t bits = xEventGroupGetBits(g_wifi_event_group);
+
+    if (bits & WIFI_BIT_GOT_IP) {
+      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
+      if (s_wifi_guard.testing.load(std::memory_order_acquire)) {
+        s_wifi_guard.testing.store(false, std::memory_order_release);
+        Config_Save();
+        Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved "
+                      "to NVS.\r\n",
+                      g_config.wifi_ssid);
+      }
+    }
+
+    if (s_wifi_guard.testing.load(std::memory_order_acquire)) {
+      if (TimeUtils::isElapsed(s_wifi_guard.start_ms, 15000)) {
+        s_wifi_guard.testing.store(false, std::memory_order_release);
+        Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed to connect within 15s! "
+                      "Reverting to '%s'...\r\n",
+                      g_config.wifi_ssid, s_wifi_guard.prev_ssid);
+        {
+          std::unique_lock lock(g_config_rw);
+          strncpy(g_config.wifi_ssid, s_wifi_guard.prev_ssid,
+                  sizeof(g_config.wifi_ssid) - 1);
+          strncpy(g_config.wifi_password, s_wifi_guard.prev_pass,
+                  sizeof(g_config.wifi_password) - 1);
+        }
+        WiFi.disconnect(false);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
+      }
+    }
+
+    if (bits & WIFI_BIT_CONNECTED) {
+      s_sta_retry_interval_ms =
+          Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
+    }
+
+    if (bits & WIFI_BIT_DISCONNECTED) {
+      if (TimeUtils::isElapsed(s_last_sta_retry_ms,
+                               s_sta_retry_interval_ms)) {
+        s_last_sta_retry_ms = now;
+        Serial.printf("[WIFI] Event: DISCONNECTED. Background STA "
+                      "reconnection attempt (interval: %u ms)...\r\n",
+                      static_cast<unsigned>(s_sta_retry_interval_ms));
+        esp_wifi_connect();
+        s_sta_retry_interval_ms =
+            std::min(s_sta_retry_interval_ms * 2, kMaxStaRetryIntervalMs);
+      }
+    }
+  }
+
+  if (now > POST_BOOT_LOG_DELAY_MS) {
+    if (const char *reason = Diag_ConsumePendingRebootReason()) {
+      LogManager::writeRebootLog(reason);
+    }
+  }
+
+  Network_HandleMaintenance(s_chk_ms, s_met_ms, s_tcp_ms, now);
+  WarmCache_CheckNvsDebounce();
+}
+
+void Remote_Init() {
   if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    mgmt_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (mgmt_server_fd >= 0) {
+    s_mgmt_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s_mgmt_server_fd >= 0) {
       int opt = 1;
-      setsockopt(mgmt_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-      int flags = fcntl(mgmt_server_fd, F_GETFL, 0);
-      fcntl(mgmt_server_fd, F_SETFL, flags | O_NONBLOCK);
+      setsockopt(s_mgmt_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+      int flags = fcntl(s_mgmt_server_fd, F_GETFL, 0);
+      fcntl(s_mgmt_server_fd, F_SETFL, flags | O_NONBLOCK);
 
       struct sockaddr_in saddr;
       memset(&saddr, 0, sizeof(saddr));
       saddr.sin_family = AF_INET;
       saddr.sin_addr.s_addr = htonl(INADDR_ANY);
       saddr.sin_port = htons(Config::TCP::MGMT_PORT);
-      if (bind(mgmt_server_fd, reinterpret_cast<struct sockaddr *>(&saddr),
+      if (bind(s_mgmt_server_fd, reinterpret_cast<struct sockaddr *>(&saddr),
                sizeof(saddr)) < 0 ||
-          listen(mgmt_server_fd, Config::TCP::MAX_MGMT_CLIENTS) < 0) {
+          listen(s_mgmt_server_fd, Config::TCP::MAX_MGMT_CLIENTS) < 0) {
         ESP_LOGE("NET", "Failed to bind/listen mgmt server (8900): errno %d",
                  errno);
-        close(mgmt_server_fd);
-        mgmt_server_fd = -1;
+        close(s_mgmt_server_fd);
+        s_mgmt_server_fd = -1;
       }
-    }
-
-    Hub_LoadConfig();
-
-    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      uint16_t listen_port = g_hub_slots[s].target_port;
-      if (listen_port == 0) {
-        listen_port = Config::TCP::EW11_SLOT_PORTS[s];
-        g_hub_slots[s].target_port = listen_port;
-      }
-
-      int sfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-      if (sfd >= 0) {
-        int opt = 1;
-        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        int flags = fcntl(sfd, F_GETFL, 0);
-        fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
-
-        struct sockaddr_in saddr;
-        memset(&saddr, 0, sizeof(saddr));
-        saddr.sin_family = AF_INET;
-        saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-        saddr.sin_port = htons(listen_port);
-        if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr),
-                 sizeof(saddr)) < 0 ||
-            listen(sfd, 1) < 0) {
-          ESP_LOGE("EW11",
-                   "Failed to bind/listen EW11 slot %d on port %u: errno %d", s,
-                   listen_port, errno);
-          close(sfd);
-          sfd = -1;
-        } else {
-          ESP_LOGI("EW11", "[CH5] Listening for EW11 slot %d (%s) on port %u",
-                   s, g_hub_slots[s].name, listen_port);
-        }
-      }
-      ew11_server_fds[s] = sfd;
     }
   } else {
     Serial.println(F("[RESCUE] CH6 TCP server port disabled in Rescue "
                      "Mode. Dedicated to OTA & Telnet."));
   }
 
-  for (;;) {
-    esp_task_wdt_reset();
-    g_wdt_monitor.feed(4);
-    ArduinoOTA.handle();
+  s_chk_ms = millis();
+  s_met_ms = millis();
+  s_tcp_ms = millis();
 
-    const bool ota_now = g_ota_in_progress.load(std::memory_order_relaxed);
-
-    System_CheckOtaHealth();
-    WarmCache_CheckNvsDebounce();
-
-    if (!g_rescue_mode.load(std::memory_order_relaxed) && g_wifi_event_group) {
-      EventBits_t bits = xEventGroupGetBits(g_wifi_event_group);
-
-      if (bits & WIFI_BIT_GOT_IP) {
-        xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
-        if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
-          g_wifi_guard.testing.store(false, std::memory_order_release);
-          Config_Save();
-          Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved "
-                        "to NVS.\r\n",
-                        g_config.wifi_ssid);
-        }
-      }
-
-      if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
-        if (TimeUtils::isElapsed(g_wifi_guard.start_ms, 15000)) {
-          g_wifi_guard.testing.store(false, std::memory_order_release);
-          Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed to connect within 15s! "
-                        "Reverting to '%s'...\r\n",
-                        g_config.wifi_ssid, g_wifi_guard.prev_ssid);
-          {
-            std::unique_lock lock(g_config_rw);
-            strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid,
-                    sizeof(g_config.wifi_ssid) - 1);
-            strncpy(g_config.wifi_password, g_wifi_guard.prev_pass,
-                    sizeof(g_config.wifi_password) - 1);
-          }
-          WiFi.disconnect(false);
-          vTaskDelay(pdMS_TO_TICKS(100));
-          WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
-        }
-      }
-
-      if (bits & WIFI_BIT_CONNECTED) {
-        s_sta_retry_interval_ms =
-            Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
-      }
-
-      if (bits & WIFI_BIT_DISCONNECTED) {
-        if (TimeUtils::isElapsed(s_last_sta_retry_ms,
-                                 s_sta_retry_interval_ms)) {
-          s_last_sta_retry_ms = millis();
-          Serial.printf("[WIFI] Event: DISCONNECTED. Background STA "
-                        "reconnection attempt (interval: %u ms)...\r\n",
-                        static_cast<unsigned>(s_sta_retry_interval_ms));
-          esp_wifi_connect();
-          s_sta_retry_interval_ms =
-              std::min(s_sta_retry_interval_ms * 2, kMaxStaRetryIntervalMs);
-        }
-      }
-    }
-
-    if (s_pending_reboot_reason && millis() > POST_BOOT_LOG_DELAY_MS) {
-      LogManager::writeRebootLog(s_pending_reboot_reason);
-      s_pending_reboot_reason = nullptr;
-    }
-
-    fd_set readfds, writefds, errorfds;
-    FD_ZERO(&readfds);
-    FD_ZERO(&writefds);
-    FD_ZERO(&errorfds);
-    int max_fd = -1;
-
-    auto add_read_fd = [&](int fd) {
-      if (fd >= 0) {
-        FD_SET(fd, &readfds);
-        FD_SET(fd, &errorfds);
-        if (fd > max_fd)
-          max_fd = fd;
-      }
-    };
-
-    add_read_fd(mgmt_server_fd);
-    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      if (ew11_server_fds[s] >= 0) {
-        add_read_fd(ew11_server_fds[s]);
-      }
-    }
-
-    {
-      MutexLocker lock(g_mgmt_mutex);
-      for (int m = 0; m < Config::TCP::MAX_MGMT_CLIENTS; m++) {
-        if (g_mgmt_sessions[m].sock >= 0) {
-          add_read_fd(g_mgmt_sessions[m].sock);
-        }
-      }
-    }
-
-    {
-      MutexLocker lock(g_ch5_mutex);
-      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-        if (g_hub_slots[s].sock >= 0) {
-          add_read_fd(g_hub_slots[s].sock);
-        }
-      }
-    }
-
-    int act = 0;
-    struct timeval tv = {0, 10000};
-    if (max_fd >= 0) {
-      act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
-      if (ota_now) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    esp_task_wdt_reset();
-    g_wdt_monitor.feed(4);
-
-    if (act > 0) {
-      Network_ProcessSockets(mgmt_server_fd, ew11_server_fds, readfds, errorfds,
-                             ota_now);
-    }
-
-    // FCU 슬롯(1~4) 120ms 논블로킹 가드타임 및 20초 주기 폴링 처리
-    Network_HandleFcuLoop(ota_now, millis());
-
-    // 주기적 시스템 및 소켓 상태 유지보수
-    Network_HandleMaintenance(t_chk, t_met, t_tcp, millis());
-  }
+  Transport::ReactorParticipant p;
+  p.name = "RemoteService";
+  p.populateFds = Remote_PopulateFds;
+  p.processEvents = Remote_ProcessEvents;
+  p.tick = Remote_Tick;
+  Transport::TcpReactor::registerParticipant(p);
 }

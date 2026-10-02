@@ -50,7 +50,6 @@ struct Args {
   }
 };
 
-extern SemaphoreHandle_t g_telnet_tx_sem;
 void sendTelnetMsg(int sock, const char *str);
 void sendTelnetMsgLen(int sock, const char *str, size_t len);
 void sendTelnetMsgf(int sock, const char *fmt, ...)

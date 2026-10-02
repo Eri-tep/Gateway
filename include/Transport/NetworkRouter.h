@@ -6,10 +6,14 @@
 
 #include "Base/SystemPlatform.h"
 #include "System/LockUtils.h"
+#include "Transport/TransportTypes.h"
 #include <IPAddress.h>
+#include <SoftwareSerial.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+
+extern SoftwareSerial g_doorphone_serial;
 
 // ── IP Subnet Whitelist Filters ──
 [[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip);
@@ -19,11 +23,6 @@
 bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format);
 
 // ── Routing Table & Multi-Channel Dispatch Registry ──
-struct RouteEndpoint {
-  uint8_t channel_id{1}; // 기본 채널: CH1 (메인 물리 RS-485)
-  int8_t slot_idx{-1};   // CH5인 경우 슬롯 인덱스 (0~4), 그 외 -1
-  uint32_t last_seen_ms{0};
-};
 
 struct DeviceRouteEntry {
   uint8_t dev_id{0};

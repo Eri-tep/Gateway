@@ -277,7 +277,13 @@ void System_DiagnoseStuck();
 void System_CheckCoreDump();
 [[nodiscard]] bool System_IsOtaPendingVerify();
 
-extern const char *s_pending_reboot_reason;
+const char *Diag_GetPendingRebootReason() noexcept;
+const char *Diag_ConsumePendingRebootReason() noexcept;
+void Diag_SetPendingRebootReason(const char *reason) noexcept;
+
+uint32_t Diag_GetBootTimeMs() noexcept;
+void Diag_SetBootTimeMs(uint32_t ms) noexcept;
+
 extern SystemMetricsTracker g_metrics;
 extern TaskWdtMonitor g_wdt_monitor;
 extern PacketStatistics g_pkt_stats;

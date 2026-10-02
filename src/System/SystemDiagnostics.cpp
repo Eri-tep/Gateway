@@ -18,7 +18,31 @@
 #include <esp_core_dump.h>
 #endif
 
-extern uint32_t g_boot_start_ms;
+static uint32_t s_boot_start_ms = 0;
+
+uint32_t Diag_GetBootTimeMs() noexcept {
+  return s_boot_start_ms;
+}
+
+void Diag_SetBootTimeMs(uint32_t ms) noexcept {
+  s_boot_start_ms = ms;
+}
+
+static const char *s_pending_reboot_reason = nullptr;
+
+const char *Diag_GetPendingRebootReason() noexcept {
+  return s_pending_reboot_reason;
+}
+
+const char *Diag_ConsumePendingRebootReason() noexcept {
+  const char *reason = s_pending_reboot_reason;
+  s_pending_reboot_reason = nullptr;
+  return reason;
+}
+
+void Diag_SetPendingRebootReason(const char *reason) noexcept {
+  s_pending_reboot_reason = reason;
+}
 
 // ── Unified System Trace Sink & Shutdown Hooks ──
 static SystemTraceSink s_trace_sink{};
@@ -76,7 +100,6 @@ SystemMetricsTracker g_metrics;
 TaskWdtMonitor g_wdt_monitor;
 PacketStatistics g_pkt_stats;
 Ch1StateMetrics g_ch1_state_metrics;
-const char *s_pending_reboot_reason = nullptr;
 
 #ifdef __cplusplus
 extern "C" {
@@ -723,9 +746,9 @@ void System_CheckOtaHealth() {
 
   bool rs485_ok =
       (millis() - g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) < 15000);
-  bool time_ok = TimeUtils::isElapsed(g_boot_start_ms,
+  bool time_ok = TimeUtils::isElapsed(s_boot_start_ms,
                                       Config::Timing::OTA_VALIDATION_PERIOD_MS);
-  bool extended_time_ok = TimeUtils::isElapsed(g_boot_start_ms, 60000);
+  bool extended_time_ok = TimeUtils::isElapsed(s_boot_start_ms, 60000);
 
   if (!time_ok || !wifi_ok || (!hub_ok && !extended_time_ok) || !rs485_ok) {
     return;

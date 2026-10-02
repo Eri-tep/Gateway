@@ -63,4 +63,9 @@ public:
 
 extern DoorphoneController g_doorphone_controller;
 
+void Doorphone_OnProfileChanged(uint8_t old_idx, uint8_t new_idx);
+
+using DoorphoneTxHandler = void (*)(const StaticPacket &pkt) noexcept;
+void Doorphone_RegisterTxHandler(DoorphoneTxHandler handler) noexcept;
+
 } // namespace Transport

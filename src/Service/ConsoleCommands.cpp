@@ -680,7 +680,7 @@ void otaPrintStatus(AppendBuf &out) {
            next ? static_cast<unsigned>(next->size / 1024) : 3712);
 
   bool val_done = TimeUtils::isElapsed(
-      g_boot_start_ms, Config::Timing::OTA_VALIDATION_PERIOD_MS);
+      Diag_GetBootTimeMs(), Config::Timing::OTA_VALIDATION_PERIOD_MS);
   snprintf(timer_val, sizeof(timer_val), "%s",
            val_done ? "120s Passed" : "Evaluating (<120s)");
   snprintf(crash_val, sizeof(crash_val), "%u Consecutive Crashes",
@@ -1260,17 +1260,7 @@ static bool ew11ParseSlot(int sock, const char *arg, int &slot,
 }
 
 static void ew11SetEnable(int sock, int slot, bool enabled) {
-  {
-    MutexLocker lock(g_ch5_mutex);
-    g_hub_slots[slot].enabled = enabled;
-    if (!enabled && g_hub_slots[slot].sock >= 0) {
-      close(g_hub_slots[slot].sock);
-      g_hub_slots[slot].sock = -1;
-      g_hub_slots[slot].is_connected = false;
-      g_hub_slots[slot].rx_len = 0;
-    }
-  }
-  Hub_SaveConfig();
+  Bridge_SetSlotEnabled(static_cast<uint8_t>(slot), enabled);
   sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n",
                  slot, enabled ? "ENABLED" : "DISABLED");
 }
@@ -1295,9 +1285,9 @@ void cmdEw11(CliContext &ctx) {
       table_sock.header(false);
 
       {
-        MutexLocker lock(g_ch5_mutex);
         for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-          auto &slot = g_hub_slots[s];
+          HubClientSlotSnapshot slot;
+          Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
           const char *status_str = !slot.enabled         ? "Disabled"
                                    : !slot.is_connected  ? "Listening"
                                    : (slot.rx_pkts == 0) ? "Idle"
@@ -1338,9 +1328,9 @@ void cmdEw11(CliContext &ctx) {
       table_fcu.header(false);
 
       {
-        MutexLocker lock(g_ch5_mutex);
         for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
-          const HubClientSlot &slot = g_hub_slots[s];
+          HubClientSlotSnapshot slot;
+          Bridge_GetSlotSnapshot(s, slot);
           Fcu::SlotRuntime rt;
           Fcu::GetSlotRuntime(s, rt);
 
@@ -1390,13 +1380,15 @@ void cmdEw11(CliContext &ctx) {
          int slot = -1;
          if (!ew11ParseSlot(sock, args.get(2), slot, "set"))
            return;
+         HubClientSlotSnapshot slot_snap;
+         Bridge_GetSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
          uint16_t default_port = Config::TCP::EW11_SLOT_PORTS[slot];
-         uint16_t port = g_hub_slots[slot].target_port > 0
-                             ? g_hub_slots[slot].target_port
+         uint16_t port = slot_snap.target_port > 0
+                             ? slot_snap.target_port
                              : default_port;
          const char *ip_str = nullptr;
          const char *name_str = nullptr;
-         bool enabled = g_hub_slots[slot].enabled;
+         bool enabled = slot_snap.enabled;
          for (int i = 3; i <= argc; ++i) {
            const char *tok = args.get(i);
            if (!tok || !*tok)
@@ -1417,14 +1409,15 @@ void cmdEw11(CliContext &ctx) {
          }
          if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port,
                          name_str)) {
+           Bridge_GetSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
            sendTelnetMsgf(
                sock,
                "[OK] EW11 Slot #%d configured (Name: %s, Listen Port: %u, "
                "Allowed IP: %s, Enabled: %s) and saved to NVS!\r\n",
-               slot, g_hub_slots[slot].name, g_hub_slots[slot].target_port,
-               g_hub_slots[slot].target_ip[0] ? g_hub_slots[slot].target_ip
+               slot, slot_snap.name, slot_snap.target_port,
+               slot_snap.target_ip[0] ? slot_snap.target_ip
                                               : "Any",
-               g_hub_slots[slot].enabled ? "true" : "false");
+               slot_snap.enabled ? "true" : "false");
          } else {
            sendTelnetMsg(sock, "[ERROR] Failed to configure EW11 slot.\r\n");
          }
@@ -1448,11 +1441,7 @@ void cmdEw11(CliContext &ctx) {
            if (CliFmt::ParseInt(args.get(5), parsed_len, 0, 255))
              len = static_cast<uint8_t>(parsed_len);
          }
-         char ns[16], tag[16];
-         snprintf(ns, sizeof(ns), "e%d_frame", slot);
-         snprintf(tag, sizeof(tag), "EW11_#%d", slot);
-         g_hub_slots[slot].tracker.setFixedLock(stx, etx, len);
-         g_hub_slots[slot].tracker.saveToNvs(ns, tag);
+         Bridge_SetFramingLock(static_cast<uint8_t>(slot), stx, etx, len);
          sendTelnetMsgf(sock,
                         "[OK] EW11 Slot #%d framing permanently fixed to STX "
                         "0x%02X, ETX 0x%02X, Len %u.\r\n",
@@ -1463,10 +1452,7 @@ void cmdEw11(CliContext &ctx) {
          int slot = -1;
          if (!ew11ParseSlot(sock, args.get(2), slot, "reset"))
            return;
-         char ns[16], tag[16];
-         snprintf(ns, sizeof(ns), "e%d_frame", slot);
-         snprintf(tag, sizeof(tag), "EW11_#%d", slot);
-         g_hub_slots[slot].tracker.clearNvs(ns, tag);
+         Bridge_ResetFramingTracker(static_cast<uint8_t>(slot));
          sendTelnetMsgf(sock,
                         "[OK] EW11 Slot #%d framing tracker reset to "
                         "autonomous auto-probing.\r\n",
@@ -1899,9 +1885,9 @@ void wallpadPrintStatus(AppendBuf &out) {
   table.separator('-');
 
   {
-    MutexLocker lock(g_ch5_mutex);
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      const auto &slot = g_hub_slots[s];
+      HubClientSlotSnapshot slot;
+      Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
       char p_buf[16], val_buf[32];
       snprintf(p_buf, sizeof(p_buf), "%u",
                slot.target_port ? slot.target_port
@@ -3058,7 +3044,8 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   }
 
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-    auto &slot = g_hub_slots[s];
+    HubClientSlotSnapshot slot;
+    Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
     if (!slot.enabled && strlen(slot.target_ip) == 0 && slot.target_port == 0)
       continue;
 

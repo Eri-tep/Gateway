@@ -52,7 +52,10 @@ Global variables must carry the **`g_`** prefix and possess **exactly one canoni
 | `g_pkt_stats` | `PacketStatistics` | Real-time packet and error statistics counters |
 | `g_polling_targets` | `PollingTargetRegistry` | Dynamic polling target registry (1st-Tier Cache) |
 | `g_device_repo` | `DeviceRepository` | Device real-time state repository (2nd-Tier Cache) |
-| `g_hub_slots` | `HubClientSlot[]` | CH5 multi-client slot pool |
+
+> **Information Hiding & Scope Reduction Mandate**:
+> - Hardware communication slots, sockets, and channel mutexes (e.g. EW11 slots `s_hub_slots`, `s_ch5_mutex`) must NEVER be exposed as `extern` global variables.
+> - They must be strictly encapsulated inside `.cpp` translation units as `static`, exposed only via read-only snapshot APIs (e.g., `Bridge_GetSlotSnapshot()`).
 
 > **Prohibitions**:
 > - Never declare reference aliases to an existing instance (`inline auto &g_metrics = g_metrics_tracker;`).
