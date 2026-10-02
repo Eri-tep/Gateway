@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <optional>
+#include <span>
 
 extern SoftwareSerial g_doorphone_serial;
 
@@ -43,8 +45,11 @@ private:
 public:
   void recordRoute(uint8_t channel_id, int8_t slot_idx, uint8_t dev_id,
                    uint8_t sub1, uint8_t sub2);
+  [[nodiscard]] std::optional<RouteEndpoint>
+  lookupRoute(uint8_t dev_id, uint8_t sub1, uint8_t sub2) const noexcept;
   [[nodiscard]] bool lookupRoute(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                  RouteEndpoint &out_ep) const;
+  [[nodiscard]] size_t getRoutes(std::span<DeviceRouteEntry> out_buf) const noexcept;
   [[nodiscard]] size_t getRoutes(DeviceRouteEntry *out_buf,
                                  size_t max_count) const;
   void clear();

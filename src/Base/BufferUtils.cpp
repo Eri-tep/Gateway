@@ -15,18 +15,25 @@ long elapsedMs(const struct timeval &now, const struct timeval &prev) noexcept {
 } // namespace TimeUtils
 
 namespace Fmt {
-void FormatHex(const uint8_t *data, size_t len, char *out,
-               size_t out_len) noexcept {
-  if (!out || out_len == 0)
+void FormatHex(std::span<const uint8_t> data, std::span<char> out) noexcept {
+  if (out.empty())
     return;
   size_t idx = 0;
-  for (size_t k = 0; k < len && idx + 3 < out_len; ++k) {
+  for (size_t k = 0; k < data.size() && idx + 3 < out.size(); ++k) {
     const auto &hex_chars = HexLUT::LUT[data[k]];
     out[idx++] = hex_chars[0];
     out[idx++] = hex_chars[1];
     out[idx++] = ' ';
   }
   out[idx] = '\0';
+}
+
+void FormatHex(const uint8_t *data, size_t len, char *out,
+               size_t out_len) noexcept {
+  if (!out || out_len == 0)
+    return;
+  FormatHex(std::span<const uint8_t>(data, data ? len : 0),
+            std::span<char>(out, out_len));
 }
 
 void FormatElapsed(uint32_t now, uint32_t timestamp, char *out,

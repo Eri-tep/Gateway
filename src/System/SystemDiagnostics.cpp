@@ -315,17 +315,18 @@ size_t LogManager::getLogCount() {
   return c > MAX_LOG_ENTRIES ? MAX_LOG_ENTRIES : c;
 }
 
-bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) {
+[[nodiscard]] std::expected<LogEntry, LogReadError>
+LogManager::getLogEntry(size_t idx) noexcept {
   if (idx >= MAX_LOG_ENTRIES)
-    return false;
+    return std::unexpected(LogReadError::OutOfBounds);
   Preferences p;
   if (!p.begin("logs", true))
-    return false;
+    return std::unexpected(LogReadError::Empty);
 
   size_t count = p.getUInt("count", 0);
   if (idx >= count) {
     p.end();
-    return false;
+    return std::unexpected(LogReadError::OutOfBounds);
   }
 
   uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
@@ -338,32 +339,40 @@ bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) {
   if (len == sizeof(env) && p.getBytes(key, &env, sizeof(env)) == sizeof(env)) {
     p.end();
     if (env.verify()) {
-      out_entry = env.payload;
-      return true;
+      return env.payload;
     }
-    return false;
+    return std::unexpected(LogReadError::OutOfBounds);
   }
   p.end();
-  return false;
+  return std::unexpected(LogReadError::OutOfBounds);
 }
 
-void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
-  if (!buf || max_len == 0)
+bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) noexcept {
+  auto res = getLogEntry(idx);
+  if (!res.has_value())
+    return false;
+  out_entry = *res;
+  return true;
+}
+
+void LogManager::readRebootLog(std::span<char> buf, size_t idx) noexcept {
+  if (buf.empty())
     return;
   buf[0] = '\0';
-  LogEntry e;
-  if (!getLogEntry(idx, e)) {
+  auto entry_res = getLogEntry(idx);
+  if (!entry_res.has_value()) {
     size_t c = getLogCount();
     if (c == 0) {
-      snprintf(buf, max_len,
+      snprintf(buf.data(), buf.size(),
                "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
     } else {
-      snprintf(buf, max_len,
+      snprintf(buf.data(), buf.size(),
                "\r\n[LOGVIEW] Invalid log index #%u (Available: 1 ~ %u)\r\n",
                static_cast<unsigned>(idx + 1), static_cast<unsigned>(c));
     }
     return;
   }
+  const LogEntry &e = *entry_res;
 
   char t_buf[32] = "N/A";
   const char *t_src = "RTC/Uptime (Unsynced)";
@@ -388,7 +397,7 @@ void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
              e.stats_snapshot.wifi_rssi, e.stats_snapshot.wifi_ip);
   }
 
-  AppendBuf add{buf, max_len};
+  AppendBuf add{buf.data(), buf.size()};
   add.appendFormat("\r\n%s", Fmt::DIV80EQ);
   add.appendFormat("                   GATEWAY BRIDGE REBOOT SNAPSHOT MONITOR  "
                    "                   \r\n");
@@ -414,6 +423,12 @@ void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
   Fmt::FormatRs485Stats(add, e.packet_stats_snapshot);
   Fmt::FormatTaskStacks(add, e.stack_snapshot, g_wdt_monitor);
   add.appendFormat("%s\r\n", Fmt::DIV80EQ);
+}
+
+void LogManager::readRebootLog(char *buf, size_t max_len, size_t idx) {
+  if (!buf || max_len == 0)
+    return;
+  readRebootLog(std::span<char>(buf, max_len), idx);
 }
 
 void LogManager::clearRebootLog() {
@@ -491,8 +506,8 @@ void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
       (static_cast<uint64_t>(delta_uart) * 1000) / elapsed_ms);
   uint32_t load1 = CPU1_BASE_LOAD + (uart_pps / CPU1_PPS_DIVISOR);
 
-  cpu0_out = static_cast<uint8_t>(std::min(load0, 99U));
-  cpu1_out = static_cast<uint8_t>(std::min(load1, 99U));
+  cpu0_out = static_cast<uint8_t>(std::min<uint32_t>(load0, 99UL));
+  cpu1_out = static_cast<uint8_t>(std::min<uint32_t>(load1, 99UL));
 }
 
 void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,

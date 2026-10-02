@@ -321,6 +321,8 @@ public:
   void reset();
   void injectControlSpec(uint8_t ctrl_op, uint8_t ctrl_len);
   bool analyzeCacheMatrix();
+  uint8_t calculateChecksum(ChecksumAlgo algo,
+                            span<const uint8_t> data) const noexcept;
   uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
                             size_t len) const;
   static const char *getAlgoName(ChecksumAlgo algo);
@@ -411,6 +413,7 @@ public:
   bool buildQueryPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                         StaticPacket &out) const;
 
+  uint8_t calculateChecksum(span<const uint8_t> data) const noexcept;
   uint8_t calculateChecksum(const uint8_t *data, size_t len) const;
   uint8_t getStx() const;
   uint8_t getEtx() const;

@@ -44,6 +44,7 @@ constexpr char DIV80EQ[] = "=============================================="
                            "==================================\r\n";
 constexpr size_t DIV80EQ_LEN = sizeof(DIV80EQ) - 1;
 
+void FormatHex(std::span<const uint8_t> data, std::span<char> out) noexcept;
 void FormatHex(const uint8_t *data, size_t len, char *out,
                size_t out_len) noexcept;
 

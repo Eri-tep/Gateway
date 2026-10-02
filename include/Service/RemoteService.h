@@ -33,7 +33,11 @@ struct MgmtSession {
 // 4. Management JSON-RPC Functions
 // ============================================================================
 void Mgmt_Init();
-void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len);
+void Mgmt_Data(MgmtSession *s, std::span<const uint8_t> data);
+inline void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
+  if (data)
+    Mgmt_Data(s, std::span<const uint8_t>(data, len));
+}
 void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id = -1);
 void Mgmt_SerializeDevices(AppendBuf &out, long req_id = -1);
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str);

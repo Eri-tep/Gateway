@@ -41,7 +41,11 @@ bool SetFanSpeed(uint8_t slot_idx, FanSpeed f);
 bool SetSwing(uint8_t slot_idx, Swing s);
 bool SetTargetTemp(uint8_t slot_idx, uint8_t temp_c);
 bool GetSlotRuntime(uint8_t slot_idx, SlotRuntime &out_rt);
-void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len);
+void handleSlotRx(uint8_t slot_idx, std::span<const uint8_t> data) noexcept;
+inline void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
+  if (data)
+    handleSlotRx(slot_idx, std::span<const uint8_t>(data, len));
+}
 
 } // namespace Fcu
 

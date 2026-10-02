@@ -6,10 +6,11 @@
 
 #include "SystemPlatform.h"
 #include <atomic>
+#include <expected>
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.7.7";
+constexpr const char *FIRMWARE_VERSION = "v1.7.8";
 } // namespace Config
 
 namespace Config::Task {
@@ -163,8 +164,19 @@ extern std::shared_mutex g_config_rw;
 extern portMUX_TYPE g_config_mux;
 extern std::atomic<bool> g_config_dirty;
 
+struct FramingConfig {
+  uint8_t data_bits{8};
+  uint8_t parity{0};
+  uint8_t stop_bits{1};
+};
+
+enum class FramingParseError : uint8_t { InvalidLength, UnsupportedFormat };
+
 const char *formatFramingStr(uint8_t data_bits, uint8_t parity,
                              uint8_t stop_bits) noexcept;
+
+[[nodiscard]] std::expected<FramingConfig, FramingParseError>
+parseFramingStr(std::string_view str) noexcept;
 
 bool parseFramingStr(const char *str, uint8_t &data_bits, uint8_t &parity,
                      uint8_t &stop_bits) noexcept;

@@ -845,12 +845,13 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   sendRpcResponse(sock, req_id, "error", "Unknown command");
 }
 
-void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
-  if (!s || s->sock < 0 || !data || len == 0)
+void Mgmt_Data(MgmtSession *s, std::span<const uint8_t> data) {
+  if (!s || s->sock < 0 || data.empty())
     return;
 
   g_pkt_stats.ch6.rx_pkts.fetch_add(1, std::memory_order_relaxed);
 
+  const size_t len = data.size();
   if (len > sizeof(s->buffer)) {
     s->len = 0; // 단일 패킷 크기가 전체 수신 버퍼 초과 시 드롭
     return;
@@ -860,7 +861,7 @@ void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
     s->len = 0; // 누적 버퍼 오버플로우 방어: 기존 미완성 데이터 플러시
   }
 
-  std::copy(data, data + len, s->buffer + s->len);
+  std::copy(data.begin(), data.end(), s->buffer + s->len);
   s->len += len;
 
   size_t p = 0;

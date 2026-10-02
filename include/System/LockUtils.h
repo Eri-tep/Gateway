@@ -6,7 +6,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-class CriticalSectionLocker {
+class [[nodiscard]] CriticalSectionLocker {
 private:
   portMUX_TYPE *_mux{nullptr};
 

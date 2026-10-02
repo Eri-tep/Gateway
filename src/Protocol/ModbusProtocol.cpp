@@ -1,11 +1,12 @@
 #include "Protocol/ModbusProtocol.h"
+#include <utility>
 
 namespace ModbusRtu {
 
-uint16_t calcCrc16(const uint8_t *buf, size_t len) noexcept {
+uint16_t calcCrc16(std::span<const uint8_t> data) noexcept {
   uint16_t crc = kModbusCrcInit;
-  for (size_t pos = 0; pos < len; pos++) {
-    crc ^= static_cast<uint16_t>(buf[pos]);
+  for (uint8_t byte : data) {
+    crc ^= static_cast<uint16_t>(byte);
     for (int i = 8; i != 0; i--) {
       if ((crc & 0x0001) != 0) {
         crc >>= 1;
@@ -37,7 +38,7 @@ buildWriteMultiplePowerOn(uint16_t mode, uint16_t fan, uint16_t swing) noexcept 
       0x00,
       0x00 // CRC 필드
   };
-  uint16_t crc = calcCrc16(frame.data(), 13);
+  uint16_t crc = calcCrc16(std::span<const uint8_t>(frame.data(), 13));
   frame[13] = static_cast<uint8_t>(crc & 0xFF);
   frame[14] = static_cast<uint8_t>((crc >> 8) & 0xFF);
   return frame;
@@ -52,23 +53,26 @@ std::array<uint8_t, 8> buildWriteSingle(uint16_t reg, uint16_t val) noexcept {
                                   static_cast<uint8_t>(val & 0xFF),
                                   0x00,
                                   0x00};
-  uint16_t crc = calcCrc16(frame.data(), 6);
+  uint16_t crc = calcCrc16(std::span<const uint8_t>(frame.data(), 6));
   frame[6] = static_cast<uint8_t>(crc & 0xFF);
   frame[7] = static_cast<uint8_t>((crc >> 8) & 0xFF);
   return frame;
 }
 
-bool parseStatusResponse(const uint8_t *data, size_t len,
-                         Fcu::Snapshot &out) noexcept {
-  if (len < 19 || data[0] != 0x01 || data[1] != 0x03 || data[2] != 0x0E) {
-    return false;
+std::expected<Fcu::Snapshot, ModbusParseError>
+parseStatusResponse(std::span<const uint8_t> data) noexcept {
+  if (data.size() < 19) {
+    return std::unexpected(ModbusParseError::InvalidLength);
+  }
+  if (data[0] != 0x01 || data[1] != 0x03 || data[2] != 0x0E) {
+    return std::unexpected(ModbusParseError::HeaderMismatch);
   }
 
-  uint16_t calc_crc = calcCrc16(data, 17);
+  uint16_t calc_crc = calcCrc16(data.subspan(0, 17));
   uint16_t pkt_crc =
       static_cast<uint16_t>(data[17]) | (static_cast<uint16_t>(data[18]) << 8);
   if (calc_crc != pkt_crc) {
-    return false;
+    return std::unexpected(ModbusParseError::CrcMismatch);
   }
 
   auto unpackBe16 = [](const uint8_t *p) -> uint16_t {
@@ -83,6 +87,7 @@ bool parseStatusResponse(const uint8_t *data, size_t len,
   uint16_t reg5 = unpackBe16(&data[13]); // 설정 희망 온도
   uint16_t reg6 = unpackBe16(&data[15]); // 실내 측정 온도
 
+  Fcu::Snapshot out;
   out.mode =
       (reg1 >= 1 && reg1 <= 3) ? static_cast<Fcu::Mode>(reg1) : Fcu::Mode::Cool;
   out.fan_speed =
@@ -92,6 +97,17 @@ bool parseStatusResponse(const uint8_t *data, size_t len,
   out.target_temp = static_cast<uint8_t>(reg5 & 0xFF);
   out.room_temp = static_cast<uint8_t>(reg6 & 0xFF);
   out.power = (out.fan_speed != Fcu::FanSpeed::Off);
+  return out;
+}
+
+bool parseStatusResponse(const uint8_t *data, size_t len,
+                         Fcu::Snapshot &out) noexcept {
+  if (!data)
+    return false;
+  auto res = parseStatusResponse(std::span<const uint8_t>(data, len));
+  if (!res)
+    return false;
+  out = *res;
   return true;
 }
 

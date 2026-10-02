@@ -16,12 +16,17 @@
 #include "Transport/TcpReactor.h"
 
 #include "esp_attr.h"
+#include "esp_idf_version.h"
 #include "esp_ota_ops.h"
 #include "esp_sntp.h"
 #include "esp_task_wdt.h"
 #include "lwip/ip.h"
 #include "lwip/tcp.h"
 #include <ArduinoOTA.h>
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+#include <Network.h>
+#endif
+#include <WiFi.h>
 
 void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 
@@ -253,7 +258,11 @@ static void initUartChannel(uart_port_t port, int tx, int rx, uint32_t baud,
                        .stop_bits = toUartStopBits(stopbits),
                        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
                        .rx_flow_ctrl_thresh = 0,
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+                       .source_clk = UART_SCLK_DEFAULT};
+#else
                        .source_clk = UART_SCLK_APB};
+#endif
   uart_param_config(port, &cfg);
   uart_set_pin(port, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
   uart_driver_install(port, Config::Packet::UART_HW_RX_BUF_SIZE, 0,
@@ -412,7 +421,16 @@ static void Boot_StartTasks() {
     rtc_last_alive_ms[i] = now;
   }
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+  esp_task_wdt_config_t twdt_config = {
+      .timeout_ms = 30 * 1000,
+      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+      .trigger_panic = true,
+  };
+  esp_task_wdt_init(&twdt_config);
+#else
   esp_task_wdt_init(30, true);
+#endif
 
   bool rescue_active = g_rescue_mode.load(std::memory_order_relaxed);
 

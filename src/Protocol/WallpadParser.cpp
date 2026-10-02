@@ -387,10 +387,15 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
   return true;
 }
 
+uint8_t UniversalProtocolEngine::calculateChecksum(span<const uint8_t> data) const noexcept {
+  return g_auto_probing_engine.calculateChecksum(effectiveProfile().algo, data);
+}
+
 uint8_t UniversalProtocolEngine::calculateChecksum(const uint8_t *data,
                                                    size_t len) const {
-  return g_auto_probing_engine.calculateChecksum(effectiveProfile().algo, data,
-                                                 len);
+  if (!data)
+    return 0;
+  return calculateChecksum(span<const uint8_t>(data, len));
 }
 uint8_t UniversalProtocolEngine::getStx() const {
   return effectiveProfile().stx;

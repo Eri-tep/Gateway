@@ -93,12 +93,12 @@ template <class T> uint8_t argmax256(const T *a, uint16_t &mx) {
 } // namespace
 
 uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
-                                             const uint8_t *data,
-                                             size_t len) const {
-  if (!data || len < 3)
+                                             span<const uint8_t> data) const noexcept {
+  const size_t len = data.size();
+  if (len < 3)
     return 0;
   if (algo == ChecksumAlgo::CRC8_MAXIM)
-    return crc8Poly31(data, len - 2);
+    return crc8Poly31(data.data(), len - 2);
 
   const bool is_xor =
       (algo == ChecksumAlgo::XOR_ALL || algo == ChecksumAlgo::XOR_NO_STX);
@@ -124,6 +124,14 @@ uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
   if (algo == ChecksumAlgo::ONES_COMPLEMENT)
     return static_cast<uint8_t>(~r);
   return r;
+}
+
+uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
+                                             const uint8_t *data,
+                                             size_t len) const {
+  if (!data || len < 3)
+    return 0;
+  return calculateChecksum(algo, span<const uint8_t>(data, len));
 }
 
 void AutoProbingEngine::initFromNvs() {

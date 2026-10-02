@@ -150,24 +150,39 @@ void DeviceRouteRegistry::recordRoute(uint8_t channel_id, int8_t slot_idx,
   _entries[i].endpoint.last_seen_ms = millis();
 }
 
-bool DeviceRouteRegistry::lookupRoute(uint8_t dev_id, uint8_t sub1,
-                                      uint8_t sub2,
-                                      RouteEndpoint &out_ep) const {
+std::optional<RouteEndpoint>
+DeviceRouteRegistry::lookupRoute(uint8_t dev_id, uint8_t sub1,
+                                 uint8_t sub2) const noexcept {
   CriticalSectionLocker lock(&_mux);
   const int i = findRouteIdx(&_entries[0], _count, dev_id, sub1, sub2);
   if (i < 0)
+    return std::nullopt;
+  return _entries[i].endpoint;
+}
+
+bool DeviceRouteRegistry::lookupRoute(uint8_t dev_id, uint8_t sub1,
+                                      uint8_t sub2,
+                                      RouteEndpoint &out_ep) const {
+  auto ep = lookupRoute(dev_id, sub1, sub2);
+  if (!ep)
     return false;
-  out_ep = _entries[i].endpoint;
+  out_ep = *ep;
   return true;
+}
+
+size_t DeviceRouteRegistry::getRoutes(std::span<DeviceRouteEntry> out_buf) const noexcept {
+  CriticalSectionLocker lock(&_mux);
+  const size_t n = std::min(_count, out_buf.size());
+  for (size_t i = 0; i < n; i++)
+    out_buf[i] = _entries[i];
+  return n;
 }
 
 size_t DeviceRouteRegistry::getRoutes(DeviceRouteEntry *out_buf,
                                       size_t max_count) const {
-  CriticalSectionLocker lock(&_mux);
-  const size_t n = std::min(_count, max_count);
-  for (size_t i = 0; i < n; i++)
-    out_buf[i] = _entries[i];
-  return n;
+  if (!out_buf || max_count == 0)
+    return 0;
+  return getRoutes(std::span<DeviceRouteEntry>(out_buf, max_count));
 }
 
 void DeviceRouteRegistry::clear() {

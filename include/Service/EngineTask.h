@@ -84,7 +84,10 @@ struct WallpadChannelConfig {
 };
 
 namespace PacketCodec {
-uint8_t calculateChecksum(const uint8_t *data, size_t len) noexcept;
+uint8_t calculateChecksum(std::span<const uint8_t> data) noexcept;
+inline uint8_t calculateChecksum(const uint8_t *data, size_t len) noexcept {
+  return data ? calculateChecksum(std::span<const uint8_t>(data, len)) : 0;
+}
 } // namespace PacketCodec
 
 class ControlDispatcher {

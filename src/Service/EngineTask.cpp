@@ -393,9 +393,9 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
 }
 
 namespace PacketCodec {
-uint8_t calculateChecksum(const uint8_t *data, size_t len) noexcept {
+uint8_t calculateChecksum(std::span<const uint8_t> data) noexcept {
   auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->calculateChecksum(data, len) : 0;
+  return parser ? parser->calculateChecksum(data) : 0;
 }
 } // namespace PacketCodec
 

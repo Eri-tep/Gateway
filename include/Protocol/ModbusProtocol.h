@@ -8,6 +8,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <span>
 
 namespace Fcu {
 
@@ -40,11 +42,20 @@ struct Snapshot {
 
 namespace ModbusRtu {
 
+enum class ModbusParseError : uint8_t {
+  InvalidLength,
+  HeaderMismatch,
+  CrcMismatch,
+};
+
 constexpr uint16_t kModbusCrcInit = 0xFFFF;
 constexpr uint16_t kModbusPolynomial = 0xA001;
 
 // Modbus-RTU CRC16 (Polynomial: 0xA001, Init: 0xFFFF, Zero-Heap)
-uint16_t calcCrc16(const uint8_t *buf, size_t len) noexcept;
+[[nodiscard]] uint16_t calcCrc16(std::span<const uint8_t> data) noexcept;
+inline uint16_t calcCrc16(const uint8_t *buf, size_t len) noexcept {
+  return buf ? calcCrc16(std::span<const uint8_t>(buf, len)) : 0;
+}
 
 // §4.1 상태 조회 쿼리 (8B 고정 프레임, Read Holding Registers 0x0000..0x0006)
 constexpr std::array<uint8_t, 8> kQueryPkt = {0x01, 0x03, 0x00, 0x00,
@@ -61,7 +72,10 @@ std::array<uint8_t, 15> buildWriteMultiplePowerOn(uint16_t mode, uint16_t fan,
 // §4.3~§4.6 단일 레지스터 쓰기 (8B FC 0x06 표준 프레임)
 std::array<uint8_t, 8> buildWriteSingle(uint16_t reg, uint16_t val) noexcept;
 
-// 19B 상태 쿼리 응답 파싱 및 CRC-16 Little-Endian 검증
+// 19B 상태 쿼리 응답 파싱 및 CRC-16 Little-Endian 검증 (std::expected)
+[[nodiscard]] std::expected<Fcu::Snapshot, ModbusParseError>
+parseStatusResponse(std::span<const uint8_t> data) noexcept;
+
 bool parseStatusResponse(const uint8_t *data, size_t len,
                          Fcu::Snapshot &out) noexcept;
 

@@ -60,10 +60,10 @@ This document defines the system specifications, runtime topology, channel mappi
 
 ### 0.1 Framework & Toolchain Environment Specifications
 - **Target Hardware**: M5Stack AtomS3 Lite (ESP32-S3FN8, 240MHz Dual-Core, 320KB SRAM, 8MB Flash)
-- **Framework**: `framework-arduinoespressif32 @ 4.20017.260907+sha.dcc1105b`
-- **Underlying SDK / ESP-IDF**: **ESP-IDF v4.4.7** (`ESP_IDF_VERSION_VAL(4, 4, 7)`)
-- **Toolchain**: `xtensa-esp32s3-elf-gcc / g++ 8.4.0 (2021r2-patch5)`
-- **C++ Standard**: **C++17** (`-std=gnu++17`)
+- **Framework**: `framework-arduinoespressif32 @ 3.1.3` (Arduino-ESP32 Core v3.1.x)
+- **Underlying SDK / ESP-IDF**: **ESP-IDF v5.3.2** (`ESP_IDF_VERSION_VAL(5, 3, 2)`)
+- **Toolchain**: `xtensa-esp-elf-gcc / g++ 13.2.0 (crosstool-NG esp-13.2.0_20240530)`
+- **C++ Standard**: **C++23** (`-std=gnu++23`)
 
 ---
 

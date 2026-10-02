@@ -8,6 +8,7 @@
 #include <Update.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <esp_idf_version.h>
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
@@ -35,7 +36,14 @@ static void configure_public_tls(WiFiClientSecure &client) {
 #else
   extern const uint8_t x509_crt_bundle_start[] asm(
       "_binary_x509_crt_bundle_start");
+  extern const uint8_t x509_crt_bundle_end[] asm(
+      "_binary_x509_crt_bundle_end");
+#if defined(ESP_IDF_VERSION) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+  client.setCACertBundle(x509_crt_bundle_start,
+                         static_cast<size_t>(x509_crt_bundle_end - x509_crt_bundle_start));
+#else
   client.setCACertBundle(x509_crt_bundle_start);
+#endif
 #endif
   client.setTimeout(5);
   client.setHandshakeTimeout(8); // CA 체인 검증을 감안하여 8초 확보

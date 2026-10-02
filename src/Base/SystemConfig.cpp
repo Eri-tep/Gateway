@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <cstring>
+#include <esp_idf_version.h>
 #include <mbedtls/sha256.h>
 
 RuntimeConfig g_config;
@@ -33,32 +34,41 @@ const char *formatFramingStr(uint8_t data_bits, uint8_t parity,
   return "8N1";
 }
 
+[[nodiscard]] std::expected<FramingConfig, FramingParseError>
+parseFramingStr(std::string_view str) noexcept {
+  if (str.size() != 3) {
+    return std::unexpected(FramingParseError::InvalidLength);
+  }
+  char d = str[0];
+  char p = static_cast<char>(toupper(static_cast<unsigned char>(str[1])));
+  char s = str[2];
+
+  if (d == '8' && p == 'N' && s == '1') {
+    return FramingConfig{8, 0, 1};
+  }
+  if (d == '8' && p == 'E' && s == '1') {
+    return FramingConfig{8, 1, 1};
+  }
+  if (d == '8' && p == 'O' && s == '1') {
+    return FramingConfig{8, 2, 1};
+  }
+  if (d == '8' && p == 'N' && s == '2') {
+    return FramingConfig{8, 0, 2};
+  }
+  return std::unexpected(FramingParseError::UnsupportedFormat);
+}
+
 bool parseFramingStr(const char *str, uint8_t &data_bits, uint8_t &parity,
                      uint8_t &stop_bits) noexcept {
   if (!str)
     return false;
-  if (strcasecmp(str, "8N1") == 0) {
-    data_bits = 8;
-    parity = 0;
-    stop_bits = 1;
-    return true;
-  } else if (strcasecmp(str, "8E1") == 0) {
-    data_bits = 8;
-    parity = 1;
-    stop_bits = 1;
-    return true;
-  } else if (strcasecmp(str, "8O1") == 0) {
-    data_bits = 8;
-    parity = 2;
-    stop_bits = 1;
-    return true;
-  } else if (strcasecmp(str, "8N2") == 0) {
-    data_bits = 8;
-    parity = 0;
-    stop_bits = 2;
-    return true;
-  }
-  return false;
+  auto res = parseFramingStr(std::string_view(str));
+  if (!res.has_value())
+    return false;
+  data_bits = res->data_bits;
+  parity = res->parity;
+  stop_bits = res->stop_bits;
+  return true;
 }
 
 void System_Sha256ToHex(const char *input, char *output) {
@@ -67,10 +77,17 @@ void System_Sha256ToHex(const char *input, char *output) {
   uint8_t hash[32];
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
+#if defined(ESP_IDF_VERSION) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+  mbedtls_sha256_starts(&ctx, 0);
+  mbedtls_sha256_update(
+      &ctx, reinterpret_cast<const unsigned char *>(input), strlen(input));
+  mbedtls_sha256_finish(&ctx, hash);
+#else
   mbedtls_sha256_starts_ret(&ctx, 0);
   mbedtls_sha256_update_ret(
       &ctx, reinterpret_cast<const unsigned char *>(input), strlen(input));
   mbedtls_sha256_finish_ret(&ctx, hash);
+#endif
   mbedtls_sha256_free(&ctx);
 
   for (size_t i = 0; i < 32; i++) {

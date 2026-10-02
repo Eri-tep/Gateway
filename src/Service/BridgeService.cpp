@@ -560,13 +560,13 @@ bool executeRegisterWrite(uint8_t slot_idx, uint16_t reg, uint16_t val,
 
 namespace Fcu {
 
-void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
-  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || !data)
+void handleSlotRx(uint8_t slot_idx, std::span<const uint8_t> data) noexcept {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || data.empty())
     return;
   auto &rt = s_fcu_slots[slot_idx];
 
   // 1) 제어 명령(0x06, 0x10) ACK 수신 확인 (8바이트 에코 응답)
-  if (len >= 8 && data[0] == 0x01 && (data[1] == 0x06 || data[1] == 0x10)) {
+  if (data.size() >= 8 && data[0] == 0x01 && (data[1] == 0x06 || data[1] == 0x10)) {
     rt.waiting_response = false;
     rt.timeout_count = 0;
     rt.is_online = true;
@@ -575,11 +575,12 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
   }
 
   // 2) 19바이트 0x03 상태 쿼리 응답 처리
-  if (len >= 19 && data[0] == 0x01 && data[1] == 0x03 && data[2] == 0x0E) {
-    Fcu::Snapshot new_snap;
-    if (!ModbusRtu::parseStatusResponse(data, len, new_snap))
-      return; // CRC 불일치 시 드롭
+  if (data.size() >= 19 && data[0] == 0x01 && data[1] == 0x03 && data[2] == 0x0E) {
+    auto parse_res = ModbusRtu::parseStatusResponse(data);
+    if (!parse_res)
+      return; // 파싱/CRC 실패 시 드롭
 
+    const auto &new_snap = *parse_res;
     rt.waiting_response = false;
     rt.timeout_count = 0;
     rt.is_online = true;
@@ -612,7 +613,7 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
 
     // 스냅샷 갱신 및 레포지토리 동기화
     rt.snap = new_snap;
-    syncDeviceRepository(slot_idx, rt.snap, data, len);
+    syncDeviceRepository(slot_idx, rt.snap, data.data(), data.size());
   }
 }
 

@@ -253,12 +253,20 @@ struct LogEntry {
   PktSnapshot packet_stats_snapshot;
 };
 
+enum class LogReadError : uint8_t {
+  OutOfBounds,
+  Empty
+};
+
 class LogManager {
 public:
   static constexpr size_t MAX_LOG_ENTRIES = 20;
   static void writeRebootLog(const char *reason);
   static size_t getLogCount();
-  static bool getLogEntry(size_t index, LogEntry &out_entry);
+  [[nodiscard]] static std::expected<LogEntry, LogReadError>
+  getLogEntry(size_t index) noexcept;
+  static bool getLogEntry(size_t index, LogEntry &out_entry) noexcept;
+  static void readRebootLog(std::span<char> out_buf, size_t index = 0) noexcept;
   static void readRebootLog(char *out_buf, size_t max_len, size_t index = 0);
   static void clearRebootLog();
 };

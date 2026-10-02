@@ -33,56 +33,19 @@
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #endif
 
-#if __has_include(<span>)
 #include <span>
+#include <string_view>
+#include <utility>
+
 using std::span;
-#else
-namespace Gateway {
-template <typename T> class span {
-  T *ptr_{nullptr};
-  size_t len_{0};
-
-public:
-  constexpr span() noexcept = default;
-  constexpr span(T *ptr, size_t len) noexcept : ptr_(ptr), len_(len) {}
-  constexpr span(T *first, T *last) noexcept
-      : ptr_(first), len_(last - first) {}
-  template <size_t N>
-  constexpr span(
-      std::array<typename std::remove_const<T>::type, N> &arr) noexcept
-      : ptr_(arr.data()), len_(N) {}
-  template <size_t N>
-  constexpr span(
-      const std::array<typename std::remove_const<T>::type, N> &arr) noexcept
-      : ptr_(arr.data()), len_(N) {}
-  template <size_t N>
-  constexpr span(T (&arr)[N]) noexcept : ptr_(arr), len_(N) {}
-  constexpr T *data() const noexcept { return ptr_; }
-  constexpr size_t size() const noexcept { return len_; }
-  constexpr bool empty() const noexcept { return len_ == 0; }
-  constexpr T &operator[](size_t idx) const noexcept { return ptr_[idx]; }
-  constexpr T *begin() const noexcept { return ptr_; }
-  constexpr T *end() const noexcept { return ptr_ + len_; }
-  constexpr span<T>
-  subspan(size_t offset,
-          size_t count = static_cast<size_t>(-1)) const noexcept {
-    if (offset >= len_)
-      return span<T>();
-    size_t actual_count =
-        (count == static_cast<size_t>(-1) || offset + count > len_)
-            ? (len_ - offset)
-            : count;
-    return span<T>(ptr_ + offset, actual_count);
-  }
-};
-} // namespace Gateway
-using Gateway::span;
-#endif
-
 using std::string_view;
 
+inline uint32_t FastCrc32(std::span<const uint8_t> data) noexcept {
+  return ~esp_rom_crc32_le(~0U, data.data(), data.size());
+}
+
 inline uint32_t FastCrc32(const uint8_t *data, size_t len) noexcept {
-  return ~esp_rom_crc32_le(~0U, data, len);
+  return FastCrc32(std::span<const uint8_t>(data, len));
 }
 
 template <typename T> struct NvsEnvelope {
