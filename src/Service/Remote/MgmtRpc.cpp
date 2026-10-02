@@ -288,35 +288,57 @@ static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
     return;
   }
 
-  std::vector<int> indices(n);
-  for (int i = 0; i < n; ++i)
+  constexpr int MAX_SCAN = 32;
+  const int scan_limit = std::min(n, MAX_SCAN);
+  std::array<int, MAX_SCAN> indices{};
+  for (int i = 0; i < scan_limit; ++i)
     indices[i] = i;
-  std::sort(indices.begin(), indices.end(),
+  std::sort(indices.begin(), indices.begin() + scan_limit,
             [](int a, int b) { return WiFi.RSSI(a) > WiFi.RSSI(b); });
 
   struct ApInfo {
-    String ssid;
+    char ssid[34];
     int pct;
   };
-  std::vector<ApInfo> top_aps;
-  top_aps.reserve(4);
+  constexpr size_t MAX_TOP_APS = 4;
+  std::array<ApInfo, MAX_TOP_APS> top_aps{};
+  size_t top_aps_count = 0;
 
-  for (int idx : indices) {
-    String s = WiFi.SSID(idx);
-    s.trim();
-    if (s.length() == 0)
+  for (int i = 0; i < scan_limit; ++i) {
+    const int idx = indices[i];
+    String raw_s = WiFi.SSID(idx);
+    raw_s.trim();
+    if (raw_s.length() == 0)
       continue;
 
-    if (std::any_of(top_aps.begin(), top_aps.end(),
-                    [&s](const auto &item) { return item.ssid == s; })) {
-      continue;
+    // 중복 SSID 검사
+    bool duplicate = false;
+    for (size_t a = 0; a < top_aps_count; ++a) {
+      if (strcmp(top_aps[a].ssid, raw_s.c_str()) == 0) {
+        duplicate = true;
+        break;
+      }
     }
+    if (duplicate)
+      continue;
 
     int rssi = WiFi.RSSI(idx);
     int pct = std::min(100, std::max(0, 2 * (rssi + 100)));
-    s.replace("\"", "\\\""); // JSON escape
-    top_aps.push_back({s, pct});
-    if (top_aps.size() >= 4)
+
+    ApInfo &info = top_aps[top_aps_count++];
+    info.pct = pct;
+    // JSON escape 단순 복사 (32바이트 바운드)
+    size_t d_idx = 0;
+    const char *src = raw_s.c_str();
+    while (*src && d_idx + 2 < sizeof(info.ssid)) {
+      if (*src == '"' || *src == '\\') {
+        info.ssid[d_idx++] = '\\';
+      }
+      info.ssid[d_idx++] = *src++;
+    }
+    info.ssid[d_idx] = '\0';
+
+    if (top_aps_count >= MAX_TOP_APS)
       break;
   }
   WiFi.scanDelete();
@@ -327,16 +349,16 @@ static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
     offset = snprintf(
         resp, sizeof(resp),
         "{\"id\":%ld,\"res\":\"ok\",\"count\":%d,\"ap_count\":%u,\"aps\":[",
-        req_id, n, static_cast<unsigned>(top_aps.size()));
+        req_id, n, static_cast<unsigned>(top_aps_count));
   } else {
     offset = snprintf(resp, sizeof(resp),
                       "{\"res\":\"ok\",\"count\":%d,\"ap_count\":%u,\"aps\":[",
-                      n, static_cast<unsigned>(top_aps.size()));
+                      n, static_cast<unsigned>(top_aps_count));
   }
-  for (size_t i = 0; i < top_aps.size(); ++i) {
+  for (size_t i = 0; i < top_aps_count; ++i) {
     offset += snprintf(resp + offset, sizeof(resp) - offset,
                        "%s{\"ssid\":\"%s\",\"pct\":%d}", (i > 0 ? "," : ""),
-                       top_aps[i].ssid.c_str(), top_aps[i].pct);
+                       top_aps[i].ssid, top_aps[i].pct);
     if (offset >= (int)sizeof(resp) - 8)
       break;
   }

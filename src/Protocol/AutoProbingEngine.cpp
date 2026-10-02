@@ -378,11 +378,12 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   struct PktPair {
     StaticPacket q, r;
   };
-  std::vector<PktPair> pairs;
+  constexpr size_t MAX_PAIRS = 32;
+  std::array<PktPair, MAX_PAIRS> pairs{};
+  size_t pair_count = 0;
   const size_t target_count = g_polling_targets.totalCount();
-  pairs.reserve(std::min<size_t>(target_count, 32));
 
-  for (size_t i = 0; i < target_count; ++i) {
+  for (size_t i = 0; i < target_count && pair_count < MAX_PAIRS; ++i) {
     PollingTargetEntry t;
     if (!g_polling_targets.getEntry(i, t) || !t.is_active ||
         t.raw_query_len < 4 ||
@@ -405,20 +406,21 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (!ack)
       continue;
 
-    PktPair p;
+    PktPair &p = pairs[pair_count++];
     p.q.length = t.raw_query_len;
     memcpy(p.q.data.data(), t.raw_query_data.data(), t.raw_query_len);
     p.r.length = ack_len;
     memcpy(p.r.data.data(), ack, ack_len);
-    pairs.push_back(p);
   }
 
-  const size_t N = pairs.size();
+  const size_t N = pair_count;
   if (N < 2)
     return false;
 
+  auto pairs_span = std::span<const PktPair>(pairs.data(), N);
+
   size_t min_len = 256;
-  for (const auto &p : pairs)
+  for (const auto &p : pairs_span)
     min_len = std::min<size_t>({min_len, p.q.length, p.r.length});
   if (min_len < 4)
     return false;
@@ -426,20 +428,20 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
 
   using Bits = std::bitset<256>;
   auto all = [&](auto &&pred) {
-    for (const auto &p : pairs)
+    for (const auto &p : pairs_span)
       if (!pred(p))
         return false;
     return true;
   };
   auto qBits = [&](size_t k) {
     Bits b;
-    for (const auto &p : pairs)
+    for (const auto &p : pairs_span)
       b.set(p.q.data[k]);
     return b;
   };
   auto rBits = [&](size_t k) {
     Bits b;
-    for (const auto &p : pairs)
+    for (const auto &p : pairs_span)
       b.set(p.r.data[k]);
     return b;
   };
@@ -450,12 +452,11 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     return false;
   };
   auto combo = [&](size_t a, size_t b) { // (a,b) 컬럼 조합의 고유 개수
-    std::vector<uint16_t> v;
-    v.reserve(N);
-    for (const auto &p : pairs)
-      v.push_back(static_cast<uint16_t>((p.q.data[a] << 8) | p.q.data[b]));
-    std::sort(v.begin(), v.end());
-    return static_cast<size_t>(std::unique(v.begin(), v.end()) - v.begin());
+    std::array<uint16_t, MAX_PAIRS> v{};
+    for (size_t i = 0; i < N; ++i)
+      v[i] = static_cast<uint16_t>((pairs[i].q.data[a] << 8) | pairs[i].q.data[b]);
+    std::sort(v.begin(), v.begin() + N);
+    return static_cast<size_t>(std::unique(v.begin(), v.begin() + N) - v.begin());
   };
 
   // 1) 길이 필드: 값 == 길이 - delta (delta 0 = 정확히 일치)
@@ -573,25 +574,27 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   }
 
   // 6) 기기 타입 / 서브 ID 후보
-  std::vector<size_t> cols;
-  for (size_t k = 1; k < K; ++k) {
+  std::array<size_t, 32> cols{};
+  size_t col_count = 0;
+  for (size_t k = 1; k < K && col_count < cols.size(); ++k) {
     if (in(int(k), {len_idx, opcode_idx, swap_i, swap_j, seq_idx, sub_cmd_idx,
                     promoted_dev_idx}))
       continue;
     if (qBits(k).count() >= 2)
-      cols.push_back(k);
+      cols[col_count++] = k;
   }
+  auto cols_span = std::span<const size_t>(cols.data(), col_count);
 
   int dev_type_idx = promoted_dev_idx, sub_id_idx = -1;
   const size_t min_unique = std::max<size_t>(2, N * 8 / 10);
 
   if (dev_type_idx < 0) { // 응답 길이를 결정하는 컬럼 = 기기 타입
-    for (size_t cand : cols) {
+    for (size_t cand : cols_span) {
       int16_t lenOf[256];
       std::fill(std::begin(lenOf), std::end(lenOf), int16_t(-1));
       bool ok = true;
       size_t keys = 0;
-      for (const auto &p : pairs) {
+      for (const auto &p : pairs_span) {
         const uint8_t v = p.q.data[cand];
         const int16_t rl = static_cast<int16_t>(p.r.length);
         if (lenOf[v] >= 0 && lenOf[v] != rl) {
@@ -616,7 +619,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   }
 
   if (dev_type_idx >= 0) {
-    for (size_t cand : cols) {
+    for (size_t cand : cols_span) {
       if (int(cand) == dev_type_idx)
         continue;
       if (combo(dev_type_idx, cand) >= min_unique) {
@@ -625,8 +628,8 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
       }
     }
   } else {
-    for (size_t c1 : cols) {
-      for (size_t c2 : cols) {
+    for (size_t c1 : cols_span) {
+      for (size_t c2 : cols_span) {
         if (c1 == c2 || combo(c1, c2) < min_unique)
           continue;
         const bool c1_is_dev = qBits(c1).count() <= qBits(c2).count();

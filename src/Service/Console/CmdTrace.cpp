@@ -65,12 +65,12 @@ void wallpadPrintStatus(AppendBuf &out) {
   }
 
   auto print_meta = [&](const char *fmt, ...) {
-    char buf[128];
+    FixedBuf<128> buf;
     va_list va;
     va_start(va, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, va);
+    buf.appendFormatV(fmt, va);
     va_end(va);
-    out.appendFormat("| %-76.76s |\r\n", buf);
+    out.appendFormat("| %-76.76s |\r\n", buf.c_str());
   };
 
   print_meta("Active Profile  : %s (ID: %u)", prof_key_buf,
@@ -124,12 +124,12 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   auto rowf = [&](const char *f, const char *p, const char *s, const char *fmt,
                   ...) {
-    char v[64];
+    FixedBuf<64> v;
     va_list args;
     va_start(args, fmt);
-    vsnprintf(v, sizeof(v), fmt, args);
+    v.appendFormatV(fmt, args);
     va_end(args);
-    print_row(f, p, v, s);
+    print_row(f, p, v.c_str(), s);
   };
 
   uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16];
@@ -162,21 +162,21 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   auto format_hex_list = [](const uint8_t *arr, size_t cnt, const char *prefix,
                             char *out, size_t out_sz) {
-    if (cnt == 0) {
-      snprintf(out, out_sz, "%s", prefix);
+    AppendBuf ob{out, out_sz};
+    ob.append(prefix);
+    if (cnt == 0)
       return;
-    }
+    ob.append(" : ");
     char hex_str[64] = {0};
-    size_t off = 0;
+    AppendBuf hb{hex_str, sizeof(hex_str)};
     for (size_t d = 0; d < cnt; ++d) {
-      if (off + 5 >= 24) {
-        off += snprintf(hex_str + off, sizeof(hex_str) - off, ", ..");
+      if (hb.offset + 5 >= 24) {
+        hb.append(", ..");
         break;
       }
-      off += snprintf(hex_str + off, sizeof(hex_str) - off, "%s%02X",
-                      (d == 0 ? "" : ", "), arr[d]);
+      hb.appendFormat("%s%02X", (d == 0 ? "" : ", "), arr[d]);
     }
-    snprintf(out, out_sz, "%s : %s", prefix, hex_str);
+    ob.append(hex_str);
   };
 
   const char *addr_status = desc.offsets_locked
@@ -206,12 +206,13 @@ void wallpadPrintStatus(AppendBuf &out) {
   auto print_addr_field = [&](const char *param, uint8_t off,
                               const uint8_t *ids, size_t cnt,
                               char *saved_buf = nullptr) {
-    char label[32], list_buf[64];
+    FixedBuf<32> label;
+    char list_buf[64];
     if (desc.offsets_locked)
-      snprintf(label, sizeof(label), "Byte #%u", off);
+      label.appendFormat("Byte #%u", off);
     else
-      strcpy(label, "Probing...");
-    format_hex_list(ids, cnt, label, list_buf, sizeof(list_buf));
+      label.append("Probing...");
+    format_hex_list(ids, cnt, label.c_str(), list_buf, sizeof(list_buf));
     if (saved_buf)
       strcpy(saved_buf, list_buf);
     print_row("", param, list_buf, addr_status);
@@ -225,11 +226,11 @@ void wallpadPrintStatus(AppendBuf &out) {
   }
   table.separator('-');
 
-  char ctl_hex[8];
+  FixedBuf<8> ctl_hex;
   if (desc.control_seen && desc.control_opcode != 0) {
-    snprintf(ctl_hex, sizeof(ctl_hex), "%02X", desc.control_opcode);
+    ctl_hex.appendFormat("%02X", desc.control_opcode);
   } else {
-    strcpy(ctl_hex, "??");
+    ctl_hex.append("??");
   }
 
   const char *opcode_status = !desc.opcodes_locked ? "[LEARNING]"
@@ -238,7 +239,7 @@ void wallpadPrintStatus(AppendBuf &out) {
                                   : "[LOCKED]";
   rowf("Command", "[OP] Opcode", opcode_status,
        "Byte #%u : QRY:%02X, CTL:%s, ACK:%02X", desc.opcode_offset,
-       desc.query_opcode, ctl_hex, desc.ack_opcode);
+       desc.query_opcode, ctl_hex.c_str(), desc.ack_opcode);
 
   const char *seq_status =
       desc.offsets_locked ? (desc.has_seq_counter ? "[LOCKED]" : "[UNUSED]")
@@ -252,17 +253,17 @@ void wallpadPrintStatus(AppendBuf &out) {
   table.separator('-');
 
   const char *payload_status = desc.offsets_locked ? "[LOCKED]" : "[ESTIMATE]";
-  char pl_r[32], pl_l[32];
+  FixedBuf<32> pl_r, pl_l;
   if (desc.offsets_locked) {
-    snprintf(pl_r, sizeof(pl_r), "Byte #%u ~ #[N-3]", desc.payload_offset);
-    snprintf(pl_l, sizeof(pl_l), "Data = [LEN - %u] Byte",
-             desc.payload_offset + 2);
+    pl_r.appendFormat("Byte #%u ~ #[N-3]", desc.payload_offset);
+    pl_l.appendFormat("Data = [LEN - %u] Byte",
+                      desc.payload_offset + 2);
   } else {
-    strcpy(pl_r, "Byte #7 ~ #[N-3] : Est");
-    strcpy(pl_l, "Data = [LEN - 9] Byte : Est");
+    pl_r.append("Byte #7 ~ #[N-3] : Est");
+    pl_l.append("Data = [LEN - 9] Byte : Est");
   }
-  print_row("Payload", "[PL] Data Range", pl_r, payload_status);
-  print_row("", "[PL] Length", pl_l, payload_status);
+  print_row("Payload", "[PL] Data Range", pl_r.c_str(), payload_status);
+  print_row("", "[PL] Length", pl_l.c_str(), payload_status);
   table.separator('-');
 
   const char *tail_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
@@ -320,28 +321,28 @@ void wallpadPrintStatus(AppendBuf &out) {
               : ((dp_status == Config::Doorphone::FramingStatus::WAITING)
                      ? "[WAITING]"
                      : "[UNKNOWN]");
-  char op_f[48], op_l[48];
+  FixedBuf<48> op_f, op_l;
   const char *dp_desc = nullptr;
   if (dp_prof) {
     dp_desc = dp_prof->desc;
-    snprintf(op_f, sizeof(op_f), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
-             dp_prof->bell_front, dp_prof->call_front, dp_prof->open_front,
-             dp_prof->end_front);
-    snprintf(op_l, sizeof(op_l), "Bell:%02X, Call:%02X, Open:%02X, End:%02X",
-             dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby,
-             dp_prof->end_lobby);
+    op_f.appendFormat("Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+                      dp_prof->bell_front, dp_prof->call_front, dp_prof->open_front,
+                      dp_prof->end_front);
+    op_l.appendFormat("Bell:%02X, Call:%02X, Open:%02X, End:%02X",
+                      dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby,
+                      dp_prof->end_lobby);
   } else if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
     dp_desc = "Waiting for traffic...";
-    strcpy(op_f, "Waiting...");
-    strcpy(op_l, "Waiting...");
+    op_f.append("Waiting...");
+    op_l.append("Waiting...");
   } else {
     dp_desc = "No Catalog Match";
-    strcpy(op_f, "Bell:B5, Call:B9, Open:B4, End:B8");
-    strcpy(op_l, "Bell:5A, Call:5F, Open:61, End:60");
+    op_f.append("Bell:B5, Call:B9, Open:B4, End:B8");
+    op_l.append("Bell:5A, Call:5F, Open:61, End:60");
   }
   print_row("", "Catalog Match", dp_desc, dp_m_st);
-  print_row("", "Opcodes(F)", op_f, dp_m_st);
-  print_row("", "Opcodes(L)", op_l, dp_m_st);
+  print_row("", "Opcodes(F)", op_f.c_str(), dp_m_st);
+  print_row("", "Opcodes(L)", op_l.c_str(), dp_m_st);
 
   rowf("", "Baudrate", "[CONFIG]", "%u bps",
        static_cast<unsigned>(g_config.doorphone_baud_rate));
@@ -352,26 +353,29 @@ void wallpadPrintStatus(AppendBuf &out) {
   table.separator('-');
 
   {
+    FixedBuf<16> p_buf;
+    FixedBuf<32> val_buf;
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
       HubClientSlotSnapshot slot;
       Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
-      char p_buf[16], val_buf[32];
-      snprintf(p_buf, sizeof(p_buf), "%u",
-               slot.target_port ? slot.target_port
-                                : Config::TCP::EW11_SLOT_PORTS[s]);
+      p_buf.reset();
+      val_buf.reset();
+      p_buf.appendFormat("%u",
+                         slot.target_port ? slot.target_port
+                                          : Config::TCP::EW11_SLOT_PORTS[s]);
       const char *f_label = (s == 0) ? "EW11 (CH5)" : "";
       const char *st = "[WAITING]";
       if (!slot.enabled && !slot.is_connected && slot.target_ip[0] == '\0') {
-        strcpy(val_buf, "Disabled");
+        val_buf.append("Disabled");
         st = "[UNUSED]";
       } else if (slot.is_connected) {
-        snprintf(val_buf, sizeof(val_buf), "Connect: %s",
-                 slot.target_ip[0] ? slot.target_ip : "-");
+        val_buf.appendFormat("Connect: %s",
+                             slot.target_ip[0] ? slot.target_ip : "-");
         st = "[ACTIVE]";
       } else {
-        strcpy(val_buf, "Listening");
+        val_buf.append("Listening");
       }
-      print_row(f_label, p_buf, val_buf, st);
+      print_row(f_label, p_buf.c_str(), val_buf.c_str(), st);
     }
   }
   table.separator('-');
@@ -389,20 +393,20 @@ void wallpadPrintStatus(AppendBuf &out) {
   uint32_t cs_pct = desc.tested_packets
                         ? (desc.matched_packets * 100 / desc.tested_packets)
                         : 100;
-  auto format_compact = [](char *buf, size_t sz, uint32_t count) {
+  auto format_compact = [](FixedBuf<16> &buf, uint32_t count) {
     if (count >= 1000000)
-      snprintf(buf, sz, "%.1fM", count / 1000000.0);
+      buf.appendFormat("%.1fM", count / 1000000.0);
     else if (count >= 1000)
-      snprintf(buf, sz, "%.1fk", count / 1000.0);
+      buf.appendFormat("%.1fk", count / 1000.0);
     else
-      snprintf(buf, sz, "%u", static_cast<unsigned>(count));
+      buf.appendFormat("%u", static_cast<unsigned>(count));
   };
-  char m_str[16], t_str[16];
-  format_compact(m_str, sizeof(m_str), desc.matched_packets);
-  format_compact(t_str, sizeof(t_str), desc.tested_packets);
+  FixedBuf<16> m_str, t_str;
+  format_compact(m_str, desc.matched_packets);
+  format_compact(t_str, desc.tested_packets);
   const char *cs_status =
       (cs_pct >= 95) ? "[STABLE]" : (cs_pct >= 80 ? "[NOISY]" : "[ERROR]");
-  rowf("", "CS Validation", cs_status, "%s / %s Packets (%u%%)", m_str, t_str,
+  rowf("", "CS Validation", cs_status, "%s / %s Packets (%u%%)", m_str.c_str(), t_str.c_str(),
        static_cast<unsigned>(cs_pct));
   table.end('=');
   out.append("\r\n");
@@ -419,6 +423,7 @@ void wallpadListProfiles(AppendBuf &out) {
   TableRenderer table(out, PROFILE_COLS, 4);
   table.header(false);
 
+  FixedBuf<8> id_buf;
   for (size_t i = 0; i < ProfileRepository::getProfileCount(); ++i) {
     VendorProfileDescriptor p_desc;
     if (ProfileRepository::getProfile(i, p_desc)) {
@@ -427,9 +432,9 @@ void wallpadListProfiles(AppendBuf &out) {
       const char *status_str = is_current
                                    ? ">> ACTIVE <<"
                                    : (is_empty ? "Available" : "Saved (NVS)");
-      char id_buf[8];
-      snprintf(id_buf, sizeof(id_buf), "%2u", static_cast<unsigned>(i));
-      table.row({id_buf, p_desc.key, p_desc.name, status_str});
+      id_buf.reset();
+      id_buf.appendFormat("%2u", static_cast<unsigned>(i));
+      table.row({id_buf.c_str(), p_desc.key, p_desc.name, status_str});
     }
   }
   table.end('-');

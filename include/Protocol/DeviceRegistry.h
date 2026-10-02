@@ -55,7 +55,22 @@ private:
   size_t device_count = 0;
   SemaphoreHandle_t _cache_mutex = nullptr;
 
+  const DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
+                                       uint8_t sub2) const noexcept;
+  DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
+                                 uint8_t sub2) noexcept;
+
 public:
+  // Unified const & non-const lookup without const_cast
+  [[nodiscard]] const DeviceStateEntry *
+  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) const noexcept {
+    return findInternal(dev_id, sub1, sub2);
+  }
+  [[nodiscard]] DeviceStateEntry *
+  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+    return findInternal(dev_id, sub1, sub2);
+  }
+
   DeviceStateEntry *findMutable(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                 bool auto_create = false) noexcept;
   void initDevices();
@@ -63,6 +78,7 @@ public:
   [[nodiscard]] const DeviceStateEntry *find(uint8_t dev_id, uint8_t sub1,
                                              uint8_t sub2) const noexcept;
   [[nodiscard]] const DeviceStateEntry *getAt(size_t index) const noexcept;
+  [[nodiscard]] DeviceStateEntry *getAt(size_t index) noexcept;
   [[nodiscard]] bool getSnapshot(size_t index,
                                  DeviceStateEntry &out_copy) noexcept;
   [[nodiscard]] size_t count() const noexcept;

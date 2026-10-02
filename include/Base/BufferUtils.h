@@ -63,10 +63,8 @@ struct AppendBuf {
   size_t cap;
   size_t offset = 0;
 
-private:
-  void appendFormatV(const char *fmt, va_list a);
-
 public:
+  void appendFormatV(const char *fmt, va_list a);
   void appendFormat(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
   template <size_t N> void append(const char (&str)[N]) noexcept {
@@ -82,4 +80,20 @@ public:
 
   void append(std::string_view sv) noexcept;
   void append(const char *str) noexcept;
+};
+
+template <size_t N> struct FixedBuf : public AppendBuf {
+  char storage[N]{0};
+
+  constexpr FixedBuf() noexcept : AppendBuf{storage, N, 0} {}
+
+  const char *c_str() const noexcept { return storage; }
+  operator const char *() const noexcept { return storage; }
+
+  void reset() noexcept {
+    offset = 0;
+    if constexpr (N > 0) {
+      storage[0] = '\0';
+    }
+  }
 };

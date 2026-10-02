@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -399,6 +400,15 @@ public:
     VendorProfileDescriptor d = activeProfile();
     return isAutoProfile(d);
   }
+
+  enum class FrameValidationError : uint8_t {
+    InvalidLength,
+    HeaderMismatch,
+    ChecksumMismatch,
+  };
+
+  [[nodiscard]] std::expected<span<const uint8_t>, FrameValidationError>
+  validateFrame(span<const uint8_t> frame) const noexcept;
 
   bool validatePacket(span<const uint8_t> frame) const;
   bool isQueryPacket(span<const uint8_t> frame) const;

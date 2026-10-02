@@ -87,14 +87,45 @@ DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
   return nullptr;
 }
 
+const DeviceStateEntry *
+DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
+                               uint8_t sub2) const noexcept {
+  sub1 = Device_NormSub1(dev_id, sub1);
+  uint8_t h = Device_Hash(dev_id, sub1, sub2);
+  size_t attempts = 0;
+
+  while (attempts < MAX_DEVICES) {
+    int8_t idx = dev_lookup_map[h];
+    if (idx == -1)
+      break;
+    if (idx >= 0 && static_cast<size_t>(idx) < device_count &&
+        cache[idx].dev_id == dev_id && cache[idx].sub1 == sub1 &&
+        cache[idx].sub2 == sub2) {
+      return &cache[idx];
+    }
+    h = (h + 1) & 0xFF;
+    attempts++;
+  }
+  return nullptr;
+}
+
+DeviceStateEntry *DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
+                                                 uint8_t sub2) noexcept {
+  return findMutable(dev_id, sub1, sub2, false);
+}
+
 const DeviceStateEntry *DeviceRepository::find(uint8_t dev_id, uint8_t sub1,
                                                uint8_t sub2) const noexcept {
   MutexLocker lock(_cache_mutex);
-  return const_cast<DeviceRepository *>(this)->findMutable(dev_id, sub1, sub2,
-                                                           false);
+  return findInternal(dev_id, sub1, sub2);
 }
 
 const DeviceStateEntry *DeviceRepository::getAt(size_t index) const noexcept {
+  MutexLocker lock(_cache_mutex);
+  return (index < device_count) ? &cache[index] : nullptr;
+}
+
+DeviceStateEntry *DeviceRepository::getAt(size_t index) noexcept {
   MutexLocker lock(_cache_mutex);
   return (index < device_count) ? &cache[index] : nullptr;
 }

@@ -172,12 +172,12 @@ void printConfig(int sock) {
     table.header(false);
 
     auto rowf = [&](const char *k, const char *fmt, ...) {
-      char v[64];
+      FixedBuf<64> v;
       va_list va;
       va_start(va, fmt);
-      vsnprintf(v, sizeof(v), fmt, va);
+      v.appendFormatV(fmt, va);
       va_end(va);
-      table.row({k, v});
+      table.row({k, v.c_str()});
     };
 
     rowf("wifi_ssid", "\"%s\"",
@@ -231,20 +231,21 @@ void printConfigHelp(int sock) {
     TableRenderer table(out, CONFIG_HELP_COLS, 3);
     table.header(false);
 
+    FixedBuf<24> range_buf;
     for (size_t i = 0; i < PARAM_COUNT; ++i) {
       const auto &p = PARAM_TABLE[i];
-      char range_buf[24];
+      range_buf.reset();
       if (p.type <= PARAM_UCHAR ||
           (p.type >= PARAM_TIMING_CH1 && p.type <= PARAM_TIMING_CH3)) {
-        snprintf(range_buf, sizeof(range_buf), "%lu ~ %lu",
-                 (unsigned long)p.minVal, (unsigned long)p.maxVal);
+        range_buf.appendFormat("%lu ~ %lu",
+                               (unsigned long)p.minVal, (unsigned long)p.maxVal);
       } else if (p.type >= PARAM_FRAMING_CH1 && p.type <= PARAM_FRAMING_CH4) {
-        strcpy(range_buf, "8N1,8E1,8O1,8N2");
+        range_buf.append("8N1,8E1,8O1,8N2");
       } else {
-        strcpy(range_buf,
-               (p.type == PARAM_PASS_HASH) ? "string (raw)" : "string");
+        range_buf.append(
+            (p.type == PARAM_PASS_HASH) ? "string (raw)" : "string");
       }
-      table.row({p.name, range_buf, p.desc});
+      table.row({p.name, range_buf.c_str(), p.desc});
     }
 
     table.end('-');
@@ -475,6 +476,8 @@ void cmdEw11(CliContext &ctx) {
       table_sock.header(false);
 
       {
+        FixedBuf<8> s_buf, p_buf;
+        FixedBuf<24> pkt_buf;
         for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
           HubClientSlotSnapshot slot;
           Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
@@ -486,14 +489,16 @@ void cmdEw11(CliContext &ctx) {
               slot.is_connected
                   ? (slot.target_ip[0] ? slot.target_ip : "Connected")
                   : (slot.target_ip[0] ? slot.target_ip : "-");
-          char s_buf[8], p_buf[8], pkt_buf[24];
-          snprintf(s_buf, sizeof(s_buf), "#%d", s);
-          snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
-          snprintf(pkt_buf, sizeof(pkt_buf), "%8u / %-8u",
-                   static_cast<unsigned>(slot.rx_pkts),
-                   static_cast<unsigned>(slot.tx_pkts));
+          s_buf.reset();
+          p_buf.reset();
+          pkt_buf.reset();
+          s_buf.appendFormat("#%d", s);
+          p_buf.appendFormat("%u", slot.target_port);
+          pkt_buf.appendFormat("%8u / %-8u",
+                               static_cast<unsigned>(slot.rx_pkts),
+                               static_cast<unsigned>(slot.tx_pkts));
           table_sock.row(
-              {s_buf, slot.name, p_buf, ip_str, status_str, pkt_buf});
+              {s_buf.c_str(), slot.name, p_buf.c_str(), ip_str, status_str, pkt_buf.c_str()});
         }
       }
       table_sock.end('-');
@@ -538,15 +543,15 @@ void cmdEw11(CliContext &ctx) {
 
           char tgt_str[8] = "-", room_str[8] = "-";
           if (rt.is_online) {
-            snprintf(tgt_str, sizeof(tgt_str), "%uC", rt.snap.target_temp);
-            snprintf(room_str, sizeof(room_str), "%uC", rt.snap.room_temp);
+            AppendBuf{tgt_str, sizeof(tgt_str)}.appendFormat("%uC", rt.snap.target_temp);
+            AppendBuf{room_str, sizeof(room_str)}.appendFormat("%uC", rt.snap.room_temp);
           }
           const char *ip_str =
               (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
 
           char s_buf[8], p_buf[8];
-          snprintf(s_buf, sizeof(s_buf), "#%u", s);
-          snprintf(p_buf, sizeof(p_buf), "%u", slot.target_port);
+          AppendBuf{s_buf, sizeof(s_buf)}.appendFormat("#%u", s);
+          AppendBuf{p_buf, sizeof(p_buf)}.appendFormat("%u", slot.target_port);
 
           table_fcu.row({s_buf, slot.name, p_buf, ip_str, pwr_str, mode_str,
                          fan_str, swng_str, tgt_str, room_str});
@@ -709,20 +714,22 @@ void cmdRoutes(CliContext &ctx) {
           "(No device routes learned yet. Waiting for bus/EW11 packets...)");
     } else {
       uint32_t now = millis();
+      FixedBuf<24> tgt_str;
+      FixedBuf<36> dst_str;
       for (size_t i = 0; i < count; i++) {
         const auto &e = entries[i];
-        char tgt_str[24], dst_str[36], el_str[20];
-        snprintf(tgt_str, sizeof(tgt_str), "0x%02X:%02X:%02X", e.dev_id, e.sub1,
-                 e.sub2);
+        char el_str[20];
+        tgt_str.reset();
+        dst_str.reset();
+        tgt_str.appendFormat("0x%02X:%02X:%02X", e.dev_id, e.sub1, e.sub2);
         if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
-          snprintf(dst_str, sizeof(dst_str), "CH#5 Slot %d",
-                   e.endpoint.slot_idx);
+          dst_str.appendFormat("CH#5 Slot %d", e.endpoint.slot_idx);
         } else {
-          snprintf(dst_str, sizeof(dst_str), "CH#%u", e.endpoint.channel_id);
+          dst_str.appendFormat("CH#%u", e.endpoint.channel_id);
         }
         Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str,
                            sizeof(el_str));
-        table.row({tgt_str, dst_str, el_str});
+        table.row({tgt_str.c_str(), dst_str.c_str(), el_str});
       }
     }
     table.end('-');

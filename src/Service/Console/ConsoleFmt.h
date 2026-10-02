@@ -47,6 +47,16 @@ inline void PrintBoxHeader(AppendBuf &out, const char *title) {
   out.append(BOX80_EQ);
 }
 
+__attribute__((format(printf, 2, 3))) inline void
+PrintBoxHeaderf(AppendBuf &out, const char *fmt, ...) {
+  FixedBuf<80> fb;
+  va_list args;
+  va_start(args, fmt);
+  fb.appendFormatV(fmt, args);
+  va_end(args);
+  PrintBoxHeader(out, fb.c_str());
+}
+
 inline void PrintBoxSubtitle(AppendBuf &out, const char *subtitle) {
   int slen = subtitle ? static_cast<int>(strlen(subtitle)) : 0;
   if (slen > 78)
@@ -55,6 +65,16 @@ inline void PrintBoxSubtitle(AppendBuf &out, const char *subtitle) {
   int pad_r = 78 - slen - pad_l;
   out.appendFormat("|%*s%.*s%*s|\r\n", pad_l, "", slen,
                    subtitle ? subtitle : "", pad_r, "");
+}
+
+__attribute__((format(printf, 2, 3))) inline void
+PrintBoxSubtitlef(AppendBuf &out, const char *fmt, ...) {
+  FixedBuf<80> fb;
+  va_list args;
+  va_start(args, fmt);
+  fb.appendFormatV(fmt, args);
+  va_end(args);
+  PrintBoxSubtitle(out, fb.c_str());
 }
 
 inline void PrintBoxFooter(AppendBuf &out, const char *tip) {

@@ -306,15 +306,30 @@ static inline bool checkFramingPure(span<const uint8_t> f, uint8_t stx,
          f[f.size() - 2];
 }
 
-bool UniversalProtocolEngine::validatePacket(span<const uint8_t> frame) const {
+std::expected<span<const uint8_t>, UniversalProtocolEngine::FrameValidationError>
+UniversalProtocolEngine::validateFrame(span<const uint8_t> frame) const noexcept {
   if (frame.size() < 3 || frame.size() > 64)
-    return false;
+    return std::unexpected(FrameValidationError::InvalidLength);
+
   EffProfile e = effectiveProfile();
   if (e.is_auto) {
     g_auto_probing_engine.feedFrame(frame); // 학습 후 갱신된 값으로 재계산
     e = effectiveProfile();
   }
-  return checkFramingPure(frame, e.stx, e.etx, e.min_len, e.max_len, e.algo);
+
+  if (frame.size() < e.min_len || frame.size() > e.max_len)
+    return std::unexpected(FrameValidationError::InvalidLength);
+  if (frame[0] != e.stx || frame[frame.size() - 1] != e.etx)
+    return std::unexpected(FrameValidationError::HeaderMismatch);
+  if (e.algo != ChecksumAlgo::NONE &&
+      g_auto_probing_engine.calculateChecksum(e.algo, frame) != frame[frame.size() - 2])
+    return std::unexpected(FrameValidationError::ChecksumMismatch);
+
+  return frame;
+}
+
+bool UniversalProtocolEngine::validatePacket(span<const uint8_t> frame) const {
+  return validateFrame(frame).has_value();
 }
 
 bool UniversalProtocolEngine::isQueryPacket(span<const uint8_t> frame) const {

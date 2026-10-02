@@ -79,13 +79,15 @@ static void AsyncWifiScanTask(void *pvParameters) {
       default:
         break;
       }
-      char no_buf[4], sig_buf[16], ch_buf[8];
-      snprintf(no_buf, sizeof(no_buf), "%d", i + 1);
+      FixedBuf<8> no_buf;
+      no_buf.appendFormat("%d", i + 1);
       int rssi = WiFi.RSSI(i);
-      snprintf(sig_buf, sizeof(sig_buf), "%d dBm (%d%%)", rssi,
-               std::min(std::max(2 * (rssi + 100), 0), 100));
-      snprintf(ch_buf, sizeof(ch_buf), "%d", WiFi.channel(i));
-      table.row({no_buf, WiFi.SSID(i).c_str(), sig_buf, ch_buf, encType});
+      FixedBuf<16> sig_buf;
+      sig_buf.appendFormat("%d dBm (%d%%)", rssi,
+                           std::min(std::max(2 * (rssi + 100), 0), 100));
+      FixedBuf<8> ch_buf;
+      ch_buf.appendFormat("%d", WiFi.channel(i));
+      table.row({no_buf.c_str(), WiFi.SSID(i).c_str(), sig_buf.c_str(), ch_buf.c_str(), encType});
     }
   }
   table.end('-');
@@ -119,8 +121,8 @@ void cmdWifi(CliContext &ctx) {
            table.header(false);
 
            bool sta_ok = (WiFi.status() == WL_CONNECTED);
-           char rssi_b[16];
-           snprintf(rssi_b, sizeof(rssi_b), "%d dBm", WiFi.RSSI());
+           FixedBuf<16> rssi_b;
+           rssi_b.appendFormat("%d dBm", WiFi.RSSI());
 
            table.row({"Station (STA)", "SSID",
                       sta_ok ? WiFi.SSID().c_str() : g_config.wifi_ssid,
@@ -128,7 +130,7 @@ void cmdWifi(CliContext &ctx) {
            table.row({"", "IP Address",
                       sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0",
                       sta_ok ? "[ACTIVE]" : "[IDLE]"});
-           table.row({"", "Signal (RSSI)", sta_ok ? rssi_b : "N/A",
+           table.row({"", "Signal (RSSI)", sta_ok ? rssi_b.c_str() : "N/A",
                       sta_ok ? "[STABLE]" : "[IDLE]"});
            table.separator('-');
 
@@ -215,15 +217,16 @@ void printSystemOverview(AppendBuf &out) {
   uint32_t ts = millis() / 1000;
   time_t now = time(nullptr);
   struct tm timeinfo;
-  char time_str[64];
+  FixedBuf<64> time_str;
   const char *time_src = "System RTC";
   if (now > 1672531200) {
     localtime_r(&now, &timeinfo);
-    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    strftime(time_str.storage, sizeof(time_str.storage), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    time_str.offset = strlen(time_str.storage);
     time_src = "NTP Synced";
   } else {
-    snprintf(time_str, sizeof(time_str), "Uptime: %ud %02uh %02um %02us",
-             ts / 86400, (ts % 86400) / 3600, (ts % 3600) / 60, ts % 60);
+    time_str.appendFormat("Uptime: %ud %02uh %02um %02us",
+                          ts / 86400, (ts % 86400) / 3600, (ts % 3600) / 60, ts % 60);
     time_src = "Unsynchronized";
   }
 
@@ -256,7 +259,7 @@ void printSystemOverview(AppendBuf &out) {
 
   auto *active = WallpadParserFactory::getActiveParser();
   auto desc = g_auto_probing_engine.getDescriptor();
-  char wp_status_buf[80];
+  FixedBuf<80> wp_status_buf;
   char vendor_name_buf[UniversalProtocolEngine::kVendorNameMaxLen] = "Unknown";
   if (active) {
     active->getVendorName(vendor_name_buf, sizeof(vendor_name_buf));
@@ -264,19 +267,18 @@ void printSystemOverview(AppendBuf &out) {
   const char *catalog_vendor = vendor_name_buf;
 
   if (g_config.wallpad_profile == 0) {
-    snprintf(wp_status_buf, sizeof(wp_status_buf),
-             desc.is_locked ? "Auto Detect (%s)" : "Auto Detect (Learning...)",
-             catalog_vendor);
+    wp_status_buf.appendFormat(
+        desc.is_locked ? "Auto Detect (%s)" : "Auto Detect (Learning...)",
+        catalog_vendor);
   } else {
     VendorProfileDescriptor cur_p;
     const char *p_name = ProfileRepository::getActiveProfile(cur_p)
                              ? (cur_p.name[0] ? cur_p.name : cur_p.key)
                              : nullptr;
     if (p_name)
-      snprintf(wp_status_buf, sizeof(wp_status_buf), "%s (%s)", p_name,
-               catalog_vendor);
+      wp_status_buf.appendFormat("%s (%s)", p_name, catalog_vendor);
     else
-      snprintf(wp_status_buf, sizeof(wp_status_buf), "%s", catalog_vendor);
+      wp_status_buf.appendFormat("%s", catalog_vendor);
   }
 
   out.appendFormat(
@@ -400,12 +402,10 @@ void cmdLogView(CliContext &ctx) {
   if (strcasecmp(sub_cmd, "list") == 0) {
     withScratchBuf(client, [count](AppendBuf &out) {
       CliFmt::PrintBoxHeader(out, "PERSISTENT REBOOT LOG HISTORY");
-      char sub_buf[64];
-      snprintf(sub_buf, sizeof(sub_buf),
-               "Total Stored: %u / %u Logs | Non-Volatile RTC/NVS",
-               static_cast<unsigned>(count),
-               static_cast<unsigned>(LogManager::MAX_LOG_ENTRIES));
-      CliFmt::PrintBoxSubtitle(out, sub_buf);
+      CliFmt::PrintBoxSubtitlef(
+          out, "Total Stored: %u / %u Logs | Non-Volatile RTC/NVS",
+          static_cast<unsigned>(count),
+          static_cast<unsigned>(LogManager::MAX_LOG_ENTRIES));
 
       static constexpr Column REBOOT_COLS[] = {
           {"No", 3, Align::CENTER, Align::CENTER},
@@ -416,32 +416,39 @@ void cmdLogView(CliContext &ctx) {
       TableRenderer table(out, REBOOT_COLS, 4);
       table.header(false);
 
+      FixedBuf<32> time_buf;
+      FixedBuf<16> up_buf;
+      FixedBuf<8> no_buf;
+
       for (size_t i = 0; i < count; i++) {
         LogEntry entry;
         if (LogManager::getLogEntry(i, entry)) {
-          char time_buf[32] = "N/A";
+          time_buf.reset();
           if (entry.timestamp > 0) {
             struct tm timeinfo;
             time_t sec = static_cast<time_t>(entry.timestamp);
             localtime_r(&sec, &timeinfo);
             if (timeinfo.tm_year >= 124) {
-              strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S",
+              strftime(time_buf.storage, sizeof(time_buf.storage), "%Y-%m-%d %H:%M:%S",
                        &timeinfo);
+              time_buf.offset = strlen(time_buf.storage);
             } else {
-              snprintf(time_buf, sizeof(time_buf),
-                       "%04d-%02d-%02d %02d:%02d:%02d", timeinfo.tm_year + 1900,
-                       timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour,
-                       timeinfo.tm_min, timeinfo.tm_sec);
+              time_buf.appendFormat("%04d-%02d-%02d %02d:%02d:%02d",
+                                    timeinfo.tm_year + 1900, timeinfo.tm_mon + 1,
+                                    timeinfo.tm_mday, timeinfo.tm_hour,
+                                    timeinfo.tm_min, timeinfo.tm_sec);
             }
+          } else {
+            time_buf.append("N/A");
           }
           uint32_t sec = entry.stats_snapshot.uptime_ms / 1000;
-          char up_buf[16];
-          snprintf(up_buf, sizeof(up_buf), "%02uh %02um %02us", sec / 3600,
-                   (sec % 3600) / 60, sec % 60);
+          up_buf.reset();
+          up_buf.appendFormat("%02uh %02um %02us", sec / 3600,
+                              (sec % 3600) / 60, sec % 60);
 
-          char no_buf[8];
-          snprintf(no_buf, sizeof(no_buf), "#%u", static_cast<unsigned>(i + 1));
-          table.row({no_buf, time_buf, entry.reason, up_buf});
+          no_buf.reset();
+          no_buf.appendFormat("#%u", static_cast<unsigned>(i + 1));
+          table.row({no_buf.c_str(), time_buf.c_str(), entry.reason, up_buf.c_str()});
         }
       }
       table.end('-');
@@ -542,22 +549,21 @@ void otaPrintStatus(AppendBuf &out) {
                              : (ota_state == ESP_OTA_IMG_ABORTED) ? "[ABORTED]"
                                                                   : "[STABLE]";
 
-  char run_val[36], next_val[36], timer_val[36], crash_val[36];
-  snprintf(run_val, sizeof(run_val), "%s (0x%06X, %u KB)",
-           running ? running->label : "app0",
-           running ? static_cast<unsigned>(running->address) : 0x10000,
-           running ? static_cast<unsigned>(running->size / 1024) : 3712);
-  snprintf(next_val, sizeof(next_val), "%s (0x%06X, %u KB)",
-           next ? next->label : "app1",
-           next ? static_cast<unsigned>(next->address) : 0x3B0000,
-           next ? static_cast<unsigned>(next->size / 1024) : 3712);
+  FixedBuf<36> run_val, next_val, timer_val, crash_val;
+  run_val.appendFormat("%s (0x%06X, %u KB)",
+                       running ? running->label : "app0",
+                       running ? static_cast<unsigned>(running->address) : 0x10000,
+                       running ? static_cast<unsigned>(running->size / 1024) : 3712);
+  next_val.appendFormat("%s (0x%06X, %u KB)",
+                        next ? next->label : "app1",
+                        next ? static_cast<unsigned>(next->address) : 0x3B0000,
+                        next ? static_cast<unsigned>(next->size / 1024) : 3712);
 
   bool val_done = TimeUtils::isElapsed(
       Diag_GetBootTimeMs(), Config::Timing::OTA_VALIDATION_PERIOD_MS);
-  snprintf(timer_val, sizeof(timer_val), "%s",
-           val_done ? "120s Passed" : "Evaluating (<120s)");
-  snprintf(crash_val, sizeof(crash_val), "%u Consecutive Crashes",
-           static_cast<unsigned>(rtc_crash_counter));
+  timer_val.append(val_done ? "120s Passed" : "Evaluating (<120s)");
+  crash_val.appendFormat("%u Consecutive Crashes",
+                         static_cast<unsigned>(rtc_crash_counter));
   bool is_rescue = g_rescue_mode.load(std::memory_order_relaxed);
 
   CliFmt::PrintBoxHeader(out, "DUAL-PARTITION OTA & ROLLBACK MONITOR");
@@ -609,12 +615,10 @@ void otaTriggerRollback(int sock) {
   vTaskDelay(pdMS_TO_TICKS(100));
   esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
   if (err != ESP_OK) {
-    char err_buf[64];
-    snprintf(err_buf, sizeof(err_buf),
-             "[ERROR] Rollback failed (No rollback partition available, "
-             "err=0x%x)\r\n",
-             err);
-    sendTelnetMsg(sock, err_buf);
+    sendTelnetMsgf(sock,
+                   "[ERROR] Rollback failed (No rollback partition available, "
+                   "err=0x%x)\r\n",
+                   err);
   }
 }
 
@@ -624,10 +628,7 @@ void otaValidate(int sock) {
     sendTelnetMsg(sock, "[OTA] Current firmware manually confirmed as VALID. "
                         "Auto-rollback cancelled.\r\n");
   } else {
-    char err_buf[64];
-    snprintf(err_buf, sizeof(err_buf),
-             "[ERROR] Failed to mark app valid: 0x%x\r\n", err);
-    sendTelnetMsg(sock, err_buf);
+    sendTelnetMsgf(sock, "[ERROR] Failed to mark app valid: 0x%x\r\n", err);
   }
 }
 
@@ -718,19 +719,14 @@ void FormatHwMetrics(AppendBuf &out, const HwSnapshot &hw) {
   };
 
   for (const auto &r : rows) {
-    char c[5][16];
-    snprintf(c[0], sizeof(c[0]), "%u%s", static_cast<unsigned>(r.cur),
-             r.suffix);
-    snprintf(c[1], sizeof(c[1]), "%u%s", static_cast<unsigned>(r.a15),
-             r.suffix);
-    snprintf(c[2], sizeof(c[2]), "%u%s", static_cast<unsigned>(r.p15),
-             r.suffix);
-    snprintf(c[3], sizeof(c[3]), "%u%s", static_cast<unsigned>(r.a24),
-             r.suffix);
-    snprintf(c[4], sizeof(c[4]), "%u%s", static_cast<unsigned>(r.p24),
-             r.suffix);
-    out.appendFormat("%-16s %11s  %11s  %11s  %11s  %11s\r\n", r.name, c[0],
-                     c[1], c[2], c[3], c[4]);
+    char s_cur[16], s_a15[16], s_p15[16], s_a24[16], s_p24[16];
+    AppendBuf{s_cur, sizeof(s_cur)}.appendFormat("%u%s", static_cast<unsigned>(r.cur), r.suffix);
+    AppendBuf{s_a15, sizeof(s_a15)}.appendFormat("%u%s", static_cast<unsigned>(r.a15), r.suffix);
+    AppendBuf{s_p15, sizeof(s_p15)}.appendFormat("%u%s", static_cast<unsigned>(r.p15), r.suffix);
+    AppendBuf{s_a24, sizeof(s_a24)}.appendFormat("%u%s", static_cast<unsigned>(r.a24), r.suffix);
+    AppendBuf{s_p24, sizeof(s_p24)}.appendFormat("%u%s", static_cast<unsigned>(r.p24), r.suffix);
+    out.appendFormat("%-16s %11s  %11s  %11s  %11s  %11s\r\n", r.name, s_cur,
+                     s_a15, s_p15, s_a24, s_p24);
   }
 }
 
@@ -764,38 +760,41 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
 
   const char *rs_n[] = {"CH#1_IoT", "CH#2_WP#1", "CH#3_WP#2", "CH#4_WP#3"};
   const ChanStats *rs_st[] = {&pkt.ch1, &pkt.ch2, &pkt.ch3, &pkt.ch4};
+  FixedBuf<24> r_str;
   for (int i = 0; i < 4; ++i) {
     uint32_t rx = rs_st[i]->rx_pkts, crc = rs_st[i]->crc_errors;
-    char r_str[24];
-    snprintf(r_str, sizeof(r_str), "%u (%.2f%%)", static_cast<unsigned>(crc),
-             rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
+    r_str.reset();
+    r_str.appendFormat("%u (%.2f%%)", static_cast<unsigned>(crc),
+                       rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
     out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", rs_n[i],
                      static_cast<unsigned>(rx),
-                     static_cast<unsigned>(rs_st[i]->tx_pkts), r_str,
+                     static_cast<unsigned>(rs_st[i]->tx_pkts), r_str.c_str(),
                      static_cast<unsigned>(rs_st[i]->invalid_frames),
                      static_cast<unsigned>(rs_st[i]->timeouts),
                      static_cast<unsigned>(rs_st[i]->uncached_pkts));
   }
 
+  FixedBuf<16> chan_name;
+  FixedBuf<24> drp_str;
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
     HubClientSlotSnapshot slot;
     Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
     if (!slot.enabled && strlen(slot.target_ip) == 0 && slot.target_port == 0)
       continue;
 
-    char chan_name[16];
-    snprintf(chan_name, sizeof(chan_name), "CH#5_%u",
-             slot.target_port ? slot.target_port
-                              : Config::TCP::EW11_SLOT_PORTS[s]);
+    chan_name.reset();
+    chan_name.appendFormat("CH#5_%u",
+                           slot.target_port ? slot.target_port
+                                            : Config::TCP::EW11_SLOT_PORTS[s]);
 
     uint32_t drp = slot.dropped_pkts;
-    char drp_str[24];
-    snprintf(drp_str, sizeof(drp_str), "%u", static_cast<unsigned>(drp));
+    drp_str.reset();
+    drp_str.appendFormat("%u", static_cast<unsigned>(drp));
 
-    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", chan_name,
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", chan_name.c_str(),
                      static_cast<unsigned>(slot.rx_pkts),
                      static_cast<unsigned>(slot.tx_pkts),
-                     drp > 0 ? drp_str : "0 (0.00%)", 0u, 0u, 0u);
+                     drp > 0 ? drp_str.c_str() : "0 (0.00%)", 0u, 0u, 0u);
   }
 }
 
