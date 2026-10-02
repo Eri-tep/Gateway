@@ -4,9 +4,24 @@
 // ============================================================================
 
 #include "Service/EngineTask.h"
-#include "Service/BridgeService.h"
-#include "Service/ConsoleCli.h"
-#include "Service/RemoteService.h"
+
+namespace {
+DeviceStateListener s_dev_listener = nullptr;
+DoorphoneEventListener s_doorphone_listener = nullptr;
+Ch5ForwardHandler s_ch5_forwarder = nullptr;
+} // namespace
+
+void Engine_RegisterDeviceStateListener(DeviceStateListener listener) noexcept {
+  s_dev_listener = listener;
+}
+
+void Engine_RegisterDoorphoneListener(DoorphoneEventListener listener) noexcept {
+  s_doorphone_listener = listener;
+}
+
+void Engine_RegisterCh5ForwardHandler(Ch5ForwardHandler handler) noexcept {
+  s_ch5_forwarder = handler;
+}
 
 #include "esp_task_wdt.h"
 #include <WiFi.h>
@@ -49,11 +64,8 @@ StackType_t stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
 uint32_t g_boot_start_ms = 0;
 SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
                   g_uart2_mutex = nullptr, g_tracer_sem = nullptr;
-Ch1StateMetrics g_ch1_state_metrics;
 
-std::atomic<bool> g_initial_caching_complete{false},
-    g_probe_convergence_reset{false};
-WifiFallbackGuard g_wifi_guard;
+std::atomic<bool> g_initial_caching_complete{false};
 Config::Doorphone::DoorphoneState g_doorphone_state{};
 CoreDumpInfo g_coredump_info;
 Config::Doorphone::FramingTracker g_doorphone_tracker;
@@ -211,7 +223,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
                                                  : 3;
             StaticPacket drp_pkt{ch, pkt_len};
             memcpy(drp_pkt.data.data(), pkt, pkt_len);
-            g_telnet_tracer.trace(ch, false, TraceType::DRP, drp_pkt);
+            System_TracePacket(ch, false, TraceType::DRP, drp_pkt);
             idx++;
             continue;
           }
@@ -320,7 +332,7 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
     return false;
 
   auto drop = [&]() {
-    g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
+    System_TracePacket(req.channel_id, false, TraceType::DRP, req);
     return false;
   };
 
@@ -351,13 +363,8 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
   if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0 &&
       ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {
     const bool unidir = (has_grp && grp.isUnidirectional()) || dev_id == 0x34;
-    if (unidir || ep.slot_idx == 0) {
-      Ew11Manager::sendBurstPacket(static_cast<uint8_t>(ep.slot_idx), req, 2,
-                                   20);
-    } else {
-      const bool sent = Hub_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
-      g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP,
-                            req);
+    if (s_ch5_forwarder) {
+      s_ch5_forwarder(static_cast<uint8_t>(ep.slot_idx), req, unidir);
     }
     return false;
   }
@@ -365,7 +372,7 @@ bool ControlDispatcher::dispatch(StaticPacket &req,
   QueueHandle_t q =
       (req.channel_id == 6) ? g_ch1_vip_queue : g_ch1_control_queue;
   if (Queue_EnqueueDropHead(q, req))
-    g_telnet_tracer.trace(1, true, TraceType::CTL, req);
+    System_TracePacket(1, true, TraceType::CTL, req);
   return false;
 }
 
@@ -432,7 +439,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     MutexLocker lock(g_uart0_mutex, pdMS_TO_TICKS(100));
     if (!lock.isLocked()) {
       g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
-      g_telnet_tracer.trace(
+      System_TraceMessage(
           "[WARN] Dropped CH1 ctrl packet, mutex timed out.\r\n");
       return;
     }
@@ -450,10 +457,12 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
   if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
                       nullptr, nullptr, &ctrlPacket) == UartRxStatus::SUCCESS) {
     g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
-    g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
+    System_TracePacket(1, false, TraceType::ACK, ack);
     g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
     ack.channel_id = 1;
-    Mgmt_BroadcastDeviceResult(g_device_repo.updateFromBus(ack));
+    if (s_dev_listener) {
+      s_dev_listener(g_device_repo.updateFromBus(ack));
+    }
     if (dev_id != 0) {
       g_route_registry.recordRoute(1, -1, dev_id, sub1, sub2);
     }
@@ -477,17 +486,17 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
         MutexLocker lock(cfg.mutex, pdMS_TO_TICKS(100));
         if (lock.isLocked()) {
           uart_write_bytes(cfg.uart_num, ack.data.data(), ack.length);
-          g_telnet_tracer.trace(ctrlPacket.channel_id, true, TraceType::ACK,
+          System_TracePacket(ctrlPacket.channel_id, true, TraceType::ACK,
                                 ack);
           cfg.stats.tx_pkts.fetch_add(1, std::memory_order_relaxed);
         } else {
-          g_telnet_tracer.trace("[WARN] UART mutex timeout forwarding ACK\r\n");
+          System_TraceMessage("[WARN] UART mutex timeout forwarding ACK\r\n");
         }
       }
     }
   } else {
     g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
-    g_telnet_tracer.trace(
+    System_TraceMessage(
         "[WARN] Device did not ACK control packet in time.\r\n");
   }
 }
@@ -504,8 +513,9 @@ void Ch1_SetState(Ch1State &cur_state, Ch1State new_state) {
       g_ch1_state_metrics.normal_cnt.fetch_add(1, std::memory_order_relaxed);
     }
 
-    g_ch1_state_metrics.last_from_state.store(old, std::memory_order_relaxed);
-    g_ch1_state_metrics.last_to_state.store(new_state,
+    g_ch1_state_metrics.last_from_state.store(static_cast<uint8_t>(old),
+                                              std::memory_order_relaxed);
+    g_ch1_state_metrics.last_to_state.store(static_cast<uint8_t>(new_state),
                                             std::memory_order_relaxed);
     g_ch1_state_metrics.last_transition_ms.store(millis(),
                                                  std::memory_order_relaxed);
@@ -662,7 +672,7 @@ void Ch1_PollNext(size_t &current_dev_idx) {
         PacketBuilder::Ch1_BuildQueryPacket(q_pkt, poll_dev_id, poll_sub1,
                                             poll_sub2);
       }
-      g_telnet_tracer.trace(1, true, TraceType::QRY, q_pkt);
+      System_TracePacket(1, true, TraceType::QRY, q_pkt);
 
       uart_flush_input(UART_NUM_0);
       uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
@@ -675,12 +685,14 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
                           nullptr, nullptr, &q_pkt) == UartRxStatus::SUCCESS) {
         g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
-        g_telnet_tracer.trace(1, false, TraceType::ACK, ack);
+        System_TracePacket(1, false, TraceType::ACK, ack);
         g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
         ack.channel_id = 1;
         g_polling_targets.updateResponse(q_pkt.data.data(), q_pkt.length,
                                          ack.data.data(), ack.length);
-        Mgmt_BroadcastDeviceResult(g_device_repo.updateFromBus(ack));
+        if (s_dev_listener) {
+          s_dev_listener(g_device_repo.updateFromBus(ack));
+        }
         g_polling_targets.markVerified(poll_dev_id, poll_sub1, poll_sub2);
         g_route_registry.recordRoute(1, -1, poll_dev_id, poll_sub1, poll_sub2);
         g_auto_probing_engine.feedOpcodePair(
@@ -751,7 +763,7 @@ void Task_Ch1(void *pvParameters) {
       if (g_system_event_group) {
         xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
       }
-      g_telnet_tracer.trace("[AUTO PROBE] Convergence state reset. Re-learning "
+      System_TraceMessage("[AUTO PROBE] Convergence state reset. Re-learning "
                             "bus offsets...\r\n");
     }
 
@@ -793,11 +805,11 @@ void Task_Ch1(void *pvParameters) {
           g_metrics.reset();
           g_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
           g_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
-          g_telnet_tracer.trace(
+          System_TraceMessage(
               "[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). "
               "Runtime metrics synchronized.\r\n");
           g_control_registry.synthesizeFromConvergedCache();
-          g_telnet_tracer.trace(
+          System_TraceMessage(
               "[CTL] Control template synthesis triggered.\r\n");
         }
       } else {
@@ -883,13 +895,13 @@ static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
                            next_ack.length);
         } else {
           ctx->stats->timeouts.fetch_add(1, std::memory_order_relaxed);
-          g_telnet_tracer.trace("[WARN] UART mutex timeout on virtual ACK\r\n");
+          System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
         }
       } else {
         uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
                          next_ack.length);
       }
-      g_telnet_tracer.trace(ctx->cfg->channel_id, true, TraceType::ACK,
+      System_TracePacket(ctx->cfg->channel_id, true, TraceType::ACK,
                             next_ack);
       ctx->stats->tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
@@ -946,7 +958,7 @@ void Task_Ch2Ch3(void *pvParameters) {
       span<const uint8_t> frame(req.data.data(), req.length);
 
       bool is_query = parser->isQueryPacket(frame);
-      g_telnet_tracer.trace(cfg->channel_id, false,
+      System_TracePacket(cfg->channel_id, false,
                             is_query ? TraceType::QRY : TraceType::CTL, req);
 
       if (is_query) {
@@ -962,7 +974,7 @@ void Task_Ch2Ch3(void *pvParameters) {
           uint32_t target_due = millis() + delay_ms;
           if (!ack_queue.enqueue(virtual_ack, target_due)) {
             stats->uncached_pkts.fetch_add(1, std::memory_order_relaxed);
-            g_telnet_tracer.trace("[WARN] Wallpad virtual ACK queue overflow, "
+            System_TraceMessage("[WARN] Wallpad virtual ACK queue overflow, "
                                   "packet dropped.\r\n");
           }
         } else {
@@ -994,7 +1006,7 @@ static inline void Ch4_SendPassthrough(const StaticPacket &pkt,
     g_doorphone_tracker.processFrame(pkt.data[0], pkt.data[pkt.length - 1],
                                      pkt.length, cur_dp_ns);
   }
-  g_telnet_tracer.trace(4, true, TraceType::RMT, pkt);
+  System_TracePacket(4, true, TraceType::RMT, pkt);
   last_tx_pkt = pkt; // Correctly recorded in all code paths to avoid echo
                      // reflection misinterpretation
   g_doorphone_serial.write(pkt.data.data(), pkt.length);
@@ -1049,18 +1061,20 @@ static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
     if (state_changed) {
       bool f = g_doorphone_state.front_bell.load(std::memory_order_relaxed);
       bool l = g_doorphone_state.lobby_bell.load(std::memory_order_relaxed);
-      Mgmt_BroadcastDoorphoneEvent(f, l);
+      if (s_doorphone_listener) {
+        s_doorphone_listener(f, l);
+      }
     }
   }
 
-  g_telnet_tracer.trace(4, false, TraceType::RMT, packet);
+  System_TracePacket(4, false, TraceType::RMT, packet);
   g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);
 }
 
 static inline void Ch4_DropInvalidFrame(const uint8_t *data, size_t len) {
   StaticPacket drp_pkt{4, static_cast<uint8_t>(std::min<size_t>(len, 16))};
   memcpy(drp_pkt.data.data(), data, drp_pkt.length);
-  g_telnet_tracer.trace(4, false, TraceType::DRP, drp_pkt);
+  System_TracePacket(4, false, TraceType::DRP, drp_pkt);
   g_pkt_stats.ch4.invalid_frames.fetch_add(1, std::memory_order_relaxed);
 }
 

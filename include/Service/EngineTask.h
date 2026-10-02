@@ -94,15 +94,6 @@ public:
   bool dispatch(StaticPacket &req, StaticPacket &virtual_ack_out);
 };
 
-struct TracePacketEntry {
-  struct timeval tv;
-  uint8_t channel;
-  bool is_tx;
-  TraceType type;
-  uint8_t len;
-  std::array<uint8_t, 64> data;
-};
-
 enum class Ch1State : uint8_t {
   IDLE,
   VIP_CONTROL,
@@ -110,16 +101,7 @@ enum class Ch1State : uint8_t {
   POLL_DEVICE
 };
 
-struct Ch1StateMetrics {
-  std::atomic<uint32_t> poll_cnt{0}, vip_cnt{0}, normal_cnt{0},
-      stale_poll_cnt{0};
-  std::atomic<Ch1State> last_from_state{Ch1State::IDLE};
-  std::atomic<Ch1State> last_to_state{Ch1State::IDLE};
-  std::atomic<uint32_t> last_transition_ms{0};
-};
-
 // ── Global Instances & RTOS Buffers ──
-extern Ch1StateMetrics g_ch1_state_metrics;
 extern DeviceRepository g_device_repo;
 extern ControlDispatcher g_control_dispatcher;
 extern QueueHandle_t g_ch1_control_queue, g_ch1_vip_queue;
@@ -146,33 +128,24 @@ extern QueueSetHandle_t g_ch1_queue_set;
 extern QueueHandle_t g_uart0_event_queue, g_uart1_event_queue,
     g_uart2_event_queue;
 extern QueueHandle_t g_ch4_passthrough_queue;
-extern SemaphoreHandle_t g_mgmt_mutex;
 extern std::atomic<bool> g_initial_caching_complete;
-extern std::atomic<bool> g_probe_convergence_reset;
-extern PacketStatistics g_pkt_stats;
 extern uint32_t g_boot_start_ms;
-struct WifiFallbackGuard {
-  std::atomic<bool> testing{false};
-  uint32_t start_ms{0};
-  char prev_ssid[64]{0};
-  char prev_pass[64]{0};
-};
-extern WifiFallbackGuard g_wifi_guard;
 extern SoftwareSerial g_doorphone_serial;
 extern SemaphoreHandle_t g_tracer_sem;
 
 extern SemaphoreHandle_t g_uart0_mutex, g_uart1_mutex, g_uart2_mutex;
 
-// ── FreeRTOS Task Functions ──
+// ── FreeRTOS Engine Task Functions ──
 void Task_Ch1(void *pvParameters);
 void Task_Ch2Ch3(void *pvParameters);
 void Task_Ch4(void *pvParameters);
-void Task_Network(void *pvParameters);
-void Task_Telnet(void *pvParameters);
 
-// ── Hub Socket Bridge Functions ──
-void Hub_LoadConfig();
-void Hub_SaveConfig();
-bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                 const char *name = nullptr);
-bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
+// ── Engine Event Listeners & Router Delegate ──
+using DeviceStateListener = void (*)(const DeviceUpdateResult &res) noexcept;
+using DoorphoneEventListener = void (*)(bool front_bell, bool lobby_bell) noexcept;
+using Ch5ForwardHandler = bool (*)(uint8_t slot_idx, const StaticPacket &pkt,
+                                   bool burst) noexcept;
+
+void Engine_RegisterDeviceStateListener(DeviceStateListener listener) noexcept;
+void Engine_RegisterDoorphoneListener(DoorphoneEventListener listener) noexcept;
+void Engine_RegisterCh5ForwardHandler(Ch5ForwardHandler handler) noexcept;

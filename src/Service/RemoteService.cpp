@@ -3,7 +3,6 @@
 // ============================================================================
 
 #include "Service/RemoteService.h"
-#include "Service/ConsoleCli.h"
 
 #include <ArduinoOTA.h>
 #include <HTTPClient.h>
@@ -34,6 +33,20 @@
 #include <unistd.h>
 
 #include "Service/BridgeService.h"
+#include "Protocol/WallpadProtocol.h"
+#include "System/SystemDiagnostics.h"
+#include "System/SystemStorage.h"
+#include "Transport/DoorphoneTracker.h"
+#include "Transport/NetworkRouter.h"
+
+WifiFallbackGuard g_wifi_guard;
+namespace {
+DeviceControlHandler s_control_handler = nullptr;
+} // namespace
+
+void Remote_RegisterControlHandler(DeviceControlHandler handler) noexcept {
+  s_control_handler = handler;
+}
 
 // ── JSON-RPC & TCP Management Server (formerly Service.cpp) ──
 // ============================================================================
@@ -150,10 +163,7 @@ static void serializeProfileAndTiming(
                    "\"ch4\":{\"baud\":%u,\"format\":\"%s\"}},",
                    static_cast<unsigned>(g_config.uart_baud_rate), f1,
                    static_cast<unsigned>(g_config.ch2_baud_rate), f2,
-                   static_cast<unsigned>(g_config.ch3_baud_rate), f3,
-                   static_cast<unsigned>(g_doorphone_serial.baudRate() > 0
-                                             ? g_doorphone_serial.baudRate()
-                                             : g_config.doorphone_baud_rate),
+                   static_cast<unsigned>(g_config.doorphone_baud_rate),
                    f4);
 }
 
@@ -445,7 +455,7 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
 
   out.appendFormat("],\"count\":%u}\n", static_cast<unsigned>(locked_count));
 }
-void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) {
+void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
   char buf[128];
   int len = snprintf(
       buf, sizeof(buf),
@@ -546,6 +556,18 @@ void Mgmt_BroadcastDeviceResult(const DeviceUpdateResult &res) noexcept {
   }
 }
 
+void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
+                                 uint8_t ho, uint8_t power,
+                                 bool is_arrival) noexcept {
+  if (is_arrival) {
+    Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY, 0,
+                              0, 0, 0, nullptr, 0.0f, floor, 0, ho);
+  } else {
+    Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY, power,
+                              0, 0, 0, nullptr, 0.0f, 15, 0, 0);
+  }
+}
+
 void Mgmt_BroadcastDevicesUpdated() {
   const char *msg = "{\"event\":\"devices_updated\"}\n";
   size_t len = strlen(msg);
@@ -596,101 +618,10 @@ static IPAddress get_client_ip(int sock) {
   return IPAddress(0, 0, 0, 0);
 }
 
-RuntimeTimingConfig g_timing_config{};
 MgmtSession g_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
 SemaphoreHandle_t g_mgmt_mutex = nullptr;
 
-void TimingConfig_Load() {
-  Preferences p;
-  if (p.begin("timing_cfg", true)) {
-    g_timing_config.ch1_poll_interval_ms = p.getUShort("ch1_poll", 1000);
-    g_timing_config.ch2_cache_delay_ms = p.getUShort("ch2_del", 30);
-    g_timing_config.ch3_cache_delay_ms = p.getUShort("ch3_del", 240);
-    p.end();
-  } else {
-    g_timing_config.ch1_poll_interval_ms = 1000;
-    g_timing_config.ch2_cache_delay_ms = 30;
-    g_timing_config.ch3_cache_delay_ms = 240;
-  }
 
-  if (g_timing_config.ch1_poll_interval_ms < 200 ||
-      g_timing_config.ch1_poll_interval_ms > 5000)
-    g_timing_config.ch1_poll_interval_ms = 1000;
-  if (g_timing_config.ch2_cache_delay_ms < 5 ||
-      g_timing_config.ch2_cache_delay_ms > 300)
-    g_timing_config.ch2_cache_delay_ms = 30;
-  if (g_timing_config.ch3_cache_delay_ms < 20 ||
-      g_timing_config.ch3_cache_delay_ms > 1000)
-    g_timing_config.ch3_cache_delay_ms = 240;
-
-  ::Serial.printf(
-      "[TIMING] Loaded: CH1 Poll %u ms, CH2 Delay %u ms, CH3 Delay %u ms\r\n",
-      g_timing_config.ch1_poll_interval_ms, g_timing_config.ch2_cache_delay_ms,
-      g_timing_config.ch3_cache_delay_ms);
-}
-
-void TimingConfig_Save() {
-  Preferences p;
-  if (p.begin("timing_cfg", false)) {
-    p.putUShort("ch1_poll", g_timing_config.ch1_poll_interval_ms);
-    p.putUShort("ch2_del", g_timing_config.ch2_cache_delay_ms);
-    p.putUShort("ch3_del", g_timing_config.ch3_cache_delay_ms);
-    p.end();
-    ::Serial.printf("[TIMING] Saved to NVS: CH1 Poll %u ms, CH2 Delay %u ms, "
-                    "CH3 Delay %u ms\r\n",
-                    g_timing_config.ch1_poll_interval_ms,
-                    g_timing_config.ch2_cache_delay_ms,
-                    g_timing_config.ch3_cache_delay_ms);
-  }
-}
-
-namespace {
-
-struct DoorphoneFsm {
-  enum class Step : uint8_t { IDLE = 0, CALL_SENT, OPEN_SENT };
-  std::atomic<Step> step{Step::IDLE};
-  std::atomic<uint8_t> c_stx{0x7F};
-  std::atomic<uint8_t> c_etx{0xEE};
-  std::atomic<uint8_t> op_open{0};
-  std::atomic<uint8_t> op_end{0};
-  esp_timer_handle_t timer{nullptr};
-};
-
-static DoorphoneFsm s_dp_fsm;
-
-static void sendDpPacket(uint8_t stx, uint8_t op, uint8_t etx) {
-  StaticPacket pkt{4, 5};
-  pkt.data[0] = stx;
-  pkt.data[1] = op;
-  pkt.data[2] = 0x00;
-  pkt.data[3] = 0x00;
-  pkt.data[4] = etx;
-  if (g_ch4_passthrough_queue) {
-    xQueueSend(g_ch4_passthrough_queue, &pkt, 0);
-  }
-}
-
-static void onDoorphoneTimer(void *arg) {
-  (void)arg;
-  DoorphoneFsm::Step cur = s_dp_fsm.step.load(std::memory_order_acquire);
-  if (cur == DoorphoneFsm::Step::CALL_SENT) {
-    sendDpPacket(s_dp_fsm.c_stx.load(std::memory_order_acquire),
-                 s_dp_fsm.op_open.load(std::memory_order_acquire),
-                 s_dp_fsm.c_etx.load(std::memory_order_acquire));
-    s_dp_fsm.step.store(DoorphoneFsm::Step::OPEN_SENT,
-                        std::memory_order_release);
-    esp_timer_start_once(s_dp_fsm.timer, 750000); // 750ms 후 종료 패킷 전송
-  } else if (cur == DoorphoneFsm::Step::OPEN_SENT) {
-    sendDpPacket(s_dp_fsm.c_stx.load(std::memory_order_acquire),
-                 s_dp_fsm.op_end.load(std::memory_order_acquire),
-                 s_dp_fsm.c_etx.load(std::memory_order_acquire));
-    g_doorphone_state.front_bell.store(false, std::memory_order_release);
-    g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
-    s_dp_fsm.step.store(DoorphoneFsm::Step::IDLE, std::memory_order_release);
-  }
-}
-
-} // anonymous namespace
 
 void Mgmt_Init() {
   if (!g_mgmt_mutex) {
@@ -700,12 +631,6 @@ void Mgmt_Init() {
     g_mgmt_sessions[i].sock = -1;
     g_mgmt_sessions[i].len = 0;
     g_mgmt_sessions[i].connected_at_ms = 0;
-  }
-  if (!s_dp_fsm.timer) {
-    esp_timer_create_args_t timer_args{};
-    timer_args.callback = onDoorphoneTimer;
-    timer_args.name = "dp_fsm_timer";
-    esp_timer_create(&timer_args, &s_dp_fsm.timer);
   }
   TimingConfig_Load();
 }
@@ -1159,19 +1084,6 @@ static void HandleRpc_DoorphoneAction(int sock, long req_id,
     uint8_t op_end = is_open_front ? (dp_prof ? dp_prof->end_front : 0xB8)
                                    : (dp_prof ? dp_prof->end_lobby : 0x60);
 
-    DoorphoneFsm::Step expected = DoorphoneFsm::Step::IDLE;
-    if (!s_dp_fsm.step.compare_exchange_strong(expected,
-                                               DoorphoneFsm::Step::CALL_SENT)) {
-      sendRpcResponse(sock, req_id, "busy",
-                      "Doorphone sequence already in progress");
-      return;
-    }
-
-    s_dp_fsm.c_stx.store(dp_stx, std::memory_order_release);
-    s_dp_fsm.c_etx.store(dp_etx, std::memory_order_release);
-    s_dp_fsm.op_open.store(op_open, std::memory_order_release);
-    s_dp_fsm.op_end.store(op_end, std::memory_order_release);
-
     // 50ms Pre-Guard Time: 벨 수신 직후 3840 bps 반이중 버스 충돌 방지용 Line
     // Silent 대기
     uint32_t last_bell =
@@ -1187,8 +1099,12 @@ static void HandleRpc_DoorphoneAction(int sock, long req_id,
       }
     }
 
-    sendDpPacket(dp_stx, op_call, dp_etx);
-    esp_timer_start_once(s_dp_fsm.timer, 350000); // 350ms 후 문열림 패킷 전송
+    if (!Transport::g_doorphone_controller.startSequence(
+            dp_stx, dp_etx, op_call, op_open, op_end)) {
+      sendRpcResponse(sock, req_id, "busy",
+                      "Doorphone sequence already in progress");
+      return;
+    }
 
     sendRpcResponse(sock, req_id, "ok");
     return;
@@ -1398,9 +1314,14 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     return;
   }
 
+  if (!s_control_handler) {
+    sendRpcResponse(sock, req_id, "error", "Engine control handler not ready");
+    return;
+  }
+
   req.channel_id = 6;
   StaticPacket dummy{};
-  g_control_dispatcher.dispatch(req, dummy);
+  s_control_handler(req, dummy);
 
   if (act == ControlActionType::SET_TEMP) {
     g_device_repo.setTargetTemp(
@@ -1427,7 +1348,7 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     qry_req.data[9] =
         parser ? parser->calculateChecksum(qry_req.data.data(), 11) : 0x84;
     qry_req.data[10] = 0xEE;
-    g_control_dispatcher.dispatch(qry_req, dummy);
+    s_control_handler(qry_req, dummy);
   }
 
   sendRpcResponse(sock, req_id, "ok");

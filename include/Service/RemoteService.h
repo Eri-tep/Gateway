@@ -5,26 +5,11 @@
 // Hub)
 // ============================================================================
 
-#include "Service/EngineTask.h"
+#include "Base/BufferUtils.h"
+#include "Base/SystemConfig.h"
+#include "Protocol/ControlTemplate.h"
+#include "Protocol/DeviceRegistry.h"
 #include <lwip/sockets.h>
-
-// ============================================================================
-// 1. Core Runtime Timing Configuration (NVS Stored)
-// ============================================================================
-struct RuntimeTimingConfig {
-  uint16_t ch1_poll_interval_ms{
-      1000}; // CH1 폴링 주기 (200~3000ms, 기본 1000ms)
-  uint16_t ch2_cache_delay_ms{
-      30}; // CH2 메인 월패드 Virtual ACK 딜레이 (10~150ms, 기본 30ms)
-  uint16_t ch3_cache_delay_ms{
-      240}; // CH3 서브 월패드 Virtual ACK 딜레이 (50~500ms, 기본 240ms)
-};
-
-extern RuntimeTimingConfig g_timing_config;
-
-void TimingConfig_Load();
-void TimingConfig_Save();
-
 #include "System/SystemOta.h"
 
 // ============================================================================
@@ -55,7 +40,7 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id = -1);
 void Mgmt_SerializeDevices(AppendBuf &out, long req_id = -1);
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str);
 
-void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell);
+void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept;
 void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                DeviceClass dev_class, int power,
                                int target_temp = 0, int current_temp = 0,
@@ -64,11 +49,26 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                int direction = 0, int ho = 0,
                                int vent_mode = 1);
 void Mgmt_BroadcastDeviceResult(const DeviceUpdateResult &res) noexcept;
+void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
+                                 uint8_t ho, uint8_t power,
+                                 bool is_arrival) noexcept;
 void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
-
-#include "Service/BridgeService.h"
 
 // ── Network Subsystem Entry Points ──
 void Task_Network(void *pvParameters);
 extern EventGroupHandle_t g_wifi_event_group;
+
+// ── Remote Control Handler Registration ──
+extern SemaphoreHandle_t g_mgmt_mutex;
+using DeviceControlHandler = bool (*)(StaticPacket &req,
+                                      StaticPacket &out_ack) noexcept;
+void Remote_RegisterControlHandler(DeviceControlHandler handler) noexcept;
+
+struct WifiFallbackGuard {
+  std::atomic<bool> testing{false};
+  uint32_t start_ms{0};
+  char prev_ssid[64]{0};
+  char prev_pass[64]{0};
+};
+extern WifiFallbackGuard g_wifi_guard;

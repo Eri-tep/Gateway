@@ -367,4 +367,50 @@ void Config_ResetDefaults() {
   g_config_dirty.store(true, std::memory_order_release);
 }
 
+RuntimeTimingConfig g_timing_config{};
+
+void TimingConfig_Load() {
+  Preferences p;
+  if (p.begin("timing_cfg", true)) {
+    g_timing_config.ch1_poll_interval_ms = p.getUShort("ch1_poll", 1000);
+    g_timing_config.ch2_cache_delay_ms = p.getUShort("ch2_del", 30);
+    g_timing_config.ch3_cache_delay_ms = p.getUShort("ch3_del", 240);
+    p.end();
+  } else {
+    g_timing_config.ch1_poll_interval_ms = 1000;
+    g_timing_config.ch2_cache_delay_ms = 30;
+    g_timing_config.ch3_cache_delay_ms = 240;
+  }
+
+  if (g_timing_config.ch1_poll_interval_ms < 200 ||
+      g_timing_config.ch1_poll_interval_ms > 5000)
+    g_timing_config.ch1_poll_interval_ms = 1000;
+  if (g_timing_config.ch2_cache_delay_ms < 5 ||
+      g_timing_config.ch2_cache_delay_ms > 300)
+    g_timing_config.ch2_cache_delay_ms = 30;
+  if (g_timing_config.ch3_cache_delay_ms < 20 ||
+      g_timing_config.ch3_cache_delay_ms > 1000)
+    g_timing_config.ch3_cache_delay_ms = 240;
+
+  ::Serial.printf(
+      "[TIMING] Loaded: CH1 Poll %u ms, CH2 Delay %u ms, CH3 Delay %u ms\r\n",
+      g_timing_config.ch1_poll_interval_ms, g_timing_config.ch2_cache_delay_ms,
+      g_timing_config.ch3_cache_delay_ms);
+}
+
+void TimingConfig_Save() {
+  Preferences p;
+  if (p.begin("timing_cfg", false)) {
+    p.putUShort("ch1_poll", g_timing_config.ch1_poll_interval_ms);
+    p.putUShort("ch2_del", g_timing_config.ch2_cache_delay_ms);
+    p.putUShort("ch3_del", g_timing_config.ch3_cache_delay_ms);
+    p.end();
+    ::Serial.printf("[TIMING] Saved to NVS: CH1 Poll %u ms, CH2 Delay %u ms, "
+                    "CH3 Delay %u ms\r\n",
+                    g_timing_config.ch1_poll_interval_ms,
+                    g_timing_config.ch2_cache_delay_ms,
+                    g_timing_config.ch3_cache_delay_ms);
+  }
+}
+
 std::atomic<bool> g_mgmt_client_connected{false};

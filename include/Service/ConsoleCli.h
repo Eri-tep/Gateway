@@ -4,8 +4,10 @@
 // ConsoleCli: Level 4 Telnet Socket Server & Interactive Console Engine
 // ============================================================================
 
-#include "Service/EngineTask.h"
-#include "Service/RemoteService.h"
+#include "Base/BufferUtils.h"
+#include "Base/SystemConfig.h"
+#include "System/SystemDiagnostics.h"
+#include <lwip/sockets.h>
 
 // ============================================================================
 // SECTION 1: TELNET PROTOCOL & IAC ENUMS
@@ -239,7 +241,16 @@ public:
 
 // ============================================================================
 // SECTION 3: TELNET TRACER CLASS DEFINITION
-// ============================================================================
+#include <sys/time.h>
+
+struct TracePacketEntry {
+  struct timeval tv;
+  uint8_t channel;
+  bool is_tx;
+  TraceType type;
+  uint8_t len;
+  std::array<uint8_t, 64> data;
+};
 
 class TelnetTracer {
 private:
@@ -324,3 +335,5 @@ struct CliContext {
   const Args &args;
   CliWriter &out;
 };
+
+void Task_Telnet(void *pvParameters);

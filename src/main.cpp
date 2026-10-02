@@ -3,6 +3,7 @@
 #include "Base/SystemPlatform.h"
 #include "Protocol/ControlTemplate.h"
 #include "Protocol/WallpadProtocol.h"
+#include "Service/BridgeService.h"
 #include "Service/ConsoleCli.h"
 #include "Service/EngineTask.h"
 #include "Service/RemoteService.h"
@@ -223,7 +224,24 @@ static void Boot_RestoreConfigAndState() {
   g_doorphone_tracker.restoreFromNvs(dp_ns);
 }
 
+static bool HandleRemoteControl(StaticPacket &req,
+                                StaticPacket &out_ack) noexcept {
+  return g_control_dispatcher.dispatch(req, out_ack);
+}
+
 static void Boot_InitSubsystems() {
+  // ── Mediator: Wire L4 Services Decoupled Event Listeners ──
+  Engine_RegisterDeviceStateListener(Mgmt_BroadcastDeviceResult);
+  Engine_RegisterDoorphoneListener(Mgmt_BroadcastDoorphoneEvent);
+  Engine_RegisterCh5ForwardHandler(Bridge_ForwardPacket);
+
+  Bridge_RegisterDeviceStateListener(Mgmt_BroadcastDeviceResult);
+  Bridge_RegisterElevatorListener(Mgmt_BroadcastElevatorEvent);
+
+  Remote_RegisterControlHandler(HandleRemoteControl);
+
+  Transport::g_doorphone_controller.init();
+
   g_control_registry.init();
   Mgmt_Init();
   Ew11Manager::init();

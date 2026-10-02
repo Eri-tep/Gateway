@@ -75,6 +75,7 @@ TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept {
 SystemMetricsTracker g_metrics;
 TaskWdtMonitor g_wdt_monitor;
 PacketStatistics g_pkt_stats;
+Ch1StateMetrics g_ch1_state_metrics;
 const char *s_pending_reboot_reason = nullptr;
 
 #ifdef __cplusplus

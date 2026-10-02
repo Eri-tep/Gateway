@@ -4,8 +4,10 @@
 // BridgeService: Level 4 EW11 TCP Bridge & Air Conditioner (FCU) Subsystem
 // ============================================================================
 
+#include "Base/BufferUtils.h"
+#include "Base/SystemConfig.h"
+#include "Protocol/DeviceRegistry.h"
 #include "Protocol/ModbusProtocol.h"
-#include "Service/EngineTask.h"
 
 namespace Fcu {
 
@@ -54,4 +56,20 @@ int Hub_AcceptClient(int slot_idx, int server_fd);
 void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
                        size_t pkt_len);
 void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len);
+void Hub_LoadConfig();
+void Hub_SaveConfig();
+bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                 const char *name = nullptr);
+bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
 void Bridge_ShutdownSockets() noexcept;
+
+// ── Bridge Event Listeners & Forwarding API ──
+using BridgeDeviceStateListener = void (*)(const DeviceUpdateResult &res) noexcept;
+using ElevatorStateListener = void (*)(uint8_t sub1, uint8_t sub2, uint8_t floor,
+                                       uint8_t ho, uint8_t power,
+                                       bool is_arrival) noexcept;
+
+void Bridge_RegisterDeviceStateListener(BridgeDeviceStateListener listener) noexcept;
+void Bridge_RegisterElevatorListener(ElevatorStateListener listener) noexcept;
+bool Bridge_ForwardPacket(uint8_t slot_idx, const StaticPacket &pkt,
+                          bool burst) noexcept;

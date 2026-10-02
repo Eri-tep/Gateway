@@ -3,8 +3,33 @@
 // ============================================================================
 
 #include "Service/BridgeService.h"
-#include "Service/ConsoleCli.h"
-#include "Service/EngineTask.h"
+#include "Protocol/DeviceRegistry.h"
+#include "Protocol/WallpadProtocol.h"
+#include "System/LockUtils.h"
+#include "System/SystemDiagnostics.h"
+#include "Transport/NetworkRouter.h"
+
+static BridgeDeviceStateListener s_bridge_dev_listener = nullptr;
+static ElevatorStateListener s_elevator_listener = nullptr;
+
+void Bridge_RegisterDeviceStateListener(BridgeDeviceStateListener listener) noexcept {
+  s_bridge_dev_listener = listener;
+}
+
+void Bridge_RegisterElevatorListener(ElevatorStateListener listener) noexcept {
+  s_elevator_listener = listener;
+}
+
+bool Bridge_ForwardPacket(uint8_t slot_idx, const StaticPacket &pkt,
+                          bool burst) noexcept {
+  if (burst || slot_idx == 0) {
+    return Ew11Manager::sendBurstPacket(slot_idx, pkt, 2, 20);
+  } else {
+    const bool sent = Hub_SendPacket(slot_idx, pkt);
+    System_TracePacket(5, true, sent ? TraceType::CTL : TraceType::DRP, pkt);
+    return sent;
+  }
+}
 
 #include <Preferences.h>
 #include <WiFi.h>
@@ -79,7 +104,7 @@ void demuxElevatorStream(HubClientSlot *slot) {
       StaticPacket drp_pkt{5, p_len};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + p_len],
                 drp_pkt.data.begin());
-      g_telnet_tracer.trace(5, false, TraceType::DRP, drp_pkt);
+      System_TracePacket(5, false, TraceType::DRP, drp_pkt);
       g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
       p += p_len;
       continue;
@@ -108,7 +133,7 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
       g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
       StaticPacket trace_pkt{5, 19};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 19], trace_pkt.data.begin());
-      g_telnet_tracer.trace(5, false, TraceType::RMT, trace_pkt);
+      System_TracePacket(5, false, TraceType::RMT, trace_pkt);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
       p += 19;
       continue;
@@ -121,7 +146,7 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
       g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
       StaticPacket trace_pkt{5, 8};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 8], trace_pkt.data.begin());
-      g_telnet_tracer.trace(5, false, TraceType::RMT, trace_pkt);
+      System_TracePacket(5, false, TraceType::RMT, trace_pkt);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
       p += 8;
       continue;
@@ -206,7 +231,7 @@ static void onBurstTimer(void *arg) {
 
   // 3. 선로 유휴 상태 확인 -> 패킷 전송
   bool sent = Hub_SendPacket(slot, tx_pkt);
-  g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP,
+  System_TracePacket(5, true, sent ? TraceType::CTL : TraceType::DRP,
                         tx_pkt);
 
   portENTER_CRITICAL(&s_burst_fsm.mux);
@@ -289,8 +314,9 @@ void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
             s_last_elev_pwr.exchange(new_pwr, std::memory_order_acq_rel);
         if (prev != new_pwr) {
           ESP_LOGI(TAG, "[CH5] Elevator State Changed -> Power: %u", new_pwr);
-          Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY,
-                                    new_pwr, 0, 0, 0, nullptr, 0.0f, 15, 0, 0);
+          if (s_elevator_listener) {
+            s_elevator_listener(sub1, sub2, 15, 0, new_pwr, false);
+          }
         }
       }
       // 2) 13-byte 도착 감지 브로드캐스트
@@ -301,8 +327,9 @@ void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
         uint8_t ho = pkt_data[10];
         ESP_LOGI(TAG, "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor,
                  ho);
-        Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY, 0,
-                                  0, 0, 0, nullptr, 0.0f, floor, 0, ho);
+        if (s_elevator_listener) {
+          s_elevator_listener(sub1, sub2, floor, ho, 0, true);
+        }
       }
     }
     return;
@@ -407,7 +434,7 @@ bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
     g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
     StaticPacket trace_pkt{5, static_cast<uint8_t>(len)};
     std::copy(pkt, pkt + len, trace_pkt.data.begin());
-    g_telnet_tracer.trace(5, true, TraceType::CTL, trace_pkt);
+    System_TracePacket(5, true, TraceType::CTL, trace_pkt);
     rt.waiting_response = true;
     rt.query_sent_ms = millis();
     rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS;
@@ -517,7 +544,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
         g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
         StaticPacket trace_pkt{5, static_cast<uint8_t>(temp_frame.size())};
         std::copy(temp_frame.begin(), temp_frame.end(), trace_pkt.data.begin());
-        g_telnet_tracer.trace(5, true, TraceType::CTL, trace_pkt);
+        System_TracePacket(5, true, TraceType::CTL, trace_pkt);
         rt.waiting_response = true;
         rt.query_sent_ms = now;
         rt.next_tx_ms = now + Config::FCU::INTER_PACKET_DELAY_MS;
@@ -537,7 +564,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
         g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
         StaticPacket trace_pkt{5, len};
         std::copy(rt.pending_cmd_buf, rt.pending_cmd_buf + len, trace_pkt.data.begin());
-        g_telnet_tracer.trace(5, true, TraceType::CTL, trace_pkt);
+        System_TracePacket(5, true, TraceType::CTL, trace_pkt);
         rt.waiting_response = true;
         rt.query_sent_ms = now;
         rt.next_tx_ms = now + Config::FCU::INTER_PACKET_DELAY_MS;
@@ -577,7 +604,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
       g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
       StaticPacket trace_pkt{5, static_cast<uint8_t>(ModbusRtu::kQueryPkt.size())};
       std::copy(ModbusRtu::kQueryPkt.begin(), ModbusRtu::kQueryPkt.end(), trace_pkt.data.begin());
-      g_telnet_tracer.trace(5, true, TraceType::QRY, trace_pkt);
+      System_TracePacket(5, true, TraceType::QRY, trace_pkt);
     }
   }
 }
@@ -795,7 +822,7 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
 
   slot->rx_pkts++;
   g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
-  g_telnet_tracer.trace(5, false, TraceType::RMT, pkt);
+  System_TracePacket(5, false, TraceType::RMT, pkt);
 
   auto *parser = WallpadParserFactory::getActiveParser();
   if (parser) {
@@ -818,7 +845,9 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
                                             pkt_len);
         }
         if (is_ack) {
-          Mgmt_BroadcastDeviceResult(g_device_repo.updateFromBus(pkt));
+          if (s_bridge_dev_listener) {
+            s_bridge_dev_listener(g_device_repo.updateFromBus(pkt));
+          }
         }
       }
     }

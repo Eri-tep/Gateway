@@ -282,6 +282,18 @@ extern SystemMetricsTracker g_metrics;
 extern TaskWdtMonitor g_wdt_monitor;
 extern PacketStatistics g_pkt_stats;
 
+struct Ch1StateMetrics {
+  std::atomic<uint32_t> poll_cnt{0};
+  std::atomic<uint32_t> vip_cnt{0};
+  std::atomic<uint32_t> normal_cnt{0};
+  std::atomic<uint32_t> stale_poll_cnt{0};
+  std::atomic<uint8_t> last_from_state{0};
+  std::atomic<uint8_t> last_to_state{0};
+  std::atomic<uint32_t> last_transition_ms{0};
+};
+
+extern Ch1StateMetrics g_ch1_state_metrics;
+
 // ── Unified System Trace Sink & Shutdown Hooks (Level 1 Decoupling) ──
 struct SystemTraceSink {
   void (*trace_packet)(uint8_t channel, bool is_tx, TraceType type,

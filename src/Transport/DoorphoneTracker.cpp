@@ -49,7 +49,7 @@ bool DoorphoneController::startSequence(uint8_t stx, uint8_t etx,
   sendDpPacket(stx, op_call, etx);
 
   if (_timer) {
-    esp_timer_start_once(_timer, 1000000); // 1초 후 문열림 패킷 전송
+    esp_timer_start_once(_timer, 350000); // 350ms 후 문열림 패킷 전송 (현대통신 FSM 골든 타임)
   }
   return true;
 }

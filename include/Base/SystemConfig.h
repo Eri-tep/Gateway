@@ -9,7 +9,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.7.0";
+constexpr const char *FIRMWARE_VERSION = "v1.7.1";
 } // namespace Config
 
 namespace Config::Task {
@@ -254,6 +254,17 @@ void Config_Load();
 void Config_Save();
 void Config_ResetDefaults();
 void System_Sha256ToHex(const char *input, char *output);
+
+struct RuntimeTimingConfig {
+  uint16_t ch1_poll_interval_ms{1000};
+  uint16_t ch2_cache_delay_ms{30};
+  uint16_t ch3_cache_delay_ms{240};
+};
+
+extern RuntimeTimingConfig g_timing_config;
+
+void TimingConfig_Load();
+void TimingConfig_Save();
 
 enum class TraceType : uint8_t {
   ALL = 0,

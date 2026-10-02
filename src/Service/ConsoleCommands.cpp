@@ -1,4 +1,5 @@
 #include "Service/ConsoleCommands.h"
+#include "Service/BridgeService.h"
 #include "Service/ConsoleCli.h"
 #include "Service/EngineTask.h"
 #include "Service/RemoteService.h"
