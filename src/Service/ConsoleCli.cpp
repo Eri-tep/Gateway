@@ -399,7 +399,7 @@ bool TelnetManager::handlePassword(TelnetSession *session,
   }
 
   if (res == AuthResult::OK) {
-    session->sessionState = AUTHENTICATED;
+    session->sessionState = SessionState::AUTHENTICATED;
     sendTelnetMsg(session->sock, "\r\nAuthentication successful.\r\n"
                                  "Welcome to Gateway Bridge Diagnostics!\r\n"
                                  "Type 'help' for available commands, "
@@ -435,7 +435,7 @@ bool TelnetManager::handlePassword(TelnetSession *session,
                     "======================\r\n\r\n");
     }
 
-    session->sessionState = AUTHENTICATED;
+    session->sessionState = SessionState::AUTHENTICATED;
     session->lineLen = 0;
     sendTelnetMsg(session->sock, "\r\n> ");
     return true;
@@ -691,10 +691,10 @@ void TelnetManager::onClientData(TelnetSession *session, const char *data,
     if (consumeIac(session, c))
       continue;
 
-    if (session->sessionState == AWAITING_PASSWORD) {
+    if (session->sessionState == SessionState::AWAITING_PASSWORD) {
       if (handlePasswordInput(session, c, should_close))
         break;
-    } else if (session->sessionState == AUTHENTICATED) {
+    } else if (session->sessionState == SessionState::AUTHENTICATED) {
       handleAuthenticatedInput(session, c);
     }
   }
@@ -762,7 +762,7 @@ void TelnetManager::onClientConnect(int new_sock,
       int victim_idx = -1;
       uint32_t oldest_unauth_time = 0xFFFFFFFF;
       for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
-        if (_sessions[i].sessionState == AWAITING_PASSWORD) {
+        if (_sessions[i].sessionState == SessionState::AWAITING_PASSWORD) {
           if (_sessions[i].connected_at_ms < oldest_unauth_time) {
             oldest_unauth_time = _sessions[i].connected_at_ms;
             victim_idx = i;
@@ -785,7 +785,7 @@ void TelnetManager::onClientConnect(int new_sock,
     _sessions[emptySlot].reset();
     _sessions[emptySlot].sock = new_sock;
     _sessions[emptySlot].clientIp = remote_ip;
-    _sessions[emptySlot].sessionState = AWAITING_PASSWORD;
+    _sessions[emptySlot].sessionState = SessionState::AWAITING_PASSWORD;
     _sessions[emptySlot].connected_at_ms = now;
     _sessions[emptySlot].last_activity_ms = now;
     _sessions[emptySlot].wasConnected = true;
@@ -924,7 +924,7 @@ void TelnetManager::tick() {
     if (s.sock < 0)
       continue;
 
-    uint32_t session_timeout = (s.sessionState == AWAITING_PASSWORD)
+    uint32_t session_timeout = (s.sessionState == SessionState::AWAITING_PASSWORD)
                                    ? 30000
                                    : Config::TCP::TELNET_SESSION_TIMEOUT_MS;
     if (TimeUtils::isElapsed(s.last_activity_ms, session_timeout)) {

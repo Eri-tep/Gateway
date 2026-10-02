@@ -336,4 +336,4 @@ enum class SystemTaskId : uint8_t {
 };
 
 void System_RegisterTaskHandle(SystemTaskId id, TaskHandle_t handle) noexcept;
-TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept;
+[[nodiscard]] TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept;

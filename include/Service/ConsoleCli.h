@@ -116,13 +116,13 @@ public:
 
 class TelnetManager {
 public:
-  enum SessionState { AWAITING_PASSWORD, AUTHENTICATED };
+  enum class SessionState : uint8_t { AWAITING_PASSWORD, AUTHENTICATED };
 
   struct TelnetSession {
     int sock = -1;
     IacState iacState = IacState::NORMAL;
     std::atomic<bool> wasConnected{false};
-    SessionState sessionState = AWAITING_PASSWORD;
+    SessionState sessionState = SessionState::AWAITING_PASSWORD;
     uint32_t connected_at_ms = 0;
     uint32_t last_activity_ms = 0;
     IPAddress clientIp{0, 0, 0, 0};
@@ -169,7 +169,7 @@ public:
       }
       iacState = IacState::NORMAL;
       wasConnected.store(false, std::memory_order_relaxed);
-      sessionState = AWAITING_PASSWORD;
+      sessionState = SessionState::AWAITING_PASSWORD;
       connected_at_ms = 0;
       last_activity_ms = 0;
       clientIp = IPAddress(0, 0, 0, 0);

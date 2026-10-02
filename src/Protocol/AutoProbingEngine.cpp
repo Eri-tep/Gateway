@@ -242,17 +242,41 @@ void AutoProbingEngine::feedFrame(span<const uint8_t> f) {
     const uint8_t best_stx = argmax256(_stx_counts, max_stx);
     const uint8_t best_etx = argmax256(_etx_counts, max_etx);
 
+    const size_t payload_len = f.size() - 2;
+    uint8_t xor_all = 0;
+    uint8_t sum_all = 0;
+    for (size_t i = 0; i < payload_len; ++i) {
+      xor_all ^= f[i];
+      sum_all += f[i];
+    }
+    const uint8_t sum_no_stx = static_cast<uint8_t>(sum_all - f[0]);
+
+    const uint8_t candidates[] = {
+        xor_all,                              // 1: XOR_ALL
+        static_cast<uint8_t>(xor_all ^ f[0]), // 2: XOR_NO_STX
+        sum_all,                              // 3: SUM_ALL
+        sum_no_stx,                           // 4: SUM_NO_STX
+        static_cast<uint8_t>(-sum_no_stx),    // 5: TWOS_COMPLEMENT
+        static_cast<uint8_t>(~sum_all),       // 6: ONES_COMPLEMENT
+    };
+
     ChecksumAlgo matched = ChecksumAlgo::UNKNOWN;
-    for (uint8_t a = 1; a <= 7; ++a) {
-      ChecksumAlgo algo = static_cast<ChecksumAlgo>(a);
-      if (calculateChecksum(algo, f.data(), f.size()) == actual_cs) {
-        _algo_matches[a]++;
-        matched = algo;
+    for (size_t i = 0; i < sizeof(candidates); ++i) {
+      if (candidates[i] == actual_cs) {
+        matched = static_cast<ChecksumAlgo>(i + 1);
         break;
       }
     }
+
+    if (matched == ChecksumAlgo::UNKNOWN &&
+        crc8Poly31(f.data(), payload_len) == actual_cs) {
+      matched = ChecksumAlgo::CRC8_MAXIM;
+    }
+
     if (matched == ChecksumAlgo::UNKNOWN)
       return;
+
+    _algo_matches[std::to_underlying(matched)]++;
 
     if (matched != _candidate_algo) {
       _candidate_algo = matched;

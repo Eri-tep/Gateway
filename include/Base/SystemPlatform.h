@@ -34,17 +34,17 @@
 #endif
 
 #include <span>
-#include <string_view>
 #include <utility>
 
 using std::span;
 using std::string_view;
+using std::to_underlying;
 
-inline uint32_t FastCrc32(std::span<const uint8_t> data) noexcept {
+[[nodiscard]] inline uint32_t FastCrc32(std::span<const uint8_t> data) noexcept {
   return ~esp_rom_crc32_le(~0U, data.data(), data.size());
 }
 
-inline uint32_t FastCrc32(const uint8_t *data, size_t len) noexcept {
+[[nodiscard]] inline uint32_t FastCrc32(const uint8_t *data, size_t len) noexcept {
   return FastCrc32(std::span<const uint8_t>(data, len));
 }
 

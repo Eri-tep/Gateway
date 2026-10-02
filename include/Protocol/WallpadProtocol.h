@@ -17,9 +17,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#include <cstddef>
-#include <cstdint>
-
 // ============================================================================
 // DEVICE SPECIFICATION (HARDCODED PER VENDOR)
 // ============================================================================
