@@ -180,3 +180,10 @@ struct StaticPacket {
   uint8_t length;
   std::array<uint8_t, 64> data;
 };
+
+// ── System Lifecycle & Synchronization Primitives ──
+extern EventGroupHandle_t g_system_event_group;
+extern std::atomic<bool> g_ota_in_progress;
+constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
+constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
+constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);

@@ -18,10 +18,57 @@
 #include <esp_core_dump.h>
 #endif
 
-#include "Service/ConsoleCli.h"
-#include "Service/RemoteService.h"
-
 extern uint32_t g_boot_start_ms;
+
+// ── Unified System Trace Sink & Shutdown Hooks ──
+static SystemTraceSink s_trace_sink{};
+constexpr size_t MAX_SHUTDOWN_HOOKS = 4;
+static ShutdownHook s_shutdown_hooks[MAX_SHUTDOWN_HOOKS]{nullptr};
+static std::atomic<size_t> s_shutdown_hook_count{0};
+
+void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept {
+  s_trace_sink = sink;
+}
+
+void System_RegisterShutdownHook(ShutdownHook hook) noexcept {
+  if (!hook)
+    return;
+  size_t idx = s_shutdown_hook_count.fetch_add(1, std::memory_order_relaxed);
+  if (idx < MAX_SHUTDOWN_HOOKS) {
+    s_shutdown_hooks[idx] = hook;
+  }
+}
+
+void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
+                        const StaticPacket &pkt) noexcept {
+  if (s_trace_sink.trace_packet) {
+    s_trace_sink.trace_packet(channel, is_tx, type, pkt);
+  }
+}
+
+void System_TraceMessage(const char *msg) noexcept {
+  if (s_trace_sink.trace_msg && msg) {
+    s_trace_sink.trace_msg(msg);
+  }
+}
+
+// ── Task Identifier & Handles (Encapsulated) ──
+static TaskHandle_t s_task_handles[static_cast<size_t>(SystemTaskId::COUNT)]{nullptr};
+
+void System_RegisterTaskHandle(SystemTaskId id, TaskHandle_t handle) noexcept {
+  size_t idx = static_cast<size_t>(id);
+  if (idx < static_cast<size_t>(SystemTaskId::COUNT)) {
+    s_task_handles[idx] = handle;
+  }
+}
+
+TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept {
+  size_t idx = static_cast<size_t>(id);
+  if (idx < static_cast<size_t>(SystemTaskId::COUNT)) {
+    return s_task_handles[idx];
+  }
+  return nullptr;
+}
 
 // ── Global Diagnostics Instances ──
 
@@ -471,30 +518,17 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   hw.temp_24h_avg = s24.count ? s24.temp_avg : hw.temp_cur;
   hw.temp_24h_peak = s24.count ? s24.temp_peak : hw.temp_cur;
 
-  st.ch1_stack = g_ch1_task_handle
-                     ? static_cast<uint16_t>(
-                           uxTaskGetStackHighWaterMark(g_ch1_task_handle))
-                     : 0;
-  st.ch2_stack = g_ch2_task_handle
-                     ? static_cast<uint16_t>(
-                           uxTaskGetStackHighWaterMark(g_ch2_task_handle))
-                     : 0;
-  st.ch3_stack = g_ch3_task_handle
-                     ? static_cast<uint16_t>(
-                           uxTaskGetStackHighWaterMark(g_ch3_task_handle))
-                     : 0;
-  st.ch4_stack = g_ch4_task_handle
-                     ? static_cast<uint16_t>(
-                           uxTaskGetStackHighWaterMark(g_ch4_task_handle))
-                     : 0;
-  st.net_stack = g_network_task_handle
-                     ? static_cast<uint16_t>(
-                           uxTaskGetStackHighWaterMark(g_network_task_handle))
-                     : 0;
-  st.telnet_stack = g_telnet_task_handle
-                        ? static_cast<uint16_t>(
-                              uxTaskGetStackHighWaterMark(g_telnet_task_handle))
-                        : 0;
+  auto get_stack = [](SystemTaskId id) -> uint16_t {
+    TaskHandle_t h = s_task_handles[static_cast<size_t>(id)];
+    return h ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(h)) : 0;
+  };
+
+  st.ch1_stack = get_stack(SystemTaskId::CH1);
+  st.ch2_stack = get_stack(SystemTaskId::CH2);
+  st.ch3_stack = get_stack(SystemTaskId::CH3);
+  st.ch4_stack = get_stack(SystemTaskId::CH4);
+  st.net_stack = get_stack(SystemTaskId::NETWORK);
+  st.telnet_stack = get_stack(SystemTaskId::TELNET);
 
   pkt.ch1 = g_pkt_stats.ch1;
   pkt.ch2 = g_pkt_stats.ch2;
@@ -514,27 +548,19 @@ void System_Restart(const char *reason) {
   if (reason && strlen(reason) > 0) {
     LogManager::writeRebootLog(reason);
   }
-  g_telnet_tracer.setTrace(false);
-  g_telnet_tracer.setClient(-1);
-  g_telnet_manager.shutdownForReboot();
-
-  {
-    MutexLocker lock(g_ch5_mutex);
-    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      if (g_hub_slots[s].sock >= 0) {
-        close(g_hub_slots[s].sock);
-        g_hub_slots[s].sock = -1;
-        g_hub_slots[s].is_connected = false;
-        g_hub_slots[s].rx_len = 0;
-      }
+  size_t count = s_shutdown_hook_count.load(std::memory_order_acquire);
+  if (count > MAX_SHUTDOWN_HOOKS) {
+    count = MAX_SHUTDOWN_HOOKS;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (s_shutdown_hooks[i]) {
+      s_shutdown_hooks[i]();
     }
   }
 
   uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(50));
   uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));
   uart_wait_tx_done(UART_NUM_2, pdMS_TO_TICKS(50));
-
-  Cache_SaveToNvs();
 
   rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
   vTaskDelay(pdMS_TO_TICKS(150));
@@ -691,28 +717,11 @@ void System_CheckOtaHealth() {
     return;
 
   bool wifi_ok = (WiFi.status() == WL_CONNECTED);
-  bool hub_ok = false;
-  {
-    MutexLocker lock(g_mgmt_mutex);
-    for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; ++i) {
-      if (g_mgmt_sessions[i].sock >= 0) {
-        hub_ok = true;
-        break;
-      }
-    }
-  }
-  if (!hub_ok) {
-    MutexLocker lock(g_ch5_mutex);
-    for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
-      if (g_hub_slots[i].is_connected) {
-        hub_ok = true;
-        break;
-      }
-    }
-  }
+  bool hub_ok = g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed) ||
+                g_pkt_stats.ch5.is_connected.load(std::memory_order_relaxed);
 
   bool rs485_ok =
-      (millis() - g_ch1_bus_ms.load(std::memory_order_relaxed) < 15000);
+      (millis() - g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) < 15000);
   bool time_ok = TimeUtils::isElapsed(g_boot_start_ms,
                                       Config::Timing::OTA_VALIDATION_PERIOD_MS);
   bool extended_time_ok = TimeUtils::isElapsed(g_boot_start_ms, 60000);
@@ -732,7 +741,7 @@ void System_CheckOtaHealth() {
       if (err == ESP_OK) {
         ::Serial.println(
             F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
-        g_telnet_tracer.trace(
+        System_TraceMessage(
             "[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
       } else {
         ::Serial.printf("[OTA] Failed to mark app valid: 0x%x\r\n", err);

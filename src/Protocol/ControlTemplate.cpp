@@ -3,102 +3,14 @@
 // ============================================================================
 
 #include "Protocol/ControlTemplate.h"
+#include "Protocol/DeviceRegistry.h"
 #include "Protocol/WallpadProtocol.h"
-#include "Service/ConsoleCli.h"
-#include "Service/EngineTask.h"
-#include "Service/RemoteService.h"
 #include "Transport/NetworkRouter.h"
 
 #include <Preferences.h>
 #include <algorithm>
 
 using namespace ControlTemplateUtils;
-
-// ============================================================================
-// Control: ControlDispatcher
-// ============================================================================
-
-bool ControlDispatcher::dispatch(StaticPacket &req,
-                                 StaticPacket &virtual_ack_out) {
-  if (UNLIKELY(req.length < 5))
-    return false;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  span<const uint8_t> frame(req.data.data(), req.length);
-
-  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  const bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
-
-  if (parser->isQueryPacket(frame)) {
-    virtual_ack_out.channel_id = req.channel_id;
-    return has_key &&
-           g_device_repo.copyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
-  }
-
-  GroupControlTemplate grp{};
-  const bool has_grp =
-      (has_key && dev_id != 0) && g_control_registry.findGroup(dev_id, grp);
-
-  bool is_ctl = parser->isControlPacket(frame);
-  if (!is_ctl && has_grp && grp.frame_len > 4 &&
-      frame.size() >= grp.frame_len) {
-    VendorProfileDescriptor desc;
-    ProfileRepository::getActiveProfile(desc);
-    const uint8_t op_off =
-        (desc.opcode_offset < frame.size()) ? desc.opcode_offset : 4;
-    is_ctl = (frame[op_off] == grp.raw_template[op_off]);
-  }
-  if (!is_ctl)
-    return false;
-
-  auto drop = [&]() {
-    g_telnet_tracer.trace(req.channel_id, false, TraceType::DRP, req);
-    return false;
-  };
-
-  if (has_grp) {
-    // 가스: 원격 '열림' 차단 (닫힘 값만 허용)
-    if (grp.coverage.dev_class == DeviceClass::GAS &&
-        grp.close_slot.discovered &&
-        grp.close_slot.action_offset < req.length &&
-        req.data[grp.close_slot.action_offset] != grp.close_slot.off_val)
-      return drop();
-
-    // 난방: 온도 설정 범위 검증
-    const auto &ts = grp.temp_slot;
-    if (grp.coverage.dev_class == DeviceClass::THERMOSTAT && ts.discovered &&
-        ts.action_offset < req.length && ts.category_offset != 0xFF &&
-        ts.category_offset < req.length &&
-        req.data[ts.category_offset] == ts.category_val) {
-      const uint8_t t = req.data[ts.action_offset];
-      if (t < 5 || t > 35)
-        return drop();
-    }
-  }
-
-  RouteEndpoint ep{1, -1, 0};
-  const bool route_known =
-      has_key && g_route_registry.lookupRoute(dev_id, sub1, sub2, ep);
-
-  if (route_known && ep.channel_id == 5 && ep.slot_idx >= 0 &&
-      ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {
-    const bool unidir = (has_grp && grp.isUnidirectional()) || dev_id == 0x34;
-    if (unidir || ep.slot_idx == 0) {
-      Ew11Manager::sendBurstPacket(static_cast<uint8_t>(ep.slot_idx), req, 2,
-                                   20);
-    } else {
-      const bool sent = Hub_SendPacket(static_cast<uint8_t>(ep.slot_idx), req);
-      g_telnet_tracer.trace(5, true, sent ? TraceType::CTL : TraceType::DRP,
-                            req);
-    }
-    return false;
-  }
-
-  QueueHandle_t q =
-      (req.channel_id == 6) ? g_ch1_vip_queue : g_ch1_control_queue;
-  if (Queue_EnqueueDropHead(q, req))
-    g_telnet_tracer.trace(1, true, TraceType::CTL, req);
-  return false;
-}
 
 // ============================================================================
 // Control: ControlTemplateRegistry

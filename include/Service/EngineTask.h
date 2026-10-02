@@ -8,6 +8,7 @@
 #include "Base/SystemConfig.h"
 #include "Base/SystemPlatform.h"
 #include "Protocol/ControlTemplate.h"
+#include "Protocol/DeviceRegistry.h"
 #include "Protocol/WallpadProtocol.h"
 #include "System/LockUtils.h"
 #include "System/SystemDiagnostics.h"
@@ -73,82 +74,15 @@ public:
   }
 };
 
-struct DeviceStateEntry {
-  uint8_t dev_id;
-  uint8_t sub1, sub2;
-  std::array<uint8_t, 64> last_ack_data;
-  uint8_t last_ack_len{0};
-  uint8_t last_target_temp{0};
-  uint8_t last_current_temp{0};
-  uint32_t last_updated_ms{0};
-  mutable uint32_t last_stale_poll_ms{0};
-  uint8_t timeout_count{0};
-  bool is_online{false};
-
-  [[nodiscard]] bool isStale() const noexcept {
-    return last_updated_ms > 0 &&
-           TimeUtils::isElapsed(last_updated_ms,
-                                Config::Timing::STALE_DEVICE_THRESHOLD_MS);
-  }
-};
-
 extern SemaphoreHandle_t g_ctrl_queue_mutex;
 
 [[nodiscard]] bool Queue_EnqueueDropHead(QueueHandle_t queue,
                                          const StaticPacket &packet) noexcept;
 
-enum class TraceType : uint8_t {
-  ALL = 0,
-  QRY,
-  CTL,
-  ACK,
-  DRP,
-  RMT,
-  MSG,
-  CH,
-  DEVID
-};
-
 struct WallpadChannelConfig {
   uart_port_t uart_num;
   QueueHandle_t *event_queue_ptr;
   uint8_t channel_id;
-};
-
-class DeviceRepository {
-private:
-  static constexpr size_t MAX_DEVICES = 48;
-  DeviceStateEntry cache[MAX_DEVICES]{};
-  int8_t dev_lookup_map[256]{};
-  size_t device_count = 0;
-  SemaphoreHandle_t _cache_mutex = nullptr;
-
-public:
-  DeviceStateEntry *findMutable(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                bool auto_create = false) noexcept;
-  void initDevices();
-  void clear();
-  [[nodiscard]] const DeviceStateEntry *find(uint8_t dev_id, uint8_t sub1,
-                                             uint8_t sub2) const noexcept;
-  [[nodiscard]] const DeviceStateEntry *getAt(size_t index) const noexcept;
-  [[nodiscard]] bool getSnapshot(size_t index,
-                                 DeviceStateEntry &out_copy) noexcept;
-  [[nodiscard]] size_t count() const noexcept;
-  [[nodiscard]] size_t getOnlineCount() const noexcept;
-  void setLastStalePollMs(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                          uint32_t ms) noexcept;
-  void setLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept;
-  bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                     uint8_t temp) noexcept;
-  void updateFromBus(StaticPacket &ack);
-  static void decodeDeviceState(const GroupControlTemplate &grp,
-                                const StaticPacket &ack,
-                                const DeviceStateEntry *dev,
-                                DecodedDeviceState &out);
-  void handlePollingTimeout(const DeviceStateEntry *dev);
-  void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);
-  [[nodiscard]] bool copyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                    StaticPacket &out) noexcept;
 };
 
 namespace PacketCodec {
@@ -212,16 +146,9 @@ extern QueueSetHandle_t g_ch1_queue_set;
 extern QueueHandle_t g_uart0_event_queue, g_uart1_event_queue,
     g_uart2_event_queue;
 extern QueueHandle_t g_ch4_passthrough_queue;
-extern SemaphoreHandle_t g_ch5_mutex;
 extern SemaphoreHandle_t g_mgmt_mutex;
-extern std::atomic<uint32_t> g_ch1_bus_ms;
-extern std::atomic<bool> g_ota_in_progress;
 extern std::atomic<bool> g_initial_caching_complete;
 extern std::atomic<bool> g_probe_convergence_reset;
-extern EventGroupHandle_t g_system_event_group;
-constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
-constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
-constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);
 extern PacketStatistics g_pkt_stats;
 extern uint32_t g_boot_start_ms;
 struct WifiFallbackGuard {
@@ -234,8 +161,6 @@ extern WifiFallbackGuard g_wifi_guard;
 extern SoftwareSerial g_doorphone_serial;
 extern SemaphoreHandle_t g_tracer_sem;
 
-extern TaskHandle_t g_telnet_task_handle, g_ch1_task_handle, g_ch2_task_handle,
-    g_ch3_task_handle, g_ch4_task_handle, g_network_task_handle;
 extern SemaphoreHandle_t g_uart0_mutex, g_uart1_mutex, g_uart2_mutex;
 
 // ── FreeRTOS Task Functions ──

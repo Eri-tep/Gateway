@@ -25,21 +25,14 @@ extern RuntimeTimingConfig g_timing_config;
 void TimingConfig_Load();
 void TimingConfig_Save();
 
-// ============================================================================
-// 2. HTTP(S) Cloud OTA Status
-// ============================================================================
-struct HttpOtaState {
-  std::atomic<bool> in_progress{false};
-  char status[64]{"Idle"};
-  uint8_t progress_pct{0};
-  char last_error[64]{""};
-};
+#include "System/SystemOta.h"
 
-extern HttpOtaState g_http_ota_state;
-
-static constexpr const char *DEFAULT_CLOUD_OTA_URL =
-    "https://raw.githubusercontent.com/Eri-tep/Gateway/main/bin/firmware.bin";
-void Mgmt_StartHttpOta(const char *url);
+// ============================================================================
+// 2. HTTP(S) Cloud OTA (Delegated to Level 1 SystemOta)
+// ============================================================================
+inline void Mgmt_StartHttpOta(const char *url) {
+  System_StartHttpOta(url);
+}
 
 // ============================================================================
 // 3. Port 8900 Management TCP Session Structure
@@ -70,6 +63,7 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                float power_w = 0.0f, int floor = 0,
                                int direction = 0, int ho = 0,
                                int vent_mode = 1);
+void Mgmt_BroadcastDeviceResult(const DeviceUpdateResult &res) noexcept;
 void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
 

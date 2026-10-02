@@ -111,6 +111,7 @@ struct SingleChannelStats {
   std::atomic<uint32_t> invalid_frames{0};
   std::atomic<uint32_t> timeouts{0};
   std::atomic<uint32_t> uncached_pkts{0};
+  std::atomic<uint32_t> last_activity_ms{0};
 
   void reset() {
     rx_pkts.store(0, std::memory_order_relaxed);
@@ -119,6 +120,7 @@ struct SingleChannelStats {
     invalid_frames.store(0, std::memory_order_relaxed);
     timeouts.store(0, std::memory_order_relaxed);
     uncached_pkts.store(0, std::memory_order_relaxed);
+    last_activity_ms.store(0, std::memory_order_relaxed);
   }
 };
 
@@ -163,6 +165,7 @@ struct ChanStats {
   uint32_t invalid_frames{0};
   uint32_t timeouts{0};
   uint32_t uncached_pkts{0};
+  uint32_t last_activity_ms{0};
 
   ChanStats() = default;
   ChanStats(const SingleChannelStats &s) noexcept
@@ -171,7 +174,8 @@ struct ChanStats {
         crc_errors(s.crc_errors.load(std::memory_order_relaxed)),
         invalid_frames(s.invalid_frames.load(std::memory_order_relaxed)),
         timeouts(s.timeouts.load(std::memory_order_relaxed)),
-        uncached_pkts(s.uncached_pkts.load(std::memory_order_relaxed)) {}
+        uncached_pkts(s.uncached_pkts.load(std::memory_order_relaxed)),
+        last_activity_ms(s.last_activity_ms.load(std::memory_order_relaxed)) {}
 
   ChanStats &operator=(const SingleChannelStats &s) noexcept {
     rx_pkts = s.rx_pkts.load(std::memory_order_relaxed);
@@ -180,6 +184,7 @@ struct ChanStats {
     invalid_frames = s.invalid_frames.load(std::memory_order_relaxed);
     timeouts = s.timeouts.load(std::memory_order_relaxed);
     uncached_pkts = s.uncached_pkts.load(std::memory_order_relaxed);
+    last_activity_ms = s.last_activity_ms.load(std::memory_order_relaxed);
     return *this;
   }
 };
@@ -276,3 +281,33 @@ extern const char *s_pending_reboot_reason;
 extern SystemMetricsTracker g_metrics;
 extern TaskWdtMonitor g_wdt_monitor;
 extern PacketStatistics g_pkt_stats;
+
+// ── Unified System Trace Sink & Shutdown Hooks (Level 1 Decoupling) ──
+struct SystemTraceSink {
+  void (*trace_packet)(uint8_t channel, bool is_tx, TraceType type,
+                       const StaticPacket &pkt){nullptr};
+  void (*trace_msg)(const char *msg){nullptr};
+};
+
+using ShutdownHook = void (*)();
+
+void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept;
+void System_RegisterShutdownHook(ShutdownHook hook) noexcept;
+
+void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
+                        const StaticPacket &pkt) noexcept;
+void System_TraceMessage(const char *msg) noexcept;
+
+// ── Task Identifier & Handles (Encapsulated) ──
+enum class SystemTaskId : uint8_t {
+  CH1 = 0,
+  CH2,
+  CH3,
+  CH4,
+  NETWORK,
+  TELNET,
+  COUNT
+};
+
+void System_RegisterTaskHandle(SystemTaskId id, TaskHandle_t handle) noexcept;
+TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept;

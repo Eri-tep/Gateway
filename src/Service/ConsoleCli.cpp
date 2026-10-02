@@ -7,6 +7,7 @@
 #include "Service/ConsoleCommands.h"
 #include "Service/EngineTask.h"
 #include "Service/RemoteService.h"
+#include "System/SystemDiagnostics.h"
 
 #include <WiFi.h>
 #include <cstdarg>
@@ -977,6 +978,22 @@ void Task_Telnet(void *pvParameters) {
   if (!g_tracer_sem)
     g_tracer_sem = xSemaphoreCreateBinary();
   g_telnet_manager.startServer();
+
+  SystemTraceSink sink;
+  sink.trace_packet = [](uint8_t ch, bool tx, TraceType ty,
+                         const StaticPacket &pkt) {
+    g_telnet_tracer.trace(ch, tx, ty, pkt);
+  };
+  sink.trace_msg = [](const char *msg) {
+    g_telnet_tracer.trace(msg);
+  };
+  System_RegisterTraceSink(sink);
+
+  System_RegisterShutdownHook([]() {
+    g_telnet_tracer.setTrace(false);
+    g_telnet_tracer.setClient(-1);
+    g_telnet_manager.shutdownForReboot();
+  });
   TSTAGE(3);
 
   static bool first_feed = true;

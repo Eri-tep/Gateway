@@ -19,3 +19,7 @@ SoftwareSerialConfig Door_SerialConfig(uint8_t data_bits, uint8_t parity,
   }
   return SWSERIAL_8N1;
 }
+
+// ── System Lifecycle & Synchronization Primitives ──
+EventGroupHandle_t g_system_event_group = nullptr;
+std::atomic<bool> g_ota_in_progress{false};

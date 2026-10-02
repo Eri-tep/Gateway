@@ -27,122 +27,7 @@
 static const char *TAG = "EW11";
 
 // ============================================================================
-// Domain 1: Modbus-RTU Protocol Codec (C++17 Type-Safe Frames, Zero-Heap)
-// ============================================================================
-namespace ModbusRtu {
-
-constexpr uint16_t kModbusCrcInit = 0xFFFF;
-constexpr uint16_t kModbusPolynomial = 0xA001;
-
-// Modbus-RTU CRC16 (Polynomial: 0xA001, Init: 0xFFFF, Zero-Heap)
-inline uint16_t calcCrc16(const uint8_t *buf, size_t len) {
-  uint16_t crc = kModbusCrcInit;
-  for (size_t pos = 0; pos < len; pos++) {
-    crc ^= static_cast<uint16_t>(buf[pos]);
-    for (int i = 8; i != 0; i--) {
-      if ((crc & 0x0001) != 0) {
-        crc >>= 1;
-        crc ^= kModbusPolynomial;
-      } else {
-        crc >>= 1;
-      }
-    }
-  }
-  return crc;
-}
-
-// §4.1 상태 조회 쿼리 (8B 고정 프레임, Read Holding Registers 0x0000..0x0006)
-constexpr std::array<uint8_t, 8> kQueryPkt = {0x01, 0x03, 0x00, 0x00,
-                                              0x00, 0x07, 0x04, 0x08};
-
-// §4.2 전원 OFF (8B 고정 프레임, Write Single Register 0x0002 = 0)
-constexpr std::array<uint8_t, 8> kPowerOffPkt = {0x01, 0x06, 0x00, 0x02,
-                                                 0x00, 0x00, 0x28, 0x0A};
-
-// §4.2 전원 ON: Reg 0x0001(모드), 0x0002(풍량), 0x0003(스윙) 일괄 (15B FC 0x10,
-// Reg 0 절대 보존)
-inline std::array<uint8_t, 15>
-buildWriteMultiplePowerOn(uint16_t mode, uint16_t fan, uint16_t swing) {
-  std::array<uint8_t, 15> frame = {
-      0x01,
-      0x10,
-      0x00,
-      0x01, // 시작 번지 0x0001 (Reg 0 절대 보존)
-      0x00,
-      0x03, // 레지스터 개수 3개
-      0x06, // 데이터 바이트 수 6바이트
-      static_cast<uint8_t>((mode >> 8) & 0xFF),
-      static_cast<uint8_t>(mode & 0xFF),
-      static_cast<uint8_t>((fan >> 8) & 0xFF),
-      static_cast<uint8_t>(fan & 0xFF),
-      static_cast<uint8_t>((swing >> 8) & 0xFF),
-      static_cast<uint8_t>(swing & 0xFF),
-      0x00,
-      0x00 // CRC 필드
-  };
-  uint16_t crc = calcCrc16(frame.data(), 13);
-  frame[13] = static_cast<uint8_t>(crc & 0xFF);
-  frame[14] = static_cast<uint8_t>((crc >> 8) & 0xFF);
-  return frame;
-}
-
-// §4.3~§4.6 단일 레지스터 쓰기 (8B FC 0x06 표준 프레임)
-inline std::array<uint8_t, 8> buildWriteSingle(uint16_t reg, uint16_t val) {
-  std::array<uint8_t, 8> frame = {0x01,
-                                  0x06,
-                                  static_cast<uint8_t>((reg >> 8) & 0xFF),
-                                  static_cast<uint8_t>(reg & 0xFF),
-                                  static_cast<uint8_t>((val >> 8) & 0xFF),
-                                  static_cast<uint8_t>(val & 0xFF),
-                                  0x00,
-                                  0x00};
-  uint16_t crc = calcCrc16(frame.data(), 6);
-  frame[6] = static_cast<uint8_t>(crc & 0xFF);
-  frame[7] = static_cast<uint8_t>((crc >> 8) & 0xFF);
-  return frame;
-}
-
-// 19B 상태 쿼리 응답 파싱 및 CRC-16 Little-Endian 검증
-inline bool parseStatusResponse(const uint8_t *data, size_t len,
-                                Fcu::Snapshot &out) {
-  if (len < 19 || data[0] != 0x01 || data[1] != 0x03 || data[2] != 0x0E) {
-    return false;
-  }
-
-  // CRC-16 검증: data[0..16] (17바이트) -> CRC at data[17..18]
-  uint16_t calc_crc = calcCrc16(data, 17);
-  uint16_t pkt_crc =
-      static_cast<uint16_t>(data[17]) | (static_cast<uint16_t>(data[18]) << 8);
-  if (calc_crc != pkt_crc) {
-    return false;
-  }
-
-  // Big-Endian 16비트 레지스터 언패킹 헬퍼
-  auto unpackBe16 = [](const uint8_t *p) -> uint16_t {
-    return (static_cast<uint16_t>(p[0]) << 8) | p[1];
-  };
-
-  uint16_t reg1 = unpackBe16(&data[5]); // 운전 모드 (1: 냉방, 2: 난방, 3: 송풍)
-  uint16_t reg2 = unpackBe16(
-      &data[7]); // 풍량 / 전원 (0: 정지, 1: 미풍, 2: 약풍, 3: 강풍, 4: 자동)
-  uint16_t reg3 = unpackBe16(&data[9]);  // 스윙 (0: 고정, 2: 회전)
-  uint16_t reg4 = unpackBe16(&data[11]); // 에러 코드
-  uint16_t reg5 = unpackBe16(&data[13]); // 설정 희망 온도
-  uint16_t reg6 = unpackBe16(&data[15]); // 실내 측정 온도
-
-  out.mode =
-      (reg1 >= 1 && reg1 <= 3) ? static_cast<Fcu::Mode>(reg1) : Fcu::Mode::Cool;
-  out.fan_speed =
-      (reg2 <= 4) ? static_cast<Fcu::FanSpeed>(reg2) : Fcu::FanSpeed::Off;
-  out.swing = (reg3 == 2) ? Fcu::Swing::On : Fcu::Swing::Off;
-  out.error_code = static_cast<uint8_t>(reg4 & 0xFF);
-  out.target_temp = static_cast<uint8_t>(reg5 & 0xFF);
-  out.room_temp = static_cast<uint8_t>(reg6 & 0xFF);
-  out.power = (out.fan_speed != Fcu::FanSpeed::Off);
-  return true;
-}
-
-} // namespace ModbusRtu
+// Modbus-RTU Protocol Codec is canonically located in Protocol/ModbusProtocol.h
 
 // ============================================================================
 // Domain 2: Stream Framing & Buffer Sliding Engine (Zero-Allocation)
@@ -221,6 +106,9 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
         slot->rx_buf[p + 2] == 0x0E) {
       slot->rx_pkts++;
       g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+      StaticPacket trace_pkt{5, 19};
+      std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 19], trace_pkt.data.begin());
+      g_telnet_tracer.trace(5, false, TraceType::RMT, trace_pkt);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
       p += 19;
       continue;
@@ -231,6 +119,9 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
         (slot->rx_buf[p + 1] == 0x06 || slot->rx_buf[p + 1] == 0x10)) {
       slot->rx_pkts++;
       g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+      StaticPacket trace_pkt{5, 8};
+      std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 8], trace_pkt.data.begin());
+      g_telnet_tracer.trace(5, false, TraceType::RMT, trace_pkt);
       Fcu::handleSlotRx(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
       p += 8;
       continue;
@@ -441,18 +332,20 @@ namespace {
 
 static Fcu::SlotRuntime s_fcu_slots[Config::TCP::MAX_EW11_SLOTS]{};
 
-void syncDeviceRepository(uint8_t slot_idx, const Fcu::Snapshot &snap) {
+void syncDeviceRepository(uint8_t slot_idx, const Fcu::Snapshot &snap,
+                          const uint8_t *raw_pkt = nullptr, size_t raw_len = 0) {
   DeviceStateEntry *dev =
       g_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
   if (!dev)
     return;
 
-  dev->last_ack_len = 19;
-  dev->last_ack_data[6] = static_cast<uint8_t>(snap.mode);
-  dev->last_ack_data[8] = static_cast<uint8_t>(snap.fan_speed);
-  dev->last_ack_data[10] = static_cast<uint8_t>(snap.swing);
-  dev->last_ack_data[14] = snap.target_temp;
+  dev->last_ack_len = static_cast<uint8_t>(
+      std::min(raw_len, sizeof(dev->last_ack_data)));
+  if (raw_pkt && dev->last_ack_len > 0) {
+    memcpy(dev->last_ack_data.data(), raw_pkt, dev->last_ack_len);
+  }
   dev->last_target_temp = snap.target_temp;
+  dev->last_current_temp = snap.room_temp;
   dev->last_updated_ms = millis();
   dev->is_online = true;
 }
@@ -512,6 +405,9 @@ bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
   if (ok) {
     slot.tx_pkts++;
     g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    StaticPacket trace_pkt{5, static_cast<uint8_t>(len)};
+    std::copy(pkt, pkt + len, trace_pkt.data.begin());
+    g_telnet_tracer.trace(5, true, TraceType::CTL, trace_pkt);
     rt.waiting_response = true;
     rt.query_sent_ms = millis();
     rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS;
@@ -592,7 +488,7 @@ void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
 
     // 스냅샷 갱신 및 레포지토리 동기화
     rt.snap = new_snap;
-    syncDeviceRepository(slot_idx, rt.snap);
+    syncDeviceRepository(slot_idx, rt.snap, data, len);
   }
 }
 
@@ -619,6 +515,9 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
                MSG_DONTWAIT) == static_cast<ssize_t>(temp_frame.size())) {
         slot->tx_pkts++;
         g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        StaticPacket trace_pkt{5, static_cast<uint8_t>(temp_frame.size())};
+        std::copy(temp_frame.begin(), temp_frame.end(), trace_pkt.data.begin());
+        g_telnet_tracer.trace(5, true, TraceType::CTL, trace_pkt);
         rt.waiting_response = true;
         rt.query_sent_ms = now;
         rt.next_tx_ms = now + Config::FCU::INTER_PACKET_DELAY_MS;
@@ -636,6 +535,9 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
           static_cast<ssize_t>(len)) {
         slot->tx_pkts++;
         g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        StaticPacket trace_pkt{5, len};
+        std::copy(rt.pending_cmd_buf, rt.pending_cmd_buf + len, trace_pkt.data.begin());
+        g_telnet_tracer.trace(5, true, TraceType::CTL, trace_pkt);
         rt.waiting_response = true;
         rt.query_sent_ms = now;
         rt.next_tx_ms = now + Config::FCU::INTER_PACKET_DELAY_MS;
@@ -673,6 +575,9 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
         static_cast<ssize_t>(ModbusRtu::kQueryPkt.size())) {
       slot->tx_pkts++;
       g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      StaticPacket trace_pkt{5, static_cast<uint8_t>(ModbusRtu::kQueryPkt.size())};
+      std::copy(ModbusRtu::kQueryPkt.begin(), ModbusRtu::kQueryPkt.end(), trace_pkt.data.begin());
+      g_telnet_tracer.trace(5, true, TraceType::QRY, trace_pkt);
     }
   }
 }
@@ -913,7 +818,7 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
                                             pkt_len);
         }
         if (is_ack) {
-          g_device_repo.updateFromBus(pkt);
+          Mgmt_BroadcastDeviceResult(g_device_repo.updateFromBus(pkt));
         }
       }
     }
@@ -1086,4 +991,16 @@ bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
     return true;
   }
   return false;
+}
+
+void Bridge_ShutdownSockets() noexcept {
+  MutexLocker lock(g_ch5_mutex);
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    if (g_hub_slots[s].sock >= 0) {
+      close(g_hub_slots[s].sock);
+      g_hub_slots[s].sock = -1;
+      g_hub_slots[s].is_connected = false;
+      g_hub_slots[s].rx_len = 0;
+    }
+  }
 }

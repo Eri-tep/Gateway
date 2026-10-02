@@ -9,7 +9,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.6.9";
+constexpr const char *FIRMWARE_VERSION = "v1.7.0";
 } // namespace Config
 
 namespace Config::Task {
@@ -201,6 +201,7 @@ struct HubClientSlot {
 };
 
 extern HubClientSlot g_hub_slots[Config::TCP::MAX_EW11_SLOTS];
+extern SemaphoreHandle_t g_ch5_mutex;
 
 enum class WallpadProfileIndex : uint8_t {
   ADAPTIVE = 0,
@@ -253,3 +254,17 @@ void Config_Load();
 void Config_Save();
 void Config_ResetDefaults();
 void System_Sha256ToHex(const char *input, char *output);
+
+enum class TraceType : uint8_t {
+  ALL = 0,
+  QRY,
+  CTL,
+  ACK,
+  DRP,
+  RMT,
+  MSG,
+  CH,
+  DEVID
+};
+
+extern std::atomic<bool> g_mgmt_client_connected;

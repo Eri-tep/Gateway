@@ -168,6 +168,37 @@ struct PollingTargetEntry {
   std::array<uint8_t, 64> raw_ack_data{};
 };
 
+// ── 1st Tier Warm-Start Cache Data Structures (Level 3 Wallpad Domain) ──
+struct RtcWarmCacheEntry {
+  uint8_t dev_id;
+  uint8_t sub1;
+  uint8_t sub2;
+  uint8_t source_channels;
+  uint8_t raw_len;
+  uint8_t raw_query[32];
+};
+
+struct RtcWarmCache {
+  uint32_t magic; // 0x57415243 ('WARC')
+  uint8_t count;
+  uint8_t reserved[3];
+  RtcWarmCacheEntry entries[48];
+  uint32_t crc32;
+};
+
+constexpr uint32_t RTC_MAGIC_WARM_CACHE = 0x57415243; // 'WARC'
+
+extern bool g_warm_cache_loaded;
+extern uint8_t g_warm_cache_source; // 0: None/Cold, 1: RTC SRAM, 2: NVS Flash
+extern uint8_t g_warm_cache_restored_count;
+extern std::atomic<bool> g_warm_cache_dirty;
+extern std::atomic<uint32_t> g_warm_cache_dirty_ms;
+
+void WarmCache_SaveToRtc();
+void WarmCache_SaveToNvs();
+void WarmCache_RestoreOnBoot();
+void WarmCache_CheckNvsDebounce();
+
 class PollingTargetRegistry {
 public:
   // 현대통신 세대망 환경(실제 28대 기기 수용 + 20대 여유 슬롯) 48대 설정

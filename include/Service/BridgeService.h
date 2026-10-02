@@ -4,34 +4,10 @@
 // BridgeService: Level 4 EW11 TCP Bridge & Air Conditioner (FCU) Subsystem
 // ============================================================================
 
+#include "Protocol/ModbusProtocol.h"
 #include "Service/EngineTask.h"
 
 namespace Fcu {
-
-enum class Mode : uint16_t { Cool = 1, Heat = 2, FanOnly = 3 };
-
-enum class FanSpeed : uint16_t {
-  Off = 0, // 정지 (30~40초 지연 정지 트리거)
-  Low = 1,
-  Mid = 2,
-  High = 3,
-  Auto = 4
-};
-
-enum class Swing : uint16_t {
-  Off = 0,
-  On = 2 // 값 1은 예약/미사용, 스윙ON은 반드시 2
-};
-
-struct Snapshot {
-  Mode mode{Mode::Cool};
-  FanSpeed fan_speed{FanSpeed::Off};
-  Swing swing{Swing::Off};
-  uint8_t error_code{0};
-  uint8_t target_temp{24}; // 희망 설정 온도 (℃)
-  uint8_t room_temp{0};    // 실내 측정 온도 (℃)
-  bool power{false};       // fan_speed != FanSpeed::Off
-};
 
 struct SlotRuntime {
   Snapshot snap{};
@@ -78,3 +54,4 @@ int Hub_AcceptClient(int slot_idx, int server_fd);
 void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
                        size_t pkt_len);
 void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len);
+void Bridge_ShutdownSockets() noexcept;

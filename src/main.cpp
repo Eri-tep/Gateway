@@ -47,7 +47,7 @@ struct TaskSpawnDescriptor {
   BaseType_t core_id;
   StackType_t *stack_buf;
   StaticTask_t *tcb_buf;
-  TaskHandle_t *out_handle;
+  SystemTaskId task_id;
   bool bypass_in_rescue;
 };
 
@@ -215,7 +215,8 @@ static void Boot_RestoreConfigAndState() {
   Serial.printf("[CONFIG] WiFi SSID: '%s', Timeout: %us, AP SSID: '%s'\r\n",
                 g_config.wifi_ssid, g_config.wifi_connect_timeout_s,
                 g_config.ap_ssid);
-  Cache_RestoreOnBoot();
+  WarmCache_RestoreOnBoot();
+  System_RegisterShutdownHook(WarmCache_SaveToNvs);
   char dp_ns[16];
   Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile,
                                                      dp_ns, sizeof(dp_ns));
@@ -226,6 +227,7 @@ static void Boot_InitSubsystems() {
   g_control_registry.init();
   Mgmt_Init();
   Ew11Manager::init();
+  System_RegisterShutdownHook(Bridge_ShutdownSockets);
 }
 
 // ============================================================================
@@ -379,22 +381,22 @@ static void Boot_InitWifiAndOta() {
 static const TaskSpawnDescriptor kTaskDescriptors[] = {
     {Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1, nullptr,
      TaskPriority::CH1_REALTIME, 1, stackCore1Ch1, &g_task_core1_ch1_buf,
-     &g_ch1_task_handle, true},
+     SystemTaskId::CH1, true},
     {Task_Ch2Ch3, "CH#2_WP#1", Config::Task::STACK_SIZE_SLAVE, &ch2_config,
      TaskPriority::WALLPAD_EMULATION, 1, stackCore1Slave,
-     &g_task_core1_slave_buf, &g_ch2_task_handle, true},
+     &g_task_core1_slave_buf, SystemTaskId::CH2, true},
     {Task_Ch2Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_SLAVE, &ch3_config,
      TaskPriority::WALLPAD_EMULATION, 1, stackCore1Slave2,
-     &g_task_core1_slave2_buf, &g_ch3_task_handle, true},
+     &g_task_core1_slave2_buf, SystemTaskId::CH3, true},
     {Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,
      TaskPriority::CH4_SUBWALLPAD, 1, stackCore1Ch4, &g_task_core1_ch4_buf,
-     &g_ch4_task_handle, true},
+     SystemTaskId::CH4, true},
     {Task_Network, "Network", Config::Task::STACK_SIZE_CORE0, nullptr,
      TaskPriority::NETWORK, 0, stackCore0Net, &g_task_core0_net_buf,
-     &g_network_task_handle, false},
+     SystemTaskId::NETWORK, false},
     {Task_Telnet, "Telnet_CLI", Config::Task::STACK_SIZE_TELNET, nullptr,
      TaskPriority::TELNET_CLI, 0, telnetTaskStack, &g_telnet_task_buf,
-     &g_telnet_task_handle, false},
+     SystemTaskId::TELNET, false},
 };
 
 static void Boot_StartTasks() {
@@ -417,11 +419,9 @@ static void Boot_StartTasks() {
         desc.function, desc.name, desc.stack_size, desc.param, desc.priority,
         desc.stack_buf, desc.tcb_buf, desc.core_id);
 
-    if (desc.out_handle) {
-      *desc.out_handle = h;
-    }
-
-    if (!h) {
+    if (h) {
+      System_RegisterTaskHandle(desc.task_id, h);
+    } else {
       Serial.printf("[FATAL] Failed to create static task '%s' on core %d!\r\n",
                     desc.name, static_cast<int>(desc.core_id));
     }

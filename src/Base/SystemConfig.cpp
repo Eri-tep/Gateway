@@ -10,6 +10,7 @@ portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> g_config_dirty{false};
 
 HubClientSlot g_hub_slots[Config::TCP::MAX_EW11_SLOTS];
+SemaphoreHandle_t g_ch5_mutex = nullptr;
 
 namespace Config::Timing {
 uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
@@ -365,3 +366,5 @@ void Config_ResetDefaults() {
   g_config = RuntimeConfig{};
   g_config_dirty.store(true, std::memory_order_release);
 }
+
+std::atomic<bool> g_mgmt_client_connected{false};
