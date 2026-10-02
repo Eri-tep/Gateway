@@ -4,33 +4,41 @@ This document defines the system specifications, runtime topology, channel mappi
 
 ---
 
-## 0. Canonical Clean Architecture Topology (4-Tier + 1 Foundation Soil)
+### 0. Canonical Clean Architecture Topology (4-Tier + 1 Foundation Soil)
 
-> **Mandatory Architectural Standard (v3.1.0 Canonical)**:
+> **Mandatory Architectural Standard (v4.0.0 Canonical & Modularized)**:
 > 1. **Foundation Soil (L0 Base 전역 순수 기반 Leaf)**: 수직 파이프라인의 층이 아니며, 전 계층($L1 \sim L4$)이 딛고 서 있는 불변의 전역 Leaf(Universal Soil). 컴파일 타임 상수, 핀맵, 고정 버퍼 규격 제공.
-> 2. **4-Tier Strict Vertical Pipeline ($L4 ightarrow L3 ightarrow L2 ightarrow L1$)**: 
->    - **L4 Service**: 비즈니스 애플리케이션 (`EngineTask`, `BridgeService`, `RemoteService`, `ConsoleCli`)
->    - **L3 Protocol**: 패킷 코덱 & 장치 모델 (`WallpadProtocol`, `ModbusProtocol`, `DeviceRegistry`, Leaf: `ProtocolTypes.h`)
->    - **L2 Transport**: 물리 채널 & 소켓 엔진 (`NetworkEngine`, `TcpReactor`, `DoorphoneTracker`, Leaf: `TransportTypes.h`)
+> 2. **4-Tier Strict Vertical Pipeline ($L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$)**: 
+>    - **L4 Service**: 비즈니스 애플리케이션 (`EngineTask`, `BridgeService`, `ConsoleCli`, `Console/`, `Remote/`)
+>    - **L3 Protocol**: 패킷 코덱, 웜스타트 캐시 & 자동 프로빙 (`WallpadParser`, `PollingRegistry`, `AutoProbingEngine`, `ModbusProtocol`, `DeviceRegistry`, `ControlTemplate`, Leaf: `ProtocolTypes.h`)
+>    - **L2 Transport**: 물리 채널, 소켓 엔진, 프레이밍 추적 (`NetworkRouter`, `TcpReactor`, `DoorphoneTracker`, `FramingTracker`, Leaf: `TransportTypes.h`)
 >    - **L1 System**: OS 프리미티브 & 인프라 (`LockUtils`, `SystemStorage`, `SystemDiagnostics`, `SystemOta`)
 > 3. **Zero Upward Includes**: 하위 계층이 상위 계층을 include하는 행위 수학적으로 0건.
 > 4. **No Middle-Man Pass-Through**: L0 Foundation Soil에 접근하기 위해 중간 계층이 불필요한 패스스루 래퍼를 두는 안티패턴 배제.
-> 5. **Complete Information Hiding (0-extern)**: 모든 런타임 전역 통신 배열(`g_hub_slots`) 및 락(`g_ch5_mutex`) 노출을 전면 폐기하고, `.cpp` 내부 `static` 번역 단위 변수로 완전 은닉. 외부는 읽기 전용 Snapshot API로만 소비.
+> 5. **Complete Information Hiding (0-extern)**: 모든 런타임 전역 통신 배열 및 락 노출을 전면 폐기하고, `.cpp` 내부 `static` 번역 단위 변수로 완전 은닉. 외부는 읽기 전용 Snapshot API로만 소비.
+> 6. **Single Responsibility Submodule Balance (400~800 Lines Sweet Spot)**: 단일 파일 1,000줄 이상의 God File을 엄격히 금지하며, 도메인별 응집 모듈로 분할.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ L4 Service: 도메인 비즈니스 로직 (EngineTask, BridgeService, Remote, CLI)│
+│ L4 Service: 도메인 비즈니스 로직 (EngineTask, BridgeService, Console, Remote)│
+│  ├─ Console: CmdSystem.cpp, CmdConfig.cpp, CmdDevice.cpp, CmdTrace.cpp │
+│  └─ Remote:  MgmtRpc.cpp, RemoteTelemetry.cpp, WifiManager.cpp         │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │ (수직 런타임: 오직 L3만 호출)
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ L3 Protocol: 패킷 프레이밍, 코덱, 장치 레지스트리 (Wallpad, Modbus, Registry)│
+│ L3 Protocol: 패킷 프레이밍, 코덱, 캐시, 자동학습 (Wallpad, Modbus, Registry) │
+│  ├─ WallpadParser.cpp (STX/ETX/CS 코덱, ProfileRepository)              │
+│  ├─ PollingRegistry.cpp (48슬롯 스케줄러, RTC SRAM/NVS 웜스타트 캐시)   │
+│  └─ AutoProbingEngine.cpp (엔트로피 분석, 통계 프로빙 FSM, 매트릭스)    │
 │ └─▶ [L3.0 Leaf: ProtocolTypes.h] (StaticPacket, DecodedDeviceState 등) │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │ (수직 런타임: 오직 L2만 호출)
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ L2 Transport: 물리 버스, 소켓 I/O, Core0 루프 (TcpReactor, NetworkRouter)│
+│ L2 Transport: 물리 버스, 소켓 I/O, Reactor, 프레이밍 학습               │
+│  ├─ TcpReactor.cpp, NetworkRouter.cpp, DoorphoneTracker.cpp            │
+│  └─ FramingTracker.cpp (L0에서 L2로 승격된 STX/ETX/LEN 동적 학습 FSM)  │
 │ └─▶ [L2.0 Leaf: TransportTypes.h] (HubClientSlotSnapshot, RouteEndpoint)│
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │ (수직 런타임: 오직 L1만 호출)
@@ -49,6 +57,13 @@ This document defines the system specifications, runtime topology, channel mappi
 │  - BufferUtils.h: Zero-Allocation 스크래치 버퍼 AppendBuf<N>            │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 0.1 Framework & Toolchain Environment Specifications
+- **Target Hardware**: M5Stack AtomS3 Lite (ESP32-S3FN8, 240MHz Dual-Core, 320KB SRAM, 8MB Flash)
+- **Framework**: `framework-arduinoespressif32 @ 4.20017.260907+sha.dcc1105b`
+- **Underlying SDK / ESP-IDF**: **ESP-IDF v4.4.7** (`ESP_IDF_VERSION_VAL(4, 4, 7)`)
+- **Toolchain**: `xtensa-esp32s3-elf-gcc / g++ 8.4.0 (2021r2-patch5)`
+- **C++ Standard**: **C++17** (`-std=gnu++17`)
 
 ---
 

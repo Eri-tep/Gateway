@@ -150,6 +150,9 @@ struct VendorProfileDescriptor {
 // 1ST TIER CACHE: POLLING TARGET REGISTRY
 // ============================================================================
 
+constexpr uint8_t kWallpadChMask = (1 << 2) | (1 << 3); // CH2, CH3 (월패드 유래)
+constexpr uint32_t EXPIRED_TARGET_EVICTION_TIMEOUT_MS = 600000;
+
 struct PollingTargetEntry {
   uint32_t last_requested_ms{0};
   uint32_t last_interval_ms{0};

@@ -9,6 +9,7 @@
 #include "System/SystemDiagnostics.h"
 #include "Transport/NetworkRouter.h"
 #include "Transport/TcpReactor.h"
+#include "Transport/FramingTracker.h"
 
 struct HubClientSlot {
   bool enabled{false};

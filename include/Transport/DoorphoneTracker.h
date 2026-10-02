@@ -7,6 +7,7 @@
 #include "Base/SystemConfig.h"
 #include "Base/SystemPlatform.h"
 #include "System/LockUtils.h"
+#include "Transport/FramingTracker.h"
 
 #include <atomic>
 #include <esp_timer.h>
