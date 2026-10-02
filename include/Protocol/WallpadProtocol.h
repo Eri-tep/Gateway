@@ -6,7 +6,7 @@
 
 #include "Base/SystemConfig.h"
 #include "Base/SystemPlatform.h"
-#include "Protocol/ControlTemplate.h"
+#include "Protocol/ProtocolTypes.h"
 #include "System/LockUtils.h"
 #include "System/SystemStorage.h"
 
@@ -321,6 +321,14 @@ public:
   uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
                             size_t len) const;
   static const char *getAlgoName(ChecksumAlgo algo);
+
+  // L2.3 DeviceRepository decoupled hooks
+  using OnlineCountFn = size_t (*)();
+  using DeviceAckLookupFn = bool (*)(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                     const uint8_t **out_ack, size_t *out_len);
+  using UpdateFromBusFn = void (*)(StaticPacket &ack);
+  static void setDeviceHooks(OnlineCountFn count_fn, DeviceAckLookupFn lookup_fn,
+                             UpdateFromBusFn update_fn);
 };
 
 extern AutoProbingEngine g_auto_probing_engine;
@@ -333,6 +341,10 @@ class ProfileRepository {
 public:
   static constexpr size_t MAX_PROFILES =
       4; // Slot 0: Auto, Slot 1..3: User Saved Profiles
+
+  // L2.2 ControlTemplate decoupled listener
+  using ProfileChangeCallbackFn = void (*)(uint8_t old_idx, uint8_t new_idx);
+  static void setProfileChangeListener(ProfileChangeCallbackFn cb);
 
   static void init();
   static size_t getProfileCount();
@@ -419,8 +431,6 @@ public:
 // From include/ProfileMatcher.h
 // ============================================================================
 
-class ControlTemplateRegistry;
-
 namespace ProfileMatcher {
 
 // 현재 수렴/잠금된 AutoProbeDescriptor를 기반으로 일치하는 제조사 프로파일을
@@ -432,14 +442,5 @@ const WallpadProfile *getActiveProfile();
 
 // 도어폰 패킷 헤더 매칭
 const DoorphoneSpec *matchDoorphone(uint8_t stx, uint8_t etx, uint8_t len);
-
-// 특정 제조사 프로파일의 기기 명세(DeviceSpec)를 ControlTemplateRegistry에
-// 주입합니다.
-void injectProfile(const WallpadProfile *profile,
-                   ControlTemplateRegistry &registry);
-
-// 캐시 수렴 시 호출되는 원스톱 엔트리포인트 (매칭 후 자동 슬롯 주입)
-void matchAndInject(const AutoProbeDescriptor &ad,
-                    ControlTemplateRegistry &registry);
 
 } // namespace ProfileMatcher

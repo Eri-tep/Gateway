@@ -3,8 +3,6 @@
 // ============================================================================
 
 #include "Protocol/WallpadProtocol.h"
-#include "Protocol/ControlTemplate.h"
-#include "Protocol/DeviceRegistry.h"
 #include "System/SystemDiagnostics.h"
 
 #include "esp_log.h"
@@ -381,136 +379,6 @@ const DoorphoneSpec *matchDoorphone(uint8_t stx, uint8_t etx, uint8_t len) {
       return &kWallpadProfiles[i]->doorphone;
   }
   return nullptr;
-}
-
-// 슬롯 한 개를 한 줄로 설정 (category_offset 은 현대통신 공통 5)
-static void setSlot(ActionSlot &s, uint8_t cat, uint8_t act, uint8_t ack,
-                    uint8_t mn = 0, uint8_t mx = 0) {
-  s.discovered = true;
-  s.category_offset = 5;
-  s.category_val = cat;
-  s.action_offset = act;
-  s.ack_state_offset = ack;
-  if (mx) {
-    s.min_val = mn;
-    s.max_val = mx;
-  }
-}
-
-static void setLevels(ActionSlot &s, std::initializer_list<uint8_t> tokens) {
-  s.level_count = static_cast<decltype(s.level_count)>(tokens.size());
-  size_t i = 0;
-  for (uint8_t t : tokens)
-    s.level_tokens[i++] = t;
-}
-
-void injectProfile(const WallpadProfile *profile,
-                   ControlTemplateRegistry &registry) {
-  if (!profile || !profile->devices || profile->device_count == 0)
-    return;
-
-  ESP_LOGI(TAG, "Applying profile: %s (%u devices)", profile->vendor_name,
-           (unsigned)profile->device_count);
-
-  for (size_t i = 0; i < profile->device_count; ++i) {
-    const DeviceSpec &spec = profile->devices[i];
-    registry.modifyOrCreateGroup(
-        spec.dev_id,
-        [&](GroupControlTemplate &grp) {
-          grp.coverage.dev_class = spec.dev_class;
-          setStr(grp.group_name, spec.name);
-          grp.frame_len = spec.ctl_len;
-          grp.sub1_offset = profile->sub1_offset;
-          grp.sub2_offset = profile->sub2_offset;
-
-          // 0x34 엘리베이터: 월패드 쿼리가 없으므로 기본 제어 골격 주입
-          // (power_slot 은 아래 공통 블록에서 spec 값으로 덮어써지므로 여기서는
-          // 골격/sub1 만 설정)
-          if (spec.dev_id == 0x34 && spec.ctl_len == 11) {
-            static const uint8_t ev_proto[11] = {0xF7, 0x0B, 0x01, 0x34,
-                                                 0x02, 0x41, 0x10, 0x06,
-                                                 0x00, 0x9C, 0xEE};
-            std::copy(ev_proto, ev_proto + 11, grp.raw_template);
-            grp.ctl_sub1_override = 0x10;
-          }
-
-          // 전원 슬롯
-          grp.power_slot.discovered = true;
-          grp.power_slot.action_offset = spec.ctl_payload_offset;
-          grp.power_slot.on_val = spec.pwr_on_val;
-          grp.power_slot.off_val = spec.pwr_off_val;
-          grp.power_slot.ack_state_offset = spec.ctl_ack_state_offset;
-          if (spec.pwr_away_val != 0xFF)
-            grp.away_mode_token = spec.pwr_away_val;
-
-          const uint8_t act = spec.ctl_payload_offset,
-                        ack = spec.ctl_ack_state_offset;
-          switch (spec.dev_class) {
-          case DeviceClass::THERMOSTAT:
-            setSlot(grp.temp_slot, 0x45, act, ack, 14, 36);
-            grp.temp_slot.ack_target_offset = spec.ctl_ack_echo_offset;
-            grp.temp_slot.ack_telemetry_offset = spec.ctl_ack_ambtemp_offset;
-            break;
-          case DeviceClass::VENT:
-            setSlot(grp.speed_slot, 0x42, act, ack, 1, 3);
-            setLevels(grp.speed_slot, {0x01, 0x03, 0x07}); // 약/중/강
-            setSlot(grp.mode_slot, 0x43, act, ack, 1,
-                    4); // 일반/바이패스/자동/공기청정
-            break;
-          case DeviceClass::GAS:
-            setSlot(grp.close_slot, 0x43, act, ack);
-            grp.close_slot.off_val = spec.pwr_off_val;
-            break;
-          case DeviceClass::AIRCON:
-            setSlot(grp.temp_slot, 0x45, act, ack, 18, 30);
-            grp.temp_slot.ack_target_offset = spec.ctl_ack_echo_offset;
-            setSlot(grp.speed_slot, 0x42, act, ack, 1, 3);
-            setLevels(grp.speed_slot, {0x01, 0x02, 0x03}); // 미풍/약풍/강풍
-            setSlot(grp.mode_slot, 0x41, act, ack, 1,
-                    5); // 냉방/제습/송풍/자동/난방
-            break;
-          default:
-            break;
-          }
-
-          // 제어 응답(ack) 슬롯
-          grp.ack_slots.discovered = true;
-          grp.ack_slots.power_offset = spec.ctl_ack_state_offset;
-          if (spec.dev_class == DeviceClass::THERMOSTAT) {
-            grp.ack_slots.target_temp_offset = spec.ctl_ack_echo_offset;
-            grp.ack_slots.current_temp_offset = spec.ctl_ack_ambtemp_offset;
-          }
-
-          // 쿼리 응답 슬롯
-          auto &q = grp.query_slots;
-          q.discovered = true;
-          q.expected_len = spec.qry_ack_len;
-          q.power_offset = spec.qry_power_offset;
-          q.target_temp_offset = spec.qry_settemp_offset;
-          q.current_temp_offset = spec.qry_ambtemp_offset;
-          q.fan_speed_offset = spec.qry_fanspeed_offset;
-          q.valve_state_offset = spec.qry_valve_offset;
-          q.power_w_offset = spec.qry_watt_h_offset;
-        },
-        spec.name);
-
-    ESP_LOGI(TAG,
-             "Injected Dev 0x%02X (%s): CTL len=%u, QRY len=%u, StateOff=#%u",
-             spec.dev_id, spec.name, spec.ctl_len, spec.qry_ack_len,
-             spec.qry_power_offset);
-  }
-}
-
-void matchAndInject(const AutoProbeDescriptor &ad,
-                    ControlTemplateRegistry &registry) {
-  if (const WallpadProfile *profile = matchProfile(ad)) {
-    injectProfile(profile, registry);
-    g_auto_probing_engine.injectControlSpec(0x02,
-                                            11); // 표준 제어 Opcode / 길이
-  } else {
-    ESP_LOGW(TAG,
-             "No matching wallpad profile found. Fallback to default framing.");
-  }
 }
 
 } // namespace ProfileMatcher
@@ -1075,6 +943,12 @@ bool ProfileRepository::getActiveProfile(VendorProfileDescriptor &out) {
   return getProfile(idx, out);
 }
 
+static ProfileRepository::ProfileChangeCallbackFn s_profile_change_cb{nullptr};
+
+void ProfileRepository::setProfileChangeListener(ProfileChangeCallbackFn cb) {
+  s_profile_change_cb = cb;
+}
+
 bool ProfileRepository::setActiveProfileIndex(size_t index) {
   if (index >= MAX_PROFILES)
     return false;
@@ -1098,7 +972,9 @@ bool ProfileRepository::setActiveProfileIndex(size_t index) {
     g_doorphone_tracker.reset();
     g_doorphone_tracker.restoreFromNvs(new_ns, "DOORPHONE");
   }
-  g_control_registry.onProfileChanged(old_idx, new_idx);
+  if (s_profile_change_cb) {
+    s_profile_change_cb(old_idx, new_idx);
+  }
   return true;
 }
 
@@ -1325,6 +1201,18 @@ void ProfileRepository::resetAllToDefaults() {
 // ============================================================================
 // AutoProbingEngine
 // ============================================================================
+
+static AutoProbingEngine::OnlineCountFn s_online_count_fn{nullptr};
+static AutoProbingEngine::DeviceAckLookupFn s_lookup_fn{nullptr};
+static AutoProbingEngine::UpdateFromBusFn s_update_from_bus_fn{nullptr};
+
+void AutoProbingEngine::setDeviceHooks(OnlineCountFn count_fn,
+                                       DeviceAckLookupFn lookup_fn,
+                                       UpdateFromBusFn update_fn) {
+  s_online_count_fn = count_fn;
+  s_lookup_fn = lookup_fn;
+  s_update_from_bus_fn = update_fn;
+}
 
 AutoProbingEngine g_auto_probing_engine;
 
@@ -1635,7 +1523,8 @@ void AutoProbingEngine::injectControlSpec(uint8_t ctrl_op, uint8_t ctrl_len) {
 // (std::set/map 제거 → bitset/배열 사용, 반복 패턴은 람다로 공통화)
 // ----------------------------------------------------------------------------
 bool AutoProbingEngine::analyzeCacheMatrix() {
-  if (g_polling_targets.ackedCount() < 2 && g_device_repo.getOnlineCount() < 2)
+  const size_t online_dev_count = s_online_count_fn ? s_online_count_fn() : 0;
+  if (g_polling_targets.ackedCount() < 2 && online_dev_count < 2)
     return false;
 
   struct PktPair {
@@ -1657,11 +1546,13 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (t.raw_ack_len >= 4) {
       ack = t.raw_ack_data.data();
       ack_len = t.raw_ack_len;
-    } else if (const DeviceStateEntry *dev =
-                   g_device_repo.find(t.dev_id, t.sub1, t.sub2);
-               dev && dev->is_online && dev->last_ack_len >= 4) {
-      ack = dev->last_ack_data.data();
-      ack_len = dev->last_ack_len;
+    } else if (s_lookup_fn) {
+      const uint8_t *dev_ack = nullptr;
+      size_t dev_ack_len = 0;
+      if (s_lookup_fn(t.dev_id, t.sub1, t.sub2, &dev_ack, &dev_ack_len)) {
+        ack = dev_ack;
+        ack_len = dev_ack_len;
+      }
     }
     if (!ack)
       continue;
@@ -1988,7 +1879,9 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
         ack_pkt.channel_id = 1;
         ack_pkt.length = t.raw_ack_len;
         memcpy(ack_pkt.data.data(), t.raw_ack_data.data(), t.raw_ack_len);
-        g_device_repo.updateFromBus(ack_pkt);
+        if (s_update_from_bus_fn) {
+          s_update_from_bus_fn(ack_pkt);
+        }
       }
     }
   }

@@ -6,6 +6,7 @@
 
 #include "Base/BufferUtils.h"
 #include "Base/SystemConfig.h"
+#include "Protocol/ProtocolTypes.h"
 #include "Protocol/ControlTemplate.h"
 #include <array>
 #include <cstddef>

@@ -163,9 +163,41 @@ void DeviceRepository::setLastStalePollMsByIndex(size_t index,
 void DeviceRepository::initDevices() {
   if (!_cache_mutex)
     _cache_mutex = xSemaphoreCreateMutex();
-  MutexLocker lock(_cache_mutex);
-  memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
-  device_count = 0;
+  {
+    MutexLocker lock(_cache_mutex);
+    memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
+    device_count = 0;
+  }
+
+  // L2.2 ControlTemplate decoupled unit count provider
+  ControlTemplateRegistry::setDeviceUnitCountProvider([](uint8_t dev_id) -> size_t {
+    size_t units = 0;
+    for (size_t i = 0; i < g_device_repo.count() && units < 2; ++i) {
+      DeviceStateEntry snap{};
+      if (g_device_repo.getSnapshot(i, snap) && snap.dev_id == dev_id)
+        ++units;
+    }
+    return units;
+  });
+
+  // L2.1 WallpadProtocol AutoProbingEngine decoupled device hooks
+  AutoProbingEngine::setDeviceHooks(
+    []() -> size_t {
+      return g_device_repo.getOnlineCount();
+    },
+    [](uint8_t dev_id, uint8_t sub1, uint8_t sub2, const uint8_t **out_ack, size_t *out_len) -> bool {
+      const DeviceStateEntry *dev = g_device_repo.find(dev_id, sub1, sub2);
+      if (dev && dev->is_online && dev->last_ack_len >= 4) {
+        *out_ack = dev->last_ack_data.data();
+        *out_len = dev->last_ack_len;
+        return true;
+      }
+      return false;
+    },
+    [](StaticPacket &ack) {
+      g_device_repo.updateFromBus(ack);
+    }
+  );
 }
 
 void DeviceRepository::clear() {
