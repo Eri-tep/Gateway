@@ -17,6 +17,7 @@ def after_build(source, target, env):
     # Extract FIRMWARE_VERSION from include/Core.h (fallback: include/core/Config.h, include/Common.h)
     version = "unknown"
     search_files = [
+        os.path.join(project_dir, "include", "Base", "SystemConfig.h"),
         os.path.join(project_dir, "include", "Core.h"),
         os.path.join(project_dir, "include", "core", "Config.h"),
         os.path.join(project_dir, "include", "Common.h")
