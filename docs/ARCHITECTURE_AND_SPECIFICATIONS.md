@@ -1,6 +1,6 @@
 # GW Home Gateway Architecture, Specifications & Design Philosophy
 
-This document defines the system specifications, runtime topology, channel mappings, deadlock-free concurrency/locking hierarchies, and the **7 Core Architectural & Refactoring Pillars** established through the major rebuilds of the three core subsystems: [`src/Protocol.cpp`](../src/Protocol.cpp), [`src/Console.cpp`](../src/Console.cpp), and [`src/Bridge.cpp`](../src/Bridge.cpp).
+This document defines the system specifications, runtime topology, channel mappings, deadlock-free concurrency/locking hierarchies, and the **7 Core Architectural & Refactoring Pillars** across the 4-Tier Clean Architecture modules.
 
 ---
 
@@ -160,13 +160,14 @@ These principles represent the engineering standard established across the `Prot
 
 ---
 
-## 5. Subsystem Rebuild Case Studies & Metrics
+## 5. Subsystem Evolution & Modularity Milestones
 
-| Subsystem File | Version | Core Architectural Enhancements | Quantifiable Results |
+| Architectural Subsystem | Canonical Modules | Core Architectural Enhancements | Quantifiable Results |
 |---|---|---|---|
-| [`src/Protocol.cpp`](../src/Protocol.cpp) | v1.6.0 | `WallpadParserFactory` & `DoorphoneFsm` segregation; `span` zero-copy packet validation | 0 CRC errors, 0 dropped frames, automatic protocol probing |
-| [`src/Console.cpp`](../src/Console.cpp) | v1.6.1 | ANSI Telnet FSM; static 8-slot ring-buffer command history (↑/↓); Tab completion; `HANDLERS` table dispatch | **-5.7KB Flash reduction**, Zero-Heap CLI |
-| [`src/Bridge.cpp`](../src/Bridge.cpp) | v1.6.2 | 4-domain segregation (`ModbusRtu`, `StreamFramer`, `Fcu`, `HubManager`); `executeRegisterWrite` unified pipeline | **-56 lines net reduction**, type-safe `std::array` frames, 0 compiler warnings |
+| **L3 Protocol Engine** | `WallpadParser.cpp`, `PollingRegistry.cpp`, `AutoProbingEngine.cpp` | Codec, 48-slot cache, and ML probing engine segregation; `span` zero-copy validation | 0 CRC errors, 0 dropped frames, automatic protocol probing, **3 files @ 400~800L** |
+| **L4 Console & CLI** | `ConsoleCommands.cpp`, `CmdSystem.cpp`, `CmdConfig.cpp`, `CmdDevice.cpp`, `CmdTrace.cpp` | ANSI Telnet FSM; 8-slot ring-buffer command history (↑/↓); Tab completion; unified `CliFmt` & table dispatch | **-5.7KB Flash reduction**, Zero-Heap CLI, **4 domain packs @ 700~800L** |
+| **L4 Remote Services** | `RemoteService.cpp`, `MgmtRpc.cpp`, `RemoteTelemetry.cpp`, `WifiManager.cpp` | SmartThings JSON-RPC, Port 8900 session reactor, 15s fallback guard FSM | Real-time push, zero deadlocks, **3 modules @ 100~880L** |
+| **L2 Transport & Core** | `TcpReactor.cpp`, `NetworkRouter.cpp`, `FramingTracker.cpp`, `DoorphoneTracker.cpp` | Dedicated Core 0 non-blocking select reactor, framing FSM promoted to L2 | Single-threaded Core 0 socket loops, 0 race conditions |
 
 ---
 

@@ -153,33 +153,19 @@ enum class WallpadProfileIndex : uint8_t {
 
 ---
 
-## 5. Safe Span Polyfill & Buffer Views
+## 5. Buffer Views: Transitioning to `std::span`
 
-- When wrapping C-style fixed-size arrays (`T (&arr)[N]`) into a `span`, deduce size automatically via template C-array constructors.
-- Keep explicit pointer + length constructors `span<T>(ptr, len)` for dynamically sized sub-buffers.
-
-```cpp
-// ✅ GOOD: Template C-array constructor support
-template <typename T> class span {
-  ...
-  template <size_t N>
-  constexpr span(T (&arr)[N]) noexcept : ptr_(arr), len_(N) {}
-};
-```
+- **C++17 Baseline**: Use the zero-allocation `span<T>` polyfill (`include/Base/BufferUtils.h`) supporting template deduction for fixed C-arrays (`T (&arr)[N]`) and explicit pointer-length slices (`span<T>(ptr, len)`).
+- **C++20/C++23 Target**: Migrate seamlessly to standard `#include <span>` and `std::span<const uint8_t>`. Both share identical 8-byte register footprints (`a2`, `a3` on Xtensa) and zero runtime overhead.
+- Under both standards, never pass raw pointer-length pairs across layer boundaries without a span wrapper.
 
 ---
 
-## 6. C++17 Language Standards
+## 6. Language Standards: C++17 Baseline to C++23 Target
 
-- Under C++17, use compact nested namespace syntax `namespace A::B { ... }` instead of deeply nested indentation blocks.
-- Leverage `constexpr` and `inline constexpr` for compile-time evaluations and constants.
-
-```cpp
-// ✅ GOOD: C++17 compact nested namespace
-namespace Config::Task {
-constexpr size_t STACK_SIZE = 8192;
-}
-```
+- **Namespace Syntax**: Use compact nested namespace syntax `namespace A::B { ... }` instead of deeply nested indentation blocks.
+- **Compile-Time Computation**: Leverage `constexpr` for compile-time evaluations and lookup tables. Under C++20/23, expand to `consteval` and `constexpr` algorithms where applicable.
+- **Standard Alignment**: Ensure all C++17 code paths remain 100% forward-compatible with C++23 toolchains (zero deprecated syntax).
 
 ---
 
@@ -230,3 +216,57 @@ struct TelnetSession {
   - **Read path**: Use `std::shared_lock<std::shared_mutex>` allowing concurrent reads across tasks without contention.
   - **Write path**: Use `std::unique_lock<std::shared_mutex>` for exclusive modification.
 - Critical sections (`portMUX_TYPE` / `taskENTER_CRITICAL`) are reserved exclusively for ISR-safety or microsecond-level atomic operations and MUST NOT enclose blocking I/O or NVS writes.
+
+---
+
+## 9. Modern C++ Evolution: C++20 & C++23 Adoption Standards
+
+When targeting modern toolchains (GCC 13.2+ with ESP-IDF v5.3+ / Arduino ESP32 v3.x), the codebase elevates from C++17 to C++23. The following idioms are canonized for high-reliability embedded systems:
+
+### 9.1 `std::expected<T, E>`: Zero-Heap Monadic Error Handling (C++23)
+- Permanently eliminates the anti-pattern of paired `bool` return flags and mutable output references (`bool parse(..., Packet &out)`).
+- Enforces strict no-heap (`-fno-exceptions`) error propagation with Return Value Optimization (RVO) in register space.
+- Enables clean monadic chaining (`.and_then()`, `.or_else()`).
+
+```cpp
+#include <expected>
+#include <span>
+
+enum class ParseError : uint8_t { FrameTooShort, InvalidFraming, ChecksumMismatch };
+
+std::expected<DeviceKey, ParseError> extractDeviceKey(std::span<const uint8_t> frame) noexcept {
+  if (frame.size() < 4) return std::unexpected(ParseError::FrameTooShort);
+  if (frame.front() != 0xF7 || frame.back() != 0xEE) return std::unexpected(ParseError::InvalidFraming);
+  return DeviceKey{ frame[3], frame[5], frame[6] };
+}
+```
+
+### 9.2 `std::span<const uint8_t>`: Zero-Copy Safe Buffer Views (C++20)
+- Replaces raw C pointer-length pairs (`const uint8_t *data, size_t len`) with an 8-byte view (pointer + size) passed entirely in hardware registers (`a2`, `a3`).
+- Incurs zero dynamic allocation, zero stack overhead, and prevents buffer overruns through bounds-aware `.subspan()`.
+
+### 9.3 Concepts & Constraints: Compile-Time Bus Packet Contracts (C++20)
+- Eliminates brittle `std::enable_if_t` / SFINAE boilerplate.
+- Enforces payload serializability and memory constraints at compile time with **0 bytes of runtime metadata overhead**.
+
+```cpp
+#include <concepts>
+#include <type_traits>
+
+template <typename T>
+concept ValidBusPacket = std::is_trivially_copyable_v<T> && (sizeof(T) <= 64);
+
+template <ValidBusPacket Pkt>
+bool enqueueTxPacket(RingbufHandle_t ringbuf, const Pkt &packet) noexcept {
+  return xRingbufferSend(ringbuf, &packet, sizeof(packet), 0) == pdTRUE;
+}
+```
+
+### 9.4 `std::to_underlying` (C++23) & `map.contains` (C++20)
+- `std::to_underlying(e)`: Replaces verbose `static_cast<std::underlying_type_t<Enum>>(e)` for type-safe enum-to-integer conversion.
+- `map.contains(key)`: Provides clear, readable existence checks without iterator boilerplate.
+
+### 9.5 Forbidden Modern Features (Embedded Guardrails)
+1. **`std::print` & `std::format` (PROHIBITED)**: Adds 100KB~200KB of runtime format parsing tables to Flash. Maintain zero-allocation `AppendBuf` and ESP-IDF logging macros (`ESP_LOGI`).
+2. **C++20 Coroutines / `std::generator` (PROHIBITED)**: Secretly allocates heap frames (`malloc`/`operator new`). Retain deterministic static FreeRTOS task loops and explicit FSMs.
+3. **`-fno-exceptions` & `-fno-rtti` (MANDATORY)**: Must remain strictly enforced under C++23 to guarantee deterministic execution time and minimal flash footprint.

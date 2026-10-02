@@ -442,9 +442,9 @@ void setup() {
   Boot_CheckCrashLoop();
   Boot_InitSyncPrimitives();
   Boot_RestoreConfigAndState();
-  Boot_InitSubsystems();
   Boot_InitHardwareAndDevices();
   Boot_InitWifiAndOta();
+  Boot_InitSubsystems();
   Boot_StartTasks();
 
   Serial.println(F("[BOOT] All FreeRTOS tasks started successfully."));

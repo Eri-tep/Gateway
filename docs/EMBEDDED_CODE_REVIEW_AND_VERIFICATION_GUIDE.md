@@ -274,3 +274,25 @@ When formal guideline constraints conflict with practical runtime optimizations,
 3. **Context-Driven Buffer & Stack Allocation**:
    - Forcing a shared global buffer (`g_scratch_buf`) to protect the stack can introduce mutex lock contention and I/O deadlocks.
    - In strictly serialized, single-task environments (such as CLI processing in `Task_Telnet`), **function-scope `static char buf[2048]` (BSS allocation)** provides the safest zero-overhead solution.
+
+---
+
+## 10. Platform Migration & C++23 Runtime Verification Protocol
+
+When elevating toolchains to **ESP-IDF v5.3+ (Arduino-ESP32 v3.x, GCC 13.2+)** and adopting C++23 idioms, the following verification checklist must be executed before deployment:
+
+### 10.1 Deterministic Memory Model Verification
+1. **Zero-Heap Verification**: Confirm 0 byte increase in dynamic heap usage across steady-state operation. All task control blocks and buffers remain statically allocated via `xTaskCreateStaticPinnedToCore`.
+2. **BSS Stability Audit**: Total static RAM usage must remain within ~45% (148KB ~ 156KB of 320KB internal DRAM).
+
+### 10.2 Stack High-Water Mark (HWM) Audit
+- While `std::expected<T, E>` and `std::span` incur zero heap allocations, return objects reside in stack frame registers and local frames during deep call chains.
+- **Verification Requirement**: After migration, inspect `uxTaskGetStackHighWaterMark()` across all 6 core tasks (`CH1`~`CH4`, `Network`, `Telnet`):
+  - **SAFE**: Remaining stack headroom $\ge 1000$ bytes.
+  - **WARN**: Headroom between $500 \sim 999$ bytes.
+  - **CRITICAL**: Headroom $< 500$ bytes (mandatory stack size increase required).
+
+### 10.3 Peripheral Hardware API Delta Gate
+- **UART Clock Source**: Ensure `uart_config_t.source_clk` uses `UART_SCLK_DEFAULT` (or conditionally `#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5,0,0)`).
+- **Serial Driver Dependency**: Verify `EspSoftwareSerial` is pinned to $\ge$ `v8.2.0` (zero legacy `esp_intr_alloc` calls).
+
