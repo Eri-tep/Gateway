@@ -17,7 +17,6 @@
 #include <Arduino.h>
 #include <IPAddress.h>
 #include <Preferences.h>
-#include <SoftwareSerial.h>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -112,25 +111,6 @@ struct CoreDumpInfo {
 };
 
 extern CoreDumpInfo g_coredump_info;
-
-struct DoorphoneSpec {
-  uint32_t baud_rate;
-  uint8_t stx;
-  uint8_t etx;
-  uint8_t len;
-  const char *desc;
-  uint8_t bell_front;
-  uint8_t bell_lobby;
-  uint8_t call_front;
-  uint8_t call_lobby;
-  uint8_t open_front;
-  uint8_t open_lobby;
-  uint8_t end_front;
-  uint8_t end_lobby;
-};
-
-SoftwareSerialConfig Door_SerialConfig(uint8_t data_bits, uint8_t parity,
-                                       uint8_t stop_bits);
 
 void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt);
 

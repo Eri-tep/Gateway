@@ -85,6 +85,22 @@ enum class ChecksumAlgo : uint8_t {
   NONE = 8 // Pure framing without checksum byte (Doorphone 0x02..0x03)
 };
 
+struct DoorphoneSpec {
+  uint32_t baud_rate;
+  uint8_t stx;
+  uint8_t etx;
+  uint8_t len;
+  const char *desc;
+  uint8_t bell_front;
+  uint8_t bell_lobby;
+  uint8_t call_front;
+  uint8_t call_lobby;
+  uint8_t open_front;
+  uint8_t open_lobby;
+  uint8_t end_front;
+  uint8_t end_lobby;
+};
+
 struct WallpadProfile {
   WallpadVendorId vendor_id;
   const char *vendor_name;

@@ -16,6 +16,8 @@
 #include <span>
 
 extern SoftwareSerial g_doorphone_serial;
+SoftwareSerialConfig Door_SerialConfig(uint8_t data_bits, uint8_t parity,
+                                       uint8_t stop_bits);
 
 // ── IP Subnet Whitelist Filters ──
 [[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip);

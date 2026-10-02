@@ -21,7 +21,7 @@ uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
 
 const char *formatFramingStr(uint8_t data_bits, uint8_t parity,
                              uint8_t stop_bits) noexcept {
-  if (data_bits == 8) {
+  if (data_bits == 8) [[likely]] {
     if (parity == 0 && stop_bits == 1)
       return "8N1";
     if (parity == 1 && stop_bits == 1)
@@ -60,15 +60,16 @@ parseFramingStr(std::string_view str) noexcept {
 
 bool parseFramingStr(const char *str, uint8_t &data_bits, uint8_t &parity,
                      uint8_t &stop_bits) noexcept {
-  if (!str)
+  if (!str) [[unlikely]]
     return false;
-  auto res = parseFramingStr(std::string_view(str));
-  if (!res.has_value())
-    return false;
-  data_bits = res->data_bits;
-  parity = res->parity;
-  stop_bits = res->stop_bits;
-  return true;
+  return parseFramingStr(std::string_view(str))
+      .transform([&](const FramingConfig &cfg) noexcept {
+        data_bits = cfg.data_bits;
+        parity = cfg.parity;
+        stop_bits = cfg.stop_bits;
+        return true;
+      })
+      .value_or(false);
 }
 
 void System_Sha256ToHex(const char *input, char *output) {
