@@ -163,8 +163,8 @@ static void serializeProfileAndTiming(
                    "\"ch4\":{\"baud\":%u,\"format\":\"%s\"}},",
                    static_cast<unsigned>(g_config.uart_baud_rate), f1,
                    static_cast<unsigned>(g_config.ch2_baud_rate), f2,
-                   static_cast<unsigned>(g_config.doorphone_baud_rate),
-                   f4);
+                   static_cast<unsigned>(g_config.ch3_baud_rate), f3,
+                   static_cast<unsigned>(g_config.doorphone_baud_rate), f4);
 }
 
 static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
