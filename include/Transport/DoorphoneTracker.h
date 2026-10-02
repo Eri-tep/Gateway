@@ -11,6 +11,27 @@
 #include <atomic>
 #include <esp_timer.h>
 
+namespace Doorphone {
+struct DoorphoneState {
+  std::atomic<bool> front_bell{false};
+  std::atomic<bool> lobby_bell{false};
+  std::atomic<uint32_t> last_bell_ms{0};
+};
+} // namespace Doorphone
+
+extern Doorphone::DoorphoneState g_doorphone_state;
+extern FramingTracker g_doorphone_tracker;
+
+// Backward compatibility alias for Config::Doorphone
+namespace Config::Doorphone {
+using FramingStatus = ::FramingStatus;
+using FramingTracker = ::FramingTracker;
+using DoorphoneState = ::Doorphone::DoorphoneState;
+constexpr uint8_t STX = 0x7F;
+constexpr uint8_t ETX = 0xEE;
+constexpr uint8_t PKT_LEN = 5;
+} // namespace Config::Doorphone
+
 namespace Transport {
 
 class DoorphoneController {

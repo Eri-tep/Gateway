@@ -6,8 +6,7 @@
 
 #include "Service/ConsoleCli.h"
 
-// ── Scratch Buffer for CLI Rendering ──
-extern char g_cli_scratch_buf[5120];
+// ── CLI Subsystem ──
 
 // ============================================================================
 // CLI Subsystem Command Interfaces

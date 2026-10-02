@@ -342,8 +342,9 @@ public:
   static constexpr size_t MAX_PROFILES =
       4; // Slot 0: Auto, Slot 1..3: User Saved Profiles
 
-  // L2.2 ControlTemplate decoupled listener
+  // Decoupled profile change listeners
   using ProfileChangeCallbackFn = void (*)(uint8_t old_idx, uint8_t new_idx);
+  static void addProfileChangeListener(ProfileChangeCallbackFn cb);
   static void setProfileChangeListener(ProfileChangeCallbackFn cb);
 
   static void init();

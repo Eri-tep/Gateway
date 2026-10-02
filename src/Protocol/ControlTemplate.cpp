@@ -4,7 +4,6 @@
 
 #include "Protocol/ControlTemplate.h"
 #include "Protocol/WallpadProtocol.h"
-#include "Transport/NetworkRouter.h"
 
 #include "esp_log.h"
 #include <Preferences.h>

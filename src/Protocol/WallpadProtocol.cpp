@@ -943,10 +943,23 @@ bool ProfileRepository::getActiveProfile(VendorProfileDescriptor &out) {
   return getProfile(idx, out);
 }
 
-static ProfileRepository::ProfileChangeCallbackFn s_profile_change_cb{nullptr};
+static ProfileRepository::ProfileChangeCallbackFn s_profile_change_cbs[4]{};
+static size_t s_profile_change_cb_count = 0;
+
+void ProfileRepository::addProfileChangeListener(ProfileChangeCallbackFn cb) {
+  if (!cb)
+    return;
+  for (size_t i = 0; i < s_profile_change_cb_count; ++i) {
+    if (s_profile_change_cbs[i] == cb)
+      return;
+  }
+  if (s_profile_change_cb_count < 4) {
+    s_profile_change_cbs[s_profile_change_cb_count++] = cb;
+  }
+}
 
 void ProfileRepository::setProfileChangeListener(ProfileChangeCallbackFn cb) {
-  s_profile_change_cb = cb;
+  addProfileChangeListener(cb);
 }
 
 bool ProfileRepository::setActiveProfileIndex(size_t index) {
@@ -963,17 +976,11 @@ bool ProfileRepository::setActiveProfileIndex(size_t index) {
 
   const uint8_t new_idx = static_cast<uint8_t>(index);
   if (old_idx != new_idx) {
-    char old_ns[16], new_ns[16];
-    Config::Doorphone::FramingTracker::getNvsNamespace(old_idx, old_ns,
-                                                       sizeof(old_ns));
-    Config::Doorphone::FramingTracker::getNvsNamespace(new_idx, new_ns,
-                                                       sizeof(new_ns));
-    g_doorphone_tracker.saveToNvs(old_ns, "DOORPHONE");
-    g_doorphone_tracker.reset();
-    g_doorphone_tracker.restoreFromNvs(new_ns, "DOORPHONE");
-  }
-  if (s_profile_change_cb) {
-    s_profile_change_cb(old_idx, new_idx);
+    for (size_t i = 0; i < s_profile_change_cb_count; ++i) {
+      if (s_profile_change_cbs[i]) {
+        s_profile_change_cbs[i](old_idx, new_idx);
+      }
+    }
   }
   return true;
 }

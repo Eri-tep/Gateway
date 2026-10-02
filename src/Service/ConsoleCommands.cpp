@@ -10,7 +10,7 @@
 // From src/CLI/Cli.cpp
 // ============================================================================
 
-char g_cli_scratch_buf[5120];
+static char g_cli_scratch_buf[5120];
 
 // ============================================================================
 // CLI 80-COLUMN UNIFIED FORMATTING & BUFFER HELPERS

@@ -9,7 +9,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.7.3";
+constexpr const char *FIRMWARE_VERSION = "v1.7.4";
 } // namespace Config
 
 namespace Config::Task {
@@ -124,10 +124,9 @@ constexpr uint8_t DEFAULT_DOORPHONE_DATABITS = 8;
 constexpr uint8_t DEFAULT_DOORPHONE_STOPBITS = 1;
 } // namespace Config::Serial
 
-namespace Config::Doorphone {
-constexpr uint8_t STX = 0x7F;
-constexpr uint8_t ETX = 0xEE;
-constexpr uint8_t PKT_LEN = 5;
+// ============================================================================
+// GENERIC PACKET FRAMING TRACKER
+// ============================================================================
 
 enum class FramingStatus : uint8_t {
   WAITING = 0,
@@ -147,9 +146,9 @@ struct FramingTracker {
 
   void setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
   void reset() noexcept;
-  void clearNvs(const char *nvs_ns, const char *tag = "DOORPHONE") noexcept;
+  void clearNvs(const char *nvs_ns, const char *tag = "FRAMING") noexcept;
   void processFrame(uint8_t stx, uint8_t etx, uint8_t len, const char *nvs_ns,
-                    const char *tag = "DOORPHONE") noexcept;
+                    const char *tag = "FRAMING") noexcept;
 
   static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
                               size_t max_len) noexcept {
@@ -158,22 +157,12 @@ struct FramingTracker {
   }
 
   void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",
-                      const char *tag = "DOORPHONE") noexcept;
+                      const char *tag = "FRAMING") noexcept;
   void saveToNvs(const char *nvs_ns = "dp_frame_p0",
-                 const char *tag = "DOORPHONE") noexcept;
+                 const char *tag = "FRAMING") noexcept;
 
   [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
 };
-
-struct DoorphoneState {
-  std::atomic<bool> front_bell{false};
-  std::atomic<bool> lobby_bell{false};
-  std::atomic<uint32_t> last_bell_ms{0};
-};
-} // namespace Config::Doorphone
-
-extern Config::Doorphone::DoorphoneState g_doorphone_state;
-extern Config::Doorphone::FramingTracker g_doorphone_tracker;
 
 enum class HubDeviceType : uint8_t {
   WALLPAD_COMPATIBLE = 0,
@@ -186,7 +175,7 @@ struct HubClientSlot {
   char target_ip[16]{""};
   uint16_t target_port{8898};
   HubDeviceType dev_type{HubDeviceType::WALLPAD_COMPATIBLE};
-  Config::Doorphone::FramingTracker tracker;
+  FramingTracker tracker;
   int sock{-1};
   bool is_connected{false};
   uint32_t last_reconnect_ms{0};

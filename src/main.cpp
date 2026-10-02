@@ -168,31 +168,7 @@ static void Boot_CheckCrashLoop() {
 // Stage 2: RTOS Synchronization Primitives & Static Queues
 // ============================================================================
 static void Boot_InitSyncPrimitives() {
-  g_uart0_mutex = xSemaphoreCreateMutex();
-  g_uart1_mutex = xSemaphoreCreateMutex();
-  g_uart2_mutex = xSemaphoreCreateMutex();
-
-  auto init_q = [](StaticQueue_t *qb, uint8_t *st, size_t q_len) {
-    return xQueueCreateStatic(q_len, sizeof(StaticPacket), st, qb);
-  };
-  g_ch1_control_queue = init_q(&g_ch1_ctrl_queue_buf, g_ch1_ctrl_storage,
-                               Config::Queue::POOL_SIZE_CONTROL);
-  g_ch1_vip_queue = init_q(&g_ch1_vip_queue_buf, g_ch1_vip_storage,
-                           Config::Queue::POOL_SIZE_VIP);
-  g_ch4_passthrough_queue = init_q(&g_ch4_pass_queue_buf, g_ch4_pass_storage,
-                                   Config::Queue::POOL_SIZE_CH4_PASS);
-
-  g_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL +
-                                    Config::Queue::POOL_SIZE_VIP);
-  if (g_ch1_queue_set) {
-    BaseType_t res1 = xQueueAddToSet(g_ch1_vip_queue, g_ch1_queue_set);
-    BaseType_t res2 = xQueueAddToSet(g_ch1_control_queue, g_ch1_queue_set);
-    if (res1 != pdPASS || res2 != pdPASS) {
-      Serial.println(F("[FATAL] Failed to add queues to g_ch1_queue_set!"));
-    }
-  } else {
-    Serial.println(F("[FATAL] Failed to create g_ch1_queue_set!"));
-  }
+  Engine_InitQueues();
 
   if (!g_ctrl_queue_mutex)
     g_ctrl_queue_mutex = xSemaphoreCreateMutex();
@@ -396,24 +372,34 @@ static void Boot_InitWifiAndOta() {
 // ============================================================================
 // Stage 7: FreeRTOS Task Spawning & Watchdog Guard
 // ============================================================================
+static StaticTask_t s_task_core1_ch1_buf, s_task_core1_slave_buf,
+    s_task_core1_slave2_buf, s_task_core1_ch4_buf, s_task_core0_net_buf,
+    s_telnet_task_buf;
+static StackType_t s_stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
+    s_stackCore1Slave[Config::Task::STACK_SIZE_SLAVE],
+    s_stackCore1Slave2[Config::Task::STACK_SIZE_SLAVE],
+    s_stackCore1Ch4[Config::Task::STACK_SIZE_CH4],
+    s_stackCore0Net[Config::Task::STACK_SIZE_CORE0],
+    s_telnetTaskStack[Config::Task::STACK_SIZE_TELNET];
+
 static const TaskSpawnDescriptor kTaskDescriptors[] = {
     {Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1, nullptr,
-     TaskPriority::CH1_REALTIME, 1, stackCore1Ch1, &g_task_core1_ch1_buf,
+     TaskPriority::CH1_REALTIME, 1, s_stackCore1Ch1, &s_task_core1_ch1_buf,
      SystemTaskId::CH1, true},
     {Task_Ch2Ch3, "CH#2_WP#1", Config::Task::STACK_SIZE_SLAVE, &ch2_config,
-     TaskPriority::WALLPAD_EMULATION, 1, stackCore1Slave,
-     &g_task_core1_slave_buf, SystemTaskId::CH2, true},
+     TaskPriority::WALLPAD_EMULATION, 1, s_stackCore1Slave,
+     &s_task_core1_slave_buf, SystemTaskId::CH2, true},
     {Task_Ch2Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_SLAVE, &ch3_config,
-     TaskPriority::WALLPAD_EMULATION, 1, stackCore1Slave2,
-     &g_task_core1_slave2_buf, SystemTaskId::CH3, true},
+     TaskPriority::WALLPAD_EMULATION, 1, s_stackCore1Slave2,
+     &s_task_core1_slave2_buf, SystemTaskId::CH3, true},
     {Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,
-     TaskPriority::CH4_SUBWALLPAD, 1, stackCore1Ch4, &g_task_core1_ch4_buf,
+     TaskPriority::CH4_SUBWALLPAD, 1, s_stackCore1Ch4, &s_task_core1_ch4_buf,
      SystemTaskId::CH4, true},
     {Task_Network, "Network", Config::Task::STACK_SIZE_CORE0, nullptr,
-     TaskPriority::NETWORK, 0, stackCore0Net, &g_task_core0_net_buf,
+     TaskPriority::NETWORK, 0, s_stackCore0Net, &s_task_core0_net_buf,
      SystemTaskId::NETWORK, false},
     {Task_Telnet, "Telnet_CLI", Config::Task::STACK_SIZE_TELNET, nullptr,
-     TaskPriority::TELNET_CLI, 0, telnetTaskStack, &g_telnet_task_buf,
+     TaskPriority::TELNET_CLI, 0, s_telnetTaskStack, &s_telnet_task_buf,
      SystemTaskId::TELNET, false},
 };
 

@@ -33,13 +33,13 @@ void Engine_RegisterCh5ForwardHandler(Ch5ForwardHandler handler) noexcept {
 // ── Core Repositories & Metrics Trackers ──
 ControlDispatcher g_control_dispatcher;
 
-// ── Static FreeRTOS Queues & Storage Pools ──
-StaticQueue_t g_ch1_ctrl_queue_buf, g_ch4_pass_queue_buf, g_ch1_vip_queue_buf;
-uint8_t
-    g_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
-uint8_t g_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS *
-                           sizeof(StaticPacket)];
-uint8_t g_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
+// ── Static FreeRTOS Queues & Storage Pools (File-local) ──
+static StaticQueue_t s_ch1_ctrl_queue_buf, s_ch4_pass_queue_buf, s_ch1_vip_queue_buf;
+static uint8_t
+    s_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+static uint8_t s_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS *
+                                  sizeof(StaticPacket)];
+static uint8_t s_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
 
 QueueHandle_t g_ch1_control_queue = nullptr, g_ch1_vip_queue = nullptr;
 QueueSetHandle_t g_ch1_queue_set = nullptr;
@@ -50,25 +50,31 @@ QueueHandle_t g_ch4_passthrough_queue = nullptr;
 SoftwareSerial g_doorphone_serial;
 SemaphoreHandle_t g_ctrl_queue_mutex = nullptr;
 
-// ── Static FreeRTOS Tasks & Stacks ──
-StaticTask_t g_task_core1_ch1_buf, g_task_core1_slave_buf,
-    g_task_core1_slave2_buf, g_task_core1_ch4_buf, g_task_core0_net_buf,
-    g_telnet_task_buf;
-StackType_t stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
-    stackCore1Slave[Config::Task::STACK_SIZE_SLAVE],
-    stackCore1Slave2[Config::Task::STACK_SIZE_SLAVE],
-    stackCore1Ch4[Config::Task::STACK_SIZE_CH4],
-    stackCore0Net[Config::Task::STACK_SIZE_CORE0],
-    telnetTaskStack[Config::Task::STACK_SIZE_TELNET];
+void Engine_InitQueues() {
+  g_uart0_mutex = xSemaphoreCreateMutex();
+  g_uart1_mutex = xSemaphoreCreateMutex();
+  g_uart2_mutex = xSemaphoreCreateMutex();
+
+  g_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
+                                           s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
+  g_ch1_vip_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_VIP, sizeof(StaticPacket),
+                                       s_ch1_vip_storage, &s_ch1_vip_queue_buf);
+  g_ch4_passthrough_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CH4_PASS, sizeof(StaticPacket),
+                                               s_ch4_pass_storage, &s_ch4_pass_queue_buf);
+
+  g_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL + Config::Queue::POOL_SIZE_VIP);
+  if (g_ch1_queue_set) {
+    xQueueAddToSet(g_ch1_vip_queue, g_ch1_queue_set);
+    xQueueAddToSet(g_ch1_control_queue, g_ch1_queue_set);
+  }
+}
 
 uint32_t g_boot_start_ms = 0;
 SemaphoreHandle_t g_uart0_mutex = nullptr, g_uart1_mutex = nullptr,
                   g_uart2_mutex = nullptr, g_tracer_sem = nullptr;
 
 std::atomic<bool> g_initial_caching_complete{false};
-Config::Doorphone::DoorphoneState g_doorphone_state{};
 CoreDumpInfo g_coredump_info;
-Config::Doorphone::FramingTracker g_doorphone_tracker;
 
 bool Queue_EnqueueDropHead(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {

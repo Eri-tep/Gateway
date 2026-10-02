@@ -21,7 +21,6 @@ uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
 }
 } // namespace Config::Timing
 
-namespace Config::Doorphone {
 void FramingTracker::setFixedLock(uint8_t stx, uint8_t etx,
                                   uint8_t len) noexcept {
   candidate_stx.store(stx, std::memory_order_relaxed);
@@ -176,7 +175,6 @@ bool FramingTracker::isConsistent(uint8_t stx, uint8_t etx) const noexcept {
   return (stx == candidate_stx.load(std::memory_order_relaxed) &&
           etx == candidate_etx.load(std::memory_order_relaxed));
 }
-} // namespace Config::Doorphone
 
 const char *formatFramingStr(uint8_t data_bits, uint8_t parity,
                              uint8_t stop_bits) noexcept {
