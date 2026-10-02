@@ -295,7 +295,7 @@ void printSystemOverview(AppendBuf &out) {
       "WiFi Connection : %s (%d dBm, IP: %s) [STABLE]\r\n"
       "Heap Memory     : %s %3u%% Free (Free %uKB / Min %uKB)\r\n"
       "Flash Storage   : %s %3u%% Used (%uKB / %uMB)\r\n",
-      Config::FIRMWARE_VERSION, wp_status_buf, time_str, time_src, ts / 86400,
+      Config::FIRMWARE_VERSION, wp_status_buf.c_str(), time_str.c_str(), time_src, ts / 86400,
       (ts % 86400) / 3600, (ts % 3600) / 60, ts % 60,
       WiFi.isConnected() ? "Connected" : "Disconnected", WiFi.RSSI(),
       WiFi.localIP().toString().c_str(), heap_bar, heap_free_pct, free_heap,
