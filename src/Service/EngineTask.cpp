@@ -1115,13 +1115,21 @@ void Task_Ch4(void *pvParameters) {
   }
 
   if (!s_initial_caching_complete.load(std::memory_order_acquire)) {
-    if (g_system_event_group) {
-      xEventGroupWaitBits(
-          g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
-          pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
-    } else {
-      vTaskDelay(
-          pdMS_TO_TICKS(Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS));
+    const uint32_t wait_start = millis();
+    while (!s_initial_caching_complete.load(std::memory_order_acquire) &&
+           (millis() - wait_start <
+            Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS)) {
+      g_wdt_monitor.feed(3);
+      if (g_system_event_group) {
+        EventBits_t bits = xEventGroupWaitBits(
+            g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
+            pdMS_TO_TICKS(200));
+        if (bits & SYS_EVT_CACHE_READY) {
+          break;
+        }
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(200));
+      }
     }
     g_wdt_monitor.feed(3);
   }
