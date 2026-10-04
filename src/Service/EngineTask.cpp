@@ -591,8 +591,8 @@ void Ch1_PollNext(size_t &current_dev_idx) {
   uint32_t now = millis();
 
   if (!target_selected && active_cnt > 0) {
-    int best_prio = 999;
-    size_t best_idx = 0;
+    size_t chosen_idx = active_cnt;
+    int chosen_score = 999;
 
     for (size_t i = 0; i < active_cnt; i++) {
       size_t idx = (current_dev_idx + i) % active_cnt;
@@ -601,32 +601,34 @@ void Ch1_PollNext(size_t &current_dev_idx) {
           g_device_repo.find(tgt.dev_id, tgt.sub1, tgt.sub2);
       int score = Ch1_ScoreCandidate(tgt, cached_dev);
 
-      if (score < best_prio) {
-        best_prio = score;
-        best_idx = idx;
-        if (score == 1)
-          break; // 최우선 순위 발견 즉시 탐색 중단
+      // 1순위(미검증/신규), 2순위(온라인 정상 주기), 3순위(10초 경과 오프라인 재탐색)
+      // 라운드로빈 순서에서 처음 만나는 자격 충족 후보를 즉시 선택하여
+      // 온라인 기기 독점에 의한 오프라인 기기 기아(Starvation) 방지
+      if (score <= 3) {
+        chosen_idx = idx;
+        chosen_score = score;
+        break;
       }
     }
 
-    if (best_prio <= 3) {
-      const auto &tgt = candidates[best_idx];
+    if (chosen_idx < active_cnt) {
+      const auto &tgt = candidates[chosen_idx];
       poll_dev_id = tgt.dev_id;
       poll_sub1 = tgt.sub1;
       poll_sub2 = tgt.sub2;
       poll_raw_len = tgt.raw_query_len;
       if (poll_raw_len > 0) {
         g_polling_targets.getQueryData(tgt.entry_idx, poll_raw_ptr,
-                                       poll_raw_len);
+                                        poll_raw_len);
       }
 
-      if (best_prio == 3) {
+      if (chosen_score == 3) {
         g_device_repo.setLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
         g_ch1_state_metrics.stale_poll_cnt.fetch_add(1,
                                                      std::memory_order_relaxed);
       }
 
-      current_dev_idx = (best_idx + 1) % active_cnt;
+      current_dev_idx = (chosen_idx + 1) % active_cnt;
       target_selected = true;
     }
   }
