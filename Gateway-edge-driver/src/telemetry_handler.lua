@@ -432,34 +432,43 @@ function TelemetryHandler.handle_doorphone_event(driver, event_data)
   local front_bell = event_data.front_bell
   local lobby_bell = event_data.lobby_bell
   local cap_motion = capabilities.motionSensor
+  if not cap_motion then return end
+
+  local function update_door_motion(dev, comp, is_active, comp_name, log_name)
+    if not (dev and comp) then return end
+    local field_name = "doorphone_motion_timer_" .. comp_name
+    local prev_timer = dev:get_field(field_name)
+    if prev_timer then
+      dev.thread:cancel_timer(prev_timer)
+      dev:set_field(field_name, nil)
+    end
+
+    if is_active then
+      log.info(string.format("🚪 [DOORPHONE REALTIME] %s Motion -> ACTIVE (호출 중)", log_name))
+      dev:emit_component_event(comp, cap_motion.motion.active({ state_change = true }))
+      local t = dev.thread:call_with_delay(30, function()
+        dev:set_field(field_name, nil)
+        log.info(string.format("🚪 [DOORPHONE AUTO-RESET] %s Motion -> INACTIVE (30s 타임아웃 자동 복구)", log_name))
+        dev:emit_component_event(comp, cap_motion.motion.inactive({ state_change = true }))
+      end)
+      dev:set_field(field_name, t)
+    else
+      log.info(string.format("🚪 [DOORPHONE REALTIME] %s Motion -> INACTIVE (대기)", log_name))
+      dev:emit_component_event(comp, cap_motion.motion.inactive({ state_change = true }))
+    end
+  end
 
   local DOORPHONE_HANDLERS = {
     doorphone_front = function(dev, c_main)
-      if cap_motion and c_main then
-        local motion_evt = front_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
-        log.info(string.format("🚪 [DOORPHONE REALTIME] Front Door Motion -> %s", front_bell and "ACTIVE (호출 중)" or "INACTIVE (대기)"))
-        dev:emit_component_event(c_main, motion_evt)
-      end
+      update_door_motion(dev, c_main, front_bell, "main", "Front Door")
     end,
     doorphone_lobby = function(dev, c_main)
-      if cap_motion and c_main then
-        local motion_evt = lobby_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
-        log.info(string.format("🚪 [DOORPHONE REALTIME] Lobby Door Motion -> %s", lobby_bell and "ACTIVE (호출 중)" or "INACTIVE (대기)"))
-        dev:emit_component_event(c_main, motion_evt)
-      end
+      update_door_motion(dev, c_main, lobby_bell, "main", "Lobby Door")
     end,
     doorphone = function(dev, c_main)
-      if cap_motion then
-        local c_lobby = dev.profile.components["lobby"]
-        if c_main then
-          local motion_evt = front_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
-          dev:emit_component_event(c_main, motion_evt)
-        end
-        if c_lobby then
-          local motion_evt = lobby_bell and cap_motion.motion.active({ state_change = true }) or cap_motion.motion.inactive({ state_change = true })
-          dev:emit_component_event(c_lobby, motion_evt)
-        end
-      end
+      local c_lobby = dev.profile.components["lobby"]
+      update_door_motion(dev, c_main, front_bell, "main", "Front Door")
+      update_door_motion(dev, c_lobby, lobby_bell, "lobby", "Lobby Door")
     end
   }
 

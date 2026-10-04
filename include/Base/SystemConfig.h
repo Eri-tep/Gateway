@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.8.5";
+constexpr const char *FIRMWARE_VERSION = "v1.8.6";
 } // namespace Config
 
 namespace Config::Task {
@@ -43,6 +43,7 @@ constexpr uint32_t CH1_STALE_POLL_INTERVAL_MS = 10000;
 constexpr uint32_t INITIAL_CACHING_GRACE_PERIOD_MS = 5000;
 constexpr uint32_t SYSTEM_MONITOR_INTERVAL_MS = 15000;
 constexpr uint32_t DOORPHONE_DEBOUNCE_MS = 500;
+constexpr uint32_t DOORPHONE_BELL_TIMEOUT_MS = 30000;
 constexpr uint32_t WALLPAD_AUTO_IPG_MS = 20;
 constexpr uint32_t DOORPHONE_IPG_MS = 25;
 constexpr uint32_t DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS = 16;

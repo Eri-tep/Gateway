@@ -1150,6 +1150,28 @@ void Task_Ch4(void *pvParameters) {
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms, cur_dp_ns);
     }
 
+    const uint32_t last_bell =
+        g_doorphone_state.last_bell_ms.load(std::memory_order_relaxed);
+    if (last_bell > 0 &&
+        TimeUtils::isElapsed(last_bell,
+                             Config::Timing::DOORPHONE_BELL_TIMEOUT_MS)) {
+      bool changed = false;
+      if (g_doorphone_state.front_bell.load(std::memory_order_relaxed)) {
+        g_doorphone_state.front_bell.store(false, std::memory_order_release);
+        changed = true;
+      }
+      if (g_doorphone_state.lobby_bell.load(std::memory_order_relaxed)) {
+        g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
+        changed = true;
+      }
+      if (changed) {
+        g_doorphone_state.last_bell_ms.store(0, std::memory_order_release);
+        if (s_doorphone_listener) {
+          s_doorphone_listener(false, false);
+        }
+      }
+    }
+
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
         g_config.doorphone_baud_rate);
     uint32_t burst_spin_total = 0;
