@@ -435,11 +435,14 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
                              ? fcu_dev->last_current_temp
                              : tgt);
 
+        int err_code = static_cast<int>(fcu_rt.snap.error_code);
+
         out.appendFormat(
             "{\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\",\"name\":"
             "\"%s\",\"channel\":5,\"power\":%d,\"mode\":%d,\"fan_speed\":%d,"
-            "\"swing\":%d,\"target_temp\":%d,\"current_temp\":%d}",
-            Config::FCU::DEV_ID, s, name_buf, pwr, mode, fan, swg, tgt, cur);
+            "\"swing\":%d,\"target_temp\":%d,\"current_temp\":%d,\"error\":%d}",
+            Config::FCU::DEV_ID, s, name_buf, pwr, mode, fan, swg, tgt, cur,
+            err_code);
         locked_count++;
       }
     }

@@ -754,8 +754,8 @@ local DEVICE_TELEMETRY_HANDLERS = {
     end
 
     -- 4. 실내 측정 온도 (temperatureMeasurement)
-    if event_data.room_temp and capabilities.temperatureMeasurement then
-      local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.room_temp, unit = "C" })
+    if event_data.current_temp and capabilities.temperatureMeasurement then
+      local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.current_temp, unit = "C" })
       cur_evt.state_change = true
       dev:emit_event(cur_evt)
     end
