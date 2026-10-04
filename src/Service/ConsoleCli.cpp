@@ -1187,16 +1187,6 @@ void TelnetTracer::flushToClient() {
     return;
 
   TSTAGE(12);
-  if (s_telnet_tx_sem && xSemaphoreTake(s_telnet_tx_sem, 0) != pdTRUE) {
-    return;
-  }
-  struct TxSemGuard {
-    SemaphoreHandle_t sem;
-    ~TxSemGuard() {
-      if (sem)
-        xSemaphoreGive(sem);
-    }
-  } sem_guard{s_telnet_tx_sem};
 
   constexpr size_t BATCH_SIZE = 8;
   TracePacketEntry local_batch[BATCH_SIZE];
