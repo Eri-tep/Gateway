@@ -1,11 +1,12 @@
-#include "L4_Services/ST_Service.h"
 #include "L4_Services/Console/ConsoleFmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
-#include "L2_Channels/RS485_CH.h"
-#include "L3_Routing/Wallpad_Protocol.h"
 #include "L4_Services/EW11_Service.h"
+#include "L4_Services/ST_Service.h"
+#include "L3_Routing/Wallpad_Protocol.h"
 #include <WiFi.h>
+#include <esp_core_dump.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 
 namespace WifiCli {

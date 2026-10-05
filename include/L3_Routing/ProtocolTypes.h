@@ -6,7 +6,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 // ============================================================================
 // CONTROL ACTION TYPES & SLOTS

@@ -27,7 +27,6 @@
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
 #include "L1_Drivers/Uart_Driver.h"
-#include <esp_timer.h>
 
 // ── Packet Timing & Queuing Primitives ──────────────────────────────────────
 struct TimestampedPacket {

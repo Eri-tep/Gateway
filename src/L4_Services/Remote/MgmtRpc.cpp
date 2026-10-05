@@ -11,33 +11,14 @@ static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 
-#include <ArduinoOTA.h>
-#include <HTTPClient.h>
-#include <Preferences.h>
-#include <Update.h>
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiClientSecure.h>
-#include <algorithm>
-#include <array>
-#include <atomic>
+#include "L3_Routing/ControlTemplate.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <esp_core_dump.h>
-#include <esp_log.h>
-#include <esp_ota_ops.h>
-#include <esp_task_wdt.h>
-#include <esp_timer.h>
-#include <fcntl.h>
-#include <lwip/ip.h>
 #include <lwip/sockets.h>
-#include <lwip/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 
 static inline const char *findJsonStringValue(const char *json, const char *key,

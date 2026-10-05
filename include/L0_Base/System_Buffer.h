@@ -6,9 +6,12 @@
 
 #include "L0_Base/System_Platform.h"
 #include <algorithm>
+#include <array>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <span>
+#include <string_view>
 
 namespace HexLUT {
 constexpr auto generateLUT() {

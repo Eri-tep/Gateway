@@ -4,21 +4,13 @@
 // SystemPlatform: Level 0 Pure Base Infrastructure Definitions
 // ============================================================================
 
-#include "driver/uart.h"
-#include "esp_core_dump.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
-#include "esp_task_wdt.h"
-#include "esp_timer.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include <Arduino.h>
-#include <IPAddress.h>
 #include <Preferences.h>
-#include <esp_log.h>
 
 // ── RAII FreeRTOS Synchronization Primitives ──
 class [[nodiscard]] CriticalSectionLocker {
@@ -80,10 +72,7 @@ public:
 
 #include <array>
 #include <atomic>
-#include <cctype>
 #include <string_view>
-#include <sys/time.h>
-#include <time.h>
 #include <type_traits>
 
 #ifndef LIKELY

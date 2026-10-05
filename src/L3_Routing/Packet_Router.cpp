@@ -17,9 +17,7 @@
 
 #include "L3_Routing/Packet_Router.h"
 #include "L3_Routing/Wallpad_Protocol.h"
-#include "L3_Routing/Device_Registry.h"
 #include "L2_Channels/RS485_CH.h"
-#include "L2_Channels/TCP_CH.h"
 #include "L0_Base/System_Config.h"
 
 #include <Arduino.h>

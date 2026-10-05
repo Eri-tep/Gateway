@@ -1,4 +1,3 @@
-#include "L4_Services/ST_Service.h"
 #include "L4_Services/Console/ConsoleFmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
@@ -6,7 +5,6 @@
 #include "L3_Routing/Device_Registry.h"
 #include "L4_Services/EW11_Service.h"
 #include <WiFi.h>
-#include <esp_ota_ops.h>
 
 namespace WallpadCli {
 

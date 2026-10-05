@@ -3,39 +3,8 @@
 // ============================================================================
 
 #include "L4_Services/Remote/RemoteInternal.h"
-#include "L4_Services/EW11_Service.h"
-#include "L4_Services/ST_Service.h"
-#include "L3_Routing/Wallpad_Protocol.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
-#include "L2_Channels/TCP_CH.h"
-
-#include <ArduinoOTA.h>
-#include <HTTPClient.h>
-#include <Preferences.h>
-#include <Update.h>
+#include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiClientSecure.h>
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <esp_core_dump.h>
-#include <esp_log.h>
-#include <esp_ota_ops.h>
-#include <esp_task_wdt.h>
-#include <esp_timer.h>
-#include <fcntl.h>
-#include <lwip/ip.h>
-#include <lwip/sockets.h>
-#include <lwip/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 EventGroupHandle_t g_wifi_event_group = nullptr;
 static uint32_t s_wifi_disconnect_count = 0;

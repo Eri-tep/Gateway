@@ -26,13 +26,9 @@
 
 #include "esp_task_wdt.h"
 #include <Arduino.h>
-#include <Preferences.h>
-#include <WiFi.h>
 #include <algorithm>
 #include <atomic>
-#include <cstdio>
 #include <cstring>
-#include <esp_timer.h>
 
 // ── Core Repositories & Metrics Trackers ──
 static RS485_PacketDispatcher s_dispatcher{};

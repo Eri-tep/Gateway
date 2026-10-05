@@ -10,34 +10,17 @@
 #include "L2_Channels/TCP_CH.h"
 #include "L3_Routing/Packet_Router.h"
 #include "L3_Routing/Device_Registry.h"
+#include "L3_Routing/ControlTemplate.h"
 
-#include <ArduinoOTA.h>
-#include <HTTPClient.h>
-#include <Preferences.h>
-#include <Update.h>
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiClientSecure.h>
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
-#include <esp_core_dump.h>
-#include <esp_log.h>
-#include <esp_ota_ops.h>
-#include <esp_task_wdt.h>
-#include <esp_timer.h>
-#include <fcntl.h>
-#include <lwip/ip.h>
+#include <esp_wifi.h>
 #include <lwip/sockets.h>
-#include <lwip/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 // ── JSON-RPC & TCP Management Server (formerly Service.cpp) ──
 // ============================================================================

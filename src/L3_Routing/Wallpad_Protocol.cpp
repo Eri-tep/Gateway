@@ -14,7 +14,6 @@
 #include "L0_Base/System_Platform.h"
 
 #include <Preferences.h>
-#include <algorithm>
 #include <cstring>
 #include <esp_timer.h>
 
@@ -22,13 +21,19 @@ namespace {
 
 int Wallpad_ScoreCandidate(const PollingTargetRegistry::PollingCandidate &tgt,
                            const DeviceStateEntry *cached_dev) noexcept {
-  if (!cached_dev) {
-    return 1;
+  // CH5 (EW11 TCP) 소속 타겟(FCU 모드버스, 엘리베이터 등)은 CH1 물리 버스 폴링에서 원천 배제
+  if ((tgt.source_channels != 0 && !(tgt.source_channels & kWallpadChMask)) ||
+      (tgt.source_channels & (1 << 5)) ||
+      tgt.dev_id == Config::FCU::DEV_ID) {
+    return 999;
   }
   RouteEndpoint ep;
   if (Router_LookupRoute(tgt.dev_id, tgt.sub1, tgt.sub2, ep) &&
       ep.channel_id == 5) {
     return 999;
+  }
+  if (!cached_dev) {
+    return 1;
   }
   if (cached_dev->last_updated_ms == 0) {
     return 1;
@@ -107,7 +112,7 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
       size_t idx = s_current_dev_idx % dev_cnt;
       auto *dev = Device_GetAt(idx);
       s_current_dev_idx = (idx + 1) % dev_cnt;
-      if (dev &&
+      if (dev && dev->dev_id != Config::FCU::DEV_ID &&
           (dev->is_online || dev->last_updated_ms == 0 ||
            TimeUtils::isElapsed(dev->last_stale_poll_ms,
                                 Config::Timing::CH1_STALE_POLL_INTERVAL_MS))) {

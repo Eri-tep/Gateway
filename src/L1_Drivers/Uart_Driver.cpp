@@ -15,7 +15,6 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
 #include <driver/uart.h>
-#include <mutex>
 
 // ── Static-sealed Doorphone SW Serial instance (L1 private) ─────────────────
 // Previously: `extern SoftwareSerial g_doorphone_serial;` in NetworkRouter.h

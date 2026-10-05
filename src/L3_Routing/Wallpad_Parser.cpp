@@ -3,19 +3,11 @@
 // ============================================================================
 
 #include "L3_Routing/Wallpad_Protocol.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
 
-#include "esp_log.h"
 #include <Preferences.h>
 #include <algorithm>
-#include <array>
-#include <bitset>
 #include <cstdio>
 #include <cstring>
-#include <initializer_list>
-#include <vector>
-
-static const char *TAG = "ProfileMatcher";
 
 namespace {
 

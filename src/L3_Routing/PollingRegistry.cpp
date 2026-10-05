@@ -3,19 +3,12 @@
 // ============================================================================
 
 #include "L3_Routing/Wallpad_Protocol.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
+#include "L0_Base/System_Buffer.h"
 
-#include "esp_log.h"
 #include <Preferences.h>
 #include <algorithm>
-#include <array>
-#include <bitset>
 #include <cstdio>
 #include <cstring>
-#include <initializer_list>
-#include <vector>
-
-static const char *TAG = "ProfileMatcher";
 
 template <class F> static inline size_t countIf(const PollingTargetEntry *e, size_t n, F f) {
   size_t c = 0;

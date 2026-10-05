@@ -4,7 +4,6 @@
 // ModbusProtocol: Level 3 Modbus-RTU Codec, Framing & CRC Engine
 // ============================================================================
 
-#include "L0_Base/System_Buffer.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>

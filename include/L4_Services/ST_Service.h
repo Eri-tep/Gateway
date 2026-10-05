@@ -1,81 +1,71 @@
 #pragma once
 
 // ============================================================================
-// BridgeService: Level 4 EW11 TCP Bridge & Air Conditioner (FCU) Subsystem
+// RemoteService: Level 4 Network Remote Services (SmartThings JSON-RPC & EW11
+// Hub)
 // ============================================================================
 
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
+#include "L1_Drivers/OTA_Driver.h"
 #include "L3_Routing/Device_Registry.h"
-#include "L3_Routing/Modbus_Protocol.h"
-#include "L2_Channels/TCP_CH.h"
+#include <span>
 #include <sys/select.h>
 
-namespace Fcu {
-
-struct SlotRuntime {
-  Snapshot snap{};
-  uint32_t last_poll_ms{0};
-  uint32_t query_sent_ms{0};
-  uint8_t timeout_count{0};
-  bool waiting_response{false};
-  bool is_online{false};
-  Mode last_active_mode{Mode::Cool};       // 기록 없을 시 안전 기본 냉방
-  FanSpeed last_active_fan{FanSpeed::Low}; // 기록 없을 시 기본 약풍
-  Swing last_active_swing{Swing::Off};     // 기록 없을 시 기본 고정
-  bool has_active_record{false};           // 냉방/난방 운전 이력 여부
-  uint32_t next_tx_ms{0};                  // 120ms 논블로킹 가드타임 만료 시각
-  uint8_t pending_temp{0};                 // 120ms 후 전송할 대기 목표온도
-  bool has_pending_temp{false};            // 온도 패킷 전송 대기 여부
-  uint8_t pending_cmd_buf[16]{};    // RS-485 Stop-and-Wait 대기 명령 버퍼
-  uint8_t pending_cmd_len{0};       // 대기 중인 명령 패킷 길이
-  uint8_t pending_restore_swing{0}; // 전원 켜기 복원 시 스윙값
-};
-
-// ── 외부 공개 제어 API ──
-bool SetPower(uint8_t slot_idx, bool on);
-bool RestorePower(uint8_t slot_idx, uint16_t mode, uint16_t fan, uint16_t swing,
-                  uint8_t temp);
-bool SetMode(uint8_t slot_idx, Mode m);
-bool SetFanSpeed(uint8_t slot_idx, FanSpeed f);
-bool SetSwing(uint8_t slot_idx, Swing s);
-bool SetTargetTemp(uint8_t slot_idx, uint8_t temp_c);
-bool GetSlotRuntime(uint8_t slot_idx, SlotRuntime &out_rt);
-void handleSlotRx(uint8_t slot_idx, std::span<const uint8_t> data) noexcept;
-inline void handleSlotRx(uint8_t slot_idx, const uint8_t *data, size_t len) {
-  if (data)
-    handleSlotRx(slot_idx, std::span<const uint8_t>(data, len));
+// ============================================================================
+// 2. HTTP(S) Cloud OTA (Delegated to Level 1 SystemOta)
+// ============================================================================
+inline void Mgmt_StartHttpOta(const char *url) {
+  System_StartHttpOta(url);
 }
 
-} // namespace Fcu
+// ============================================================================
+// 3. Port 8900 Management TCP Session Structure
+// ============================================================================
+struct MgmtSession {
+  int sock{-1};
+  uint8_t buffer[Config::TCP::MGMT_BUFFER_SIZE];
+  size_t len{0};
+  uint32_t connected_at_ms{0};
+};
 
-// ── EW11 Slot Snapshot & Management API (0-extern 정보 은닉) ──
-bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out);
-bool Bridge_SetSlotEnabled(uint8_t slot_idx, bool enabled);
-bool Bridge_SetFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len);
-bool Bridge_ResetFramingTracker(uint8_t slot_idx);
+// ============================================================================
+// 4. Management JSON-RPC Functions
+// ============================================================================
+void Mgmt_Init();
+void Mgmt_Data(MgmtSession *s, std::span<const uint8_t> data);
+inline void Mgmt_Data(MgmtSession *s, const uint8_t *data, size_t len) {
+  if (data)
+    Mgmt_Data(s, std::span<const uint8_t>(data, len));
+}
+void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id = -1);
+void Mgmt_SerializeDevices(AppendBuf &out, long req_id = -1);
+void Mgmt_DispatchJsonRpc(int sock, const char *json_str);
 
-void Hub_LoadConfig();
-void Hub_SaveConfig();
-bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                 const char *name = nullptr);
-bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
+void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept;
+void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                               DeviceClass dev_class, int power,
+                               int target_temp = 0, int current_temp = 0,
+                               int speed = 0, const char *valve_state = nullptr,
+                               float power_w = 0.0f, int floor = 0,
+                               int direction = 0, int ho = 0,
+                               int vent_mode = 1);
+void Mgmt_BroadcastDeviceResult(const DeviceUpdateResult &res) noexcept;
+void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
+                                 uint8_t ho, uint8_t power,
+                                 bool is_arrival) noexcept;
+void Mgmt_BroadcastDevicesUpdated();
+void Mgmt_BroadcastRawJson(const char *json_payload);
 
-void Bridge_Init();
-void Bridge_ShutdownSockets() noexcept;
+// ── Network Subsystem Entry Points ──
+void Remote_Init();
+void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
+void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
+void Remote_Tick(bool ota_now, uint32_t now_ms) noexcept;
 
-// ── Core 0 Network Reactor Interface ──
-void Bridge_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
-void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
-void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept;
+extern EventGroupHandle_t g_wifi_event_group;
 
-// ── Bridge Event Listeners & Forwarding API ──
-using BridgeDeviceStateListener = void (*)(const DeviceUpdateResult &res) noexcept;
-using ElevatorStateListener = void (*)(uint8_t sub1, uint8_t sub2, uint8_t floor,
-                                       uint8_t ho, uint8_t power,
-                                       bool is_arrival) noexcept;
-
-void Bridge_RegisterDeviceStateListener(BridgeDeviceStateListener listener) noexcept;
-void Bridge_RegisterElevatorListener(ElevatorStateListener listener) noexcept;
-bool Bridge_ForwardPacket(uint8_t slot_idx, const StaticPacket &pkt,
-                          bool burst) noexcept;
+// ── Remote Control Handler Registration ──
+using DeviceControlHandler = bool (*)(StaticPacket &req,
+                                      StaticPacket &out_ack) noexcept;
+void Remote_RegisterControlHandler(DeviceControlHandler handler) noexcept;

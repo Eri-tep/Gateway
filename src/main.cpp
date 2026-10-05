@@ -19,6 +19,7 @@
 #include "esp_ota_ops.h"
 #include "esp_sntp.h"
 #include "esp_task_wdt.h"
+#include "esp_wifi.h"
 #include "lwip/ip.h"
 #include "lwip/tcp.h"
 #include <ArduinoOTA.h>
