@@ -3,6 +3,8 @@
 // ============================================================================
 
 #include "L3_Routing/Public/Protocol_Diagnostics.h"
+#include "L3_Routing/Public/Packet_Router.h"
+#include "L2_Channels/RS485_CH.h"
 #include "L3_Routing/Private/Wallpad_Engine.h"
 #include "L3_Routing/Private/Control_Registry.h"
 #include <algorithm>
@@ -497,5 +499,38 @@ uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept
   return parser ? parser->calculateChecksum(data, len) : 0;
 }
 
+// ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
+void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
+  dispatcher.onBuildPoll = Router_BuildNextPoll;
+  dispatcher.onBusPacket = Router_HandleBusPacket;
+  dispatcher.onTimeout = Router_HandlePollTimeout;
+  dispatcher.onDispatchControl = Router_DispatchControl;
+  dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
+  dispatcher.onCheckConvergence = Wallpad_CheckConvergence;
+  dispatcher.onGetStx = Wallpad_GetStx;
+  dispatcher.onIsAutoUnlocked = Wallpad_IsAutoUnlocked;
+  dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
+  dispatcher.onExtractLength = Wallpad_ExtractLength;
+  dispatcher.onValidatePacket = Wallpad_ValidatePacket;
+  dispatcher.onHandleSubBusQuery = Router_HandleSubBusQuery;
+  dispatcher.onFeedControlFrame = Wallpad_FeedControlFrame;
+  dispatcher.onDoorphonePacket = Wallpad_HandleDoorphonePacket;
+  dispatcher.onDoorphoneReset = Wallpad_ResetDoorphoneBellState;
+  dispatcher.onMatchDoorphoneLock = Wallpad_MatchDoorphoneLock;
+  dispatcher.onDoorphoneGetLockedFraming = Wallpad_DoorphoneGetLockedFraming;
+  dispatcher.onDoorphoneFrameDetected = Wallpad_DoorphoneFrameDetected;
+  dispatcher.onDoorphoneCheckBellTimeout = Wallpad_DoorphoneCheckBellTimeout;
+  dispatcher.onIsQueryPacket = Wallpad_IsQueryPacket;
+}
 
+void Protocol_DoorphoneInit() noexcept {
+  Wallpad_DoorphoneInit();
+}
 
+void Protocol_DoorphoneRestoreNvs(const char *dp_ns) noexcept {
+  Wallpad_DoorphoneRestoreNvs(dp_ns);
+}
+
+void Protocol_WarmCacheRestoreOnBoot() noexcept {
+  WarmCache_RestoreOnBoot();
+}

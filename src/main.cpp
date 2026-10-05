@@ -4,7 +4,6 @@
 #include "L2_Channels/RS485_CH.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L1_Drivers/Uart_Driver.h"
-#include "L3_Routing/Private/Wallpad_Engine.h"
 #include "L3_Routing/Public/Device_Registry.h"
 #include "L3_Routing/Public/Packet_Router.h"
 #include "L3_Routing/Public/Protocol_Diagnostics.h"
@@ -197,11 +196,11 @@ static void Boot_RestoreConfigAndState() {
   Serial.printf("[CONFIG] WiFi SSID: '%s', Timeout: %us, AP SSID: '%s'\r\n",
                 g_config.wifi_ssid, g_config.wifi_connect_timeout_s,
                 g_config.ap_ssid);
-  WarmCache_RestoreOnBoot();
-  System_RegisterShutdownHook(WarmCache_SaveToNvs);
+  Protocol_WarmCacheRestoreOnBoot();
+  System_RegisterShutdownHook(ProtocolDiag_WarmCacheSaveToNvs);
   char dp_ns[16];
   ProtocolDiag_GetFramingNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
-  Wallpad_DoorphoneRestoreNvs(dp_ns);
+  Protocol_DoorphoneRestoreNvs(dp_ns);
 }
 
 static bool HandleRemoteControl(StaticPacket &req,
@@ -222,29 +221,10 @@ static void Boot_InitSubsystems() {
 
   // ── Register L3 Protocol Dispatcher SPI into L2 RS-485 Engine ──
   RS485_PacketDispatcher rs485_dispatcher{};
-  rs485_dispatcher.onBuildPoll = Router_BuildNextPoll;
-  rs485_dispatcher.onBusPacket = Router_HandleBusPacket;
-  rs485_dispatcher.onTimeout = Router_HandlePollTimeout;
-  rs485_dispatcher.onDispatchControl = Router_DispatchControl;
-  rs485_dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
-  rs485_dispatcher.onCheckConvergence = Wallpad_CheckConvergence;
-  rs485_dispatcher.onGetStx = Wallpad_GetStx;
-  rs485_dispatcher.onIsAutoUnlocked = Wallpad_IsAutoUnlocked;
-  rs485_dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
-  rs485_dispatcher.onExtractLength = Wallpad_ExtractLength;
-  rs485_dispatcher.onValidatePacket = Wallpad_ValidatePacket;
-  rs485_dispatcher.onHandleSubBusQuery = Router_HandleSubBusQuery;
-  rs485_dispatcher.onFeedControlFrame = Wallpad_FeedControlFrame;
-  rs485_dispatcher.onDoorphonePacket = Wallpad_HandleDoorphonePacket;
-  rs485_dispatcher.onDoorphoneReset = Wallpad_ResetDoorphoneBellState;
-  rs485_dispatcher.onMatchDoorphoneLock = Wallpad_MatchDoorphoneLock;
-  rs485_dispatcher.onDoorphoneGetLockedFraming = Wallpad_DoorphoneGetLockedFraming;
-  rs485_dispatcher.onDoorphoneFrameDetected = Wallpad_DoorphoneFrameDetected;
-  rs485_dispatcher.onDoorphoneCheckBellTimeout = Wallpad_DoorphoneCheckBellTimeout;
-  rs485_dispatcher.onIsQueryPacket = Wallpad_IsQueryPacket;
+  Protocol_BindDispatcher(rs485_dispatcher);
   RS485_RegisterDispatcher(rs485_dispatcher);
 
-  Wallpad_DoorphoneInit();
+  Protocol_DoorphoneInit();
   Remote_Init();
   Bridge_Init();
   Mgmt_Init();

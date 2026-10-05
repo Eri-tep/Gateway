@@ -206,5 +206,9 @@ bool ProtocolDiag_ValidatePacket(const uint8_t *buf, size_t len) noexcept;
 bool ProtocolDiag_IsQueryPacket(const uint8_t *buf, size_t len) noexcept;
 uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
 
-
-
+// ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
+struct RS485_PacketDispatcher;
+void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept;
+void Protocol_DoorphoneInit() noexcept;
+void Protocol_DoorphoneRestoreNvs(const char *dp_ns) noexcept;
+void Protocol_WarmCacheRestoreOnBoot() noexcept;
