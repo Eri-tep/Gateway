@@ -7,6 +7,7 @@
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
 #include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include "L3_Routing/Private/AutoProbingEngine.h"
 #include "L3_Routing/Private/PollingRegistry.h"
 #include "L3_Routing/Private/Wallpad_Parser.h"
@@ -167,38 +168,12 @@ bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
 void Wallpad_FeedControlFrame(span<const uint8_t> frame) noexcept;
 
 // 6. Doorphone (CH4) Handling & FSM (L3 Canonical)
-// FramingStatus is defined in Device_Registry.h
+// FramingStatus and FramingTracker are defined in ProtocolDiagnostics.h / Device_Registry.h
 
-struct FramingTracker {
-  std::atomic<FramingStatus> status{FramingStatus::WAITING};
-  std::atomic<uint8_t> candidate_stx{0};
-  std::atomic<uint8_t> candidate_etx{0};
-  std::atomic<uint8_t> candidate_len{0};
-  std::atomic<uint8_t> consecutive_matches{0};
-  std::atomic<uint8_t> consecutive_mismatches{0};
-  std::atomic<bool> is_custom_fixed{false};
-
-  void setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
-  void reset() noexcept;
-  void clearNvs(const char *nvs_ns, const char *tag = "FRAMING") noexcept;
-  void processFrame(uint8_t stx, uint8_t etx, uint8_t len, const char *nvs_ns,
-                    const char *tag = "FRAMING") noexcept;
-
-  static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
-                              size_t max_len) noexcept {
-    snprintf(out_ns, max_len, "dp_frame_p%u",
-             static_cast<unsigned int>(prof_idx & 0x03));
-  }
-
-  void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",
-                      const char *tag = "FRAMING") noexcept;
-  void saveToNvs(const char *nvs_ns = "dp_frame_p0",
-                 const char *tag = "FRAMING") noexcept;
-
-  [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
-};
 
 void Wallpad_DoorphoneInit() noexcept;
+bool Wallpad_DoorphoneOpen(bool is_lobby = false) noexcept;
+void Wallpad_InitDecoupledHooks() noexcept;
 bool Wallpad_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,
                                     uint8_t op_open, uint8_t op_end) noexcept;
 void Wallpad_DoorphoneCancel() noexcept;

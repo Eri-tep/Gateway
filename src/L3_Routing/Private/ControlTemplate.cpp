@@ -788,3 +788,214 @@ uint8_t GroupControlTemplate::getWattageOffset(uint8_t pkt_len) const noexcept {
 bool GroupControlTemplate::isUnidirectional() const noexcept {
   return dev_id == 0x34; // 단방향 버스트 전송 (엘리베이터 등)
 }
+
+namespace {
+
+static void decodeOutlet(const GroupControlTemplate &grp,
+                         const StaticPacket &ack, const DeviceStateEntry *,
+                         DecodedDeviceState &out) {
+  uint8_t w_off = grp.getWattageOffset(ack.length);
+  if (w_off + 1 < ack.length) {
+    uint16_t raw_w =
+        (static_cast<uint16_t>(ack.data[w_off]) << 8) | ack.data[w_off + 1];
+    out.power_w = (raw_w < 50000) ? static_cast<float>(raw_w) : 0.0f;
+  }
+}
+
+static void decodeSwitch(const GroupControlTemplate &grp,
+                         const StaticPacket &ack, const DeviceStateEntry *dev,
+                         DecodedDeviceState &out) {
+  if (grp.frame_len >= 17) {
+    out.dev_class = DeviceClass::OUTLET;
+    decodeOutlet(grp, ack, dev, out);
+  }
+}
+
+static void decodeGas(const GroupControlTemplate &grp, const StaticPacket &ack,
+                         const DeviceStateEntry *, DecodedDeviceState &out) {
+  uint8_t v_off = grp.getValveStateOffset(ack.length);
+  bool is_closed =
+      (v_off >= ack.length || ack.data[v_off] == grp.close_slot.off_val);
+  snprintf(out.valve_state, sizeof(out.valve_state), "%s",
+           is_closed ? "closed" : "open");
+}
+
+static void decodeMomentary(const GroupControlTemplate &grp,
+                            const StaticPacket &ack,
+                            const DeviceStateEntry *dev,
+                            DecodedDeviceState &out) {
+  out.floor = 15;
+  out.direction = 0;
+  out.ho = 0;
+  if (grp.dev_id == 0x34) {
+    out.power =
+        (ack.length == 11 && ack.data[4] == 0x04)
+            ? ((ack.data[8] == 0x06) ? 1 : 0)
+            : ((dev && dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01)
+                                              : 0);
+  } else if (ack.length >= 6) {
+    out.floor = constrain(static_cast<int>(ack.data[5]), 1, 60);
+    out.direction = (ack.length >= 7) ? ack.data[6] : 0;
+  }
+}
+
+static void decodeThermostat(const GroupControlTemplate &grp,
+                             const StaticPacket &ack,
+                             const DeviceStateEntry *dev,
+                             DecodedDeviceState &out) {
+  out.target_temp = dev ? dev->last_target_temp : 0;
+  out.current_temp = (dev && dev->last_current_temp > 0)
+                         ? dev->last_current_temp
+                         : out.target_temp;
+
+  uint8_t p_off = grp.getPowerOffset(ack.length);
+  if (p_off < ack.length && grp.away_mode_token != 0 &&
+      ack.data[p_off] == grp.away_mode_token)
+    out.power = 2;
+
+  uint8_t t_off = grp.getTargetTempOffset(ack.length);
+  if (t_off < ack.length && ack.data[t_off] >= 5 && ack.data[t_off] <= 35) {
+    out.target_temp = ack.data[t_off];
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_target_temp = ack.data[t_off];
+  }
+
+  uint8_t c_off = grp.getCurrentTempOffset(ack.length);
+  if (c_off < ack.length && ack.data[c_off] >= 5 && ack.data[c_off] <= 50) {
+    out.current_temp = ack.data[c_off];
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_current_temp = ack.data[c_off];
+  }
+}
+
+static void decodeVent(const GroupControlTemplate &grp, const StaticPacket &ack,
+                       const DeviceStateEntry *, DecodedDeviceState &out) {
+  uint8_t p_off = grp.getPowerOffset(ack.length);
+  out.power = (p_off < ack.length && ack.data[p_off] == 0x01) ? 1 : 0;
+  out.fan_speed = 1;
+  out.vent_mode = 1;
+
+  uint8_t spd_off = grp.getFanSpeedOffset(ack.length);
+  if (spd_off < ack.length)
+    out.fan_speed = grp.decodeFanSpeed(ack.data[spd_off]);
+
+  if (out.power == 1 && (ack.length >= 6 && ack.data[5] == 0x43) &&
+      p_off < ack.length) {
+    uint8_t m = ack.data[p_off];
+    if (m >= 1 && m <= 4)
+      out.vent_mode = m;
+  }
+}
+
+static void decodeAircon(const GroupControlTemplate &, const StaticPacket &ack,
+                         const DeviceStateEntry *dev, DecodedDeviceState &out) {
+  size_t base = (ack.length == 14) ? 7 : 8;
+  if (base + 4 >= ack.length)
+    return;
+
+  out.power = ((ack.data[base] & 0x7F) == 0x01) ? 1 : 0;
+  out.vent_mode = constrain(static_cast<int>(ack.data[base + 1]), 1, 5);
+  out.fan_speed = (ack.data[base + 2] >= 1 && ack.data[base + 2] <= 4)
+                      ? ack.data[base + 2]
+                      : 4;
+
+  uint8_t amb = ack.data[base + 3];
+  if (amb >= 5 && amb <= 50) {
+    out.current_temp = amb;
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_current_temp = amb;
+  }
+  uint8_t tgt = ack.data[base + 4] & 0x7F;
+  if (tgt >= 5 && tgt <= 35) {
+    out.target_temp = tgt;
+    if (dev)
+      const_cast<DeviceStateEntry *>(dev)->last_target_temp = tgt;
+  }
+}
+
+static void decodeUnknown(const GroupControlTemplate &, const StaticPacket &,
+                          const DeviceStateEntry *, DecodedDeviceState &) {}
+
+using ClassDecoderFn = void (*)(const GroupControlTemplate &grp,
+                                const StaticPacket &ack,
+                                const DeviceStateEntry *dev,
+                                DecodedDeviceState &out);
+
+static constexpr ClassDecoderFn kClassDecoders[] = {
+    decodeUnknown,    // UNKNOWN = 0
+    decodeSwitch,     // SWITCH = 1
+    decodeOutlet,     // OUTLET = 2
+    decodeGas,        // GAS = 3
+    decodeMomentary,  // MOMENTARY = 4
+    decodeThermostat, // THERMOSTAT = 5
+    decodeVent,       // VENT = 6
+    decodeAircon      // AIRCON = 7
+};
+
+} // namespace
+
+void ControlTemplate_DecodeDeviceState(const GroupControlTemplate &grp,
+                                       const StaticPacket &ack,
+                                       const DeviceStateEntry *dev,
+                                       DecodedDeviceState &out) noexcept {
+  out.dev_class = grp.coverage.dev_class;
+  out.should_broadcast = false;
+  out.power = 0;
+  out.target_temp = 0;
+  out.current_temp = 0;
+  out.fan_speed = 0;
+  out.vent_mode = 1;
+  out.power_w = 0.0f;
+  out.floor = 1;
+  out.direction = 0;
+  out.ho = 0;
+  snprintf(out.valve_state, sizeof(out.valve_state), "closed");
+
+  // 1. 공통 기본 전원 슬롯 디코딩
+  uint8_t p_off = grp.getPowerOffset(ack.length);
+  if (p_off != 0xFF && p_off < ack.length) {
+    out.power = (ack.data[p_off] == grp.power_slot.on_val) ? 1 : 0;
+  }
+
+  // 2. 클래스별 디스패치 (특수 전원 및 파라미터 개별 디코딩)
+  const size_t idx = static_cast<size_t>(grp.coverage.dev_class);
+  if (idx < sizeof(kClassDecoders) / sizeof(kClassDecoders[0])) {
+    kClassDecoders[idx](grp, ack, dev, out);
+  } else {
+    decodeUnknown(grp, ack, dev, out);
+  }
+}
+
+bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
+                                   const StaticPacket &ack,
+                                   const DeviceStateEntry *dev,
+                                   DecodedDeviceState &out) noexcept {
+  GroupControlTemplate grp{};
+  bool has_grp = g_control_registry.findGroup(dev_id, grp);
+  if (!has_grp && dev_id == 0x34) {
+    grp.dev_id = 0x34;
+    grp.coverage.dev_class = DeviceClass::MOMENTARY;
+    has_grp = true;
+  }
+  if (!has_grp) {
+    return false;
+  }
+  ControlTemplate_DecodeDeviceState(grp, ack, dev, out);
+  return true;
+}
+
+uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
+  GroupControlTemplate grp{};
+  if (g_control_registry.findGroup(dev_id, grp)) {
+    if (grp.power_slot.category_val != 0 &&
+        grp.power_slot.category_val != 0xFF) {
+      if (sub1 == grp.temp_slot.category_val ||
+          sub1 == grp.speed_slot.category_val) {
+        return grp.power_slot.category_val;
+      }
+    }
+  }
+  return sub1;
+}
+
+

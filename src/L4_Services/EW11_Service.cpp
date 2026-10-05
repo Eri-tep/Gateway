@@ -4,7 +4,7 @@
 
 #include "L4_Services/EW11_Service.h"
 #include "L3_Routing/Public/Device_Registry.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L2_Channels/RS485_CH.h"
@@ -164,8 +164,7 @@ inline void consumeRxBuffer(HubClientSlot *slot, size_t consumed) {
 }
 
 void demuxElevatorStream(HubClientSlot *slot) {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  uint8_t stx = parser ? parser->getStx() : PKT_STX;
+  uint8_t stx = ProtocolDiag_GetActiveStx();
 
   size_t p = 0;
   size_t loop_count = 0;
@@ -175,9 +174,7 @@ void demuxElevatorStream(HubClientSlot *slot) {
       continue;
     }
 
-    int len_res =
-        parser ? parser->extractPacketLength(slot->rx_buf, slot->rx_len, p)
-               : -1;
+    int len_res = ProtocolDiag_ExtractPacketLength(slot->rx_buf, slot->rx_len, p);
     if (len_res == 0)
       break; // 불완전 패킷: 추가 수신 대기
     if (len_res < 0) {
@@ -191,8 +188,7 @@ void demuxElevatorStream(HubClientSlot *slot) {
       continue;
     }
 
-    span<const uint8_t> frame(&slot->rx_buf[p], p_len);
-    if (!parser->validatePacket(frame)) {
+    if (!ProtocolDiag_ValidatePacket(&slot->rx_buf[p], p_len)) {
       StaticPacket drp_pkt{5, p_len};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + p_len],
                 drp_pkt.data.begin());
@@ -387,13 +383,8 @@ void processPacket(int slot_idx, const uint8_t *pkt_data, size_t pkt_len) {
 
   // Slot 0: 엘리베이터 (0x34) 전용 처리
   if (slot_idx == 0) {
-    auto *parser = WallpadParserFactory::getActiveParser();
-    if (!parser)
-      return;
-
-    span<const uint8_t> frame(pkt_data, pkt_len);
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    if (parser->extractDeviceKey(frame, dev_id, sub1, sub2) && dev_id == 0x34) {
+    if (ProtocolDiag_ExtractDeviceKey(pkt_data, pkt_len, dev_id, sub1, sub2) && dev_id == 0x34) {
       Router_RecordRoute(5, 0, 0x34, sub1, sub2);
 
       // 1) 11-byte 상태 응답 (호출 ACK / 대기 복귀)
@@ -673,7 +664,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
     rt.waiting_response = true;
 
     // 1st-Tier Polling Target 등록 (스핀락 경합 방지)
-    g_polling_targets.registerOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
+    ProtocolDiag_PollingRegisterOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
                                       ModbusRtu::kQueryPkt.data(),
                                       ModbusRtu::kQueryPkt.size());
     Router_RecordRoute(5, slot_idx, Config::FCU::DEV_ID, slot_idx, 0);
@@ -905,30 +896,28 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
   g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
   System_TracePacket(5, false, TraceType::RMT, pkt);
 
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (parser) {
-    span<const uint8_t> frame(pkt_data, pkt_len);
-    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    if (parser->extractDeviceKey(frame, dev_id, sub1, sub2) && dev_id != 0 &&
-        dev_id != parser->getStx() && dev_id != parser->getEtx() &&
-        dev_id != 0xFF) {
-      int8_t s_idx = static_cast<int8_t>(slot - s_hub_slots);
-      Router_RecordRoute(5, s_idx, dev_id, sub1, sub2);
+  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+  uint8_t stx = ProtocolDiag_GetActiveStx();
+  uint8_t etx = ProtocolDiag_GetActiveEtx();
+  if (ProtocolDiag_ExtractDeviceKey(pkt_data, pkt_len, dev_id, sub1, sub2) && dev_id != 0 &&
+      dev_id != stx && dev_id != etx &&
+      dev_id != 0xFF) {
+    int8_t s_idx = static_cast<int8_t>(slot - s_hub_slots);
+    Router_RecordRoute(5, s_idx, dev_id, sub1, sub2);
 
-      bool is_query = parser->isQueryPacket(frame);
-      bool is_ack = (pkt_len >= 5 && frame[4] == 0x04); // 표준 ACK Opcode(0x04)
+    bool is_query = ProtocolDiag_IsQueryPacket(pkt_data, pkt_len);
+    bool is_ack = (pkt_len >= 5 && pkt_data[4] == 0x04); // 표준 ACK Opcode(0x04)
 
-      // 0x2A (신발장 서브 패널 / 원격검침)는 폴링 대상 및 단말 제어 기기가
-      // 아니므로 캐시에서 완전 제외
-      if (dev_id != 0x2A) {
-        if (is_query) {
-          g_polling_targets.registerOrTouch(5, dev_id, sub1, sub2, pkt_data,
+    // 0x2A (신발장 서브 패널 / 원격검침)는 폴링 대상 및 단말 제어 기기가
+    // 아니므로 캐시에서 완전 제외
+    if (dev_id != 0x2A) {
+      if (is_query) {
+        ProtocolDiag_PollingRegisterOrTouch(5, dev_id, sub1, sub2, pkt_data,
                                             pkt_len);
-        }
-        if (is_ack) {
-          if (s_bridge_dev_listener) {
-            s_bridge_dev_listener(Device_UpdateFromBus(pkt));
-          }
+      }
+      if (is_ack) {
+        if (s_bridge_dev_listener) {
+          s_bridge_dev_listener(Device_UpdateFromBus(pkt));
         }
       }
     }

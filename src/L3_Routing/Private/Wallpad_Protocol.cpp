@@ -8,7 +8,6 @@
 #include "L3_Routing/Public/Device_Registry.h"
 #include "L3_Routing/Public/Packet_Router.h"
 #include "L3_Routing/Private/ControlTemplate.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
@@ -99,7 +98,7 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
       }
       if (chosen_score == 3) {
         Device_SetLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
-        g_ch1_state_metrics.stale_poll_cnt.fetch_add(1, std::memory_order_relaxed);
+        System_IncrementStalePollCount();
       }
       s_current_dev_idx = (chosen_idx + 1) % active_cnt;
       target_selected = true;
@@ -293,11 +292,8 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
           !g_auto_probing_engine.isOffsetsLocked()) {
         g_auto_probing_engine.analyzeCacheMatrix();
       }
-      g_pkt_stats.resetAll();
+      System_NotifyConvergence();
       g_polling_targets.resetHits();
-      g_metrics.reset();
-      g_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
-      g_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
       System_TraceMessage(
           "[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). "
           "Runtime metrics synchronized.\r\n");
@@ -590,9 +586,7 @@ public:
     pkt.data[2] = 0x00;
     pkt.data[3] = 0x00;
     pkt.data[4] = etx;
-    if (s_dp_tx_handler) {
-      s_dp_tx_handler(pkt);
-    }
+    (void)Router_EnqueueDownlink(4, pkt);
   }
 
   static void onTimerCallback(void *arg);
@@ -632,8 +626,94 @@ void DoorphoneController::onTimerCallback(void * /*arg*/) {
 
 } // namespace
 
+void Wallpad_InitDecoupledHooks() noexcept {
+  Device_RegisterParserHooks(
+    [](std::span<const uint8_t> frame) noexcept -> bool {
+      auto *parser = WallpadParserFactory::getActiveParser();
+      return parser ? parser->isAckPacket(frame) : false;
+    },
+    [](std::span<const uint8_t> frame, uint8_t &dev_id, uint8_t &sub1, uint8_t &sub2) noexcept -> bool {
+      auto *parser = WallpadParserFactory::getActiveParser();
+      return parser ? parser->extractDeviceKey(frame, dev_id, sub1, sub2) : false;
+    }
+  );
+
+  Device_RegisterStateDecoder(ControlTemplate_DecodeByDevId);
+  Device_RegisterNormSub1Hook(ControlTemplate_NormSub1);
+
+  ControlTemplateRegistry::setDeviceUnitCountProvider([](uint8_t dev_id) -> size_t {
+    size_t units = 0;
+    for (size_t i = 0; i < Device_GetCount() && units < 2; ++i) {
+      DeviceStateEntry snap{};
+      if (Device_GetSnapshot(i, snap) && snap.dev_id == dev_id)
+        ++units;
+    }
+    return units;
+  });
+
+  AutoProbingEngine::setDeviceHooks(
+    []() -> size_t {
+      return Device_GetOnlineCount();
+    },
+    [](uint8_t dev_id, uint8_t sub1, uint8_t sub2, const uint8_t **out_ack, size_t *out_len) -> bool {
+      const DeviceStateEntry *dev = Device_Find(dev_id, sub1, sub2);
+      if (dev && dev->is_online && dev->last_ack_len >= 4) {
+        *out_ack = dev->last_ack_data.data();
+        *out_len = dev->last_ack_len;
+        return true;
+      }
+      return false;
+    },
+    [](StaticPacket &ack) {
+      Device_ProcessBusPacket(ack);
+    }
+  );
+}
+
+bool Wallpad_DoorphoneOpen(bool is_lobby) noexcept {
+  FramingStatus dp_status = FramingStatus::WAITING;
+  uint8_t dp_stx = 0;
+  uint8_t dp_etx = 0;
+  uint8_t dp_len = 0;
+  Wallpad_DoorphoneGetFraming(dp_status, dp_stx, dp_etx, dp_len);
+
+  if (dp_stx == 0)
+    dp_stx = 0x7F;
+  if (dp_etx == 0)
+    dp_etx = 0xEE;
+
+  const DoorphoneSpec *dp_prof =
+      ProfileMatcher::matchDoorphone(dp_stx, dp_etx, dp_len);
+
+  uint8_t op_call = (!is_lobby) ? (dp_prof ? dp_prof->call_front : 0xB9)
+                                : (dp_prof ? dp_prof->call_lobby : 0x5F);
+  uint8_t op_open = (!is_lobby) ? (dp_prof ? dp_prof->open_front : 0xB4)
+                                : (dp_prof ? dp_prof->open_lobby : 0x61);
+  uint8_t op_end = (!is_lobby) ? (dp_prof ? dp_prof->end_front : 0xB8)
+                               : (dp_prof ? dp_prof->end_lobby : 0x60);
+
+  // 50ms Pre-Guard Time: 벨 수신 직후 3840 bps 반이중 버스 충돌 방지용 Line Silent 대기
+  uint32_t last_bell = s_doorphone_state.last_bell_ms.load(std::memory_order_relaxed);
+  if (last_bell > 0) {
+    uint32_t now_ms = millis();
+    constexpr uint32_t kDpPreGuardMs = 50;
+    if (now_ms - last_bell < kDpPreGuardMs) {
+      uint32_t rem_ms = kDpPreGuardMs - (now_ms - last_bell);
+      if (rem_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(rem_ms) > 0 ? pdMS_TO_TICKS(rem_ms) : 1);
+      }
+    }
+  }
+
+  return Wallpad_DoorphoneStartSequence(dp_stx, dp_etx, op_call, op_open, op_end);
+}
+
 void Wallpad_DoorphoneInit() noexcept {
   s_doorphone_controller.init();
+  Device_RegisterDoorphoneOpenHandler(Wallpad_DoorphoneOpen);
+  Wallpad_InitDecoupledHooks();
+  ProfileRepository::addProfileChangeListener(Wallpad_DoorphoneOnProfileChanged);
+  g_control_registry.init();
 }
 
 bool Wallpad_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,

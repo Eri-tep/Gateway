@@ -1,9 +1,8 @@
 #include "L4_Services/Console/ConsoleFmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
-#include "L3_Routing/Private/ControlTemplate.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include "L3_Routing/Public/Device_Registry.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
 #include <WiFi.h>
 
 namespace WallpadCli {
@@ -28,12 +27,14 @@ static void formatSources(uint8_t src_mask, AppendBuf &buf) {
 }
 
 void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
-  g_polling_targets.sweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
-  size_t tgt_total = g_polling_targets.totalCount();
-  size_t tgt_active = g_polling_targets.activeCount();
-  const char *wc_src_str = (g_warm_cache_source == 1)   ? "RTC SRAM"
-                           : (g_warm_cache_source == 2) ? "NVS Flash"
-                                                        : "Cold Start";
+  ProtocolDiag_PollingSweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
+  size_t tgt_active = 0, tgt_verified = 0, tgt_total = 0;
+  ProtocolDiag_GetPollingStats(tgt_active, tgt_verified, tgt_total);
+  uint8_t wc_source = 0, wc_count = 0;
+  ProtocolDiag_GetWarmCacheStatus(wc_source, wc_count);
+  const char *wc_src_str = (wc_source == 1)   ? "RTC SRAM"
+                           : (wc_source == 2) ? "NVS Flash"
+                                              : "Cold Start";
 
   CliFmt::PrintBoxHeader(out,
                          "[1ST-TIER CACHE] DYNAMIC POLLING TARGET REGISTRY");
@@ -41,7 +42,7 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
   CliFmt::PrintBoxSubtitlef(
       out, "Active Targets: %zu | Tracked: %zu | Warm Cache: %s (%u)",
       tgt_active, tgt_total, wc_src_str,
-      static_cast<unsigned>(g_warm_cache_restored_count));
+      static_cast<unsigned>(wc_count));
 
   static constexpr Column TIER1_COLS[] = {
       {"No", 3, Align::CENTER, Align::CENTER},
@@ -57,11 +58,11 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
   if (tgt_total == 0) {
     table.empty("(No polling targets registered yet. Waiting for queries...)");
   } else {
+    PollingEntrySnapshot entries[48];
+    size_t snap_cnt = ProtocolDiag_GetPollingTargetsSnapshot(entries, 48);
     unsigned int display_idx = 1;
-    for (size_t i = 0; i < tgt_total; ++i) {
-      PollingTargetEntry tgt;
-      if (!g_polling_targets.getEntry(i, tgt))
-        continue;
+    for (size_t i = 0; i < snap_cnt; ++i) {
+      const auto &tgt = entries[i];
       if (tgt.source_channels != 0 &&
           (tgt.source_channels & ALLOWED_MASK) == 0) {
         continue;
@@ -71,12 +72,12 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
       formatSources(tgt.source_channels, src_buf);
 
       char last_req_str[16] = {0};
-      Fmt::FormatElapsed(now, tgt.last_requested_ms, last_req_str,
+      Fmt::FormatElapsed(now, tgt.last_seen_ms, last_req_str,
                          sizeof(last_req_str));
 
       FixedBuf<64> q_hex;
-      if (tgt.raw_query_len > 0) {
-        Fmt::FormatHex(tgt.raw_query_data.data(), tgt.raw_query_len, q_hex.storage,
+      if (tgt.pkt_len > 0) {
+        Fmt::FormatHex(tgt.pkt_data.data(), tgt.pkt_len, q_hex.storage,
                        sizeof(q_hex.storage));
         q_hex.offset = strlen(q_hex.storage);
       } else {
@@ -164,10 +165,11 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
   DevSummary devs[16]{};
   size_t dev_count = 0;
 
-  size_t tgt_total = g_polling_targets.totalCount();
+  PollingEntrySnapshot entries[48];
+  size_t tgt_total = ProtocolDiag_GetPollingTargetsSnapshot(entries, 48);
   for (size_t i = 0; i < tgt_total; ++i) {
-    PollingTargetEntry tgt;
-    if (!g_polling_targets.getEntry(i, tgt) || tgt.dev_id == 0)
+    const auto &tgt = entries[i];
+    if (tgt.dev_id == 0)
       continue;
 
     DevSummary *found = nullptr;
@@ -183,20 +185,20 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
     }
     if (found) {
       found->sub_cnt++;
-      found->qry_cnt += tgt.hit_count;
+      found->qry_cnt += tgt.hits;
       if (tgt.is_active)
         found->online = true;
-      if (tgt.last_requested_ms > found->last_seen_ms)
-        found->last_seen_ms = tgt.last_requested_ms;
+      if (tgt.last_seen_ms > found->last_seen_ms)
+        found->last_seen_ms = tgt.last_seen_ms;
     }
   }
 
   for (size_t d = 0; d < dev_count; ++d) {
-    GroupControlTemplate grp{};
-    if (g_control_registry.findGroup(devs[d].dev_id, grp)) {
-      if (grp.group_name[0])
-        strncpy(devs[d].name, grp.group_name, sizeof(devs[d].name) - 1);
-      const char *c_str = DeviceClassToCliString(grp.coverage.dev_class);
+    BlueprintSnapshot bp{};
+    if (ProtocolDiag_GetBlueprint(devs[d].dev_id, bp)) {
+      if (bp.group_name[0])
+        strncpy(devs[d].name, bp.group_name, sizeof(devs[d].name) - 1);
+      const char *c_str = DeviceClassToCliString(bp.dev_class);
       if (c_str)
         strncpy(devs[d].cls_str, c_str, sizeof(devs[d].cls_str) - 1);
     }
@@ -291,7 +293,7 @@ void cmdDevs(CliContext &ctx) {
       {"clear", "clear",
        "Clear all 1st-tier targets and 2nd-tier device caches",
        [](int s, int, const Args &) {
-         g_polling_targets.clear();
+         ProtocolDiag_PollingClear();
          Device_Clear();
          sendTelnetMsg(s, "All 1st-tier & 2nd-tier device caches CLEARED.\r\n");
        }},
@@ -312,7 +314,7 @@ static void ctlHandleName(int sock, int argc, const Args &args) {
     if (dev_id == 0 || !name || !*name) {
       sendTelnetMsg(
           sock, "[ERROR] Missing name: ctl name <dev_id> <custom_name>\r\n");
-    } else if (g_control_registry.setGroupName(dev_id, name)) {
+    } else if (ProtocolDiag_SetGroupName(dev_id, name)) {
       sendTelnetMsgf(sock,
                      "[OK] DevID 0x%02X group name set to '%s' and saved to "
                      "NVS flash.\r\n",
@@ -369,7 +371,7 @@ static void ctlHandleClass(int sock, int argc, const Args &args) {
     } else {
       const char *final_name =
           (custom_name && strlen(custom_name) > 0) ? custom_name : def_name;
-      if (g_control_registry.setGroupClass(dev_id, cls, final_name)) {
+      if (ProtocolDiag_SetGroupClass(dev_id, cls, final_name)) {
         sendTelnetMsgf(sock,
                        "[OK] DevID 0x%02X class set to %s ('%s') and saved to "
                        "NVS flash.\r\n",
@@ -415,7 +417,7 @@ void cmdCtl(CliContext &ctx) {
          }
          const char *arg = a.get(2);
          if (strcasecmp(arg, "all") == 0) {
-           g_control_registry.resetGroup(0, true);
+           ProtocolDiag_ResetGroup(0, true);
            sendTelnetMsg(s, "[OK] All control blueprints reset & "
                             "re-synthesized from catalog specs.\r\n");
          } else {
@@ -428,7 +430,7 @@ void cmdCtl(CliContext &ctx) {
                             arg);
              return;
            }
-           g_control_registry.resetGroup(dev_id, false);
+           ProtocolDiag_ResetGroup(dev_id, false);
            sendTelnetMsgf(s,
                           "[OK] Control template for DevID 0x%02X action slots "
                           "reset completed.\r\n",
@@ -476,9 +478,8 @@ void cmdCtl(CliContext &ctx) {
 void wallpadPrintControlTable(AppendBuf &out) {
   CliFmt::PrintBoxHeader(out, "DEVICE CONTROL BLUEPRINTS & ACTION SLOTS");
 
-  GroupControlTemplate grps[ControlTemplateRegistry::MAX_GROUPS];
-  size_t count = g_control_registry.getGroupsSnapshot(
-      grps, ControlTemplateRegistry::MAX_GROUPS);
+  BlueprintSnapshot grps[8];
+  size_t count = ProtocolDiag_GetBlueprintsSnapshot(grps, 8);
 
   CliFmt::PrintBoxSubtitlef(
       out, "Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted",
@@ -508,20 +509,20 @@ void wallpadPrintControlTable(AppendBuf &out) {
   FixedBuf<8> ctl_len_str, qry_len_str, id_str;
 
   for (size_t i = 0; i < count; ++i) {
-    const GroupControlTemplate &grp = grps[i];
+    const BlueprintSnapshot &grp = grps[i];
     if (grp.dev_id == 0)
       continue;
 
-    const char *cls_str = DeviceClassToCliString(grp.coverage.dev_class);
+    const char *cls_str = DeviceClassToCliString(grp.dev_class);
 
     char name_safe[9] = {0};
     strncpy(name_safe, grp.group_name, sizeof(name_safe) - 1);
 
     pwr_buf.reset();
-    if (grp.power_slot.discovered) {
+    if (grp.power_discovered) {
       pwr_buf.appendFormat("#%u [%02X/%02X]",
-                           grp.power_slot.action_offset, grp.power_slot.on_val,
-                           grp.power_slot.off_val);
+                           grp.power_offset, grp.power_on,
+                           grp.power_off);
     } else {
       pwr_buf.append("-");
     }
@@ -533,44 +534,43 @@ void wallpadPrintControlTable(AppendBuf &out) {
       ctl_len_str.append("-");
 
     qry_len_str.reset();
-    if (grp.query_slots.expected_len > 0)
-      qry_len_str.appendFormat("%uB",
-                               grp.query_slots.expected_len);
+    if (grp.qry_len > 0)
+      qry_len_str.appendFormat("%uB", grp.qry_len);
     else
       qry_len_str.append("-");
 
     char extra_slots[48] = {0};
     AppendBuf eb{extra_slots, sizeof(extra_slots)};
-    if (grp.query_slots.power_offset != 0xFF) {
-      eb.appendFormat("#%u", grp.query_slots.power_offset);
+    if (grp.qry_pwr_offset != 0xFF) {
+      eb.appendFormat("#%u", grp.qry_pwr_offset);
     } else {
       eb.append("-");
     }
 
-    bool has_sub = (grp.query_slots.target_temp_offset != 0xFF ||
-                    grp.query_slots.current_temp_offset != 0xFF ||
-                    grp.query_slots.fan_speed_offset != 0xFF ||
-                    grp.query_slots.power_w_offset != 0xFF);
+    bool has_sub = (grp.qry_target_temp_offset != 0xFF ||
+                    grp.qry_curr_temp_offset != 0xFF ||
+                    grp.qry_fan_speed_offset != 0xFF ||
+                    grp.qry_wattage_offset != 0xFF);
     if (has_sub) {
       eb.append(" (");
       bool first = true;
-      if (grp.query_slots.target_temp_offset != 0xFF) {
-        eb.appendFormat("TT:%u", grp.query_slots.target_temp_offset);
+      if (grp.qry_target_temp_offset != 0xFF) {
+        eb.appendFormat("TT:%u", grp.qry_target_temp_offset);
         first = false;
       }
-      if (grp.query_slots.current_temp_offset != 0xFF) {
+      if (grp.qry_curr_temp_offset != 0xFF) {
         eb.appendFormat("%sAT:%u", first ? "" : ", ",
-                        grp.query_slots.current_temp_offset);
+                        grp.qry_curr_temp_offset);
         first = false;
       }
-      if (grp.query_slots.fan_speed_offset != 0xFF) {
+      if (grp.qry_fan_speed_offset != 0xFF) {
         eb.appendFormat("%sFS:%u", first ? "" : ", ",
-                        grp.query_slots.fan_speed_offset);
+                        grp.qry_fan_speed_offset);
         first = false;
       }
-      if (grp.query_slots.power_w_offset != 0xFF) {
+      if (grp.qry_wattage_offset != 0xFF) {
         eb.appendFormat("%sW:%u", first ? "" : ", ",
-                        grp.query_slots.power_w_offset);
+                        grp.qry_wattage_offset);
       }
       eb.append(")");
     }
@@ -588,8 +588,8 @@ void wallpadPrintControlTable(AppendBuf &out) {
 }
 
 void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
-  GroupControlTemplate grp{};
-  if (!g_control_registry.findGroup(dev_id, grp)) {
+  BlueprintSnapshot grp{};
+  if (!ProtocolDiag_GetBlueprint(dev_id, grp)) {
     out.appendFormat(
         "[ERROR] Group 0x%02X not found in control blueprints.\r\n", dev_id);
     return;
@@ -602,7 +602,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
                           grp.dev_id, name_safe);
   CliFmt::PrintBoxSubtitlef(
       out, "Frame: CTL %uB | QRY %uB | Sub1 Offset #%u | Sub2 Offset #%u",
-      grp.frame_len, grp.query_slots.expected_len, grp.sub1_offset,
+      grp.frame_len, grp.qry_len, grp.sub1_offset,
       grp.sub2_offset);
 
   static constexpr Column DETAIL_COLS[] = {
@@ -622,34 +622,34 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     table.row({label, v_buf.c_str()});
   };
 
-  row_slot("Power Control Slot", grp.power_slot.discovered, [&]() {
+  row_slot("Power Control Slot", grp.power_discovered, [&]() {
     v_buf.appendFormat("Offset #%u  [ ON: 0x%02X / OFF: 0x%02X ]",
-                       grp.power_slot.action_offset, grp.power_slot.on_val,
-                       grp.power_slot.off_val);
+                       grp.power_offset, grp.power_on,
+                       grp.power_off);
   });
-  row_slot("Temp Control Slot", grp.temp_slot.discovered, [&]() {
+  row_slot("Temp Control Slot", grp.temp_discovered, [&]() {
     v_buf.appendFormat("Offset #%u  [ Range: %u ~ %u C ]",
-                       grp.temp_slot.action_offset, grp.temp_slot.min_val,
-                       grp.temp_slot.max_val);
+                       grp.temp_offset, grp.temp_min,
+                       grp.temp_max);
   });
-  row_slot("Fan Speed Slot", grp.speed_slot.discovered, [&]() {
-    if (grp.speed_slot.level_count > 0) {
-      v_buf.appendFormat("Offset #%u  [ ", grp.speed_slot.action_offset);
-      for (uint8_t i = 0; i < grp.speed_slot.level_count; ++i) {
+  row_slot("Fan Speed Slot", grp.speed_discovered, [&]() {
+    if (grp.speed_levels > 0) {
+      v_buf.appendFormat("Offset #%u  [ ", grp.speed_offset);
+      for (uint8_t i = 0; i < grp.speed_levels; ++i) {
         if (i > 0)
           v_buf.append(",");
-        v_buf.appendFormat("L%u:0x%02X", i + 1, grp.speed_slot.level_tokens[i]);
+        v_buf.appendFormat("L%u:0x%02X", i + 1, grp.speed_tokens[i]);
       }
       v_buf.append(" ]");
     } else {
       v_buf.appendFormat("Offset #%u  [ Range: %u ~ %u ]",
-                         grp.speed_slot.action_offset, grp.speed_slot.min_val,
-                         grp.speed_slot.max_val);
+                         grp.speed_offset, grp.speed_min,
+                         grp.speed_max);
     }
   });
-  row_slot("Close Action Slot", grp.close_slot.discovered, [&]() {
+  row_slot("Close Action Slot", grp.close_discovered, [&]() {
     v_buf.appendFormat("Offset #%u  [ Action: 0x%02X ]",
-                       grp.close_slot.action_offset, grp.close_slot.off_val);
+                       grp.close_offset, grp.close_val);
   });
 
   table.separator('-');
@@ -659,12 +659,12 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id) {
     uint8_t off;
   };
   const InboundDef kInbound[] = {
-      {"Power Status Offset", grp.query_slots.power_offset},
-      {"Target Temp Offset", grp.query_slots.target_temp_offset},
-      {"Ambient Temp Offset", grp.query_slots.current_temp_offset},
-      {"Fan Speed Offset", grp.query_slots.fan_speed_offset},
-      {"Power Wattage Offset", grp.query_slots.power_w_offset},
-      {"CTL ACK State Offset", grp.ack_slots.power_offset},
+      {"Power Status Offset", grp.qry_pwr_offset},
+      {"Target Temp Offset", grp.qry_target_temp_offset},
+      {"Ambient Temp Offset", grp.qry_curr_temp_offset},
+      {"Fan Speed Offset", grp.qry_fan_speed_offset},
+      {"Power Wattage Offset", grp.qry_wattage_offset},
+      {"CTL ACK State Offset", grp.ack_pwr_offset},
   };
   for (const auto &inb : kInbound) {
     v_buf.reset();

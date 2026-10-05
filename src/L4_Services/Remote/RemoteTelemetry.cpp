@@ -5,12 +5,11 @@
 #include "L4_Services/Remote/RemoteInternal.h"
 #include "L4_Services/EW11_Service.h"
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L3_Routing/Public/Packet_Router.h"
 #include "L3_Routing/Public/Device_Registry.h"
-#include "L3_Routing/Private/ControlTemplate.h"
 
 #include <algorithm>
 #include <atomic>
@@ -67,20 +66,16 @@ static void serializeSysMetrics(AppendBuf &out, uint8_t c0, uint8_t c1,
 }
 
 static void serializeProfileAndTiming(
-    AppendBuf &out, const VendorProfileDescriptor &active_prof,
-    const AutoProbeDescriptor &auto_desc, const char *wc_src, size_t total_devs,
+    AppendBuf &out, const ProfileInfoSnapshot &active_prof,
+    const AutoProbingDescriptorSnapshot &auto_desc, const char *wc_src, size_t total_devs,
     size_t online_devs, size_t stale_devs, uint32_t ch2_rx,
     uint32_t ch2_uncached) {
   char cat_match_buf[64] = "None";
-  const auto *matched_p = ProfileMatcher::getActiveProfile();
-  if (matched_p) {
-    snprintf(cat_match_buf, sizeof(cat_match_buf), "%s",
-             matched_p->vendor_name);
-  }
+  ProtocolDiag_GetActiveVendorName(cat_match_buf, sizeof(cat_match_buf));
 
   char bp_buf[64];
   snprintf(bp_buf, sizeof(bp_buf), "%u Groups",
-           static_cast<unsigned>(g_control_registry.getGroupCount()));
+           static_cast<unsigned>(ProtocolDiag_GetGroupCount()));
 
   bool fully_locked = (g_config.wallpad_profile != 0) ||
                       (auto_desc.is_locked && auto_desc.opcodes_locked &&
@@ -98,7 +93,7 @@ static void serializeProfileAndTiming(
       static_cast<unsigned>(g_config.wallpad_profile), active_prof.key,
       active_prof.name, auto_desc.is_locked ? "true" : "false",
       fully_locked ? "true" : "false", cat_match_buf, bp_buf, auto_desc.stx,
-      auto_desc.etx, AutoProbingEngine::getAlgoName(auto_desc.checksum_algo),
+      auto_desc.etx, auto_desc.checksum_algo_name,
       auto_desc.query_opcode, auto_desc.control_opcode, auto_desc.ack_opcode,
       auto_desc.matched_packets);
 
@@ -193,7 +188,7 @@ static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
 
   bool f_bell = false, l_bell = false;
   uint32_t b_ms = 0;
-  Wallpad_DoorphoneGetState(f_bell, l_bell, b_ms);
+  Device_DoorphoneGetState(f_bell, l_bell, b_ms);
   out.appendFormat(
       "\"doorphone\":{\"front_bell\":%s,\"lobby_bell\":%s,\"last_bell_ms\":%u}",
       f_bell ? "true" : "false", l_bell ? "true" : "false",
@@ -213,14 +208,17 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
       heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) / 1024;
   bool ntp_synced = (time(nullptr) > 1672531200);
 
-  VendorProfileDescriptor active_prof{};
-  ProfileRepository::getActiveProfile(active_prof);
-  auto auto_desc = g_auto_probing_engine.getDescriptor();
+  ProfileInfoSnapshot active_prof{};
+  ProtocolDiag_GetProfileInfo(g_config.wallpad_profile, active_prof);
+  AutoProbingDescriptorSnapshot auto_desc{};
+  ProtocolDiag_GetAutoProbingDescriptor(auto_desc);
 
+  uint8_t wc_source = 0, wc_count = 0;
+  ProtocolDiag_GetWarmCacheStatus(wc_source, wc_count);
   const char *wc_src =
-      (g_warm_cache_source == 1)
+      (wc_source == 1)
           ? "RTC_SRAM"
-          : (g_warm_cache_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
+          : (wc_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
   size_t total_devs = Device_GetCount();
   size_t online_devs = Device_GetOnlineCount();
   size_t stale_devs =
@@ -324,21 +322,18 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
     if (!Device_GetSnapshot(i, snap) || snap.dev_id == 0)
       continue;
 
-    GroupControlTemplate grp{};
-    if (!g_control_registry.findGroup(snap.dev_id, grp))
-      continue;
-
     StaticPacket ack{};
     ack.length = snap.last_ack_len;
     memcpy(ack.data.data(), snap.last_ack_data.data(),
            std::min<size_t>(snap.last_ack_len, 32));
 
     DecodedDeviceState st{};
-    Device_DecodeState(grp, ack, &snap, st);
+    if (!Device_DecodeState(snap.dev_id, ack, &snap, st))
+      continue;
 
     DeviceClass dc = st.dev_class;
     const char *cls_str = DeviceClassToTelemetryString(dc);
-    const char *grp_name = grp.group_name;
+    const char *grp_name = ProtocolDiag_GetGroupName(snap.dev_id);
     bool is_outlet = (dc == DeviceClass::OUTLET);
 
     char name_buf[32];

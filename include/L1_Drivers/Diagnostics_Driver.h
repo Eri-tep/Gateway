@@ -314,6 +314,8 @@ using ShutdownHook = void (*)();
 
 void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept;
 void System_RegisterShutdownHook(ShutdownHook hook) noexcept;
+void Diag_ResetMetricsOnConvergence() noexcept;
+void Diag_IncrementStalePollCount() noexcept;
 
 void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
                         const StaticPacket &pkt) noexcept;

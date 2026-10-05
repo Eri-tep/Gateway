@@ -1,7 +1,7 @@
 #include "L4_Services/Console/ConsoleFmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include "L3_Routing/Public/Device_Registry.h"
 #include "L4_Services/EW11_Service.h"
 #include <WiFi.h>
@@ -9,50 +9,23 @@
 namespace WallpadCli {
 
 void wallpadPrintStatus(AppendBuf &out) {
-  auto *active = WallpadParserFactory::getActiveParser();
-  auto desc = g_auto_probing_engine.getDescriptor();
-  VendorProfileDescriptor active_prof;
-  bool is_manual_prof = false;
-  if (ProfileRepository::getActiveProfile(active_prof) &&
-      strcasecmp(active_prof.key, "auto") != 0) {
-    is_manual_prof = true;
-    desc.stx = active_prof.stx;
-    desc.etx = active_prof.etx;
-    desc.checksum_algo = active_prof.cs_algo;
-    desc.opcode_offset = active_prof.opcode_offset;
-    desc.query_opcode = active_prof.query_op;
-    desc.control_opcode = active_prof.ctrl_op;
-    desc.ack_opcode = active_prof.ack_op;
-    desc.control_seen = (active_prof.ctrl_op != 0);
-    desc.dev_id_offset = active_prof.dev_id_offset;
-    desc.sub1_offset = active_prof.sub1_offset;
-    desc.sub2_offset = active_prof.sub2_offset;
-    desc.is_swapped_addr = (active_prof.is_swapped_addr != 0);
-    desc.is_locked = true;
-    desc.opcodes_locked = true;
-    desc.offsets_locked = true;
-    desc.payload_offset =
-        std::max({active_prof.opcode_offset, active_prof.dev_id_offset,
-                  active_prof.sub1_offset, active_prof.sub2_offset}) +
-        1;
-  }
+  AutoProbingDescriptorSnapshot desc{};
+  ProtocolDiag_GetAutoProbingDescriptor(desc);
 
-  size_t active_targets = g_polling_targets.activeCount();
-  size_t verified_targets = g_polling_targets.verifiedCount();
+  size_t active_targets = 0, verified_targets = 0, total_targets = 0;
+  ProtocolDiag_GetPollingStats(active_targets, verified_targets, total_targets);
   size_t online_devs = Device_GetOnlineCount();
 
   const char *phase_str = "Phase 1/3 (Framing Probing)";
-  if (is_manual_prof || desc.offsets_locked) {
+  if (desc.is_manual || desc.offsets_locked) {
     phase_str = "Phase 3/3: Fully Locked";
   } else if (desc.is_locked) {
     phase_str = "Phase 2/3: Cache Syncing";
   }
 
   CliFmt::PrintBoxHeader(out, "WALLPAD PROTOCOL AUTO-PROBING ENGINE STATUS");
-  char prof_key_buf[UniversalProtocolEngine::kProfileKeyMaxLen] = "Standard";
-  if (active) {
-    active->getActiveProfileKey(prof_key_buf, sizeof(prof_key_buf));
-  }
+  char prof_key_buf[16] = "Standard";
+  ProtocolDiag_GetActiveProfileKey(prof_key_buf, sizeof(prof_key_buf));
 
   auto print_meta = [&](const char *fmt, ...) {
     FixedBuf<128> buf;
@@ -65,17 +38,16 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   print_meta("Active Profile  : %s (ID: %u)", prof_key_buf,
              static_cast<unsigned>(g_config.wallpad_profile));
-  if (g_config.wallpad_profile ==
-      static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE)) {
+  if (g_config.wallpad_profile == 0) {
     print_meta("Profile Mode    : Auto Adaptive [%s]", phase_str);
   } else {
     print_meta("Profile Mode    : Manual Fixed");
   }
-  const auto *matched_p = ProfileMatcher::getActiveProfile();
-  if (matched_p) {
+  char cat_vendor[64] = {0};
+  size_t cat_dev_cnt = 0;
+  if (ProtocolDiag_GetCatalogMatch(cat_vendor, sizeof(cat_vendor), cat_dev_cnt)) {
     print_meta("Catalog Match   : %s (%u Devices Spec Injected)",
-               matched_p->vendor_name,
-               static_cast<unsigned>(matched_p->device_count));
+               cat_vendor, static_cast<unsigned>(cat_dev_cnt));
   } else {
     print_meta("Catalog Match   : None (Generic Framing Only)");
   }
@@ -124,31 +96,8 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   uint8_t dev_ids[16], sub1_ids[16], sub2_ids[16];
   size_t dev_id_cnt = 0, sub1_cnt = 0, sub2_cnt = 0;
-
-  constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
-  size_t total_tgts = g_polling_targets.totalCount();
-  for (size_t i = 0; i < total_tgts; ++i) {
-    PollingTargetEntry entry;
-    if (g_polling_targets.getEntry(i, entry)) {
-      if ((entry.source_channels & CH23_MASK) == 0)
-        continue;
-      if (dev_id_cnt < 16 && std::find(dev_ids, dev_ids + dev_id_cnt,
-                                       entry.dev_id) == dev_ids + dev_id_cnt) {
-        dev_ids[dev_id_cnt++] = entry.dev_id;
-      }
-      if (sub1_cnt < 16 && std::find(sub1_ids, sub1_ids + sub1_cnt,
-                                     entry.sub1) == sub1_ids + sub1_cnt) {
-        sub1_ids[sub1_cnt++] = entry.sub1;
-      }
-      if (sub2_cnt < 16 && std::find(sub2_ids, sub2_ids + sub2_cnt,
-                                     entry.sub2) == sub2_ids + sub2_cnt) {
-        sub2_ids[sub2_cnt++] = entry.sub2;
-      }
-    }
-  }
-  std::sort(dev_ids, dev_ids + dev_id_cnt);
-  std::sort(sub1_ids, sub1_ids + sub1_cnt);
-  std::sort(sub2_ids, sub2_ids + sub2_cnt);
+  ProtocolDiag_GetActiveAddresses(dev_ids, dev_id_cnt, sub1_ids, sub1_cnt,
+                                  sub2_ids, sub2_cnt, 16);
 
   auto format_hex_list = [](const uint8_t *arr, size_t cnt, const char *prefix,
                             char *out, size_t out_sz) {
@@ -258,9 +207,9 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   const char *tail_status = desc.is_locked ? "[LOCKED]" : "[LEARNING]";
   rowf("Tail", "[CS] Checksum", tail_status, "Byte #[N-2] : %s",
-       AutoProbingEngine::getAlgoName(desc.checksum_algo));
+       desc.checksum_algo_name);
   rowf("", "[ET] ETX", tail_status, "Byte #[N-1] : %02X",
-       active ? active->getEtx() : 0xEE);
+       ProtocolDiag_GetActiveEtx());
   table.separator('-');
 
   uint32_t b1 = g_config.uart_baud_rate, b2 = g_config.ch2_baud_rate,
@@ -281,7 +230,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   uint8_t cur_dp_stx = 0;
   uint8_t cur_dp_etx = 0;
   uint8_t cur_dp_len = 0;
-  Wallpad_DoorphoneGetFraming(dp_status, cur_dp_stx, cur_dp_etx, cur_dp_len);
+  ProtocolDiag_DoorphoneGetFraming(dp_status, cur_dp_stx, cur_dp_etx, cur_dp_len);
 
   const char *dp_status_str =
       (dp_status == FramingStatus::LOCKED)     ? "[LOCKED]"
@@ -299,25 +248,25 @@ void wallpadPrintStatus(AppendBuf &out) {
          cur_dp_stx, cur_dp_etx);
   }
 
-  const DoorphoneSpec *dp_prof =
-      ProfileMatcher::matchDoorphone(cur_dp_stx, cur_dp_etx, cur_dp_len);
+  DoorphoneMatchSnapshot dp_match{};
+  bool has_match = ProtocolDiag_GetDoorphoneMatch(dp_match);
   const char *dp_m_st =
-      dp_prof ? ((dp_status == FramingStatus::LOCKED)
+      has_match ? ((dp_status == FramingStatus::LOCKED)
                      ? "[LOCKED]"
                      : "[LEARNING]")
-              : ((dp_status == FramingStatus::WAITING)
+                : ((dp_status == FramingStatus::WAITING)
                      ? "[WAITING]"
                      : "[UNKNOWN]");
   FixedBuf<48> op_f, op_l;
   const char *dp_desc = nullptr;
-  if (dp_prof) {
-    dp_desc = dp_prof->desc;
+  if (has_match) {
+    dp_desc = dp_match.desc;
     op_f.appendFormat("Bell:%02X, Call:%02X, Open:%02X, End:%02X",
-                      dp_prof->bell_front, dp_prof->call_front, dp_prof->open_front,
-                      dp_prof->end_front);
+                      dp_match.bell_front, dp_match.call_front, dp_match.open_front,
+                      dp_match.end_front);
     op_l.appendFormat("Bell:%02X, Call:%02X, Open:%02X, End:%02X",
-                      dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby,
-                      dp_prof->end_lobby);
+                      dp_match.bell_lobby, dp_match.call_lobby, dp_match.open_lobby,
+                      dp_match.end_lobby);
   } else if (dp_status == FramingStatus::WAITING) {
     dp_desc = "Waiting for traffic...";
     op_f.append("Waiting...");
@@ -411,9 +360,10 @@ void wallpadListProfiles(AppendBuf &out) {
   table.header(false);
 
   FixedBuf<8> id_buf;
-  for (size_t i = 0; i < ProfileRepository::getProfileCount(); ++i) {
-    VendorProfileDescriptor p_desc;
-    if (ProfileRepository::getProfile(i, p_desc)) {
+  size_t prof_cnt = ProtocolDiag_GetProfileCount();
+  for (size_t i = 0; i < prof_cnt; ++i) {
+    ProfileInfoSnapshot p_desc;
+    if (ProtocolDiag_GetProfileInfo(i, p_desc)) {
       bool is_current = (g_config.wallpad_profile == i);
       bool is_empty = (i > 0 && strncmp(p_desc.name, "[Empty", 6) == 0);
       const char *status_str = is_current
@@ -436,7 +386,7 @@ void wallpadSaveProfile(int sock, const char *name) {
     return;
   }
   size_t saved_slot = 0;
-  if (ProfileRepository::saveCurrentAutoAs(name, saved_slot)) {
+  if (ProtocolDiag_SaveCurrentProfileAs(name, saved_slot)) {
     sendTelnetMsgf(sock,
                    "[OK] Successfully saved current Auto profile as '%s' (Slot "
                    "#%u) in NVS!\r\n",
@@ -454,21 +404,21 @@ void wallpadDeleteProfile(int sock, const char *target) {
   char *endp = nullptr;
   long val = strtol(target, &endp, 10);
   size_t idx = 999;
+  size_t prof_cnt = ProtocolDiag_GetProfileCount();
   if (endp != target && *endp == '\0' && val >= 1 &&
-      val < static_cast<long>(ProfileRepository::getProfileCount())) {
+      val < static_cast<long>(prof_cnt)) {
     idx = static_cast<size_t>(val);
   } else {
-    VendorProfileDescriptor pd;
-    for (size_t i = 1; i < ProfileRepository::getProfileCount(); ++i) {
-      if (ProfileRepository::getProfile(i, pd) &&
+    ProfileInfoSnapshot pd;
+    for (size_t i = 1; i < prof_cnt; ++i) {
+      if (ProtocolDiag_GetProfileInfo(i, pd) &&
           strcasecmp(pd.key, target) == 0) {
         idx = i;
         break;
       }
     }
   }
-  if (idx >= 1 && idx < ProfileRepository::getProfileCount()) {
-    ProfileRepository::deleteProfile(idx);
+  if (idx >= 1 && idx < prof_cnt && ProtocolDiag_DeleteProfile(idx)) {
     sendTelnetMsgf(sock, "[OK] Custom profile (Slot #%u) reset to empty.\r\n",
                    static_cast<unsigned>(idx));
   } else {
@@ -488,20 +438,17 @@ void wallpadSetProfile(int sock, const char *key) {
   char *endp = nullptr;
   long val = strtol(key, &endp, 10);
   if (endp != key && *endp == '\0' && val >= 0 &&
-      val < static_cast<long>(ProfileRepository::getProfileCount())) {
-    ok = ProfileRepository::setActiveProfileIndex(static_cast<size_t>(val));
+      val < static_cast<long>(ProtocolDiag_GetProfileCount())) {
+    ok = ProtocolDiag_SetActiveProfile(static_cast<size_t>(val));
   } else {
-    ok = ProfileRepository::setActiveProfileByKey(key);
+    ok = ProtocolDiag_SetActiveProfileByKey(key);
   }
 
   if (ok) {
-    auto *new_p = WallpadParserFactory::getActiveParser();
-    char v_name[UniversalProtocolEngine::kVendorNameMaxLen] = {0};
-    char p_key[UniversalProtocolEngine::kProfileKeyMaxLen] = {0};
-    if (new_p) {
-      new_p->getVendorName(v_name, sizeof(v_name));
-      new_p->getActiveProfileKey(p_key, sizeof(p_key));
-    }
+    char v_name[32] = {0};
+    char p_key[16] = {0};
+    ProtocolDiag_GetActiveVendorName(v_name, sizeof(v_name));
+    ProtocolDiag_GetActiveProfileKey(p_key, sizeof(p_key));
     sendTelnetMsgf(
         sock, "[OK] Wallpad profile changed to '%s' (%s) and saved to NVS.\r\n",
         v_name[0] ? v_name : key, p_key[0] ? p_key : key);
@@ -657,22 +604,14 @@ void cmdWallpad(CliContext &ctx) {
        }},
       {"auto", "auto", "Switch to Universal Auto-Probing mode",
        [](int s, int, const Args &) {
-         char dp_ns[16];
-         FramingTracker::getNvsNamespace(0, dp_ns,
-                                                            sizeof(dp_ns));
-         ProfileRepository::setActiveProfileIndex(0);
-         g_auto_probing_engine.reset();
-         Wallpad_DoorphoneClearNvs(dp_ns);
+         ProtocolDiag_SetActiveProfile(0);
+         ProtocolDiag_WallpadReset();
          sendTelnetMsg(s, "[OK] Switched to Universal Auto-Probing mode "
                           "(Wallpad & Doorphone framing reset).\r\n");
        }},
       {"reset", "reset", "Reset auto-probing engine and re-learn",
        [](int s, int, const Args &) {
-         char dp_ns[16];
-         FramingTracker::getNvsNamespace(
-             g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
-         g_auto_probing_engine.reset();
-         Wallpad_DoorphoneClearNvs(dp_ns);
+         ProtocolDiag_WallpadReset();
          g_probe_convergence_reset.store(true, std::memory_order_release);
        }},
       {"simulate", "simulate <hex...>",
@@ -699,7 +638,7 @@ void cmdWallpad(CliContext &ctx) {
                s, "[ERROR] Simulated packet must be at least 3 bytes.\r\n");
            return;
          }
-         g_auto_probing_engine.feedFrame(span<const uint8_t>(sim_buf, sim_len));
+         ProtocolDiag_AutoProbingFeedFrame(sim_buf, sim_len);
          sendTelnetMsgf(
              s, "[OK] Fed %u simulated bytes into Auto-Probing Engine.\r\n",
              sim_len);

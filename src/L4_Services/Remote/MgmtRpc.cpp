@@ -6,12 +6,10 @@
 static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include "L4_Services/EW11_Service.h"
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
 #include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
-
-#include "L3_Routing/Private/ControlTemplate.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -110,8 +108,8 @@ static void HandleRpc_GetTelemetry(int sock, long req_id,
 static void HandleRpc_SetProfile(int sock, long req_id, const char *json_str,
                                  const IPAddress & /*client_ip*/) {
   long slot = findJsonIntValue(json_str, "slot", -1);
-  if (slot >= 0 && slot < static_cast<long>(ProfileRepository::MAX_PROFILES)) {
-    ProfileRepository::setActiveProfileIndex(static_cast<size_t>(slot));
+  if (slot >= 0 && slot < static_cast<long>(ProtocolDiag_GetMaxProfiles())) {
+    ProtocolDiag_SetActiveProfile(static_cast<size_t>(slot));
     {
       std::unique_lock lock(g_config_rw);
       g_config.wallpad_profile = static_cast<uint8_t>(slot);
@@ -132,7 +130,7 @@ static void HandleRpc_SaveAutoToSlot(int sock, long req_id,
     strncpy(name_buf, "Saved Custom", sizeof(name_buf) - 1);
 
   size_t saved_slot = 1;
-  if (ProfileRepository::saveCurrentAutoAs(name_buf, saved_slot)) {
+  if (ProtocolDiag_SaveCurrentProfileAs(name_buf, saved_slot)) {
     char resp[96];
     if (req_id >= 0) {
       snprintf(resp, sizeof(resp),
@@ -185,7 +183,7 @@ static void HandleRpc_SetTiming(int sock, long req_id, const char *json_str,
 static void HandleRpc_CacheSync(int sock, long req_id,
                                 const char * /*json_str*/,
                                 const IPAddress & /*client_ip*/) {
-  WarmCache_SaveToNvs();
+  ProtocolDiag_WarmCacheSaveToNvs();
   sendRpcResponse(sock, req_id, "ok", "Warm cache synced to NVS");
 }
 
@@ -204,12 +202,8 @@ static void HandleRpc_Ping(int sock, long req_id, const char * /*json_str*/,
 static void HandleRpc_CachePurgeRescan(int sock, long req_id,
                                        const char * /*json_str*/,
                                        const IPAddress & /*client_ip*/) {
-  char dp_ns[16];
-  FramingTracker::getNvsNamespace(g_config.wallpad_profile,
-                                  dp_ns, sizeof(dp_ns));
-  g_auto_probing_engine.reset();
-  Wallpad_DoorphoneClearNvs(dp_ns);
-  g_polling_targets.clear();
+  ProtocolDiag_WallpadReset();
+  ProtocolDiag_PollingClear();
   Device_Clear();
   g_probe_convergence_reset.store(true, std::memory_order_release);
   sendRpcResponse(sock, req_id, "ok",
@@ -219,12 +213,8 @@ static void HandleRpc_CachePurgeRescan(int sock, long req_id,
 static void HandleRpc_WallpadReset(int sock, long req_id,
                                    const char * /*json_str*/,
                                    const IPAddress & /*client_ip*/) {
-  char dp_ns[16];
-  FramingTracker::getNvsNamespace(g_config.wallpad_profile,
-                                  dp_ns, sizeof(dp_ns));
-  g_auto_probing_engine.reset();
-  Wallpad_DoorphoneClearNvs(dp_ns);
-  g_polling_targets.clear();
+  ProtocolDiag_WallpadReset();
+  ProtocolDiag_PollingClear();
   Device_Clear();
   g_probe_convergence_reset.store(true, std::memory_order_release);
   sendRpcResponse(sock, req_id, "ok",
@@ -470,45 +460,7 @@ static void HandleRpc_DoorphoneAction(int sock, long req_id,
   bool is_open_lobby = (strcasecmp(action_buf, "open_lobby") == 0);
 
   if (is_open_front || is_open_lobby) {
-    FramingStatus dp_status = FramingStatus::WAITING;
-    uint8_t dp_stx = 0;
-    uint8_t dp_etx = 0;
-    uint8_t dp_len = 0;
-    Wallpad_DoorphoneGetFraming(dp_status, dp_stx, dp_etx, dp_len);
-
-    if (dp_stx == 0)
-      dp_stx = 0x7F;
-    if (dp_etx == 0)
-      dp_etx = 0xEE;
-
-    const DoorphoneSpec *dp_prof =
-        ProfileMatcher::matchDoorphone(dp_stx, dp_etx, dp_len);
-
-    uint8_t op_call = is_open_front ? (dp_prof ? dp_prof->call_front : 0xB9)
-                                    : (dp_prof ? dp_prof->call_lobby : 0x5F);
-    uint8_t op_open = is_open_front ? (dp_prof ? dp_prof->open_front : 0xB4)
-                                    : (dp_prof ? dp_prof->open_lobby : 0x61);
-    uint8_t op_end = is_open_front ? (dp_prof ? dp_prof->end_front : 0xB8)
-                                   : (dp_prof ? dp_prof->end_lobby : 0x60);
-
-    // 50ms Pre-Guard Time: 벨 수신 직후 3840 bps 반이중 버스 충돌 방지용 Line
-    // Silent 대기
-    bool f_bell = false, l_bell = false;
-    uint32_t last_bell = 0;
-    Wallpad_DoorphoneGetState(f_bell, l_bell, last_bell);
-    if (last_bell > 0) {
-      uint32_t now_ms = millis();
-      constexpr uint32_t kDpPreGuardMs = 50;
-      if (now_ms - last_bell < kDpPreGuardMs) {
-        uint32_t rem_ms = kDpPreGuardMs - (now_ms - last_bell);
-        if (rem_ms > 0) {
-          vTaskDelay(pdMS_TO_TICKS(rem_ms) > 0 ? pdMS_TO_TICKS(rem_ms) : 1);
-        }
-      }
-    }
-
-    if (!Wallpad_DoorphoneStartSequence(
-            dp_stx, dp_etx, op_call, op_open, op_end)) {
+    if (!Device_DoorphoneOpen(is_open_lobby)) {
       sendRpcResponse(sock, req_id, "busy",
                       "Doorphone sequence already in progress");
       return;
@@ -705,16 +657,8 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     return;
   }
 
-  GroupControlTemplate grp{};
-  if (!g_control_registry.findGroup(static_cast<uint8_t>(dev_id), grp)) {
-    const char *err_msg = "{\"res\":\"error\",\"msg\":\"Device is not "
-                          "registered in ctl_spec registry\"}\n";
-    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
-    return;
-  }
-
   StaticPacket req{};
-  if (!g_control_registry.buildControlPacket(
+  if (!ProtocolDiag_BuildControlPacket(
           static_cast<uint8_t>(dev_id), static_cast<uint8_t>(sub1),
           static_cast<uint8_t>(sub2), act, static_cast<int>(val), req)) {
     const char *err_msg =
@@ -742,7 +686,6 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
   // 현대통신 환기 장치(0x2B) 전원 ON 시 게이트웨이가 자체적으로 0x43 운전 모드
   // 조회 패킷을 연계 주입
   if (dev_id == 0x2B && act == ControlActionType::POWER && val == 1) {
-    const auto *const parser = WallpadParserFactory::getActiveParser();
     StaticPacket qry_req{};
     qry_req.channel_id = 6;
     qry_req.length = 11;
@@ -755,8 +698,8 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     qry_req.data[6] = 0x11;
     qry_req.data[7] = 0x00;
     qry_req.data[8] = 0x00;
-    qry_req.data[9] =
-        parser ? parser->calculateChecksum(qry_req.data.data(), 11) : 0x84;
+    uint8_t cs = ProtocolDiag_CalculateChecksum(qry_req.data.data(), 11);
+    qry_req.data[9] = cs ? cs : 0x84;
     qry_req.data[10] = 0xEE;
     Remote_GetControlHandler()(qry_req, dummy);
   }

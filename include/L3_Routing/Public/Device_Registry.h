@@ -24,6 +24,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 // ============================================================================
 // CONTROL ACTION TYPES & SLOTS (Absorbed from ProtocolTypes)
@@ -125,8 +126,6 @@ struct DeviceKey {
   }
 };
 
-struct GroupControlTemplate;
-
 struct DeviceStateEntry {
   uint8_t dev_id;
   uint8_t sub1, sub2;
@@ -160,8 +159,8 @@ struct DeviceUpdateResult {
   } extra[7]{};
 };
 
-/// Decode device state from snapshot and template
-void Device_DecodeState(const struct GroupControlTemplate &grp,
+/// Decode device state from snapshot via registered protocol decoder
+bool Device_DecodeState(uint8_t dev_id,
                         const StaticPacket &ack,
                         const DeviceStateEntry *dev,
                         DecodedDeviceState &out) noexcept;
@@ -247,17 +246,20 @@ void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept;
 /// Dispatch doorphone bell state change to registered listener.
 void Device_NotifyDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept;
 
-// ── L4 Doorphone Query & Control Facade API ──────────────────────────────────
+// ── L3 Decoupled Protocol Parser & Decoder Registration API ──────────────────
+using DeviceAckPacketCheckFn = bool (*)(std::span<const uint8_t> frame) noexcept;
+using DeviceKeyExtractorFn   = bool (*)(std::span<const uint8_t> frame, uint8_t &dev_id, uint8_t &sub1, uint8_t &sub2) noexcept;
+using DeviceStateDecoderFn   = bool (*)(uint8_t dev_id, const StaticPacket &ack, const DeviceStateEntry *dev, DecodedDeviceState &out) noexcept;
+using DeviceNormSub1Fn       = uint8_t (*)(uint8_t dev_id, uint8_t sub1) noexcept;
+using DoorphoneOpenHandler   = bool (*)(bool is_lobby) noexcept;
+
+void Device_RegisterParserHooks(DeviceAckPacketCheckFn ack_check, DeviceKeyExtractorFn key_extract) noexcept;
+void Device_RegisterStateDecoder(DeviceStateDecoderFn fn) noexcept;
+void Device_RegisterNormSub1Hook(DeviceNormSub1Fn fn) noexcept;
+void Device_RegisterDoorphoneOpenHandler(DoorphoneOpenHandler handler) noexcept;
+
+// ── L4 Doorphone Control & State Facade API ──────────────────────────────────
+[[nodiscard]] bool Device_DoorphoneOpen(bool is_lobby = false) noexcept;
 void Device_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
                               uint32_t &out_last_bell_ms) noexcept;
-void Device_DoorphoneGetFraming(FramingStatus &out_status, uint8_t &out_stx,
-                                uint8_t &out_etx, uint8_t &out_len) noexcept;
-void Device_DoorphoneClearNvs(const char *nvs_ns) noexcept;
-bool Device_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,
-                                   uint8_t op_open, uint8_t op_end) noexcept;
-
-// ── L4 Packet Parsing Facade API ─────────────────────────────────────────────
-bool Device_ExtractKeyFromFrame(const uint8_t *data, size_t len,
-                                uint8_t &out_dev_id, uint8_t &out_sub1,
-                                uint8_t &out_sub2) noexcept;
 

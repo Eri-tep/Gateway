@@ -180,3 +180,17 @@ inline uint8_t getCurrentProfileIndex() {
   return g_config.wallpad_profile;
 }
 } // namespace ControlTemplateUtils
+
+void ControlTemplate_DecodeDeviceState(const GroupControlTemplate &grp,
+                                       const StaticPacket &ack,
+                                       const DeviceStateEntry *dev,
+                                       DecodedDeviceState &out) noexcept;
+
+bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
+                                   const StaticPacket &ack,
+                                   const DeviceStateEntry *dev,
+                                   DecodedDeviceState &out) noexcept;
+
+uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept;
+
+

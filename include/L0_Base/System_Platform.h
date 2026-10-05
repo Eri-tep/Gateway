@@ -184,5 +184,21 @@ constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);
 
 void System_Restart(const char *reason);
 
+enum class TraceType : uint8_t;
 
+// ── Global Decoupled Diagnostic Trace & Event Sinks ──
+using SystemTraceMessageFn = void (*)(const char *msg);
+using SystemTracePacketFn = void (*)(uint8_t channel, bool is_tx, TraceType type,
+                                    const StaticPacket &pkt);
+using SystemConvergenceHookFn = void (*)();
 
+void System_RegisterTraceMessageSink(SystemTraceMessageFn fn) noexcept;
+void System_RegisterTracePacketSink(SystemTracePacketFn fn) noexcept;
+void System_RegisterConvergenceHook(SystemConvergenceHookFn fn) noexcept;
+void System_RegisterStalePollSink(void (*fn)()) noexcept;
+
+void System_TraceMessage(const char *msg) noexcept;
+void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
+                        const StaticPacket &pkt) noexcept;
+void System_NotifyConvergence() noexcept;
+void System_IncrementStalePollCount() noexcept;

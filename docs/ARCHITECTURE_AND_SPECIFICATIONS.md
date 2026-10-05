@@ -28,14 +28,24 @@ This document defines the system specifications, runtime topology, channel mappi
 
 ---
 
-### 0.3 Canonical Clean Architecture Topology (4-Tier + 1 Foundation Soil)
+### 0.3 Canonical Clean Architecture Topology (4-Tier + L0 Foundation Soil & L3 Shell-Core)
 
-> **Mandatory Architectural Standard (v4.0.0 Canonical & Modularized)**:
-> 1. **Foundation Soil (L0 Base Leaf)**: Universal static foundation (`System_Buffer.h`, `System_Config.h`, `System_Platform.h`). Zero upward dependencies; accessible directly by any layer ($L1 \sim L4$).
-> 2. **L1 Physical HAL Drivers**: Hardware abstractions (`Uart_Driver`, `NVS_Driver`, `Diagnostics_Driver`, `RTOS_Driver`). Complete information hiding.
-> 3. **L2 Transport & Data Link Channels**: Raw frame transport, timeslot scheduling, and socket polling (`RS485_CH`, `TCP_CH`). Pure transport leaves; zero awareness of L3 state or L4 listeners.
-> 4. **L3 Routing, Codec & State Hub**: Protocol parsers, state hub SSOT, packet routing, and U-turn bypass (`Wallpad_Parser`, `Wallpad_Protocol`, `Modbus_Parser`, `Modbus_Protocol`, `Device_Registry`, `Packet_Router`).
-> 5. **L4 Application Services**: High-level orchestrators (`ST_Service`, `EW11_Service`, `CTL_Service`, `CLI_Service`) with structured submodules (`Console/`, `Remote/`).
+> **Mandatory Architectural Standard (v4.1.0 Canonical Shell-Core Standard)**:
+> 1. **Foundation Soil (L0 Base Leaf)**: Universal static foundation (`System_Buffer.h`, `System_Config.h`, `System_Platform.h`). Zero upward dependencies; accessible directly by any layer ($L1 \sim L4$). Must remain a **pure foundation leaf** with **zero domain-specific hooks or callbacks**.
+> 2. **L1 Physical HAL Drivers**: Hardware abstractions (`Uart_Driver`, `Diagnostics_Driver`, `OTA_Driver`). Complete information hiding. Exclusively tracks physical driver health and UART channel state metrics.
+> 3. **L2 Transport & Data Link Channels**: Raw frame transport, timeslot scheduling, and socket polling (`RS485_CH`, `TCP_CH`). Pure transport leaves; zero awareness of L3 device state, scheduler strategies, or L4 listeners.
+> 4. **L3 Routing, Subsystem & Shell-Core Engine**:
+>    - **L3 Public Shell (External Boundary Gateways)**:
+>      - `Packet_Router` : **The ONLY bidirectional packet gateway** between L3 and L2 (`Router_EnqueueDownlink`, `Router_BuildNextPoll`).
+>      - `Device_Registry`: SSOT device repository and decoupled control/state ingress.
+>      - `ProtocolDiagnostics`: Decoupled read-only diagnostic snapshots and inspection facade for L4 (strictly zero runtime framing engines or mutated state).
+>    - **L3 Private Core (100% Encapsulated Engines)**:
+>      - `Wallpad_Protocol`: Internal protocol FSM and doorphone state machine (`FramingTracker` sealed here).
+>      - `Wallpad_Parser`: Binary frame parser and checksum validation.
+>      - `PollingRegistry`: Dynamic polling target registry, warm cache, and **sole owner of internal `stale_poll_cnt`**.
+>      - `AutoProbingEngine`: Runtime heuristic protocol matrix solver.
+>      - `ControlTemplate`: Device capability blueprints and action slot decoders.
+> 5. **L4 Application Services**: High-level orchestrators (`ST_Service`, `EW11_Service`, `CLI_Service`, `RemoteRpc`, `RemoteTelemetry`). Interacts strictly with L3 Public; possesses 0% access to L3 Private.
 
 ```
 include/

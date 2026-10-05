@@ -50,6 +50,8 @@ static std::atomic<size_t> s_shutdown_hook_count{0};
 
 void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept {
   s_trace_sink = sink;
+  System_RegisterTraceMessageSink(sink.trace_msg);
+  System_RegisterTracePacketSink(sink.trace_packet);
 }
 
 void System_RegisterShutdownHook(ShutdownHook hook) noexcept {
@@ -58,19 +60,6 @@ void System_RegisterShutdownHook(ShutdownHook hook) noexcept {
   size_t idx = s_shutdown_hook_count.fetch_add(1, std::memory_order_relaxed);
   if (idx < MAX_SHUTDOWN_HOOKS) {
     s_shutdown_hooks[idx] = hook;
-  }
-}
-
-void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
-                        const StaticPacket &pkt) noexcept {
-  if (s_trace_sink.trace_packet) {
-    s_trace_sink.trace_packet(channel, is_tx, type, pkt);
-  }
-}
-
-void System_TraceMessage(const char *msg) noexcept {
-  if (s_trace_sink.trace_msg && msg) {
-    s_trace_sink.trace_msg(msg);
   }
 }
 
@@ -98,6 +87,17 @@ SystemMetricsTracker g_metrics;
 TaskWdtMonitor g_wdt_monitor;
 PacketStatistics g_pkt_stats;
 Ch1StateMetrics g_ch1_state_metrics;
+
+void Diag_ResetMetricsOnConvergence() noexcept {
+  g_pkt_stats.resetAll();
+  g_metrics.reset();
+  g_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
+  g_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
+}
+
+void Diag_IncrementStalePollCount() noexcept {
+  g_ch1_state_metrics.stale_poll_cnt.fetch_add(1, std::memory_order_relaxed);
+}
 
 #ifdef __cplusplus
 extern "C" {

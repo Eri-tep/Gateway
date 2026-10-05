@@ -3,7 +3,6 @@
 // ============================================================================
 
 #include "L3_Routing/Private/Wallpad_Protocol.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
 
 #include <Preferences.h>
 #include <algorithm>

@@ -4,7 +4,6 @@
 #include "L2_Channels/RS485_CH.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L1_Drivers/Uart_Driver.h"
-#include "L3_Routing/Private/ControlTemplate.h"
 #include "L3_Routing/Private/Wallpad_Protocol.h"
 #include "L3_Routing/Public/Device_Registry.h"
 #include "L3_Routing/Public/Packet_Router.h"
@@ -245,13 +244,11 @@ static void Boot_InitSubsystems() {
   RS485_RegisterDispatcher(rs485_dispatcher);
 
   Wallpad_DoorphoneInit();
-  ProfileRepository::addProfileChangeListener(Wallpad_DoorphoneOnProfileChanged);
-  Wallpad_DoorphoneRegisterTxHandler(RS485_EnqueueCh4Passthrough);
-
-  g_control_registry.init();
   Remote_Init();
   Bridge_Init();
   Mgmt_Init();
+  System_RegisterConvergenceHook(Diag_ResetMetricsOnConvergence);
+  System_RegisterStalePollSink(Diag_IncrementStalePollCount);
   System_RegisterShutdownHook(Bridge_ShutdownSockets);
   SystemOta_RegisterPreOtaHook(Bridge_ShutdownSockets);
 }

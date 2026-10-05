@@ -4,8 +4,6 @@
 // ============================================================================
 
 #include "L3_Routing/Public/Device_Registry.h"
-#include "L3_Routing/Private/ControlTemplate.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
 
 #include <Arduino.h>
 #include <algorithm>
@@ -43,6 +41,16 @@ const char *DeviceClassToTelemetryString(DeviceClass cls) noexcept {
 }
 
 namespace {
+
+DeviceAckPacketCheckFn s_ack_packet_check = nullptr;
+DeviceKeyExtractorFn s_key_extractor = nullptr;
+DeviceStateDecoderFn s_state_decoder = nullptr;
+DeviceNormSub1Fn s_norm_sub1_fn = nullptr;
+DoorphoneOpenHandler s_dp_open_handler = nullptr;
+
+std::atomic<bool> s_dp_front_bell{false};
+std::atomic<bool> s_dp_lobby_bell{false};
+std::atomic<uint32_t> s_dp_last_bell_ms{0};
 
 class DeviceRepository {
 private:
@@ -86,10 +94,6 @@ public:
   bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                      uint8_t temp) noexcept;
   DeviceUpdateResult updateFromBus(StaticPacket &ack);
-  static void decodeDeviceState(const GroupControlTemplate &grp,
-                                const StaticPacket &ack,
-                                const DeviceStateEntry *dev,
-                                DecodedDeviceState &out);
   void handlePollingTimeout(const DeviceStateEntry *dev);
   void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);
   [[nodiscard]] bool copyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
@@ -111,17 +115,7 @@ static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1,
 }
 
 static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  GroupControlTemplate grp{};
-  if (g_control_registry.findGroup(dev_id, grp)) {
-    if (grp.power_slot.category_val != 0 &&
-        grp.power_slot.category_val != 0xFF) {
-      if (sub1 == grp.temp_slot.category_val ||
-          sub1 == grp.speed_slot.category_val) {
-        return grp.power_slot.category_val;
-      }
-    }
-  }
-  return sub1;
+  return s_norm_sub1_fn ? s_norm_sub1_fn(dev_id, sub1) : sub1;
 }
 
 DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
@@ -286,36 +280,6 @@ void DeviceRepository::initDevices() {
     device_count = 0;
     _online_count.store(0, std::memory_order_relaxed);
   }
-
-  // L2.2 ControlTemplate decoupled unit count provider
-  ControlTemplateRegistry::setDeviceUnitCountProvider([](uint8_t dev_id) -> size_t {
-    size_t units = 0;
-    for (size_t i = 0; i < s_device_repo.count() && units < 2; ++i) {
-      DeviceStateEntry snap{};
-      if (s_device_repo.getSnapshot(i, snap) && snap.dev_id == dev_id)
-        ++units;
-    }
-    return units;
-  });
-
-  // L2.1 WallpadProtocol AutoProbingEngine decoupled device hooks
-  AutoProbingEngine::setDeviceHooks(
-    []() -> size_t {
-      return s_device_repo.getOnlineCount();
-    },
-    [](uint8_t dev_id, uint8_t sub1, uint8_t sub2, const uint8_t **out_ack, size_t *out_len) -> bool {
-      const DeviceStateEntry *dev = s_device_repo.find(dev_id, sub1, sub2);
-      if (dev && dev->is_online && dev->last_ack_len >= 4) {
-        *out_ack = dev->last_ack_data.data();
-        *out_len = dev->last_ack_len;
-        return true;
-      }
-      return false;
-    },
-    [](StaticPacket &ack) {
-      s_device_repo.updateFromBus(ack);
-    }
-  );
 }
 
 void DeviceRepository::clear() {
@@ -323,183 +287,6 @@ void DeviceRepository::clear() {
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   device_count = 0;
   _online_count.store(0, std::memory_order_relaxed);
-}
-
-namespace {
-
-static void decodeOutlet(const GroupControlTemplate &grp,
-                         const StaticPacket &ack, const DeviceStateEntry *,
-                         DecodedDeviceState &out) {
-  uint8_t w_off = grp.getWattageOffset(ack.length);
-  if (w_off + 1 < ack.length) {
-    uint16_t raw_w =
-        (static_cast<uint16_t>(ack.data[w_off]) << 8) | ack.data[w_off + 1];
-    out.power_w = (raw_w < 50000) ? static_cast<float>(raw_w) : 0.0f;
-  }
-}
-
-static void decodeSwitch(const GroupControlTemplate &grp,
-                         const StaticPacket &ack, const DeviceStateEntry *dev,
-                         DecodedDeviceState &out) {
-  if (grp.frame_len >= 17) {
-    out.dev_class = DeviceClass::OUTLET;
-    decodeOutlet(grp, ack, dev, out);
-  }
-}
-
-static void decodeGas(const GroupControlTemplate &grp, const StaticPacket &ack,
-                         const DeviceStateEntry *, DecodedDeviceState &out) {
-  uint8_t v_off = grp.getValveStateOffset(ack.length);
-  bool is_closed =
-      (v_off >= ack.length || ack.data[v_off] == grp.close_slot.off_val);
-  snprintf(out.valve_state, sizeof(out.valve_state), "%s",
-           is_closed ? "closed" : "open");
-}
-
-static void decodeMomentary(const GroupControlTemplate &grp,
-                            const StaticPacket &ack,
-                            const DeviceStateEntry *dev,
-                            DecodedDeviceState &out) {
-  out.floor = 15;
-  out.direction = 0;
-  out.ho = 0;
-  if (grp.dev_id == 0x34) {
-    out.power =
-        (ack.length == 11 && ack.data[4] == 0x04)
-            ? ((ack.data[8] == 0x06) ? 1 : 0)
-            : ((dev && dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01)
-                                              : 0);
-  } else if (ack.length >= 6) {
-    out.floor = constrain(static_cast<int>(ack.data[5]), 1, 60);
-    out.direction = (ack.length >= 7) ? ack.data[6] : 0;
-  }
-}
-
-static void decodeThermostat(const GroupControlTemplate &grp,
-                             const StaticPacket &ack,
-                             const DeviceStateEntry *dev,
-                             DecodedDeviceState &out) {
-  out.target_temp = dev ? dev->last_target_temp : 0;
-  out.current_temp = (dev && dev->last_current_temp > 0)
-                         ? dev->last_current_temp
-                         : out.target_temp;
-
-  uint8_t p_off = grp.getPowerOffset(ack.length);
-  if (p_off < ack.length && grp.away_mode_token != 0 &&
-      ack.data[p_off] == grp.away_mode_token)
-    out.power = 2;
-
-  uint8_t t_off = grp.getTargetTempOffset(ack.length);
-  if (t_off < ack.length && ack.data[t_off] >= 5 && ack.data[t_off] <= 35) {
-    out.target_temp = ack.data[t_off];
-    if (dev)
-      const_cast<DeviceStateEntry *>(dev)->last_target_temp = ack.data[t_off];
-  }
-
-  uint8_t c_off = grp.getCurrentTempOffset(ack.length);
-  if (c_off < ack.length && ack.data[c_off] >= 5 && ack.data[c_off] <= 50) {
-    out.current_temp = ack.data[c_off];
-    if (dev)
-      const_cast<DeviceStateEntry *>(dev)->last_current_temp = ack.data[c_off];
-  }
-}
-
-static void decodeVent(const GroupControlTemplate &grp, const StaticPacket &ack,
-                       const DeviceStateEntry *, DecodedDeviceState &out) {
-  uint8_t p_off = grp.getPowerOffset(ack.length);
-  out.power = (p_off < ack.length && ack.data[p_off] == 0x01) ? 1 : 0;
-  out.fan_speed = 1;
-  out.vent_mode = 1;
-
-  uint8_t spd_off = grp.getFanSpeedOffset(ack.length);
-  if (spd_off < ack.length)
-    out.fan_speed = grp.decodeFanSpeed(ack.data[spd_off]);
-
-  if (out.power == 1 && (ack.length >= 6 && ack.data[5] == 0x43) &&
-      p_off < ack.length) {
-    uint8_t m = ack.data[p_off];
-    if (m >= 1 && m <= 4)
-      out.vent_mode = m;
-  }
-}
-
-static void decodeAircon(const GroupControlTemplate &, const StaticPacket &ack,
-                         const DeviceStateEntry *dev, DecodedDeviceState &out) {
-  size_t base = (ack.length == 14) ? 7 : 8;
-  if (base + 4 >= ack.length)
-    return;
-
-  out.power = ((ack.data[base] & 0x7F) == 0x01) ? 1 : 0;
-  out.vent_mode = constrain(static_cast<int>(ack.data[base + 1]), 1, 5);
-  out.fan_speed = (ack.data[base + 2] >= 1 && ack.data[base + 2] <= 4)
-                      ? ack.data[base + 2]
-                      : 4;
-
-  uint8_t amb = ack.data[base + 3];
-  if (amb >= 5 && amb <= 50) {
-    out.current_temp = amb;
-    if (dev)
-      const_cast<DeviceStateEntry *>(dev)->last_current_temp = amb;
-  }
-  uint8_t tgt = ack.data[base + 4] & 0x7F;
-  if (tgt >= 5 && tgt <= 35) {
-    out.target_temp = tgt;
-    if (dev)
-      const_cast<DeviceStateEntry *>(dev)->last_target_temp = tgt;
-  }
-}
-
-static void decodeUnknown(const GroupControlTemplate &, const StaticPacket &,
-                          const DeviceStateEntry *, DecodedDeviceState &) {}
-
-using ClassDecoderFn = void (*)(const GroupControlTemplate &grp,
-                                const StaticPacket &ack,
-                                const DeviceStateEntry *dev,
-                                DecodedDeviceState &out);
-
-static constexpr ClassDecoderFn kClassDecoders[] = {
-    decodeUnknown,    // UNKNOWN = 0
-    decodeSwitch,     // SWITCH = 1
-    decodeOutlet,     // OUTLET = 2
-    decodeGas,        // GAS = 3
-    decodeMomentary,  // MOMENTARY = 4
-    decodeThermostat, // THERMOSTAT = 5
-    decodeVent,       // VENT = 6
-    decodeAircon      // AIRCON = 7
-};
-
-} // anonymous namespace
-
-void DeviceRepository::decodeDeviceState(const GroupControlTemplate &grp,
-                                         const StaticPacket &ack,
-                                         const DeviceStateEntry *dev,
-                                         DecodedDeviceState &out) {
-  out.dev_class = grp.coverage.dev_class;
-  out.should_broadcast = false;
-  out.power = 0;
-  out.target_temp = 0;
-  out.current_temp = 0;
-  out.fan_speed = 0;
-  out.vent_mode = 1;
-  out.power_w = 0.0f;
-  out.floor = 1;
-  out.direction = 0;
-  out.ho = 0;
-  snprintf(out.valve_state, sizeof(out.valve_state), "closed");
-
-  // 1. 공통 기본 전원 슬롯 디코딩
-  uint8_t p_off = grp.getPowerOffset(ack.length);
-  if (p_off != 0xFF && p_off < ack.length) {
-    out.power = (ack.data[p_off] == grp.power_slot.on_val) ? 1 : 0;
-  }
-
-  // 2. 클래스별 디스패치 (특수 전원 및 파라미터 개별 디코딩)
-  const size_t idx = static_cast<size_t>(grp.coverage.dev_class);
-  if (idx < sizeof(kClassDecoders) / sizeof(kClassDecoders[0])) {
-    kClassDecoders[idx](grp, ack, dev, out);
-  } else {
-    decodeUnknown(grp, ack, dev, out);
-  }
 }
 
 namespace {
@@ -596,15 +383,14 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     return res;
   }
 
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (!parser ||
-      !parser->isAckPacket(span<const uint8_t>(ack.data.data(), ack.length)))
+  if (!s_ack_packet_check ||
+      !s_ack_packet_check(std::span<const uint8_t>(ack.data.data(), ack.length)))
     return res;
 
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  if (!parser->extractDeviceKey(
-          span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1,
-          sub2)) {
+  if (!s_key_extractor ||
+      !s_key_extractor(std::span<const uint8_t>(ack.data.data(), ack.length),
+                       dev_id, sub1, sub2)) {
     return res;
   }
 
@@ -673,16 +459,8 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
   res.updated = true;
 
   if (ack_changed) {
-    GroupControlTemplate grp{};
-    bool has_grp = g_control_registry.findGroup(dev_id, grp);
-    if (!has_grp && dev_id == 0x34) {
-      grp.dev_id = 0x34;
-      grp.coverage.dev_class = DeviceClass::MOMENTARY;
-      has_grp = true;
-    }
-
-    if (has_grp) {
-      decodeDeviceState(grp, ack, &dev_snap, st);
+    bool has_decoded = s_state_decoder && s_state_decoder(dev_id, ack, &dev_snap, st);
+    if (has_decoded) {
       if (dev_id == 0x34) {
         bool ev_state_changed = (st.power != prev_pwr) ||
                                 (st.direction != prev_dir) || (st.ho != prev_ho);
@@ -864,47 +642,52 @@ void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept {
 }
 
 void Device_NotifyDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
+  s_dp_front_bell.store(front_bell, std::memory_order_release);
+  s_dp_lobby_bell.store(lobby_bell, std::memory_order_release);
+  if (front_bell || lobby_bell) {
+    s_dp_last_bell_ms.store(millis(), std::memory_order_release);
+  }
   if (s_doorphone_listener) {
     s_doorphone_listener(front_bell, lobby_bell);
   }
 }
 
-void Device_DecodeState(const struct GroupControlTemplate &grp,
+void Device_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
+                              uint32_t &out_last_bell_ms) noexcept {
+  out_front_bell = s_dp_front_bell.load(std::memory_order_relaxed);
+  out_lobby_bell = s_dp_lobby_bell.load(std::memory_order_relaxed);
+  out_last_bell_ms = s_dp_last_bell_ms.load(std::memory_order_relaxed);
+}
+
+bool Device_DoorphoneOpen(bool is_lobby) noexcept {
+  return s_dp_open_handler ? s_dp_open_handler(is_lobby) : false;
+}
+
+void Device_RegisterParserHooks(DeviceAckPacketCheckFn ack_check,
+                                DeviceKeyExtractorFn key_extract) noexcept {
+  s_ack_packet_check = ack_check;
+  s_key_extractor = key_extract;
+}
+
+void Device_RegisterStateDecoder(DeviceStateDecoderFn fn) noexcept {
+  s_state_decoder = fn;
+}
+
+void Device_RegisterNormSub1Hook(DeviceNormSub1Fn fn) noexcept {
+  s_norm_sub1_fn = fn;
+}
+
+void Device_RegisterDoorphoneOpenHandler(DoorphoneOpenHandler handler) noexcept {
+  s_dp_open_handler = handler;
+}
+
+bool Device_DecodeState(uint8_t dev_id,
                         const StaticPacket &ack,
                         const DeviceStateEntry *dev,
                         DecodedDeviceState &out) noexcept {
-  DeviceRepository::decodeDeviceState(grp, ack, dev, out);
+  return s_state_decoder ? s_state_decoder(dev_id, ack, dev, out) : false;
 }
 
-void Device_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
-                              uint32_t &out_last_bell_ms) noexcept {
-  Wallpad_DoorphoneGetState(out_front_bell, out_lobby_bell, out_last_bell_ms);
-}
-
-void Device_DoorphoneGetFraming(FramingStatus &out_status, uint8_t &out_stx,
-                                uint8_t &out_etx, uint8_t &out_len) noexcept {
-  Wallpad_DoorphoneGetFraming(out_status, out_stx, out_etx, out_len);
-}
-
-void Device_DoorphoneClearNvs(const char *nvs_ns) noexcept {
-  Wallpad_DoorphoneClearNvs(nvs_ns);
-}
-
-bool Device_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,
-                                   uint8_t op_open, uint8_t op_end) noexcept {
-  return Wallpad_DoorphoneStartSequence(stx, etx, op_call, op_open, op_end);
-}
-
-bool Device_ExtractKeyFromFrame(const uint8_t *data, size_t len,
-                                uint8_t &out_dev_id, uint8_t &out_sub1,
-                                uint8_t &out_sub2) noexcept {
-  if (!data || len < 5) return false;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (!parser) return false;
-  std::span<const uint8_t> frame(data, len);
-  parser->extractDeviceKey(frame, out_dev_id, out_sub1, out_sub2);
-  return true;
-}
 
 
 
