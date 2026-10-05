@@ -1,64 +1,118 @@
 # GW Home Gateway Architecture, Specifications & Design Philosophy
 
-This document defines the system specifications, runtime topology, channel mappings, deadlock-free concurrency/locking hierarchies, and the **7 Core Architectural & Refactoring Pillars** across the 4-Tier Clean Architecture modules.
+This document defines the system specifications, runtime topology, channel mappings, deadlock-free concurrency/locking hierarchies, and the **Canonical 4+1 Layer Architecture & Implementation Standards**.
 
 ---
 
-### 0. Canonical Clean Architecture Topology (4-Tier + 1 Foundation Soil)
+### 0. Migration Post-Mortem & Anti-Pattern Analysis (Architectural Integrity Mandate)
+
+> [!CAUTION]
+> **Post-Mortem Review & Mandatory Corrective Action (Recorded 2026-10-04)**
+> During the 4+1 Layer Clean Architecture migration, an over-reliance on transitional alias headers and direct bulk relocation led to critical architectural compromises. To ensure zero recurrence, the root causes, anti-patterns, and binding corrective rules are permanently codified here.
+
+#### 0.1 Root Causes of Recent Architectural Regressions
+1. **"Relocation Without Modular Decomposition" (The God File Renaming Fallacy)**:
+   - The monolithic `EngineTask.cpp` (~1,370 lines) contained responsibilities spanning three distinct layers: L2 frame transmission, L3 packet parsing & device state mutation (`DeviceRegistry`), and L4 event dispatching (SmartThings/Doorphone listeners).
+   - Rather than decomposing these responsibilities into their designated layers, the entire file body was simply moved into `src/Channels/RS485_CH.cpp`. Renaming a God File without decomposing its internal responsibilities violated Single Responsibility and clean layering.
+2. **Upward Dependency Leak in L2 Transport**:
+   - Because `RS485_CH.cpp` retained L3 state mutation and L4 listener dispatch logic, `include/Channels/RS485_CH.h` required `#include "Routing/DeviceRegistry.h"`, and `src/Channels/RS485_CH.cpp` required `#include "Services/EngineTask.h"`.
+   - This directly violated the **Strict Downlink Hierarchy ($L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$)** and the **Zero Upward Include** rule.
+3. **Spurious File Proliferation via Unresolved Scaffolding**:
+   - Intermediate forwarding headers and legacy files (`DeviceRegistry.cpp` alongside `Device_Registry.cpp`, `NetworkRouter.cpp` alongside `Packet_Router.cpp`, and unmerged trackers) were retained concurrently rather than undergoing full in-place canonical absorption.
+4. **The False Remedy of Forced Monolithic Merging**:
+   - Attempting to reduce file counts by collapsing legitimately separated modules (`Wallpad_Parser`, `Wallpad_Protocol`, `Device_Registry`, `AutoProbingEngine`) into a single file directly contradicts modular cohesion and recreates massive monolithic debt. Legitimate submodules (such as `Console/` commands and `Remote/` handlers) must remain modularized while eliminating transitional scaffolding.
+
+#### 0.2 Canonical Corrective Principles
+- **L2 Pure Transport Leaf Invariant**: `RS485_CH` and `TCP_CH` must act strictly as L2 Transport Leaves. They manage physical UART/Socket I/O, ring buffers, timeslots, and hardware tasks. They possess **0% awareness of L3 device state registries or L4 listeners**. All packet boundary validation and state updates belong strictly in L3.
+- **Top-Down Downlink / Pull-Pop Pipeline**: Downlink requests flow strictly $L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$. Uplink reception operates via top-down polling/pulling from thread-safe channel queues without upward callback hooks.
+
+---
+
+### 0.3 Canonical Clean Architecture Topology (4-Tier + 1 Foundation Soil)
 
 > **Mandatory Architectural Standard (v4.0.0 Canonical & Modularized)**:
-> 1. **Foundation Soil (L0 Base 전역 순수 기반 Leaf)**: 수직 파이프라인의 층이 아니며, 전 계층($L1 \sim L4$)이 딛고 서 있는 불변의 전역 Leaf(Universal Soil). 컴파일 타임 상수, 핀맵, 고정 버퍼 규격 제공.
-> 2. **4-Tier Strict Vertical Pipeline ($L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$)**: 
->    - **L4 Service**: 비즈니스 애플리케이션 (`EngineTask`, `BridgeService`, `ConsoleCli`, `Console/`, `Remote/`)
->    - **L3 Protocol**: 패킷 코덱, 웜스타트 캐시 & 자동 프로빙 (`WallpadParser`, `PollingRegistry`, `AutoProbingEngine`, `ModbusProtocol`, `DeviceRegistry`, `ControlTemplate`, Leaf: `ProtocolTypes.h`)
->    - **L2 Transport**: 물리 채널, 소켓 엔진, 프레이밍 추적 (`NetworkRouter`, `TcpReactor`, `DoorphoneTracker`, `FramingTracker`, Leaf: `TransportTypes.h`)
->    - **L1 System**: OS 프리미티브 & 인프라 (`LockUtils`, `SystemStorage`, `SystemDiagnostics`, `SystemOta`)
-> 3. **Zero Upward Includes**: 하위 계층이 상위 계층을 include하는 행위 수학적으로 0건.
-> 4. **No Middle-Man Pass-Through**: L0 Foundation Soil에 접근하기 위해 중간 계층이 불필요한 패스스루 래퍼를 두는 안티패턴 배제.
-> 5. **Complete Information Hiding (0-extern)**: 모든 런타임 전역 통신 배열 및 락 노출을 전면 폐기하고, `.cpp` 내부 `static` 번역 단위 변수로 완전 은닉. 외부는 읽기 전용 Snapshot API로만 소비.
-> 6. **Single Responsibility Submodule Balance (400~800 Lines Sweet Spot)**: 단일 파일 1,000줄 이상의 God File을 엄격히 금지하며, 도메인별 응집 모듈로 분할.
+> 1. **Foundation Soil (L0 Base Leaf)**: Universal static foundation (`System_Buffer.h`, `System_Config.h`, `System_Platform.h`). Zero upward dependencies; accessible directly by any layer ($L1 \sim L4$).
+> 2. **L1 Physical HAL Drivers**: Hardware abstractions (`Uart_Driver`, `NVS_Driver`, `Diagnostics_Driver`, `RTOS_Driver`). Complete information hiding.
+> 3. **L2 Transport & Data Link Channels**: Raw frame transport, timeslot scheduling, and socket polling (`RS485_CH`, `TCP_CH`). Pure transport leaves; zero awareness of L3 state or L4 listeners.
+> 4. **L3 Routing, Codec & State Hub**: Protocol parsers, state hub SSOT, packet routing, and U-turn bypass (`Wallpad_Parser`, `Wallpad_Protocol`, `Modbus_Parser`, `Modbus_Protocol`, `Device_Registry`, `Packet_Router`).
+> 5. **L4 Application Services**: High-level orchestrators (`ST_Service`, `EW11_Service`, `CTL_Service`, `CLI_Service`) with structured submodules (`Console/`, `Remote/`).
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ L4 Service: 도메인 비즈니스 로직 (EngineTask, BridgeService, Console, Remote)│
-│  ├─ Console: CmdSystem.cpp, CmdConfig.cpp, CmdDevice.cpp, CmdTrace.cpp │
-│  └─ Remote:  MgmtRpc.cpp, RemoteTelemetry.cpp, WifiManager.cpp         │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │ (수직 런타임: 오직 L3만 호출)
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ L3 Protocol: 패킷 프레이밍, 코덱, 캐시, 자동학습 (Wallpad, Modbus, Registry) │
-│  ├─ WallpadParser.cpp (STX/ETX/CS 코덱, ProfileRepository)              │
-│  ├─ PollingRegistry.cpp (48슬롯 스케줄러, RTC SRAM/NVS 웜스타트 캐시)   │
-│  └─ AutoProbingEngine.cpp (엔트로피 분석, 통계 프로빙 FSM, 매트릭스)    │
-│ └─▶ [L3.0 Leaf: ProtocolTypes.h] (StaticPacket, DecodedDeviceState 등) │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │ (수직 런타임: 오직 L2만 호출)
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ L2 Transport: 물리 버스, 소켓 I/O, Reactor, 프레이밍 학습               │
-│  ├─ TcpReactor.cpp, NetworkRouter.cpp, DoorphoneTracker.cpp            │
-│  └─ FramingTracker.cpp (L0에서 L2로 승격된 STX/ETX/LEN 동적 학습 FSM)  │
-│ └─▶ [L2.0 Leaf: TransportTypes.h] (HubClientSlotSnapshot, RouteEndpoint)│
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │ (수직 런타임: 오직 L1만 호출)
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ L1 System: OS 프리미티브, NVS, WDT, OTA (LockUtils, Storage, Diagnostics)│
-└─────────────────────────────────────────────────────────────────────────┘
-  ▲                         ▲                         ▲                ▲
-  │ (컴파일 타임 Leaf 참조)   │ (컴파일 타임 Leaf 참조)   │                │
-  └─────────────────────────┴─────────────┬───────────┴────────────────┘
-                                          │
-┌─────────────────────────────────────────┴───────────────────────────────┐
-│              L0 Base: Foundation Soil (전역 순수 기반 Leaf)              │
-│  - SystemConfig.h: 네트워크 포트, 버퍼 크기, 불변 타이밍 파라미터         │
-│  - SystemPlatform.h: ESP32-S3 GPIO 핀 매핑, StaticPacket 구조체         │
-│  - BufferUtils.h: Zero-Allocation 스크래치 버퍼 AppendBuf<N>            │
-└─────────────────────────────────────────────────────────────────────────┘
+include/
+├── L0_Base/                  [L0: Foundation Soil]
+│   ├── System_Buffer.h       (AppendBuf fixed scratch buffers, zero-heap utilities)
+│   ├── System_Config.h       (NVS keys, baud rates, timing constants, monadic parsers)
+│   └── System_Platform.h     (ESP32-S3 pin mappings, StaticPacket structures)
+├── L1_Drivers/               [L1: Physical HAL Drivers]
+│   ├── Uart_Driver.h         (Unified HW UART0~2 + Doorphone SW Serial HAL)
+│   ├── NVS_Driver.h          (Flash non-volatile key-value storage HAL)
+│   ├── RTOS_Driver.h         (FreeRTOS Mutex, Semaphore, and CriticalSection RAII)
+│   └── Diagnostics_Driver.h  (Heap/stack watermarks, CPU telemetry, OTA flashing)
+├── L2_Channels/              [L2: Transport & Data Link Channels]
+│   ├── RS485_CH.h            (Ch1~Ch4 serial channel manager, FreeRTOS timeslots)
+│   └── TCP_CH.h              (Core 0 TCP reactor, socket FSM, embedded IPFilter)
+├── L3_Routing/               [L3: Routing, Codec & State Hub]
+│   ├── Packet_Router.h       (Inter-channel packet dispatch, U-turn bypass orchestration)
+│   ├── Device_Registry.h     (SSOT device state repository, desired vs real states)
+│   ├── Wallpad_Parser.h      (Hyundai Wallpad packet framing & checksum validation)
+│   ├── Wallpad_Protocol.h    (Wallpad packet encoders, decoders, payload builders)
+│   ├── Modbus_Parser.h       (Modbus RTU frame boundary and CRC validator)
+│   └── Modbus_Protocol.h     (Modbus register mapping, encode/decode routines)
+└── L4_Services/              [L4: Application Services]
+    ├── ST_Service.h          (SmartThings LAN bridge, asynchronous REST/Webhook push)
+    ├── EW11_Service.h        (Virtual RS-485 EW11 TCP client/server session coordinator)
+    ├── CTL_Service.h         (Web UI HTTP REST control endpoint handler)
+    ├── CLI_Service.h         (UART0 serial diagnostic/administration console REPL)
+    ├── Console/              [CLI Submodules - Domain Modularization]
+    │   ├── ConsoleFmt.h      (ANSI styling and tabular text formatting utilities)
+    │   ├── CmdConfig.h       (NVS configuration and Wi-Fi parameter commands)
+    │   ├── CmdDevice.h       (Device control and real-time state query commands)
+    │   ├── CmdSystem.h       (FreeRTOS tasks, heap, stack, and mutex diagnostics)
+    │   └── CmdTrace.h        (Channel-specific real-time packet sniffer commands)
+    └── Remote/               [Remote & EW11 Submodules]
+        ├── RemoteInternal.h  (Internal session types and remote context definitions)
+        ├── MgmtRpc.h         (Remote JSON-RPC parser and management command handlers)
+        ├── RemoteTelemetry.h (Periodic system metric payload builders)
+        └── WifiManager.h     (Wi-Fi state machine and automatic reconnect logic)
+
+src/
+├── L0_Base/
+│   ├── System_Config.cpp
+│   └── System_Platform.cpp
+├── L1_Drivers/
+│   ├── Uart_Driver.cpp       (HW UART & SoftwareSerial fully sealed via file-static scope)
+│   ├── NVS_Driver.cpp
+│   └── Diagnostics_Driver.cpp
+├── L2_Channels/
+│   ├── RS485_CH.cpp          (Task_Ch1, Task_Ch2Ch3, Task_Ch4 FreeRTOS worker loops)
+│   └── TCP_CH.cpp            (Task_TcpCore0 socket polling and IP whitelist filter)
+├── L3_Routing/
+│   ├── Packet_Router.cpp     (U-turn routing table, horizontal bypass engine)
+│   ├── Device_Registry.cpp   (Mutex-protected snapshot API, 0% extern global state leaks)
+│   ├── Wallpad_Parser.cpp
+│   ├── Wallpad_Protocol.cpp
+│   ├── Modbus_Parser.cpp
+│   └── Modbus_Protocol.cpp
+├── L4_Services/
+│   ├── ST_Service.cpp        (SmartThings event transmission loop)
+│   ├── EW11_Service.cpp      (EW11 proxy and remote management coordinator)
+│   ├── CTL_Service.cpp
+│   ├── CLI_Service.cpp       (Serial stream tokenizer and command dispatcher)
+│   ├── Console/              [CLI Submodule Implementations]
+│   │   ├── CmdConfig.cpp
+│   │   ├── CmdDevice.cpp
+│   │   ├── CmdSystem.cpp
+│   │   └── CmdTrace.cpp
+│   └── Remote/               [Remote Submodule Implementations]
+│       ├── MgmtRpc.cpp
+│       ├── RemoteTelemetry.cpp
+│       └── WifiManager.cpp
+└── main.cpp                  (Bootstrapping, driver/channel/service init & task launch)
 ```
 
-### 0.1 Framework & Toolchain Environment Specifications
+---
+
+### 0.4 Framework & Toolchain Environment Specifications
 - **Target Hardware**: M5Stack AtomS3 Lite (ESP32-S3FN8, 240MHz Dual-Core, 320KB SRAM, 8MB Flash)
 - **Framework**: `framework-arduinoespressif32 @ 3.1.3` (Arduino-ESP32 Core v3.1.x)
 - **Underlying SDK / ESP-IDF**: **ESP-IDF v5.3.2** (`ESP_IDF_VERSION_VAL(5, 3, 2)`)

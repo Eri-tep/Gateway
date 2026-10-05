@@ -1,19 +1,20 @@
-#include "Base/BufferUtils.h"
-#include "Base/SystemConfig.h"
-#include "Base/SystemPlatform.h"
-#include "Protocol/ControlTemplate.h"
-#include "Protocol/WallpadProtocol.h"
-#include "Service/BridgeService.h"
-#include "Service/ConsoleCli.h"
-#include "Service/EngineTask.h"
-#include "Service/RemoteService.h"
-#include "System/LockUtils.h"
-#include "System/SystemDiagnostics.h"
-#include "System/SystemOta.h"
-#include "System/SystemStorage.h"
-#include "Transport/DoorphoneTracker.h"
-#include "Transport/NetworkRouter.h"
-#include "Transport/TcpReactor.h"
+#include "L0_Base/System_Buffer.h"
+#include "L0_Base/System_Config.h"
+#include "L0_Base/System_Platform.h"
+#include "L2_Channels/RS485_CH.h"
+#include "L2_Channels/TCP_CH.h"
+#include "L1_Drivers/Uart_Driver.h"
+#include "L3_Routing/ControlTemplate.h"
+#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Device_Registry.h"
+#include "L3_Routing/Packet_Router.h"
+#include "L4_Services/ST_Service.h"
+#include "L4_Services/CLI_Service.h"
+#include "L4_Services/EW11_Service.h"
+#include "L1_Drivers/RTOS_Driver.h"
+#include "L1_Drivers/Diagnostics_Driver.h"
+#include "L1_Drivers/SystemOta.h"
+#include "L1_Drivers/NVS_Driver.h"
 
 #include "esp_attr.h"
 #include "esp_idf_version.h"
@@ -175,10 +176,10 @@ static void Boot_CheckCrashLoop() {
 // Stage 2: RTOS Synchronization Primitives & Static Queues
 // ============================================================================
 static void Boot_InitSyncPrimitives() {
-  Engine_InitQueues();
+  RS485_InitQueues();
 
-  ch2_config.event_queue_ptr = Engine_GetUartEventQueuePtr(1);
-  ch3_config.event_queue_ptr = Engine_GetUartEventQueuePtr(2);
+  ch2_config.event_queue_ptr = RS485_GetUartEventQueuePtr(1);
+  ch3_config.event_queue_ptr = RS485_GetUartEventQueuePtr(2);
 
   if (!g_wifi_event_group)
     g_wifi_event_group = xEventGroupCreate();
@@ -212,14 +213,38 @@ static bool HandleRemoteControl(StaticPacket &req,
 
 static void Boot_InitSubsystems() {
   // ── Mediator: Wire L4 Services Decoupled Event Listeners ──
-  Engine_RegisterDeviceStateListener(Mgmt_BroadcastDeviceResult);
-  Engine_RegisterDoorphoneListener(Mgmt_BroadcastDoorphoneEvent);
-  Engine_RegisterCh5ForwardHandler(Bridge_ForwardPacket);
+  Device_RegisterStateListener(Mgmt_BroadcastDeviceResult);
+  Device_RegisterDoorphoneListener(Mgmt_BroadcastDoorphoneEvent);
+  Router_RegisterCh5ForwardHandler(Bridge_ForwardPacket);
 
   Bridge_RegisterDeviceStateListener(Mgmt_BroadcastDeviceResult);
   Bridge_RegisterElevatorListener(Mgmt_BroadcastElevatorEvent);
 
   Remote_RegisterControlHandler(HandleRemoteControl);
+
+  // ── Register L3 Protocol Dispatcher SPI into L2 RS-485 Engine ──
+  RS485_PacketDispatcher rs485_dispatcher{};
+  rs485_dispatcher.onBuildPoll = Wallpad_BuildNextPollPacket;
+  rs485_dispatcher.onBusPacket = Wallpad_HandleBusPacket;
+  rs485_dispatcher.onTimeout = Wallpad_HandlePollTimeout;
+  rs485_dispatcher.onEvaluateControl = [](StaticPacket &req, StaticPacket &v_ack,
+                                          uint8_t &ch5_slot, bool &unidir) noexcept -> uint8_t {
+    return static_cast<uint8_t>(Wallpad_EvaluateControl(req, v_ack, ch5_slot, unidir));
+  };
+  rs485_dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
+  rs485_dispatcher.onCheckConvergence = Wallpad_CheckConvergence;
+  rs485_dispatcher.onGetStx = Wallpad_GetStx;
+  rs485_dispatcher.onIsAutoUnlocked = Wallpad_IsAutoUnlocked;
+  rs485_dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
+  rs485_dispatcher.onExtractLength = Wallpad_ExtractLength;
+  rs485_dispatcher.onValidatePacket = Wallpad_ValidatePacket;
+  rs485_dispatcher.onHandleSubBusQuery = Wallpad_HandleSubBusQuery;
+  rs485_dispatcher.onFeedControlFrame = Wallpad_FeedControlFrame;
+  rs485_dispatcher.onDoorphonePacket = Wallpad_HandleDoorphonePacket;
+  rs485_dispatcher.onDoorphoneReset = Wallpad_ResetDoorphoneBellState;
+  rs485_dispatcher.onMatchDoorphoneLock = Wallpad_MatchDoorphoneLock;
+  rs485_dispatcher.onIsQueryPacket = Wallpad_IsQueryPacket;
+  RS485_RegisterDispatcher(rs485_dispatcher);
 
   Transport::g_doorphone_controller.init();
   ProfileRepository::addProfileChangeListener(Transport::Doorphone_OnProfileChanged);
@@ -234,59 +259,29 @@ static void Boot_InitSubsystems() {
 
 // ============================================================================
 // Stage 5: Hardware UART Buses & Peripheral Serial Setup
+// All UART init delegated to Uart_Driver L1 HAL (AGENTS.md Rule 17).
 // ============================================================================
-static inline uart_word_length_t toUartDataBits(uint8_t d) {
-  return (d == 7) ? UART_DATA_7_BITS : UART_DATA_8_BITS;
-}
-
-static inline uart_parity_t toUartParity(uint8_t p) {
-  return (p == 1)   ? UART_PARITY_EVEN
-         : (p == 2) ? UART_PARITY_ODD
-                    : UART_PARITY_DISABLE;
-}
-
-static inline uart_stop_bits_t toUartStopBits(uint8_t s) {
-  return (s == 2) ? UART_STOP_BITS_2 : UART_STOP_BITS_1;
-}
-
-static void initUartChannel(uart_port_t port, int tx, int rx, uint32_t baud,
-                            uint8_t dbits, uint8_t parity, uint8_t stopbits,
-                            QueueHandle_t *out_queue) {
-  uart_config_t cfg = {.baud_rate = static_cast<int>(baud),
-                       .data_bits = toUartDataBits(dbits),
-                       .parity = toUartParity(parity),
-                       .stop_bits = toUartStopBits(stopbits),
-                       .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-                       .rx_flow_ctrl_thresh = 0,
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-                       .source_clk = UART_SCLK_DEFAULT};
-#else
-                       .source_clk = UART_SCLK_APB};
-#endif
-  uart_param_config(port, &cfg);
-  uart_set_pin(port, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-  uart_driver_install(port, Config::Packet::UART_HW_RX_BUF_SIZE, 0,
-                      Config::Queue::UART_EVENT_QUEUE_SIZE, out_queue, 0);
-}
 
 static void Boot_InitHardwareAndDevices() {
-  initUartChannel(UART_NUM_0, 2, 1, g_config.uart_baud_rate,
-                  g_config.uart_data_bits, g_config.uart_parity,
-                  g_config.uart_stop_bits, Engine_GetUartEventQueuePtr(0));
-  initUartChannel(UART_NUM_1, 6, 5, g_config.ch2_baud_rate,
-                  g_config.ch2_data_bits, g_config.ch2_parity,
-                  g_config.ch2_stop_bits, Engine_GetUartEventQueuePtr(1));
-  initUartChannel(UART_NUM_2, 8, 7, g_config.ch3_baud_rate,
-                  g_config.ch3_data_bits, g_config.ch3_parity,
-                  g_config.ch3_stop_bits, Engine_GetUartEventQueuePtr(2));
+  Uart_InitHw(UART_NUM_0, 2, 1,
+              g_config.uart_baud_rate, g_config.uart_data_bits,
+              g_config.uart_parity, g_config.uart_stop_bits,
+              RS485_GetUartEventQueuePtr(0));
+  Uart_InitHw(UART_NUM_1, 6, 5,
+              g_config.ch2_baud_rate, g_config.ch2_data_bits,
+              g_config.ch2_parity, g_config.ch2_stop_bits,
+              RS485_GetUartEventQueuePtr(1));
+  Uart_InitHw(UART_NUM_2, 8, 7,
+              g_config.ch3_baud_rate, g_config.ch3_data_bits,
+              g_config.ch3_parity, g_config.ch3_stop_bits,
+              RS485_GetUartEventQueuePtr(2));
 
-  g_doorphone_serial.begin(g_config.doorphone_baud_rate,
-                           Door_SerialConfig(g_config.doorphone_data_bits,
-                                             g_config.doorphone_parity,
-                                             g_config.doorphone_stop_bits),
-                           Config::GPIO::RX_GPIO, Config::GPIO::TX_GPIO);
-  pinMode(Config::GPIO::RX_GPIO, INPUT_PULLUP);
-  g_device_repo.initDevices();
+  Uart_InitDoorphone(g_config.doorphone_baud_rate,
+                     g_config.doorphone_data_bits,
+                     g_config.doorphone_parity,
+                     g_config.doorphone_stop_bits,
+                     Config::GPIO::RX_GPIO, Config::GPIO::TX_GPIO);
+  Device_Init();
 }
 
 // ============================================================================
