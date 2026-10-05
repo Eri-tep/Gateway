@@ -7,7 +7,7 @@
 #include "L4_Services/ConsoleCommands.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
-#include "L3_Routing/Public/ProtocolDiagnostics.h"
+#include "L3_Routing/Public/Protocol_Diagnostics.h"
 
 #include <WiFi.h>
 #include <algorithm>

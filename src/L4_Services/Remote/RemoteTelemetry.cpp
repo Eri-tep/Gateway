@@ -5,7 +5,7 @@
 #include "L4_Services/Remote/RemoteInternal.h"
 #include "L4_Services/EW11_Service.h"
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Public/ProtocolDiagnostics.h"
+#include "L3_Routing/Public/Protocol_Diagnostics.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L3_Routing/Public/Packet_Router.h"

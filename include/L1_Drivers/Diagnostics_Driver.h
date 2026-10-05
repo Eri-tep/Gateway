@@ -295,7 +295,6 @@ struct Ch1StateMetrics {
   std::atomic<uint32_t> poll_cnt{0};
   std::atomic<uint32_t> vip_cnt{0};
   std::atomic<uint32_t> normal_cnt{0};
-  std::atomic<uint32_t> stale_poll_cnt{0};
   std::atomic<uint8_t> last_from_state{0};
   std::atomic<uint8_t> last_to_state{0};
   std::atomic<uint32_t> last_transition_ms{0};
@@ -314,8 +313,6 @@ using ShutdownHook = void (*)();
 
 void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept;
 void System_RegisterShutdownHook(ShutdownHook hook) noexcept;
-void Diag_ResetMetricsOnConvergence() noexcept;
-void Diag_IncrementStalePollCount() noexcept;
 
 void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
                         const StaticPacket &pkt) noexcept;

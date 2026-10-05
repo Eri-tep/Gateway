@@ -4,9 +4,10 @@
 #include "L2_Channels/RS485_CH.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L1_Drivers/Uart_Driver.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Private/Wallpad_Engine.h"
 #include "L3_Routing/Public/Device_Registry.h"
 #include "L3_Routing/Public/Packet_Router.h"
+#include "L3_Routing/Public/Protocol_Diagnostics.h"
 #include "L4_Services/ST_Service.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/EW11_Service.h"
@@ -199,7 +200,7 @@ static void Boot_RestoreConfigAndState() {
   WarmCache_RestoreOnBoot();
   System_RegisterShutdownHook(WarmCache_SaveToNvs);
   char dp_ns[16];
-  FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
+  ProtocolDiag_GetFramingNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
   Wallpad_DoorphoneRestoreNvs(dp_ns);
 }
 
@@ -247,8 +248,6 @@ static void Boot_InitSubsystems() {
   Remote_Init();
   Bridge_Init();
   Mgmt_Init();
-  System_RegisterConvergenceHook(Diag_ResetMetricsOnConvergence);
-  System_RegisterStalePollSink(Diag_IncrementStalePollCount);
   System_RegisterShutdownHook(Bridge_ShutdownSockets);
   SystemOta_RegisterPreOtaHook(Bridge_ShutdownSockets);
 }

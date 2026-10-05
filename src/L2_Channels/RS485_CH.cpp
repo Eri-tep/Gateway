@@ -96,11 +96,19 @@ bool Queue_EnqueueDropHead(QueueHandle_t queue,
   return (xQueueSend(queue, &packet, 0) == pdTRUE);
 }
 
+bool Queue_EnqueueDropTail(QueueHandle_t queue,
+                           const StaticPacket &packet) noexcept {
+  if (UNLIKELY(!queue))
+    return false;
+  MutexLocker lock(s_ctrl_queue_mutex);
+  return (xQueueSend(queue, &packet, 0) == pdTRUE);
+}
+
 // ── RS-485 Channel TX Enqueue (canonical L2 → internal queue bridge) ─────────
 
 bool Engine_EnqueueCh1(const StaticPacket &pkt, bool vip) noexcept {
   QueueHandle_t q = vip ? s_ch1_vip_queue : s_ch1_control_queue;
-  return Queue_EnqueueDropHead(q, pkt);
+  return Queue_EnqueueDropTail(q, pkt);
 }
 
 bool Engine_EnqueueCh4Pass(const StaticPacket &pkt) noexcept {
@@ -331,7 +339,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
 bool RS485_EnqueueControl(const StaticPacket &pkt, bool vip) noexcept {
   QueueHandle_t q = vip ? s_ch1_vip_queue : s_ch1_control_queue;
-  if (Queue_EnqueueDropHead(q, pkt)) {
+  if (Queue_EnqueueDropTail(q, pkt)) {
     System_TracePacket(1, true, TraceType::CTL, pkt);
     return true;
   }

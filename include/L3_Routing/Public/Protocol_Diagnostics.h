@@ -11,39 +11,8 @@
 #include "L0_Base/System_Buffer.h"
 #include "L3_Routing/Public/Device_Registry.h"
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
-
-// ── Framing Tracker (L3 Canonical Framing Lock Engine) ──────────────────────
-struct FramingTracker {
-  std::atomic<FramingStatus> status{FramingStatus::WAITING};
-  std::atomic<uint8_t> candidate_stx{0};
-  std::atomic<uint8_t> candidate_etx{0};
-  std::atomic<uint8_t> candidate_len{0};
-  std::atomic<uint8_t> consecutive_matches{0};
-  std::atomic<uint8_t> consecutive_mismatches{0};
-  std::atomic<bool> is_custom_fixed{false};
-
-  void setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
-  void reset() noexcept;
-  void clearNvs(const char *nvs_ns, const char *tag = "FRAMING") noexcept;
-  void processFrame(uint8_t stx, uint8_t etx, uint8_t len, const char *nvs_ns,
-                    const char *tag = "FRAMING") noexcept;
-
-  static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
-                              size_t max_len) noexcept {
-    snprintf(out_ns, max_len, "dp_frame_p%u",
-             static_cast<unsigned int>(prof_idx & 0x03));
-  }
-
-  void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",
-                      const char *tag = "FRAMING") noexcept;
-  void saveToNvs(const char *nvs_ns = "dp_frame_p0",
-                 const char *tag = "FRAMING") noexcept;
-
-  [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
-};
 
 // ── Diagnostic Snapshot Structures ──────────────────────────────────────────
 
@@ -176,6 +145,8 @@ void ProtocolDiag_GetWarmCacheStatus(uint8_t &out_source, uint8_t &out_restored_
 void ProtocolDiag_PollingResetHits() noexcept;
 void ProtocolDiag_PollingClear() noexcept;
 void ProtocolDiag_PollingSweepExpired(uint32_t threshold_ms) noexcept;
+size_t ProtocolDiag_GetPollingTargetCount() noexcept;
+bool ProtocolDiag_GetPollingEntry(size_t index, PollingEntrySnapshot &out_snap) noexcept;
 size_t ProtocolDiag_GetPollingTargetsSnapshot(PollingEntrySnapshot *out_array, size_t max_count) noexcept;
 void ProtocolDiag_PollingRegisterOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1,
                                          uint8_t sub2, const uint8_t *pkt_data,
@@ -188,6 +159,7 @@ void ProtocolDiag_GetActiveAddresses(uint8_t *dev_ids, size_t &dev_cnt,
                                      uint8_t *sub1_ids, size_t &sub1_cnt,
                                      uint8_t *sub2_ids, size_t &sub2_cnt,
                                      size_t max_items) noexcept;
+uint32_t ProtocolDiag_GetStalePollCount() noexcept;
 
 // ── Framing & Profile Helpers ────────────────────────────────────────────────
 void ProtocolDiag_GetFramingNamespace(uint8_t profile_idx, char *out_buf,

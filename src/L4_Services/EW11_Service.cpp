@@ -4,7 +4,7 @@
 
 #include "L4_Services/EW11_Service.h"
 #include "L3_Routing/Public/Device_Registry.h"
-#include "L3_Routing/Public/ProtocolDiagnostics.h"
+#include "L3_Routing/Public/Protocol_Diagnostics.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L2_Channels/RS485_CH.h"
@@ -28,7 +28,10 @@ struct HubClientSlot {
   char target_ip[16]{""};
   uint16_t target_port{8898};
   HubDeviceType dev_type{HubDeviceType::WALLPAD_COMPATIBLE};
-  FramingTracker tracker;
+  uint8_t frame_stx{0};
+  uint8_t frame_etx{0};
+  uint8_t frame_len{0};
+  bool frame_locked{false};
   int sock{-1};
   bool is_connected{false};
   uint32_t last_reconnect_ms{0};
@@ -88,12 +91,21 @@ bool Bridge_SetFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t l
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) {
     return false;
   }
-  char ns[16], tag[16];
+  char ns[16];
   snprintf(ns, sizeof(ns), "e%d_frame", slot_idx);
-  snprintf(tag, sizeof(tag), "EW11_#%d", slot_idx);
   MutexLocker lock(s_ch5_mutex);
-  s_hub_slots[slot_idx].tracker.setFixedLock(stx, etx, len);
-  s_hub_slots[slot_idx].tracker.saveToNvs(ns, tag);
+  s_hub_slots[slot_idx].frame_stx = stx;
+  s_hub_slots[slot_idx].frame_etx = etx;
+  s_hub_slots[slot_idx].frame_len = len;
+  s_hub_slots[slot_idx].frame_locked = true;
+
+  Preferences p;
+  p.begin(ns, false);
+  p.putUChar("stx", stx);
+  p.putUChar("etx", etx);
+  p.putUChar("len", len);
+  p.putBool("locked", true);
+  p.end();
   return true;
 }
 
@@ -101,11 +113,18 @@ bool Bridge_ResetFramingTracker(uint8_t slot_idx) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) {
     return false;
   }
-  char ns[16], tag[16];
+  char ns[16];
   snprintf(ns, sizeof(ns), "e%d_frame", slot_idx);
-  snprintf(tag, sizeof(tag), "EW11_#%d", slot_idx);
   MutexLocker lock(s_ch5_mutex);
-  s_hub_slots[slot_idx].tracker.clearNvs(ns, tag);
+  s_hub_slots[slot_idx].frame_stx = 0;
+  s_hub_slots[slot_idx].frame_etx = 0;
+  s_hub_slots[slot_idx].frame_len = 0;
+  s_hub_slots[slot_idx].frame_locked = false;
+
+  Preferences p;
+  p.begin(ns, false);
+  p.clear();
+  p.end();
   return true;
 }
 
@@ -936,7 +955,7 @@ void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
   // 오버플로우 방어: 수신 버퍼 여유가 부족할 경우 미완성 패킷 시작 바이트
   // 앞으로 슬라이딩
   if (slot->rx_len + len > sizeof(slot->rx_buf)) {
-    uint8_t stx = slot->tracker.candidate_stx.load(std::memory_order_relaxed);
+    uint8_t stx = slot->frame_stx;
     if (stx == 0)
       stx = PKT_STX;
     size_t stx_pos = 0;
@@ -1001,10 +1020,17 @@ void Hub_LoadConfig() {
   }
 
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-    char ns[16], tag[16];
+    char ns[16];
     snprintf(ns, sizeof(ns), "e%d_frame", s);
-    snprintf(tag, sizeof(tag), "EW11_#%d", s);
-    s_hub_slots[s].tracker.restoreFromNvs(ns, tag);
+    Preferences fp;
+    fp.begin(ns, true);
+    if (fp.getBool("locked", false)) {
+      s_hub_slots[s].frame_stx = fp.getUChar("stx", 0);
+      s_hub_slots[s].frame_etx = fp.getUChar("etx", 0);
+      s_hub_slots[s].frame_len = fp.getUChar("len", 0);
+      s_hub_slots[s].frame_locked = true;
+    }
+    fp.end();
   }
   p.end();
 }

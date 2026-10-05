@@ -88,16 +88,7 @@ TaskWdtMonitor g_wdt_monitor;
 PacketStatistics g_pkt_stats;
 Ch1StateMetrics g_ch1_state_metrics;
 
-void Diag_ResetMetricsOnConvergence() noexcept {
-  g_pkt_stats.resetAll();
-  g_metrics.reset();
-  g_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
-  g_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
-}
 
-void Diag_IncrementStalePollCount() noexcept {
-  g_ch1_state_metrics.stale_poll_cnt.fetch_add(1, std::memory_order_relaxed);
-}
 
 #ifdef __cplusplus
 extern "C" {

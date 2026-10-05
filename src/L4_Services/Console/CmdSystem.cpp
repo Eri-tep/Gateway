@@ -3,7 +3,7 @@
 #include "L4_Services/ConsoleCommands.h"
 #include "L4_Services/EW11_Service.h"
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Public/ProtocolDiagnostics.h"
+#include "L3_Routing/Public/Protocol_Diagnostics.h"
 #include <WiFi.h>
 #include <esp_core_dump.h>
 #include <esp_heap_caps.h>
@@ -329,8 +329,7 @@ void printStats(int sock) {
       static_cast<unsigned>(
           g_ch1_state_metrics.normal_cnt.load(std::memory_order_relaxed)),
       "Stale Emerg Polls",
-      static_cast<unsigned>(
-          g_ch1_state_metrics.stale_poll_cnt.load(std::memory_order_relaxed)));
+      static_cast<unsigned>(ProtocolDiag_GetStalePollCount()));
 
   Fmt::FormatTaskStacks(out, stack_snap, g_wdt_monitor);
   out.append("================================================================="

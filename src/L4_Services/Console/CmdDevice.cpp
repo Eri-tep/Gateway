@@ -1,7 +1,7 @@
 #include "L4_Services/Console/ConsoleFmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
-#include "L3_Routing/Public/ProtocolDiagnostics.h"
+#include "L3_Routing/Public/Protocol_Diagnostics.h"
 #include "L3_Routing/Public/Device_Registry.h"
 #include <WiFi.h>
 
@@ -58,11 +58,12 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
   if (tgt_total == 0) {
     table.empty("(No polling targets registered yet. Waiting for queries...)");
   } else {
-    PollingEntrySnapshot entries[48];
-    size_t snap_cnt = ProtocolDiag_GetPollingTargetsSnapshot(entries, 48);
+    PollingEntrySnapshot tgt;
+    size_t snap_cnt = ProtocolDiag_GetPollingTargetCount();
     unsigned int display_idx = 1;
     for (size_t i = 0; i < snap_cnt; ++i) {
-      const auto &tgt = entries[i];
+      if (!ProtocolDiag_GetPollingEntry(i, tgt))
+        continue;
       if (tgt.source_channels != 0 &&
           (tgt.source_channels & ALLOWED_MASK) == 0) {
         continue;
@@ -165,10 +166,11 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
   DevSummary devs[16]{};
   size_t dev_count = 0;
 
-  PollingEntrySnapshot entries[48];
-  size_t tgt_total = ProtocolDiag_GetPollingTargetsSnapshot(entries, 48);
+  PollingEntrySnapshot tgt;
+  size_t tgt_total = ProtocolDiag_GetPollingTargetCount();
   for (size_t i = 0; i < tgt_total; ++i) {
-    const auto &tgt = entries[i];
+    if (!ProtocolDiag_GetPollingEntry(i, tgt))
+      continue;
     if (tgt.dev_id == 0)
       continue;
 

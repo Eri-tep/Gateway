@@ -2,8 +2,8 @@
 // ControlTemplate: Level 3 Device Capability Blueprint Implementation
 // ============================================================================
 
-#include "L3_Routing/Private/ControlTemplate.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Private/Control_Registry.h"
+#include "L3_Routing/Private/Wallpad_Engine.h"
 
 #include "esp_log.h"
 #include <Preferences.h>

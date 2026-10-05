@@ -4,10 +4,10 @@
 // Canonical 4+1 Layer: L3 Routing/Protocol layer
 // ============================================================================
 
-#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Private/Wallpad_Engine.h"
 #include "L3_Routing/Public/Device_Registry.h"
 #include "L3_Routing/Public/Packet_Router.h"
-#include "L3_Routing/Private/ControlTemplate.h"
+#include "L3_Routing/Private/Control_Registry.h"
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
@@ -51,6 +51,7 @@ static size_t s_current_dev_idx = 0;
 static uint32_t s_stable_start_ms = 0;
 static size_t s_last_active_tgts = 0;
 static bool s_convergence_done = false;
+static std::atomic<uint32_t> s_stale_poll_cnt{0};
 
 } // namespace
 
@@ -98,7 +99,7 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
       }
       if (chosen_score == 3) {
         Device_SetLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
-        System_IncrementStalePollCount();
+        s_stale_poll_cnt.fetch_add(1, std::memory_order_relaxed);
       }
       s_current_dev_idx = (chosen_idx + 1) % active_cnt;
       target_selected = true;
@@ -292,7 +293,6 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
           !g_auto_probing_engine.isOffsetsLocked()) {
         g_auto_probing_engine.analyzeCacheMatrix();
       }
-      System_NotifyConvergence();
       g_polling_targets.resetHits();
       System_TraceMessage(
           "[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). "
@@ -306,6 +306,10 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
     s_stable_start_ms = 0;
   }
   return false;
+}
+
+uint32_t Wallpad_GetStalePollCount() noexcept {
+  return s_stale_poll_cnt.load(std::memory_order_relaxed);
 }
 
 uint8_t Wallpad_GetStx() noexcept {

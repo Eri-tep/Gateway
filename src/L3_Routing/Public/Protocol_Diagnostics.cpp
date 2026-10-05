@@ -2,9 +2,9 @@
 // ProtocolDiagnostics: Level 3 Public Diagnostics & Engine Facade Implementation
 // ============================================================================
 
-#include "L3_Routing/Public/ProtocolDiagnostics.h"
-#include "L3_Routing/Private/Wallpad_Protocol.h"
-#include "L3_Routing/Private/ControlTemplate.h"
+#include "L3_Routing/Public/Protocol_Diagnostics.h"
+#include "L3_Routing/Private/Wallpad_Engine.h"
+#include "L3_Routing/Private/Control_Registry.h"
 #include <algorithm>
 #include <span>
 
@@ -33,28 +33,38 @@ void ProtocolDiag_PollingSweepExpired(uint32_t threshold_ms) noexcept {
   g_polling_targets.sweepExpired(threshold_ms);
 }
 
+size_t ProtocolDiag_GetPollingTargetCount() noexcept {
+  return g_polling_targets.totalCount();
+}
+
+bool ProtocolDiag_GetPollingEntry(size_t index, PollingEntrySnapshot &snap) noexcept {
+  PollingTargetEntry tgt;
+  if (!g_polling_targets.getEntry(index, tgt))
+    return false;
+  snap.dev_id = tgt.dev_id;
+  snap.sub1 = tgt.sub1;
+  snap.sub2 = tgt.sub2;
+  snap.source_channels = tgt.source_channels;
+  snap.hits = tgt.hit_count;
+  snap.last_seen_ms = tgt.last_requested_ms;
+  snap.is_active = tgt.is_active;
+  snap.verified = tgt.is_verified;
+  snap.pkt_len = tgt.raw_query_len;
+  if (tgt.raw_query_len > 0) {
+    size_t copy_len = std::min(static_cast<size_t>(tgt.raw_query_len), snap.pkt_data.size());
+    std::copy(tgt.raw_query_data.begin(), tgt.raw_query_data.begin() + copy_len, snap.pkt_data.begin());
+  }
+  return true;
+}
+
 size_t ProtocolDiag_GetPollingTargetsSnapshot(PollingEntrySnapshot *out_array, size_t max_count) noexcept {
   if (!out_array || max_count == 0)
     return 0;
   size_t total = g_polling_targets.totalCount();
   size_t written = 0;
   for (size_t i = 0; i < total && written < max_count; ++i) {
-    PollingTargetEntry tgt;
-    if (!g_polling_targets.getEntry(i, tgt))
-      continue;
-    auto &snap = out_array[written++];
-    snap.dev_id = tgt.dev_id;
-    snap.sub1 = tgt.sub1;
-    snap.sub2 = tgt.sub2;
-    snap.source_channels = tgt.source_channels;
-    snap.hits = tgt.hit_count;
-    snap.last_seen_ms = tgt.last_requested_ms;
-    snap.is_active = tgt.is_active;
-    snap.verified = tgt.is_verified;
-    snap.pkt_len = tgt.raw_query_len;
-    if (tgt.raw_query_len > 0) {
-      size_t copy_len = std::min(static_cast<size_t>(tgt.raw_query_len), snap.pkt_data.size());
-      std::copy(tgt.raw_query_data.begin(), tgt.raw_query_data.begin() + copy_len, snap.pkt_data.begin());
+    if (ProtocolDiag_GetPollingEntry(i, out_array[written])) {
+      written++;
     }
   }
   return written;
@@ -167,9 +177,16 @@ void ProtocolDiag_GetActiveAddresses(uint8_t *dev_ids, size_t &dev_cnt,
   std::sort(sub2_ids, sub2_ids + sub2_cnt);
 }
 
+uint32_t ProtocolDiag_GetStalePollCount() noexcept {
+  return Wallpad_GetStalePollCount();
+}
+
 void ProtocolDiag_GetFramingNamespace(uint8_t profile_idx, char *out_buf,
                                       size_t buf_len) noexcept {
-  FramingTracker::getNvsNamespace(profile_idx, out_buf, buf_len);
+  if (out_buf && buf_len > 0) {
+    snprintf(out_buf, buf_len, "dp_frame_p%u",
+             static_cast<unsigned int>(profile_idx & 0x03));
+  }
 }
 
 bool ProtocolDiag_ExtractDeviceKey(const uint8_t *data, size_t len,
@@ -300,8 +317,8 @@ size_t ProtocolDiag_GetMaxProfiles() noexcept {
 void ProtocolDiag_WallpadReset() noexcept {
   char wp_ns[16] = {0};
   char dp_ns[16] = {0};
-  FramingTracker::getNvsNamespace(0, wp_ns, sizeof(wp_ns));
-  FramingTracker::getNvsNamespace(0, dp_ns, sizeof(dp_ns));
+  ProtocolDiag_GetFramingNamespace(0, wp_ns, sizeof(wp_ns));
+  ProtocolDiag_GetFramingNamespace(0, dp_ns, sizeof(dp_ns));
   g_auto_probing_engine.reset();
   Wallpad_DoorphoneClearNvs(dp_ns);
 }

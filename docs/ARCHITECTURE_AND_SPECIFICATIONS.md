@@ -49,29 +49,32 @@ This document defines the system specifications, runtime topology, channel mappi
 
 ```
 include/
-├── L0_Base/                  [L0: Foundation Soil]
+├── L0_Base/                  [L0: Pure Foundation Soil Leaf]
 │   ├── System_Buffer.h       (AppendBuf fixed scratch buffers, zero-heap utilities)
 │   ├── System_Config.h       (NVS keys, baud rates, timing constants, monadic parsers)
-│   └── System_Platform.h     (ESP32-S3 pin mappings, StaticPacket structures)
+│   └── System_Platform.h     (ESP32-S3 pin mappings, StaticPacket, System_TracePacket/Message)
 ├── L1_Drivers/               [L1: Physical HAL Drivers]
 │   ├── Uart_Driver.h         (Unified HW UART0~2 + Doorphone SW Serial HAL)
-│   ├── NVS_Driver.h          (Flash non-volatile key-value storage HAL)
-│   ├── RTOS_Driver.h         (FreeRTOS Mutex, Semaphore, and CriticalSection RAII)
-│   └── Diagnostics_Driver.h  (Heap/stack watermarks, CPU telemetry, OTA flashing)
+│   ├── Diagnostics_Driver.h  (Heap/stack watermarks, CPU telemetry, Ch1StateMetrics)
+│   └── OTA_Driver.h          (Dual-partition rollback, rescue AP recovery)
 ├── L2_Channels/              [L2: Transport & Data Link Channels]
-│   ├── RS485_CH.h            (Ch1~Ch4 serial channel manager, FreeRTOS timeslots)
+│   ├── RS485_CH.h            (Ch1~Ch4 serial channel manager, FreeRTOS timeslot loops)
 │   └── TCP_CH.h              (Core 0 TCP reactor, socket FSM, embedded IPFilter)
-├── L3_Routing/               [L3: Routing, Codec & State Hub]
-│   ├── Packet_Router.h       (Inter-channel packet dispatch, U-turn bypass orchestration)
-│   ├── Device_Registry.h     (SSOT device state repository, desired vs real states)
-│   ├── Wallpad_Parser.h      (Hyundai Wallpad packet framing & checksum validation)
-│   ├── Wallpad_Protocol.h    (Wallpad packet encoders, decoders, payload builders)
-│   ├── Modbus_Parser.h       (Modbus RTU frame boundary and CRC validator)
-│   └── Modbus_Protocol.h     (Modbus register mapping, encode/decode routines)
+├── L3_Routing/               [L3: Routing, Subsystem & Shell-Core Hub]
+│   ├── Public/               [L3 Public Shell: External Gateways for L4 & L2]
+│   │   ├── Packet_Router.h   (Sole L3 ↔ L2 bidirectional packet gateway & downlink egress)
+│   │   ├── Device_Registry.h (SSOT device state repository & control ingress API)
+│   │   ├── Protocol_Diagnostics.h (Thread-safe read-only diagnostic snapshots & facade)
+│   │   └── Modbus_Codec.h    (FCU Modbus RTU byte stream encoder, decoder & CRC-16)
+│   └── Private/              [L3 Private Core: 100% Internal Subsystem Engines]
+│       ├── Wallpad_Engine.h  (Internal protocol FSM & Doorphone FramingTracker engine)
+│       ├── Wallpad_Parser.h  (Hyundai Wallpad packet framing & checksum algorithms)
+│       ├── Polling_Registry.h(1st-tier dynamic polling targets & internal stale_poll_cnt)
+│       ├── Auto_Probing.h    (Runtime automatic matrix solver & profile discovery)
+│       └── Control_Registry.h(Control blueprints, slot coverage & frame synthesis)
 └── L4_Services/              [L4: Application Services]
     ├── ST_Service.h          (SmartThings LAN bridge, asynchronous REST/Webhook push)
     ├── EW11_Service.h        (Virtual RS-485 EW11 TCP client/server session coordinator)
-    ├── CTL_Service.h         (Web UI HTTP REST control endpoint handler)
     ├── CLI_Service.h         (UART0 serial diagnostic/administration console REPL)
     ├── Console/              [CLI Submodules - Domain Modularization]
     │   ├── ConsoleFmt.h      (ANSI styling and tabular text formatting utilities)
@@ -88,37 +91,66 @@ include/
 src/
 ├── L0_Base/
 │   ├── System_Config.cpp
-│   └── System_Platform.cpp
+│   └── System_Platform.cpp   (Platform synchronization & decoupled trace message/packet sinks)
 ├── L1_Drivers/
 │   ├── Uart_Driver.cpp       (HW UART & SoftwareSerial fully sealed via file-static scope)
-│   ├── NVS_Driver.cpp
-│   └── Diagnostics_Driver.cpp
+│   ├── Diagnostics_Driver.cpp(System metrics, task watchdogs, hardware crash telemetry)
+│   └── OTA_Driver.cpp
 ├── L2_Channels/
 │   ├── RS485_CH.cpp          (Task_Ch1, Task_Ch2Ch3, Task_Ch4 FreeRTOS worker loops)
 │   └── TCP_CH.cpp            (Task_TcpCore0 socket polling and IP whitelist filter)
 ├── L3_Routing/
-│   ├── Packet_Router.cpp     (U-turn routing table, horizontal bypass engine)
-│   ├── Device_Registry.cpp   (Mutex-protected snapshot API, 0% extern global state leaks)
-│   ├── Wallpad_Parser.cpp
-│   ├── Wallpad_Protocol.cpp
-│   ├── Modbus_Parser.cpp
-│   └── Modbus_Protocol.cpp
+│   ├── Public/
+│   │   ├── Packet_Router.cpp (Downlink queue dispatch & horizontal bus routing)
+│   │   ├── Device_Registry.cpp(Mutex-protected snapshot API, 0% extern global state leaks)
+│   │   ├── Protocol_Diagnostics.cpp(Facade query methods & snapshot mapping)
+│   │   └── Modbus_Codec.cpp  (FCU Modbus RTU byte stream encoder & CRC-16 implementation)
+│   └── Private/
+│       ├── Wallpad_Engine.cpp(Doorphone FSM, guard delays, framing engine implementation)
+│       ├── Wallpad_Parser.cpp  (Zero-copy span packet parsers)
+│       ├── Polling_Registry.cpp (Dynamic polling targets, warm cache & stale_poll_cnt)
+│       ├── Auto_Probing.cpp  (Matrix solver & convergence detection)
+│       └── Control_Registry.cpp (Blueprint synthesis & action execution)
 ├── L4_Services/
-│   ├── ST_Service.cpp        (SmartThings event transmission loop)
-│   ├── EW11_Service.cpp      (EW11 proxy and remote management coordinator)
-│   ├── CTL_Service.cpp
-│   ├── CLI_Service.cpp       (Serial stream tokenizer and command dispatcher)
-│   ├── Console/              [CLI Submodule Implementations]
-│   │   ├── CmdConfig.cpp
-│   │   ├── CmdDevice.cpp
-│   │   ├── CmdSystem.cpp
-│   │   └── CmdTrace.cpp
-│   └── Remote/               [Remote Submodule Implementations]
-│       ├── MgmtRpc.cpp
-│       ├── RemoteTelemetry.cpp
-│       └── WifiManager.cpp
-└── main.cpp                  (Bootstrapping, driver/channel/service init & task launch)
+│   ├── ST_Service.cpp
+│   ├── EW11_Service.cpp      (EW11 proxy coordinator with self-contained frame metadata)
+│   ├── CLI_Service.cpp       (Telnet virtual stream diagnostic console REPL / TCP Port 23; strictly network-only)
+│   ├── Console/              (CmdConfig.cpp, CmdDevice.cpp, CmdSystem.cpp, CmdTrace.cpp)
+│   └── Remote/               (MgmtRpc.cpp, RemoteTelemetry.cpp, WifiManager.cpp)
+└── main.cpp                  (Bootstrapping, dependency injection & task launches)
 ```
+
+#### 0.3.1 Binding Architectural Invariants (Non-Negotiable)
+
+1. **Total Shell-Core Model (100% Information Hiding)**:
+   - All external ingress into L3 (from L4) must target **L3 Public headers exclusively**.
+   - All external egress from L3 (to L2) must traverse **`Packet_Router::Router_EnqueueDownlink()` exclusively**.
+   - L3 Private headers (`Wallpad_Protocol.h`, `PollingRegistry.h`, `ControlTemplate.h`, etc.) are strictly forbidden from being included by L4 Services or L2 Channels.
+2. **Zero Upward Dependencies & Zero Layer Skipping**:
+   - Upward includes ($L_M \rightarrow L_N$ where $M < N$) are strictly prohibited.
+   - Vertical runtime calls must follow the strictly adjacent hierarchy: $L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$. Layer skipping ($L3 \rightarrow L1$) is prohibited.
+3. **No Middle-Man Semantic Leakage**:
+   - L3 scheduler decisions (such as "stale device polling") belong strictly inside L3 (`PollingRegistry::_stale_poll_cnt`). L3 must never pass scheduler semantics down to L2 channels as parameters or delegate metric increments to lower layers.
+4. **No Overreaching Metric Invasions**:
+   - L3 protocol convergence (`Wallpad_CheckConvergence`) must only stabilize its own cache and signal system milestone `SYS_EVT_CACHE_READY`. It is strictly forbidden for L3 to wipe or reset L1 hardware metrics (`g_pkt_stats`, `g_metrics`).
+5. **L0 Foundation Soil Purity**:
+   - L0 Base (`System_Platform.h/cpp`) is a universal, static leaf. It must remain completely free of application- or channel-specific callback hooks.
+6. **Framing & State Ownership**:
+   - Framing engines (`FramingTracker`) belong strictly to their operational domain (`Wallpad_Protocol` for Doorphone CH4). Services such as `EW11_Service` must encapsulate their own framing parameters without coupling to L3 core engines.
+7. **CLI Virtual Stream & Dedicated UART0 Invariant**:
+   - `CLI_Service` is strictly an L4 Telnet network stream service (TCP Port 23 / `Task_Telnet`). It must never be designated as or multiplexed with a UART0 serial console. Hardware UART0 is 100% dedicated to CH1 RS-485 bus master communication.
+8. **Headless Safety & Silent Booting Guard**:
+   - Because no physical serial console exists during normal operation:
+     - **Core Dump to Flash**: `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=1` and the dedicated `coredump` flash partition (384KB) capture panic/WDT backtraces for post-boot Telnet inspection (`coredump` command).
+     - **RS-485 Silent Boot Guard**: Early boot logging must never leak onto hardware UART0 pins. Output is muted or restricted to internal memory/CDC until RS-485 port drivers are cleanly initialized.
+9. **Task Worker Execution Context (Synchronous Vertical Pipeline)**:
+   - FreeRTOS tasks (`Task_Ch1`, `Task_Ch2Ch3`) are execution workers, not layer definitions. Workers execute adjacent synchronous calls: $L3 \rightarrow L2 \rightarrow L1$. L2 Channels (`RS485_CH`, `TCP_CH`) remain pure I/O leaves (buffer & UART management), with zero knowledge of device states or routing tables.
+10. **Static Buffer Backpressure & Drop Policy**:
+    - Under bus traffic bursts or network disconnects:
+      - State and polling queues utilize **Drop-Head** (discard oldest stale frames, preserve newest state).
+      - VIP and control command queues utilize **Drop-Tail** with synchronous error reporting (reject new command with error code to prompt immediate client retry).
+11. **Flash Endurance Protection via RTC SRAM**:
+    - Dynamic polling cache, probing matrix, and volatile runtime tracking are preserved across soft resets and WDT reboots in RTC Fast/Slow SRAM (`RTC_NOINIT_ATTR`). Flash NVS commits are strictly debounced and executed only upon cache convergence (`SYS_EVT_CACHE_READY`) or explicit shutdown.
 
 ---
 
@@ -142,7 +174,7 @@ src/
 
 | Task Name | Core Affinity | Priority | Entry Function | Path Classification | Responsibility |
 | :--- | :---: | :---: | :--- | :--- | :--- |
-| `CH#1_IoT` | Core 1 | 19 (High) | `Task_Ch1()` | **Hot Path** | RS-485 physical master polling & device state synchronization |
+| `CH#1_IoT` | Core 1 | 19 (High) | `Task_Ch1()` | **Hot Path** | RS-485 master execution worker (drives L2 transport, performs L3 polling & device state sync) |
 | `CH#2_WP#1` | Core 1 | 18 (High) | `Task_Ch2Ch3()` | Warm Path | Wallpad #1 RS-485 slave virtual ACK immediate response |
 | `CH#3_WP#2` | Core 1 | 18 (High) | `Task_Ch2Ch3()` | Warm Path | Wallpad #2 RS-485 slave virtual ACK immediate response |
 | `CH#4_WP#3` | Core 1 | 10 (Med) | `Task_Ch4()` | Warm Path | Doorphone SoftwareSerial bidirectional communication |
@@ -155,13 +187,13 @@ src/
 
 | Channel | Physical/Logical Interface | Port / Pins | Role | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| **CH1** | UART0 (RS-485) | Hardware Default | Sub-device master bus (Lights, Thermostats, Fans) | Real-time physical RS-485 bus master control |
+| **CH1** | UART0 (RS-485) | Hardware Default | Sub-device master bus (Lights, Thermostats, Fans) | Real-time physical RS-485 bus master control (Exclusively dedicated; NO console serial multiplexing) |
 | **CH2** | UART1 (RS-485) | RX: 5, TX: 6 (Configurable) | Main wallpad bridge (Virtual slave) | Immediate virtual ACK frame emission |
 | **CH3** | UART2 (RS-485) | RX: 7, TX: 8 (Configurable) | Sub wallpad bridge (Virtual slave) | Immediate virtual ACK frame emission |
 | **CH4** | SoftwareSerial | RX: 38, TX: 39 | Doorphone (videophone) serial bus | Call detection and door unlock bridge |
 | **CH5** | TCP Client | 8898 (Elevator) / 8891~8894 (FCU) | EW11 multi-hub bridge client | External serial bus bridge over TCP |
 | **CH6** | TCP Server | 8900 | SmartThings dedicated JSON-RPC server | Device control ingestion & telemetry push |
-| **CLI** | TCP Server | 23 | Telnet administration & diagnostic console | Real-time packet tracer, state dump, NVS config |
+| **CLI** | TCP Server | 23 | Telnet administration & diagnostic console | Real-time packet tracer, state dump, NVS config (100% Virtual network stream; NO UART) |
 
 ---
 
@@ -179,6 +211,8 @@ src/
    - For global configurations (`g_config`) with frequent multi-task reads and rare writes, standardise on `std::shared_mutex` (`std::shared_lock` vs `std::unique_lock`).
 4. **NVS Persistence Debouncing**:
    - Debounce runtime template updates and configuration writes (`WARM_CACHE_NVS_DEBOUNCE_MS`) to protect Flash endurance.
+5. **Flash Wear Leveling & RTC SRAM Retention**:
+   - Volatile runtime caching, auto-probing matrix state, and dynamic polling registries reside in RTC Fast/Slow SRAM (`RTC_NOINIT_ATTR`). Flash writes (`WARM_CACHE_NVS_DEBOUNCE_MS`) are strictly debounced and committed only upon complete cache convergence (`SYS_EVT_CACHE_READY`) or explicit shutdown hook, shielding SPI Flash from endurance fatigue.
 
 ---
 
@@ -196,10 +230,13 @@ These principles represent the engineering standard established across the `Prot
 - Dispersed `bool` flags coupled with `millis()` checks across loops introduce state leaks and race conditions.
 - Consolidate sequential workflows into explicit enum-based FSMs (e.g. Telnet ANSI stream parser) or prioritized sequential loops (e.g. FCU 5-step FSM loop).
 
-### Pillar 3: 100% Zero-Heap & Zero-Copy Invariant
-> **"Permanently prohibit dynamic heap allocations (malloc/new/String) across all hot paths and long-running runtime loops."**
+### Pillar 3: 100% Zero-Heap, Zero-Copy & Backpressure Invariant
+> **"Permanently prohibit dynamic heap allocations (malloc/new/String) across all hot paths, and establish deterministic queue drop semantics."**
 - In embedded systems running 24/7/365, heap fragmentation is a delayed catastrophic failure.
 - Standardise on fixed-size frames (`std::array<uint8_t, N>`, `StaticPacket`), buffer views (`span<const uint8_t>`, `std::string_view`), static ring buffers (`history[8][64]`), and non-allocating utility buffers (`AppendBuf`).
+- **Deterministic Queue Backpressure & Drop Policy**:
+  - **Drop-Head (State & Polling Caches)**: When static queues saturate under bus traffic bursts, the oldest frame is discarded to preserve immediate temporal freshness.
+  - **Drop-Tail with Synchronous Error (VIP & Control Commands)**: Saturated control queues reject new inbound commands with an immediate error response, preventing silent command drop and prompting upstream retransmission.
 
 ### Pillar 4: Pipeline Unification & Table-Driven Dispatch
 > **"Consolidate repetitive procedural operations into unified template pipelines and elevate multi-branch conditions into constexpr lookup tables."**
