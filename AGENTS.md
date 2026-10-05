@@ -7,7 +7,7 @@ Integrated project: **M5Stack AtomS3 Lite RS-485/TCP Gateway Firmware (C++17)** 
 ## 0. Thinking Process Mandatory Anchor (CoT Gate)
 > [!IMPORTANT]
 > **BEFORE CALLING ANY TOOL**, you MUST internally verify this 4-point checklist:
-> 1. **Plan Check**: Am I modifying code without user-approved `implementation_plan.md`? -> If yes, STOP and present plan first.
+> 1. **Plan Check**: Am I modifying code without user-approved implementation plan presented directly in chat? -> If yes, STOP and present plan in conversation first (NEVER create an implementation_plan.md file).
 > 2. **Deploy Check**: Am I running `install` or `assign` without explicit user command? -> If yes, STOP. Verification is strictly `package` only.
 > 3. **Boundary Check**: Is verification limited to `pio run` / `edge:drivers:package`? -> If yes, proceed. (Packaging is STRICTLY FORBIDDEN if no files under `Gateway-edge-driver/` were modified).
 > 4. **Target Disambiguation Check**: Is the target file unambiguously identified and verified against repository state? -> If ambiguous, STOP and clarify with the user.
@@ -31,7 +31,7 @@ Integrated project: **M5Stack AtomS3 Lite RS-485/TCP Gateway Firmware (C++17)** 
 
 ## 2. Core Invariants (STRICTLY FORBIDDEN)
 1. **NO AUTO DEPLOY**: Never run `drivers:install`, `channels:assign`, or ESP32 OTA flash without explicit user command.
-2. **NO UNAPPROVED EDIT**: Never modify code before user approves `implementation_plan.md`.
+2. **NO UNAPPROVED EDIT**: Never modify code before user approves an implementation plan presented directly in chat. NEVER create an `implementation_plan.md` file on disk.
 3. **NO GIT PUSH/COMMIT**: `git commit` and `git push` are strictly forbidden.
 4. **NO HEAP IN HOT PATHS**: No `new`, `malloc`, or dynamic `String` in RX/TX paths (`Task_Ch1`, `Task_Ch2Ch3`).
 5. **NO BLOCKING IN LUA**: Zero CPU loops (`while true do`) or OS `sleep` in SmartThings `cosock`.
@@ -55,7 +55,7 @@ Integrated project: **M5Stack AtomS3 Lite RS-485/TCP Gateway Firmware (C++17)** 
 51: ---
 52: 
 53: ## 3. Mandatory Procedures & Boundaries
-54: 1. **Implementation Plan & Approval**: Present plan, request feedback, and wait for approval before any edits.
+54: 1. **Implementation Plan & Approval**: Present implementation plan directly in chat/conversation (DO NOT create physical plan files like `implementation_plan.md` on disk), request feedback, and wait for approval before any edits.
 55: 2. **Build Verification Boundary (Zero Auto-Deploy)**:
 56:    - Firmware: `~/.platformio/penv/bin/pio run` (0 error, 0 warning required).
 57:    - Edge Driver: `smartthings edge:drivers:package Gateway-edge-driver` ONLY (STRICTLY FORBIDDEN if no files under `Gateway-edge-driver/` were modified).

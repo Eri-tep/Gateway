@@ -6,7 +6,7 @@
 
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
-#include "L3_Routing/ProtocolTypes.h"
+#include "L3_Routing/Public/Device_Registry.h"
 
 #include <cstddef>
 #include <cstdint>

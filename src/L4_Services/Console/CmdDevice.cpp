@@ -1,9 +1,9 @@
 #include "L4_Services/Console/ConsoleFmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
-#include "L3_Routing/ControlTemplate.h"
-#include "L3_Routing/Device_Registry.h"
-#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Private/ControlTemplate.h"
+#include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Private/Wallpad_Protocol.h"
 #include <WiFi.h>
 
 namespace WallpadCli {

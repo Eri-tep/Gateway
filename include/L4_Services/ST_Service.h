@@ -8,7 +8,7 @@
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L1_Drivers/OTA_Driver.h"
-#include "L3_Routing/Device_Registry.h"
+#include "L3_Routing/Public/Device_Registry.h"
 #include <span>
 #include <sys/select.h>
 

@@ -5,12 +5,12 @@
 #include "L4_Services/Remote/RemoteInternal.h"
 #include "L4_Services/EW11_Service.h"
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Private/Wallpad_Protocol.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
-#include "L3_Routing/Packet_Router.h"
-#include "L3_Routing/Device_Registry.h"
-#include "L3_Routing/ControlTemplate.h"
+#include "L3_Routing/Public/Packet_Router.h"
+#include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Private/ControlTemplate.h"
 
 #include <algorithm>
 #include <atomic>

@@ -5,8 +5,8 @@
 // ============================================================================
 
 #include "L2_Channels/TCP_CH.h"
-#include "L3_Routing/Device_Registry.h"
-#include "L3_Routing/Modbus_Protocol.h"
+#include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Public/Modbus_Protocol.h"
 #include <cstdint>
 #include <span>
 #include <sys/select.h>

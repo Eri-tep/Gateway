@@ -4,10 +4,10 @@
 // Canonical 4+1 Layer: L3 Routing/Protocol layer
 // ============================================================================
 
-#include "L3_Routing/Wallpad_Protocol.h"
-#include "L3_Routing/Device_Registry.h"
-#include "L3_Routing/Packet_Router.h"
-#include "L3_Routing/ControlTemplate.h"
+#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Public/Packet_Router.h"
+#include "L3_Routing/Private/ControlTemplate.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"

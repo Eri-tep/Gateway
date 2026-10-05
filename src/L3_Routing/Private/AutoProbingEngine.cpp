@@ -2,7 +2,7 @@
 // WallpadProtocol: Level 3 Wallpad Profiles, Protocol Engine & Probing Cache
 // ============================================================================
 
-#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Private/Wallpad_Protocol.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 
 #include <Preferences.h>

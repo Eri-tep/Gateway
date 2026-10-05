@@ -3,7 +3,7 @@
 #include "L4_Services/ConsoleCommands.h"
 #include "L4_Services/EW11_Service.h"
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include <WiFi.h>
 #include <esp_core_dump.h>
 #include <esp_heap_caps.h>
@@ -259,29 +259,10 @@ void printSystemOverview(AppendBuf &out) {
   make_ascii_bar(heap_bar, sizeof(heap_bar), heap_free_pct);
   make_ascii_bar(flash_bar, sizeof(flash_bar), flash_used_pct);
 
-  auto *active = WallpadParserFactory::getActiveParser();
-  auto desc = g_auto_probing_engine.getDescriptor();
   FixedBuf<80> wp_status_buf;
-  char vendor_name_buf[UniversalProtocolEngine::kVendorNameMaxLen] = "Unknown";
-  if (active) {
-    active->getVendorName(vendor_name_buf, sizeof(vendor_name_buf));
-  }
-  const char *catalog_vendor = vendor_name_buf;
-
-  if (g_config.wallpad_profile == 0) {
-    wp_status_buf.appendFormat(
-        desc.is_locked ? "Auto Detect (%s)" : "Auto Detect (Learning...)",
-        catalog_vendor);
-  } else {
-    VendorProfileDescriptor cur_p;
-    const char *p_name = ProfileRepository::getActiveProfile(cur_p)
-                             ? (cur_p.name[0] ? cur_p.name : cur_p.key)
-                             : nullptr;
-    if (p_name)
-      wp_status_buf.appendFormat("%s (%s)", p_name, catalog_vendor);
-    else
-      wp_status_buf.appendFormat("%s", catalog_vendor);
-  }
+  char profile_summary_buf[80] = "Unknown";
+  ProtocolDiag_GetProfileSummary(profile_summary_buf, sizeof(profile_summary_buf));
+  wp_status_buf.append(profile_summary_buf);
 
   out.appendFormat(
       "\r\n==========================================================="
@@ -367,7 +348,7 @@ void cmdStats(CliContext &ctx) {
     const char *sub = ctx.args.get(1);
     if (strcasecmp(sub, "clear") == 0) {
       g_pkt_stats.resetAll();
-      g_polling_targets.resetHits();
+      ProtocolDiag_PollingResetHits();
       g_metrics.reset();
       sendTelnetMsg(client, "All traffic statistics, hits, and metrics history "
                             "CLEARED to 0.\r\n");

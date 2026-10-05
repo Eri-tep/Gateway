@@ -5,7 +5,7 @@
 #include "L4_Services/Remote/RemoteInternal.h"
 constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 
@@ -302,7 +302,7 @@ void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
   }
 
   Network_HandleMaintenance(s_chk_ms, s_met_ms, s_tcp_ms, now);
-  WarmCache_CheckNvsDebounce();
+  ProtocolDiag_WarmCacheCheckNvsDebounce();
 }
 
 void Remote_Init() {

@@ -6,12 +6,12 @@
 static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include "L4_Services/EW11_Service.h"
 #include "L4_Services/ST_Service.h"
-#include "L3_Routing/Wallpad_Protocol.h"
-#include "L3_Routing/Device_Registry.h"
+#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Public/Device_Registry.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 
-#include "L3_Routing/ControlTemplate.h"
+#include "L3_Routing/Private/ControlTemplate.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>

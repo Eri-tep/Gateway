@@ -7,7 +7,7 @@
 #include "L4_Services/ConsoleCommands.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
 #include "L2_Channels/TCP_CH.h"
-#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Public/ProtocolDiagnostics.h"
 
 #include <WiFi.h>
 #include <algorithm>
@@ -1082,11 +1082,7 @@ bool TelnetTracer::passesFilter(uint8_t channel, TraceType type,
   if (mode == TraceType::DEVID) {
     uint8_t pkt_dev_id = 0, dummy_s1 = 0, dummy_s2 = 0;
     if (pkt.length >= 5 && pkt.data[0] == PKT_STX) {
-      auto *parser = WallpadParserFactory::getActiveParser();
-      if (parser) {
-        span<const uint8_t> frame(pkt.data.data(), pkt.length);
-        parser->extractDeviceKey(frame, pkt_dev_id, dummy_s1, dummy_s2);
-      }
+      ProtocolDiag_ExtractDeviceKey(pkt.data.data(), pkt.length, pkt_dev_id, dummy_s1, dummy_s2);
     } else if (pkt.length == 5 && pkt.data[0] == 0x7F) {
       pkt_dev_id = pkt.data[1];
     }
@@ -1215,11 +1211,7 @@ void TelnetTracer::flushToClient() {
     TracePacketEntry &entry = local_batch[i];
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
     if (entry.len >= 5 && entry.data[0] == PKT_STX) {
-      auto *parser = WallpadParserFactory::getActiveParser();
-      if (parser) {
-        span<const uint8_t> frame(entry.data.data(), entry.len);
-        parser->extractDeviceKey(frame, dev_id, sub1, sub2);
-      }
+      ProtocolDiag_ExtractDeviceKey(entry.data.data(), entry.len, dev_id, sub1, sub2);
     }
 
     long delay_ms = -1;

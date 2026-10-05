@@ -684,8 +684,7 @@ static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
   }
 }
 
-void Task_Ch2Ch3(void *pvParameters) {
-  auto *cfg = static_cast<WallpadChannelConfig *>(pvParameters);
+static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
   if (!cfg)
     return;
 
@@ -699,7 +698,6 @@ void Task_Ch2Ch3(void *pvParameters) {
     return;
   }
 
-  size_t task_idx = (cfg && cfg->channel_id == 3) ? 2 : 1;
   uart_flush_input(cfg->uart_num);
   TimestampedPacketQueue<8> ack_queue;
 
@@ -754,6 +752,16 @@ void Task_Ch2Ch3(void *pvParameters) {
       }
     }
   }
+}
+
+void Task_Ch2(void *pvParameters) {
+  auto *cfg = static_cast<WallpadChannelConfig *>(pvParameters);
+  RunSlaveChannelLoop(cfg, 1 /* CH2 WDT Slot */);
+}
+
+void Task_Ch3(void *pvParameters) {
+  auto *cfg = static_cast<WallpadChannelConfig *>(pvParameters);
+  RunSlaveChannelLoop(cfg, 2 /* CH3 WDT Slot */);
 }
 
 // ============================================================================

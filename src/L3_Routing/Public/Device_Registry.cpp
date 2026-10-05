@@ -3,14 +3,44 @@
 // Implementation
 // ============================================================================
 
-#include "L3_Routing/Device_Registry.h"
-#include "L3_Routing/ControlTemplate.h"
-#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Private/ControlTemplate.h"
+#include "L3_Routing/Private/Wallpad_Protocol.h"
 
 #include <Arduino.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+
+// ============================================================================
+// DeviceClass String Conversion Implementations (Absorbed from ProtocolTypes)
+// ============================================================================
+
+const char *DeviceClassToName(DeviceClass cls) noexcept {
+  static constexpr const char *kNames[] = {"Unknown", "Light",    "Outlet",
+                                           "Gas",     "Elevator", "Thermo",
+                                           "Vent",    "Aircon"};
+  const size_t idx = static_cast<size_t>(cls);
+  return (idx < sizeof(kNames) / sizeof(kNames[0])) ? kNames[idx] : "Unknown";
+}
+
+const char *DeviceClassToCliString(DeviceClass cls) noexcept {
+  static constexpr const char *kCliNames[] = {"UNKNOWN", "SWITCH", "OUTLET",
+                                              "GAS",     "MOMENT", "THERMO",
+                                              "VENT",    "AIRCON"};
+  const size_t idx = static_cast<size_t>(cls);
+  return (idx < sizeof(kCliNames) / sizeof(kCliNames[0])) ? kCliNames[idx]
+                                                          : "UNKNOWN";
+}
+
+const char *DeviceClassToTelemetryString(DeviceClass cls) noexcept {
+  static constexpr const char *kTeleNames[] = {
+      "unknown",   "switch",     "outlet", "gas",
+      "momentary", "thermostat", "vent",   "aircon"};
+  const size_t idx = static_cast<size_t>(cls);
+  return (idx < sizeof(kTeleNames) / sizeof(kTeleNames[0])) ? kTeleNames[idx]
+                                                            : "unknown";
+}
 
 namespace {
 
@@ -845,4 +875,36 @@ void Device_DecodeState(const struct GroupControlTemplate &grp,
                         DecodedDeviceState &out) noexcept {
   DeviceRepository::decodeDeviceState(grp, ack, dev, out);
 }
+
+void Device_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
+                              uint32_t &out_last_bell_ms) noexcept {
+  Wallpad_DoorphoneGetState(out_front_bell, out_lobby_bell, out_last_bell_ms);
+}
+
+void Device_DoorphoneGetFraming(FramingStatus &out_status, uint8_t &out_stx,
+                                uint8_t &out_etx, uint8_t &out_len) noexcept {
+  Wallpad_DoorphoneGetFraming(out_status, out_stx, out_etx, out_len);
+}
+
+void Device_DoorphoneClearNvs(const char *nvs_ns) noexcept {
+  Wallpad_DoorphoneClearNvs(nvs_ns);
+}
+
+bool Device_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,
+                                   uint8_t op_open, uint8_t op_end) noexcept {
+  return Wallpad_DoorphoneStartSequence(stx, etx, op_call, op_open, op_end);
+}
+
+bool Device_ExtractKeyFromFrame(const uint8_t *data, size_t len,
+                                uint8_t &out_dev_id, uint8_t &out_sub1,
+                                uint8_t &out_sub2) noexcept {
+  if (!data || len < 5) return false;
+  auto *parser = WallpadParserFactory::getActiveParser();
+  if (!parser) return false;
+  std::span<const uint8_t> frame(data, len);
+  parser->extractDeviceKey(frame, out_dev_id, out_sub1, out_sub2);
+  return true;
+}
+
+
 

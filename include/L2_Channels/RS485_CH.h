@@ -155,9 +155,13 @@ void RS485_InitQueues();
 /// Implements full CH1 FSM: VIP control → normal control → poll device.
 void Task_Ch1(void *pvParameters);
 
-/// CH2 + CH3 sub-device / ventilation bus task (UART_NUM_1+2, Core 1).
+/// CH2 Sub-Wallpad #1 bus task (UART_NUM_1, Core 1).
 /// Handles virtual ACK cache responses and U-turn bypass routing.
-void Task_Ch2Ch3(void *pvParameters);
+void Task_Ch2(void *pvParameters);
+
+/// CH3 Sub-Wallpad #2 bus task (UART_NUM_2, Core 1).
+/// Handles virtual ACK cache responses and U-turn bypass routing.
+void Task_Ch3(void *pvParameters);
 
 /// CH4 Doorphone SW Serial task (SoftwareSerial, Core 1).
 /// Handles doorphone frame detection, bell events, and passthrough TX.

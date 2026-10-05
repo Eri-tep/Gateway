@@ -4,10 +4,10 @@
 #include "L2_Channels/RS485_CH.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L1_Drivers/Uart_Driver.h"
-#include "L3_Routing/ControlTemplate.h"
-#include "L3_Routing/Wallpad_Protocol.h"
-#include "L3_Routing/Device_Registry.h"
-#include "L3_Routing/Packet_Router.h"
+#include "L3_Routing/Private/ControlTemplate.h"
+#include "L3_Routing/Private/Wallpad_Protocol.h"
+#include "L3_Routing/Public/Device_Registry.h"
+#include "L3_Routing/Public/Packet_Router.h"
 #include "L4_Services/ST_Service.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/EW11_Service.h"
@@ -392,10 +392,10 @@ static const TaskSpawnDescriptor kTaskDescriptors[] = {
     {Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1, nullptr,
      TaskPriority::CH1_REALTIME, 1, s_stackCore1Ch1, &s_task_core1_ch1_buf,
      SystemTaskId::CH1, true},
-    {Task_Ch2Ch3, "CH#2_WP#1", Config::Task::STACK_SIZE_SLAVE, &ch2_config,
+    {Task_Ch2, "CH#2_WP#1", Config::Task::STACK_SIZE_SLAVE, &ch2_config,
      TaskPriority::WALLPAD_EMULATION, 1, s_stackCore1Slave,
      &s_task_core1_slave_buf, SystemTaskId::CH2, true},
-    {Task_Ch2Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_SLAVE, &ch3_config,
+    {Task_Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_SLAVE, &ch3_config,
      TaskPriority::WALLPAD_EMULATION, 1, s_stackCore1Slave2,
      &s_task_core1_slave2_buf, SystemTaskId::CH3, true},
     {Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,
