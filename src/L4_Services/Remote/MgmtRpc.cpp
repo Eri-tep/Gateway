@@ -9,8 +9,6 @@ static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include "L3_Routing/Wallpad_Protocol.h"
 #include "L3_Routing/Device_Registry.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
-#include "L1_Drivers/NVS_Driver.h"
-#include "L2_Channels/RS485_CH.h"
 #include "L2_Channels/TCP_CH.h"
 
 #include <ArduinoOTA.h>
@@ -226,10 +224,10 @@ static void HandleRpc_CachePurgeRescan(int sock, long req_id,
                                        const char * /*json_str*/,
                                        const IPAddress & /*client_ip*/) {
   char dp_ns[16];
-  Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile,
-                                                     dp_ns, sizeof(dp_ns));
+  FramingTracker::getNvsNamespace(g_config.wallpad_profile,
+                                  dp_ns, sizeof(dp_ns));
   g_auto_probing_engine.reset();
-  g_doorphone_tracker.clearNvs(dp_ns);
+  Wallpad_DoorphoneClearNvs(dp_ns);
   g_polling_targets.clear();
   Device_Clear();
   g_probe_convergence_reset.store(true, std::memory_order_release);
@@ -241,10 +239,10 @@ static void HandleRpc_WallpadReset(int sock, long req_id,
                                    const char * /*json_str*/,
                                    const IPAddress & /*client_ip*/) {
   char dp_ns[16];
-  Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile,
-                                                     dp_ns, sizeof(dp_ns));
+  FramingTracker::getNvsNamespace(g_config.wallpad_profile,
+                                  dp_ns, sizeof(dp_ns));
   g_auto_probing_engine.reset();
-  g_doorphone_tracker.clearNvs(dp_ns);
+  Wallpad_DoorphoneClearNvs(dp_ns);
   g_polling_targets.clear();
   Device_Clear();
   g_probe_convergence_reset.store(true, std::memory_order_release);
@@ -491,12 +489,11 @@ static void HandleRpc_DoorphoneAction(int sock, long req_id,
   bool is_open_lobby = (strcasecmp(action_buf, "open_lobby") == 0);
 
   if (is_open_front || is_open_lobby) {
-    uint8_t dp_stx =
-        g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-    uint8_t dp_etx =
-        g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-    uint8_t dp_len =
-        g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+    FramingStatus dp_status = FramingStatus::WAITING;
+    uint8_t dp_stx = 0;
+    uint8_t dp_etx = 0;
+    uint8_t dp_len = 0;
+    Wallpad_DoorphoneGetFraming(dp_status, dp_stx, dp_etx, dp_len);
 
     if (dp_stx == 0)
       dp_stx = 0x7F;
@@ -515,8 +512,9 @@ static void HandleRpc_DoorphoneAction(int sock, long req_id,
 
     // 50ms Pre-Guard Time: 벨 수신 직후 3840 bps 반이중 버스 충돌 방지용 Line
     // Silent 대기
-    uint32_t last_bell =
-        g_doorphone_state.last_bell_ms.load(std::memory_order_acquire);
+    bool f_bell = false, l_bell = false;
+    uint32_t last_bell = 0;
+    Wallpad_DoorphoneGetState(f_bell, l_bell, last_bell);
     if (last_bell > 0) {
       uint32_t now_ms = millis();
       constexpr uint32_t kDpPreGuardMs = 50;
@@ -528,7 +526,7 @@ static void HandleRpc_DoorphoneAction(int sock, long req_id,
       }
     }
 
-    if (!Transport::g_doorphone_controller.startSequence(
+    if (!Wallpad_DoorphoneStartSequence(
             dp_stx, dp_etx, op_call, op_open, op_end)) {
       sendRpcResponse(sock, req_id, "busy",
                       "Doorphone sequence already in progress");

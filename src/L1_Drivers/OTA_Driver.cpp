@@ -1,9 +1,7 @@
-#include "L1_Drivers/SystemOta.h"
+#include "L1_Drivers/OTA_Driver.h"
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
-#include "L1_Drivers/RTOS_Driver.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
 #include <HTTPClient.h>
 #include <Update.h>
 #include <WiFi.h>

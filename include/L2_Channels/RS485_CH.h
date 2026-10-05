@@ -26,7 +26,6 @@
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
-#include "L1_Drivers/RTOS_Driver.h"
 #include "L1_Drivers/Uart_Driver.h"
 #include <esp_timer.h>
 
@@ -94,12 +93,8 @@ enum class Ch1State : uint8_t {
   POLL_DEVICE
 };
 
-class ControlDispatcher {
-public:
-  bool dispatch(StaticPacket &req, StaticPacket &virtual_ack_out);
-};
-
-extern ControlDispatcher g_control_dispatcher;
+/// Enqueue control packet to CH1 local bus (VIP or normal queue).
+[[nodiscard]] bool RS485_EnqueueControl(const StaticPacket &pkt, bool vip = false) noexcept;
 
 // ── RS-485 Packet Dispatcher SPI (Canonical L2-L3 Inversion) ─────────────────
 struct RS485_PacketDispatcher {
@@ -109,8 +104,7 @@ struct RS485_PacketDispatcher {
                       const StaticPacket *matching_query) noexcept{nullptr};
   void (*onTimeout)(uint8_t poll_dev_id, uint8_t poll_sub1,
                     uint8_t poll_sub2) noexcept{nullptr};
-  uint8_t (*onEvaluateControl)(StaticPacket &req, StaticPacket &virtual_ack_out,
-                               uint8_t &out_ch5_slot, bool &out_unidir) noexcept{nullptr};
+  bool (*onDispatchControl)(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept{nullptr};
   uint32_t (*onGetPollIntervalMs)() noexcept{nullptr};
   bool (*onCheckConvergence)(bool reset) noexcept{nullptr};
   uint8_t (*onGetStx)() noexcept{nullptr};
@@ -126,6 +120,9 @@ struct RS485_PacketDispatcher {
   void (*onDoorphoneReset)() noexcept{nullptr};
   bool (*onMatchDoorphoneLock)(uint8_t stx, uint8_t etx, uint8_t len,
                                uint8_t &out_fixed_len) noexcept{nullptr};
+  bool (*onDoorphoneGetLockedFraming)(uint8_t &stx, uint8_t &etx, uint8_t &len) noexcept{nullptr};
+  void (*onDoorphoneFrameDetected)(uint8_t stx, uint8_t etx, uint8_t len) noexcept{nullptr};
+  void (*onDoorphoneCheckBellTimeout)() noexcept{nullptr};
   bool (*onIsQueryPacket)(span<const uint8_t> frame) noexcept{nullptr};
 };
 
@@ -182,100 +179,6 @@ struct WallpadChannelConfig {
   uint8_t channel_id;         ///< Logical channel ID (2 or 3)
 };
 
-// ── Generic Serial Packet Framing Tracker ─────────────────────────────────────
+// ── CH4 Doorphone Passthrough Queue Enqueue API ──────────────────────────────
+void RS485_EnqueueCh4Passthrough(const StaticPacket &pkt) noexcept;
 
-enum class FramingStatus : uint8_t {
-  WAITING = 0,
-  LEARNING = 1,
-  LOCKED = 2,
-  NOISY = 3
-};
-
-struct FramingTracker {
-  std::atomic<FramingStatus> status{FramingStatus::WAITING};
-  std::atomic<uint8_t> candidate_stx{0};
-  std::atomic<uint8_t> candidate_etx{0};
-  std::atomic<uint8_t> candidate_len{0};
-  std::atomic<uint8_t> consecutive_matches{0};
-  std::atomic<uint8_t> consecutive_mismatches{0};
-  std::atomic<bool> is_custom_fixed{false};
-
-  void setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
-  void reset() noexcept;
-  void clearNvs(const char *nvs_ns, const char *tag = "FRAMING") noexcept;
-  void processFrame(uint8_t stx, uint8_t etx, uint8_t len, const char *nvs_ns,
-                    const char *tag = "FRAMING") noexcept;
-
-  static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
-                              size_t max_len) noexcept {
-    snprintf(out_ns, max_len, "dp_frame_p%u",
-             static_cast<unsigned int>(prof_idx & 0x03));
-  }
-
-  void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",
-                      const char *tag = "FRAMING") noexcept;
-  void saveToNvs(const char *nvs_ns = "dp_frame_p0",
-                 const char *tag = "FRAMING") noexcept;
-
-  [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
-};
-
-// ── Doorphone Protocol Framing & State Machine (CH4) ──────────────────────────
-
-namespace Doorphone {
-struct DoorphoneState {
-  std::atomic<bool> front_bell{false};
-  std::atomic<bool> lobby_bell{false};
-  std::atomic<uint32_t> last_bell_ms{0};
-};
-} // namespace Doorphone
-
-extern Doorphone::DoorphoneState g_doorphone_state;
-extern FramingTracker g_doorphone_tracker;
-
-namespace Config::Doorphone {
-using FramingStatus = ::FramingStatus;
-using FramingTracker = ::FramingTracker;
-using DoorphoneState = ::Doorphone::DoorphoneState;
-constexpr uint8_t STX = 0x7F;
-constexpr uint8_t ETX = 0xEE;
-constexpr uint8_t PKT_LEN = 5;
-} // namespace Config::Doorphone
-
-namespace Transport {
-
-class DoorphoneController {
-public:
-  enum class Step : uint8_t { IDLE = 0, CALL_SENT, OPEN_SENT };
-
-private:
-  std::atomic<Step> _step{Step::IDLE};
-  std::atomic<uint8_t> _c_stx{0x7F};
-  std::atomic<uint8_t> _c_etx{0xEE};
-  std::atomic<uint8_t> _op_open{0};
-  std::atomic<uint8_t> _op_end{0};
-  esp_timer_handle_t _timer{nullptr};
-
-public:
-  void init();
-  bool startSequence(uint8_t stx, uint8_t etx, uint8_t op_call, uint8_t op_open,
-                     uint8_t op_end);
-  void cancel();
-  [[nodiscard]] bool isBusy() const noexcept {
-    return _step.load(std::memory_order_acquire) != Step::IDLE;
-  }
-  [[nodiscard]] Step getStep() const noexcept {
-    return _step.load(std::memory_order_acquire);
-  }
-
-  static void onTimerCallback(void *arg);
-};
-
-extern DoorphoneController g_doorphone_controller;
-
-void Doorphone_OnProfileChanged(uint8_t old_idx, uint8_t new_idx);
-
-using DoorphoneTxHandler = void (*)(const StaticPacket &pkt) noexcept;
-void Doorphone_RegisterTxHandler(DoorphoneTxHandler handler) noexcept;
-
-} // namespace Transport

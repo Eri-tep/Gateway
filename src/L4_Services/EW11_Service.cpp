@@ -8,7 +8,6 @@ constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 #include "L4_Services/ST_Service.h"
 #include "L3_Routing/Wallpad_Protocol.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
-#include "L1_Drivers/NVS_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 
 #include <ArduinoOTA.h>

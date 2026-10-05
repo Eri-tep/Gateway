@@ -16,7 +16,11 @@
 // ============================================================================
 
 #include "L3_Routing/Packet_Router.h"
-#include "L1_Drivers/RTOS_Driver.h"
+#include "L3_Routing/Wallpad_Protocol.h"
+#include "L3_Routing/Device_Registry.h"
+#include "L2_Channels/RS485_CH.h"
+#include "L2_Channels/TCP_CH.h"
+#include "L0_Base/System_Config.h"
 
 #include <Arduino.h>
 #include <algorithm>
@@ -164,3 +168,59 @@ bool Router_ForwardToCh5(uint8_t slot_idx, const StaticPacket &pkt,
   }
   return false;
 }
+
+// ── Canonical L3 Central Ingress & Orchestration Implementations ────────────
+
+bool Router_DispatchControl(StaticPacket &req,
+                            StaticPacket &virtual_ack_out) noexcept {
+  if (UNLIKELY(req.length < 5))
+    return false;
+
+  bool unidir = false;
+  ControlAction act = Wallpad_EvaluateControl(req, virtual_ack_out, unidir);
+  if (act == ControlAction::VIRTUAL_ACK_IMMEDIATE) {
+    return true;
+  }
+  if (act == ControlAction::TRANSMIT_LOCAL) {
+    // Check if device is routed via EW11 (CH5)
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    auto *parser = WallpadParserFactory::getActiveParser();
+    if (parser && parser->extractDeviceKey(
+                      span<const uint8_t>(req.data.data(), req.length),
+                      dev_id, sub1, sub2)) {
+      RouteEndpoint ep{1, -1, 0};
+      if (Router_LookupRoute(dev_id, sub1, sub2, ep) &&
+          ep.channel_id == 5 && ep.slot_idx >= 0 &&
+          ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+        return Router_ForwardToCh5(static_cast<uint8_t>(ep.slot_idx), req,
+                                   unidir);
+      }
+    }
+
+    bool is_vip = (req.channel_id == 6);
+    return RS485_EnqueueControl(req, is_vip);
+  }
+
+  return false;
+}
+
+void Router_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
+                            const StaticPacket *matching_query) noexcept {
+  Wallpad_HandleBusPacket(channel_id, ack_pkt, matching_query);
+}
+
+bool Router_BuildNextPoll(StaticPacket &out_pkt, uint8_t &poll_dev_id,
+                          uint8_t &poll_sub1, uint8_t &poll_sub2) noexcept {
+  return Wallpad_BuildNextPollPacket(out_pkt, poll_dev_id, poll_sub1, poll_sub2);
+}
+
+void Router_HandlePollTimeout(uint8_t poll_dev_id, uint8_t poll_sub1,
+                              uint8_t poll_sub2) noexcept {
+  Wallpad_HandlePollTimeout(poll_dev_id, poll_sub1, poll_sub2);
+}
+
+bool Router_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
+                              StaticPacket &virtual_ack_out) noexcept {
+  return Wallpad_HandleSubBusQuery(channel_id, req, virtual_ack_out);
+}
+

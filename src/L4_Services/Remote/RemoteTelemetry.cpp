@@ -7,7 +7,6 @@
 #include "L4_Services/ST_Service.h"
 #include "L3_Routing/Wallpad_Protocol.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
-#include "L1_Drivers/NVS_Driver.h"
 #include "L2_Channels/TCP_CH.h"
 #include "L3_Routing/Packet_Router.h"
 #include "L3_Routing/Device_Registry.h"
@@ -209,10 +208,9 @@ static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
   }
   out.append("],");
 
-  bool f_bell = g_doorphone_state.front_bell.load(std::memory_order_relaxed);
-  bool l_bell = g_doorphone_state.lobby_bell.load(std::memory_order_relaxed);
-  uint32_t b_ms =
-      g_doorphone_state.last_bell_ms.load(std::memory_order_relaxed);
+  bool f_bell = false, l_bell = false;
+  uint32_t b_ms = 0;
+  Wallpad_DoorphoneGetState(f_bell, l_bell, b_ms);
   out.appendFormat(
       "\"doorphone\":{\"front_bell\":%s,\"lobby_bell\":%s,\"last_bell_ms\":%u}",
       f_bell ? "true" : "false", l_bell ? "true" : "false",
@@ -353,7 +351,7 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
            std::min<size_t>(snap.last_ack_len, 32));
 
     DecodedDeviceState st{};
-    DeviceRepository::decodeDeviceState(grp, ack, &snap, st);
+    Device_DecodeState(grp, ack, &snap, st);
 
     DeviceClass dc = st.dev_class;
     const char *cls_str = DeviceClassToTelemetryString(dc);

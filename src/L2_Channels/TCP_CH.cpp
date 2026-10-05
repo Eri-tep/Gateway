@@ -3,10 +3,8 @@
 // ============================================================================
 
 #include "L2_Channels/TCP_CH.h"
-#include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
-#include "L1_Drivers/SystemOta.h"
 
 #include <ArduinoOTA.h>
 #include <WiFi.h>

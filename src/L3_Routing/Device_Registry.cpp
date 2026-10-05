@@ -4,16 +4,72 @@
 // ============================================================================
 
 #include "L3_Routing/Device_Registry.h"
+#include "L3_Routing/ControlTemplate.h"
 #include "L3_Routing/Wallpad_Protocol.h"
-#include "L1_Drivers/RTOS_Driver.h"
 
 #include <Arduino.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 
+namespace {
+
+class DeviceRepository {
+private:
+  static constexpr size_t MAX_DEVICES = 48;
+  DeviceStateEntry cache[MAX_DEVICES]{};
+  int8_t dev_lookup_map[256]{};
+  size_t device_count = 0;
+  std::atomic<size_t> _online_count{0};
+  SemaphoreHandle_t _cache_mutex = nullptr;
+
+  const DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
+                                       uint8_t sub2) const noexcept;
+  DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
+                                 uint8_t sub2) noexcept;
+
+public:
+  [[nodiscard]] const DeviceStateEntry *
+  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) const noexcept {
+    return findInternal(dev_id, sub1, sub2);
+  }
+  [[nodiscard]] DeviceStateEntry *
+  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+    return findInternal(dev_id, sub1, sub2);
+  }
+
+  DeviceStateEntry *findMutable(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                bool auto_create = false) noexcept;
+  void initDevices();
+  void clear();
+  [[nodiscard]] const DeviceStateEntry *find(uint8_t dev_id, uint8_t sub1,
+                                             uint8_t sub2) const noexcept;
+  [[nodiscard]] const DeviceStateEntry *getAt(size_t index) const noexcept;
+  [[nodiscard]] DeviceStateEntry *getAt(size_t index) noexcept;
+  [[nodiscard]] bool getSnapshot(size_t index,
+                                 DeviceStateEntry &out_copy) noexcept;
+  [[nodiscard]] size_t count() const noexcept;
+  [[nodiscard]] size_t getOnlineCount() const noexcept;
+  void setLastStalePollMs(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                          uint32_t ms) noexcept;
+  void setLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept;
+  bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                     uint8_t temp) noexcept;
+  DeviceUpdateResult updateFromBus(StaticPacket &ack);
+  static void decodeDeviceState(const GroupControlTemplate &grp,
+                                const StaticPacket &ack,
+                                const DeviceStateEntry *dev,
+                                DecodedDeviceState &out);
+  void handlePollingTimeout(const DeviceStateEntry *dev);
+  void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);
+  [[nodiscard]] bool copyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                    StaticPacket &out) noexcept;
+};
+
 // ── Static Sealed Repository Instance (Rule 17) ──
 static DeviceRepository s_device_repo;
+
+} // namespace
 
 // ============================================================================
 // Device State Repository & CH1 Control Pipeline
@@ -198,6 +254,7 @@ void DeviceRepository::initDevices() {
     MutexLocker lock(_cache_mutex);
     memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
     device_count = 0;
+    _online_count.store(0, std::memory_order_relaxed);
   }
 
   // L2.2 ControlTemplate decoupled unit count provider
@@ -235,6 +292,7 @@ void DeviceRepository::clear() {
   MutexLocker lock(_cache_mutex);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   device_count = 0;
+  _online_count.store(0, std::memory_order_relaxed);
 }
 
 namespace {
@@ -572,7 +630,10 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     }
     dev->last_updated_ms = millis();
     dev->timeout_count = 0;
-    dev->is_online = true;
+    if (!dev->is_online) {
+      dev->is_online = true;
+      _online_count.fetch_add(1, std::memory_order_relaxed);
+    }
 
     if (ack_changed) {
       dev_snap = *dev;
@@ -627,17 +688,23 @@ void DeviceRepository::handlePollingTimeout(const DeviceStateEntry *dev) {
     return;
   MutexLocker lock(_cache_mutex);
   auto *mdev = const_cast<DeviceStateEntry *>(dev);
-  if (++mdev->timeout_count >= 3)
+  if (mdev->is_online && ++mdev->timeout_count >= 3) {
     mdev->is_online = false;
+    if (_online_count.load(std::memory_order_relaxed) > 0) {
+      _online_count.fetch_sub(1, std::memory_order_relaxed);
+    }
+  }
 }
 
 void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
                                             uint8_t sub2) {
   MutexLocker lock(_cache_mutex);
   auto *mdev = findMutable(dev_id, sub1, sub2, true);
-  if (mdev) {
-    if (++mdev->timeout_count >= 3)
-      mdev->is_online = false;
+  if (mdev && mdev->is_online && ++mdev->timeout_count >= 3) {
+    mdev->is_online = false;
+    if (_online_count.load(std::memory_order_relaxed) > 0) {
+      _online_count.fetch_sub(1, std::memory_order_relaxed);
+    }
   }
 }
 
@@ -647,13 +714,7 @@ size_t DeviceRepository::count() const noexcept {
 }
 
 size_t DeviceRepository::getOnlineCount() const noexcept {
-  MutexLocker lock(_cache_mutex);
-  size_t online = 0;
-  for (size_t i = 0; i < device_count; i++) {
-    if (cache[i].is_online && cache[i].last_ack_len > 0)
-      online++;
-  }
-  return online;
+  return _online_count.load(std::memory_order_relaxed);
 }
 
 // ── Device_GetSnapshot ────────────────────────────────────────────────────────
@@ -777,3 +838,11 @@ void Device_NotifyDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
     s_doorphone_listener(front_bell, lobby_bell);
   }
 }
+
+void Device_DecodeState(const struct GroupControlTemplate &grp,
+                        const StaticPacket &ack,
+                        const DeviceStateEntry *dev,
+                        DecodedDeviceState &out) noexcept {
+  DeviceRepository::decodeDeviceState(grp, ack, dev, out);
+}
+

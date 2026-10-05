@@ -11,10 +11,8 @@
 #include "L4_Services/ST_Service.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/EW11_Service.h"
-#include "L1_Drivers/RTOS_Driver.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
-#include "L1_Drivers/SystemOta.h"
-#include "L1_Drivers/NVS_Driver.h"
+#include "L1_Drivers/OTA_Driver.h"
 
 #include "esp_attr.h"
 #include "esp_idf_version.h"
@@ -201,14 +199,13 @@ static void Boot_RestoreConfigAndState() {
   WarmCache_RestoreOnBoot();
   System_RegisterShutdownHook(WarmCache_SaveToNvs);
   char dp_ns[16];
-  Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile,
-                                                     dp_ns, sizeof(dp_ns));
-  g_doorphone_tracker.restoreFromNvs(dp_ns);
+  FramingTracker::getNvsNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
+  Wallpad_DoorphoneRestoreNvs(dp_ns);
 }
 
 static bool HandleRemoteControl(StaticPacket &req,
                                 StaticPacket &out_ack) noexcept {
-  return g_control_dispatcher.dispatch(req, out_ack);
+  return Router_DispatchControl(req, out_ack);
 }
 
 static void Boot_InitSubsystems() {
@@ -224,13 +221,10 @@ static void Boot_InitSubsystems() {
 
   // ── Register L3 Protocol Dispatcher SPI into L2 RS-485 Engine ──
   RS485_PacketDispatcher rs485_dispatcher{};
-  rs485_dispatcher.onBuildPoll = Wallpad_BuildNextPollPacket;
-  rs485_dispatcher.onBusPacket = Wallpad_HandleBusPacket;
-  rs485_dispatcher.onTimeout = Wallpad_HandlePollTimeout;
-  rs485_dispatcher.onEvaluateControl = [](StaticPacket &req, StaticPacket &v_ack,
-                                          uint8_t &ch5_slot, bool &unidir) noexcept -> uint8_t {
-    return static_cast<uint8_t>(Wallpad_EvaluateControl(req, v_ack, ch5_slot, unidir));
-  };
+  rs485_dispatcher.onBuildPoll = Router_BuildNextPoll;
+  rs485_dispatcher.onBusPacket = Router_HandleBusPacket;
+  rs485_dispatcher.onTimeout = Router_HandlePollTimeout;
+  rs485_dispatcher.onDispatchControl = Router_DispatchControl;
   rs485_dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
   rs485_dispatcher.onCheckConvergence = Wallpad_CheckConvergence;
   rs485_dispatcher.onGetStx = Wallpad_GetStx;
@@ -238,16 +232,20 @@ static void Boot_InitSubsystems() {
   rs485_dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
   rs485_dispatcher.onExtractLength = Wallpad_ExtractLength;
   rs485_dispatcher.onValidatePacket = Wallpad_ValidatePacket;
-  rs485_dispatcher.onHandleSubBusQuery = Wallpad_HandleSubBusQuery;
+  rs485_dispatcher.onHandleSubBusQuery = Router_HandleSubBusQuery;
   rs485_dispatcher.onFeedControlFrame = Wallpad_FeedControlFrame;
   rs485_dispatcher.onDoorphonePacket = Wallpad_HandleDoorphonePacket;
   rs485_dispatcher.onDoorphoneReset = Wallpad_ResetDoorphoneBellState;
   rs485_dispatcher.onMatchDoorphoneLock = Wallpad_MatchDoorphoneLock;
+  rs485_dispatcher.onDoorphoneGetLockedFraming = Wallpad_DoorphoneGetLockedFraming;
+  rs485_dispatcher.onDoorphoneFrameDetected = Wallpad_DoorphoneFrameDetected;
+  rs485_dispatcher.onDoorphoneCheckBellTimeout = Wallpad_DoorphoneCheckBellTimeout;
   rs485_dispatcher.onIsQueryPacket = Wallpad_IsQueryPacket;
   RS485_RegisterDispatcher(rs485_dispatcher);
 
-  Transport::g_doorphone_controller.init();
-  ProfileRepository::addProfileChangeListener(Transport::Doorphone_OnProfileChanged);
+  Wallpad_DoorphoneInit();
+  ProfileRepository::addProfileChangeListener(Wallpad_DoorphoneOnProfileChanged);
+  Wallpad_DoorphoneRegisterTxHandler(RS485_EnqueueCh4Passthrough);
 
   g_control_registry.init();
   Remote_Init();

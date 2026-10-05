@@ -3,7 +3,6 @@
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
-#include "L1_Drivers/RTOS_Driver.h"
 #include <Arduino.h>
 #include <atomic>
 #include <cstddef>
@@ -93,10 +92,7 @@ public:
   void reset();
   void addSample(uint8_t cpu0_pct, uint8_t cpu1_pct, uint16_t ram_kb,
                  int8_t temp_c);
-  MetricSample getCurrent() const noexcept {
-    MutexLocker lock(_metrics_mutex);
-    return _current;
-  }
+  MetricSample getCurrent() const noexcept;
 
   StatSummary get15m() const;
   StatSummary get24h() const;
@@ -275,7 +271,6 @@ public:
 
 void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
                          PktSnapshot &pkt);
-void System_Restart(const char *reason);
 void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out);
 int8_t System_ReadTempC();
 void System_EnterRescueMode(const char *reason);

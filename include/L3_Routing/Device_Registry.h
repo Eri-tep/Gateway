@@ -22,12 +22,11 @@
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L3_Routing/ProtocolTypes.h"
-#include "L3_Routing/ControlTemplate.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+
+struct GroupControlTemplate;
 
 struct DeviceStateEntry {
   uint8_t dev_id;
@@ -62,56 +61,11 @@ struct DeviceUpdateResult {
   } extra[7]{};
 };
 
-class DeviceRepository {
-private:
-  static constexpr size_t MAX_DEVICES = 48;
-  DeviceStateEntry cache[MAX_DEVICES]{};
-  int8_t dev_lookup_map[256]{};
-  size_t device_count = 0;
-  SemaphoreHandle_t _cache_mutex = nullptr;
-
-  const DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
-                                       uint8_t sub2) const noexcept;
-  DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
-                                 uint8_t sub2) noexcept;
-
-public:
-  [[nodiscard]] const DeviceStateEntry *
-  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) const noexcept {
-    return findInternal(dev_id, sub1, sub2);
-  }
-  [[nodiscard]] DeviceStateEntry *
-  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
-    return findInternal(dev_id, sub1, sub2);
-  }
-
-  DeviceStateEntry *findMutable(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                bool auto_create = false) noexcept;
-  void initDevices();
-  void clear();
-  [[nodiscard]] const DeviceStateEntry *find(uint8_t dev_id, uint8_t sub1,
-                                             uint8_t sub2) const noexcept;
-  [[nodiscard]] const DeviceStateEntry *getAt(size_t index) const noexcept;
-  [[nodiscard]] DeviceStateEntry *getAt(size_t index) noexcept;
-  [[nodiscard]] bool getSnapshot(size_t index,
-                                 DeviceStateEntry &out_copy) noexcept;
-  [[nodiscard]] size_t count() const noexcept;
-  [[nodiscard]] size_t getOnlineCount() const noexcept;
-  void setLastStalePollMs(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                          uint32_t ms) noexcept;
-  void setLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept;
-  bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                     uint8_t temp) noexcept;
-  DeviceUpdateResult updateFromBus(StaticPacket &ack);
-  static void decodeDeviceState(const GroupControlTemplate &grp,
-                                const StaticPacket &ack,
-                                const DeviceStateEntry *dev,
-                                DecodedDeviceState &out);
-  void handlePollingTimeout(const DeviceStateEntry *dev);
-  void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);
-  [[nodiscard]] bool copyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                    StaticPacket &out) noexcept;
-};
+/// Decode device state from snapshot and template
+void Device_DecodeState(const struct GroupControlTemplate &grp,
+                        const StaticPacket &ack,
+                        const DeviceStateEntry *dev,
+                        DecodedDeviceState &out) noexcept;
 
 // ── Device State Query & Management API (L3 SSOT Snapshot Interface) ─────────
 

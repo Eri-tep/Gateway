@@ -6,7 +6,6 @@
 
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
-#include "L1_Drivers/RTOS_Driver.h"
 #include "L3_Routing/ProtocolTypes.h"
 
 #include <Arduino.h>

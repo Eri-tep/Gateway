@@ -34,271 +34,7 @@
 #include <cstring>
 #include <esp_timer.h>
 
-// ── Generic Framing Tracker Implementation ───────────────────────────────────
-
-void FramingTracker::setFixedLock(uint8_t stx, uint8_t etx,
-                                  uint8_t len) noexcept {
-  candidate_stx.store(stx, std::memory_order_relaxed);
-  candidate_etx.store(etx, std::memory_order_relaxed);
-  candidate_len.store(len, std::memory_order_relaxed);
-  consecutive_matches.store(10, std::memory_order_relaxed);
-  consecutive_mismatches.store(0, std::memory_order_relaxed);
-  is_custom_fixed.store(true, std::memory_order_relaxed);
-  status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-}
-
-void FramingTracker::reset() noexcept {
-  is_custom_fixed.store(false, std::memory_order_relaxed);
-  candidate_stx.store(0, std::memory_order_relaxed);
-  candidate_etx.store(0, std::memory_order_relaxed);
-  candidate_len.store(0, std::memory_order_relaxed);
-  consecutive_matches.store(0, std::memory_order_relaxed);
-  consecutive_mismatches.store(0, std::memory_order_relaxed);
-  status.store(FramingStatus::WAITING, std::memory_order_relaxed);
-}
-
-void FramingTracker::clearNvs(const char *nvs_ns, const char *tag) noexcept {
-  reset();
-  Preferences prefs;
-  if (prefs.begin(nvs_ns, false)) {
-    prefs.clear();
-    prefs.end();
-    ::Serial.printf("[%s] Cleared framing NVS storage (%s).\r\n", tag, nvs_ns);
-  }
-}
-
-void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
-                                  const char *nvs_ns,
-                                  const char *tag) noexcept {
-  if (is_custom_fixed.load(std::memory_order_relaxed)) {
-    return;
-  }
-
-  FramingStatus cur = status.load(std::memory_order_relaxed);
-
-  if (stx == 0x7F && etx == 0xEE && (len == 0 || len == 5)) {
-    setFixedLock(0x7F, 0xEE, 5);
-    saveToNvs(nvs_ns, tag);
-    return;
-  }
-
-  if (cur == FramingStatus::WAITING) {
-    candidate_stx.store(stx, std::memory_order_relaxed);
-    candidate_etx.store(etx, std::memory_order_relaxed);
-    if (len > 0)
-      candidate_len.store(len, std::memory_order_relaxed);
-    consecutive_matches.store(1, std::memory_order_relaxed);
-    consecutive_mismatches.store(0, std::memory_order_relaxed);
-    status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
-    return;
-  }
-
-  uint8_t cand_s = candidate_stx.load(std::memory_order_relaxed);
-  uint8_t cand_e = candidate_etx.load(std::memory_order_relaxed);
-
-  if (stx == cand_s && etx == cand_e) {
-    if (len > 0)
-      candidate_len.store(len, std::memory_order_relaxed);
-    consecutive_mismatches.store(0, std::memory_order_relaxed);
-    uint8_t m = consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (m >= 3) {
-      status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-      saveToNvs(nvs_ns, tag);
-    } else {
-      status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
-    }
-  } else {
-    consecutive_matches.store(0, std::memory_order_relaxed);
-    uint8_t m =
-        consecutive_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (cur == FramingStatus::LOCKED) {
-      if (m >= 10) {
-        status.store(FramingStatus::WAITING, std::memory_order_relaxed);
-        consecutive_mismatches.store(0, std::memory_order_relaxed);
-      }
-    } else {
-      if (m >= 5) {
-        candidate_stx.store(stx, std::memory_order_relaxed);
-        candidate_etx.store(etx, std::memory_order_relaxed);
-        if (len > 0)
-          candidate_len.store(len, std::memory_order_relaxed);
-        consecutive_matches.store(1, std::memory_order_relaxed);
-        consecutive_mismatches.store(0, std::memory_order_relaxed);
-        status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
-      }
-    }
-  }
-}
-
-void FramingTracker::restoreFromNvs(const char *nvs_ns,
-                                    const char *tag) noexcept {
-  if (!nvs_ns)
-    nvs_ns = "dp_frame_p0";
-
-  Preferences prefs;
-  if (prefs.begin(nvs_ns, true)) {
-    uint8_t s = prefs.getUChar("stx", 0);
-    uint8_t e = prefs.getUChar("etx", 0);
-    uint8_t l = prefs.getUChar("len", 0);
-    bool locked = prefs.getBool("locked", false);
-    bool fixed = prefs.getBool("fixed", false);
-    prefs.end();
-
-    if (locked && s != 0 && e != 0) {
-      candidate_stx.store(s, std::memory_order_relaxed);
-      candidate_etx.store(e, std::memory_order_relaxed);
-      candidate_len.store(l, std::memory_order_relaxed);
-      status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-      is_custom_fixed.store(fixed, std::memory_order_relaxed);
-      ::Serial.printf("[%s] Restored valid framing from NVS (%s): STX=0x%02X, "
-                      "ETX=0x%02X, LEN=%u\r\n",
-                      tag, nvs_ns, s, e, l);
-    }
-  }
-}
-
-void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
-  if (!nvs_ns)
-    nvs_ns = "dp_frame_p0";
-
-  Preferences prefs;
-  if (prefs.begin(nvs_ns, false)) {
-    uint8_t s = candidate_stx.load(std::memory_order_relaxed);
-    uint8_t e = candidate_etx.load(std::memory_order_relaxed);
-    uint8_t l = candidate_len.load(std::memory_order_relaxed);
-    bool is_locked =
-        (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
-    bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
-
-    prefs.putUChar("stx", s);
-    prefs.putUChar("etx", e);
-    prefs.putUChar("len", l);
-    prefs.putBool("locked", is_locked);
-    prefs.putBool("fixed", fixed);
-    prefs.end();
-
-    ::Serial.printf("[%s] Persisted framing to NVS (%s): STX=0x%02X, "
-                    "ETX=0x%02X, LEN=%u%s\r\n",
-                    tag, nvs_ns, s, e, l, fixed ? " [FIXED]" : "");
-  }
-}
-
-bool FramingTracker::isConsistent(uint8_t stx, uint8_t etx) const noexcept {
-  const FramingStatus cur = status.load(std::memory_order_relaxed);
-  if (cur != FramingStatus::LOCKED)
-    return true;
-  return (stx == candidate_stx.load(std::memory_order_relaxed) &&
-          etx == candidate_etx.load(std::memory_order_relaxed));
-}
-
-// ── Doorphone Protocol Implementation (CH4) ───────────────────────────────────
-
-Doorphone::DoorphoneState g_doorphone_state{};
-FramingTracker g_doorphone_tracker;
-
-namespace Transport {
-
-DoorphoneController g_doorphone_controller;
-static DoorphoneTxHandler s_tx_handler = nullptr;
-
-void Doorphone_RegisterTxHandler(DoorphoneTxHandler handler) noexcept {
-  s_tx_handler = handler;
-}
-
-void Doorphone_OnProfileChanged(uint8_t old_idx, uint8_t new_idx) {
-  if (old_idx != new_idx) {
-    char old_ns[16], new_ns[16];
-    FramingTracker::getNvsNamespace(old_idx, old_ns, sizeof(old_ns));
-    FramingTracker::getNvsNamespace(new_idx, new_ns, sizeof(new_ns));
-    g_doorphone_tracker.saveToNvs(old_ns, "DOORPHONE");
-    g_doorphone_tracker.reset();
-    g_doorphone_tracker.restoreFromNvs(new_ns, "DOORPHONE");
-  }
-}
-
-static void sendDpPacket(uint8_t stx, uint8_t op, uint8_t etx) {
-  StaticPacket pkt{4, 5};
-  pkt.data[0] = stx;
-  pkt.data[1] = op;
-  pkt.data[2] = 0x00;
-  pkt.data[3] = 0x00;
-  pkt.data[4] = etx;
-  if (s_tx_handler) {
-    s_tx_handler(pkt);
-  }
-}
-
-void DoorphoneController::init() {
-  if (!_timer) {
-    esp_timer_create_args_t timer_args{};
-    timer_args.callback = onTimerCallback;
-    timer_args.name = "dp_fsm_timer";
-    esp_timer_create(&timer_args, &_timer);
-  }
-}
-
-bool DoorphoneController::startSequence(uint8_t stx, uint8_t etx,
-                                        uint8_t op_call, uint8_t op_open,
-                                        uint8_t op_end) {
-  Step expected = Step::IDLE;
-  if (!_step.compare_exchange_strong(expected, Step::CALL_SENT)) {
-    return false;
-  }
-
-  _c_stx.store(stx, std::memory_order_release);
-  _c_etx.store(etx, std::memory_order_release);
-  _op_open.store(op_open, std::memory_order_release);
-  _op_end.store(op_end, std::memory_order_release);
-
-  sendDpPacket(stx, op_call, etx);
-
-  if (_timer) {
-    esp_timer_start_once(_timer, 350000); // 350ms 후 문열림 패킷 전송 (골든 타임)
-  }
-  return true;
-}
-
-void DoorphoneController::cancel() {
-  if (_timer) {
-    esp_timer_stop(_timer);
-  }
-  _step.store(Step::IDLE, std::memory_order_release);
-}
-
-void DoorphoneController::onTimerCallback(void * /*arg*/) {
-  const Step cur = g_doorphone_controller._step.load(std::memory_order_acquire);
-  switch (cur) {
-  case Step::CALL_SENT:
-    sendDpPacket(
-        g_doorphone_controller._c_stx.load(std::memory_order_acquire),
-        g_doorphone_controller._op_open.load(std::memory_order_acquire),
-        g_doorphone_controller._c_etx.load(std::memory_order_acquire));
-    g_doorphone_controller._step.store(Step::OPEN_SENT,
-                                       std::memory_order_release);
-    if (g_doorphone_controller._timer) {
-      esp_timer_start_once(g_doorphone_controller._timer,
-                           750000); // 750ms 후 종료 패킷
-    }
-    break;
-
-  case Step::OPEN_SENT:
-    sendDpPacket(g_doorphone_controller._c_stx.load(std::memory_order_acquire),
-                 g_doorphone_controller._op_end.load(std::memory_order_acquire),
-                 g_doorphone_controller._c_etx.load(std::memory_order_acquire));
-    g_doorphone_state.front_bell.store(false, std::memory_order_release);
-    g_doorphone_state.lobby_bell.store(false, std::memory_order_release);
-    g_doorphone_controller._step.store(Step::IDLE, std::memory_order_release);
-    break;
-
-  default:
-    break;
-  }
-}
-
-} // namespace Transport
-
 // ── Core Repositories & Metrics Trackers ──
-ControlDispatcher g_control_dispatcher;
 static RS485_PacketDispatcher s_dispatcher{};
 
 void RS485_RegisterDispatcher(const RS485_PacketDispatcher &dispatcher) noexcept {
@@ -348,12 +84,6 @@ void Engine_InitQueues() {
     xQueueAddToSet(s_ch1_vip_queue, s_ch1_queue_set);
     xQueueAddToSet(s_ch1_control_queue, s_ch1_queue_set);
   }
-
-  Transport::Doorphone_RegisterTxHandler([](const StaticPacket &pkt) noexcept {
-    if (s_ch4_passthrough_queue) {
-      xQueueSend(s_ch4_passthrough_queue, &pkt, 0);
-    }
-  });
 }
 
 CoreDumpInfo g_coredump_info;
@@ -381,6 +111,10 @@ bool Engine_EnqueueCh4Pass(const StaticPacket &pkt) noexcept {
   if (UNLIKELY(!s_ch4_passthrough_queue))
     return false;
   return (xQueueSend(s_ch4_passthrough_queue, &pkt, 0) == pdTRUE);
+}
+
+void RS485_EnqueueCh4Passthrough(const StaticPacket &pkt) noexcept {
+  Engine_EnqueueCh4Pass(pkt);
 }
 
 // ============================================================================
@@ -596,25 +330,14 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 }
 
 // ============================================================================
-// 3. Control Dispatcher Pipeline
+// 3. Control Enqueue Pipeline
 // ============================================================================
 
-bool ControlDispatcher::dispatch(StaticPacket &req,
-                                 StaticPacket &virtual_ack_out) {
-  if (UNLIKELY(req.length < 5) || !s_dispatcher.onEvaluateControl)
-    return false;
-
-  uint8_t ch5_slot = 0;
-  bool unidir = false;
-  uint8_t act = s_dispatcher.onEvaluateControl(req, virtual_ack_out, ch5_slot, unidir);
-  if (act == 3) { // VIRTUAL_ACK_IMMEDIATE
+bool RS485_EnqueueControl(const StaticPacket &pkt, bool vip) noexcept {
+  QueueHandle_t q = vip ? s_ch1_vip_queue : s_ch1_control_queue;
+  if (Queue_EnqueueDropHead(q, pkt)) {
+    System_TracePacket(1, true, TraceType::CTL, pkt);
     return true;
-  }
-  if (act == 1) { // TRANSMIT_LOCAL
-    QueueHandle_t q =
-        (req.channel_id == 6) ? s_ch1_vip_queue : s_ch1_control_queue;
-    if (Queue_EnqueueDropHead(q, req))
-      System_TracePacket(1, true, TraceType::CTL, req);
   }
   return false;
 }
@@ -1029,7 +752,9 @@ void Task_Ch2Ch3(void *pvParameters) {
           s_dispatcher.onFeedControlFrame(frame);
         }
         StaticPacket dummy_ack;
-        g_control_dispatcher.dispatch(req, dummy_ack);
+        if (s_dispatcher.onDispatchControl) {
+          s_dispatcher.onDispatchControl(req, dummy_ack);
+        }
       }
     }
   }
@@ -1041,12 +766,9 @@ void Task_Ch2Ch3(void *pvParameters) {
 
 static inline void Ch4_SendPassthrough(const StaticPacket &pkt,
                                        StaticPacket &last_tx_pkt,
-                                       uint32_t &last_tx_ms, char *cur_dp_ns) {
-  if (pkt.length >= 3) {
-    Config::Doorphone::FramingTracker::getNvsNamespace(g_config.wallpad_profile,
-                                                       cur_dp_ns, 16);
-    g_doorphone_tracker.processFrame(pkt.data[0], pkt.data[pkt.length - 1],
-                                     pkt.length, cur_dp_ns);
+                                       uint32_t &last_tx_ms) {
+  if (pkt.length >= 3 && s_dispatcher.onDoorphoneFrameDetected) {
+    s_dispatcher.onDoorphoneFrameDetected(pkt.data[0], pkt.data[pkt.length - 1], pkt.length);
   }
   System_TracePacket(4, true, TraceType::RMT, pkt);
   last_tx_pkt = pkt; // Correctly recorded in all code paths to avoid echo
@@ -1097,9 +819,6 @@ void Task_Ch4(void *pvParameters) {
   uint32_t last_tx_ms = 0;
   StaticPacket last_pkt{};
   uint32_t last_pkt_ms = 0;
-  char cur_dp_ns[16];
-  Config::Doorphone::FramingTracker::getNvsNamespace(
-      g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
 
   if (g_system_event_group) {
     xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
@@ -1139,17 +858,11 @@ void Task_Ch4(void *pvParameters) {
     }
 
     if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx, 0) == pdTRUE) {
-      Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms, cur_dp_ns);
+      Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
     }
 
-    const uint32_t last_bell =
-        g_doorphone_state.last_bell_ms.load(std::memory_order_relaxed);
-    if (last_bell > 0 &&
-        TimeUtils::isElapsed(last_bell,
-                             Config::Timing::DOORPHONE_BELL_TIMEOUT_MS)) {
-      if (s_dispatcher.onDoorphoneReset) {
-        s_dispatcher.onDoorphoneReset();
-      }
+    if (s_dispatcher.onDoorphoneCheckBellTimeout) {
+      s_dispatcher.onDoorphoneCheckBellTimeout();
     }
 
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
@@ -1184,17 +897,14 @@ void Task_Ch4(void *pvParameters) {
       }
     }
 
-    Config::Doorphone::FramingStatus cur_status =
-        g_doorphone_tracker.status.load(std::memory_order_relaxed);
-    if (cur_status == Config::Doorphone::FramingStatus::LOCKED &&
-        buf_len >= 3) {
-      uint8_t target_stx =
-          g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-      uint8_t target_etx =
-          g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-      uint8_t target_len =
-          g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
+    uint8_t target_stx = 0;
+    uint8_t target_etx = 0;
+    uint8_t target_len = 0;
+    bool is_locked = s_dispatcher.onDoorphoneGetLockedFraming
+        ? s_dispatcher.onDoorphoneGetLockedFraming(target_stx, target_etx, target_len)
+        : false;
 
+    if (is_locked && buf_len >= 3) {
       size_t p = 0;
       while (p < buf_len) {
         if (buf[p] != target_stx) {
@@ -1267,7 +977,7 @@ void Task_Ch4(void *pvParameters) {
     if (last_byte_ms > 0 &&
         TimeUtils::isElapsed(last_byte_ms, Config::Timing::DOORPHONE_IPG_MS)) {
 
-      if (cur_status == Config::Doorphone::FramingStatus::LOCKED) {
+      if (is_locked) {
         buf_len = 0;
       } else {
         if (buf_len >= 3) {
@@ -1277,36 +987,8 @@ void Task_Ch4(void *pvParameters) {
           uint8_t pkt_stx = packet.data[0];
           uint8_t pkt_etx = packet.data[packet.length - 1];
 
-          Config::Doorphone::FramingStatus prev_status =
-              g_doorphone_tracker.status.load(std::memory_order_relaxed);
-
-          // 프로파일 카탈로그에 일치하는 도어폰 규격이 있으면 즉시 영구
-          // 잠금(LOCKED)
-          uint8_t fixed_len = 0;
-          bool matched_lock =
-              s_dispatcher.onMatchDoorphoneLock
-                  ? s_dispatcher.onMatchDoorphoneLock(pkt_stx, pkt_etx, 5,
-                                                      fixed_len)
-                  : false;
-          char cur_dp_ns_local[16];
-          Config::Doorphone::FramingTracker::getNvsNamespace(
-              g_config.wallpad_profile, cur_dp_ns_local,
-              sizeof(cur_dp_ns_local));
-
-          if (matched_lock && packet.length >= 5) {
-            if (prev_status != Config::Doorphone::FramingStatus::LOCKED) {
-              g_doorphone_tracker.setFixedLock(pkt_stx, pkt_etx, fixed_len);
-              g_doorphone_tracker.saveToNvs(cur_dp_ns_local);
-            }
-          } else {
-            g_doorphone_tracker.processFrame(pkt_stx, pkt_etx, packet.length,
-                                             cur_dp_ns_local);
-            Config::Doorphone::FramingStatus status =
-                g_doorphone_tracker.status.load(std::memory_order_relaxed);
-            if (prev_status != Config::Doorphone::FramingStatus::LOCKED &&
-                status == Config::Doorphone::FramingStatus::LOCKED) {
-              g_doorphone_tracker.saveToNvs(cur_dp_ns_local);
-            }
+          if (s_dispatcher.onDoorphoneFrameDetected) {
+            s_dispatcher.onDoorphoneFrameDetected(pkt_stx, pkt_etx, packet.length);
           }
 
           Ch4_HandleDoorphoneEvent(packet, last_pkt, last_pkt_ms, millis());
@@ -1330,7 +1012,7 @@ void Task_Ch4(void *pvParameters) {
 
     if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx,
                       pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
-      Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms, cur_dp_ns);
+      Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
     }
   }
 }

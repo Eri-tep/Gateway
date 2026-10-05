@@ -11,7 +11,6 @@
 
 #include "L1_Drivers/Uart_Driver.h"
 #include "L0_Base/System_Config.h"
-#include "L0_Base/System_Platform.h"
 
 #include <Arduino.h>
 #include <SoftwareSerial.h>

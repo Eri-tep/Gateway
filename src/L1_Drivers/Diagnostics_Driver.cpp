@@ -2,8 +2,6 @@
 #include "L0_Base/System_Buffer.h"
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
-#include "L1_Drivers/RTOS_Driver.h"
-#include "L1_Drivers/NVS_Driver.h"
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
@@ -246,6 +244,11 @@ StatSummary SystemMetricsTracker::get24h() const {
   }
   acc.addBucket(_cur_bucket);
   return acc.finalize(_cached_flash_kb);
+}
+
+MetricSample SystemMetricsTracker::getCurrent() const noexcept {
+  MutexLocker lock(_metrics_mutex);
+  return _current;
 }
 
 // ── TaskWdtMonitor Implementation ──

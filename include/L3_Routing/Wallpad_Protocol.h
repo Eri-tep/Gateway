@@ -7,8 +7,6 @@
 #include "L0_Base/System_Config.h"
 #include "L0_Base/System_Platform.h"
 #include "L3_Routing/ProtocolTypes.h"
-#include "L1_Drivers/RTOS_Driver.h"
-#include "L1_Drivers/NVS_Driver.h"
 
 #include <array>
 #include <atomic>
@@ -494,9 +492,9 @@ void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
 void Wallpad_HandlePollTimeout(uint8_t poll_dev_id, uint8_t poll_sub1,
                                uint8_t poll_sub2) noexcept;
 
-// 2. Control Evaluation & Routing
+// 2. Control Evaluation (Validation, Safety Gate, Virtual ACK)
 ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_ack_out,
-                                      uint8_t &out_ch5_slot, bool &out_unidir) noexcept;
+                                      bool &out_unidir) noexcept;
 
 // 3. Timing & Convergence
 uint32_t Wallpad_GetPollIntervalMs() noexcept;
@@ -514,7 +512,63 @@ bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
                                StaticPacket &virtual_ack_out) noexcept;
 void Wallpad_FeedControlFrame(span<const uint8_t> frame) noexcept;
 
-// 6. Doorphone (CH4) Handling
+// 6. Doorphone (CH4) Handling & FSM (L3 Canonical)
+enum class FramingStatus : uint8_t {
+  WAITING = 0,
+  LEARNING = 1,
+  LOCKED = 2,
+  NOISY = 3
+};
+
+struct FramingTracker {
+  std::atomic<FramingStatus> status{FramingStatus::WAITING};
+  std::atomic<uint8_t> candidate_stx{0};
+  std::atomic<uint8_t> candidate_etx{0};
+  std::atomic<uint8_t> candidate_len{0};
+  std::atomic<uint8_t> consecutive_matches{0};
+  std::atomic<uint8_t> consecutive_mismatches{0};
+  std::atomic<bool> is_custom_fixed{false};
+
+  void setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
+  void reset() noexcept;
+  void clearNvs(const char *nvs_ns, const char *tag = "FRAMING") noexcept;
+  void processFrame(uint8_t stx, uint8_t etx, uint8_t len, const char *nvs_ns,
+                    const char *tag = "FRAMING") noexcept;
+
+  static void getNvsNamespace(uint8_t prof_idx, char *out_ns,
+                              size_t max_len) noexcept {
+    snprintf(out_ns, max_len, "dp_frame_p%u",
+             static_cast<unsigned int>(prof_idx & 0x03));
+  }
+
+  void restoreFromNvs(const char *nvs_ns = "dp_frame_p0",
+                      const char *tag = "FRAMING") noexcept;
+  void saveToNvs(const char *nvs_ns = "dp_frame_p0",
+                 const char *tag = "FRAMING") noexcept;
+
+  [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
+};
+
+void Wallpad_DoorphoneInit() noexcept;
+bool Wallpad_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,
+                                    uint8_t op_open, uint8_t op_end) noexcept;
+void Wallpad_DoorphoneCancel() noexcept;
+[[nodiscard]] bool Wallpad_DoorphoneIsBusy() noexcept;
+void Wallpad_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
+                              uint32_t &out_last_bell_ms) noexcept;
+void Wallpad_DoorphoneGetFraming(FramingStatus &out_status, uint8_t &out_stx,
+                                uint8_t &out_etx, uint8_t &out_len) noexcept;
+bool Wallpad_DoorphoneGetLockedFraming(uint8_t &stx, uint8_t &etx, uint8_t &len) noexcept;
+void Wallpad_DoorphoneFrameDetected(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
+void Wallpad_DoorphoneCheckBellTimeout() noexcept;
+void Wallpad_DoorphoneClearNvs(const char *nvs_ns) noexcept;
+void Wallpad_DoorphoneRestoreNvs(const char *nvs_ns) noexcept;
+void Wallpad_DoorphoneSaveNvs(const char *nvs_ns) noexcept;
+void Wallpad_DoorphoneOnProfileChanged(uint8_t old_idx, uint8_t new_idx) noexcept;
+
+using DoorphoneTxHandler = void (*)(const StaticPacket &pkt) noexcept;
+void Wallpad_DoorphoneRegisterTxHandler(DoorphoneTxHandler handler) noexcept;
+
 void Wallpad_HandleDoorphonePacket(const StaticPacket &packet) noexcept;
 void Wallpad_ResetDoorphoneBellState() noexcept;
 const DoorphoneSpec *Wallpad_MatchDoorphone(uint8_t stx, uint8_t etx, uint8_t len) noexcept;

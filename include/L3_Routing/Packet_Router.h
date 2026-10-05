@@ -19,9 +19,9 @@
 //      External callers use Router_RecordRoute / Router_LookupRoute API.
 // ============================================================================
 
-#include "L2_Channels/RS485_CH.h"
-#include "L2_Channels/TCP_CH.h"
-#include "L3_Routing/Device_Registry.h"
+#include "L0_Base/System_Buffer.h"
+#include <cstddef>
+#include <cstdint>
 // ── Multi-Channel Route Endpoint & Entry PODs ──────────────────────────────
 struct RouteEndpoint {
   uint8_t channel_id{1}; // Default channel: CH1 (Main Physical RS-485)
@@ -73,3 +73,25 @@ using Ch5ForwardHandler = bool (*)(uint8_t slot_idx, const StaticPacket &pkt,
 void Router_RegisterCh5ForwardHandler(Ch5ForwardHandler handler) noexcept;
 bool Router_ForwardToCh5(uint8_t slot_idx, const StaticPacket &pkt,
                          bool burst) noexcept;
+
+
+/// Dispatches an RX packet received from physical bus (CH1~CH4) into L3 domain decoders.
+void Router_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
+                            const StaticPacket *matching_query) noexcept;
+
+/// Assembles the next device polling packet for CH1 transmission.
+bool Router_BuildNextPoll(StaticPacket &out_pkt, uint8_t &poll_dev_id,
+                          uint8_t &poll_sub1, uint8_t &poll_sub2) noexcept;
+
+/// Notifies L3 subsystem of polling timeout on a target device.
+void Router_HandlePollTimeout(uint8_t poll_dev_id, uint8_t poll_sub1,
+                              uint8_t poll_sub2) noexcept;
+
+/// Handles sub-bus (CH2/CH3) query packets with cache virtual response.
+bool Router_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
+                              StaticPacket &virtual_ack_out) noexcept;
+
+/// Dispatches a control or query request: handles virtual ACK, routing to CH5, or enqueuing to local bus.
+[[nodiscard]] bool Router_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept;
+
+

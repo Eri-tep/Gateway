@@ -9,7 +9,6 @@
 #include "L2_Channels/TCP_CH.h"
 #include "L4_Services/EW11_Service.h"
 #include "L1_Drivers/Diagnostics_Driver.h"
-#include "L1_Drivers/NVS_Driver.h"
 #include "L3_Routing/Wallpad_Protocol.h"
 
 #include <WiFi.h>

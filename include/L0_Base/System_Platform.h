@@ -14,9 +14,70 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include <Arduino.h>
 #include <IPAddress.h>
 #include <Preferences.h>
+#include <esp_log.h>
+
+// ── RAII FreeRTOS Synchronization Primitives ──
+class [[nodiscard]] CriticalSectionLocker {
+private:
+  portMUX_TYPE *_mux{nullptr};
+
+public:
+  explicit CriticalSectionLocker(portMUX_TYPE *mux) noexcept : _mux(mux) {
+    if (_mux)
+      portENTER_CRITICAL(_mux);
+  }
+  explicit CriticalSectionLocker(portMUX_TYPE &mux) noexcept : _mux(&mux) {
+    portENTER_CRITICAL(_mux);
+  }
+  ~CriticalSectionLocker() noexcept {
+    if (_mux)
+      portEXIT_CRITICAL(_mux);
+  }
+  CriticalSectionLocker(const CriticalSectionLocker &) = delete;
+  CriticalSectionLocker &operator=(const CriticalSectionLocker &) = delete;
+  CriticalSectionLocker(CriticalSectionLocker &&) = delete;
+  CriticalSectionLocker &operator=(CriticalSectionLocker &&) = delete;
+};
+
+class [[nodiscard]] MutexLocker {
+private:
+  SemaphoreHandle_t _mutex{nullptr};
+  bool _locked{false};
+  uint32_t _acquired_ms{0};
+
+public:
+  explicit MutexLocker(SemaphoreHandle_t mutex,
+                       TickType_t timeout = portMAX_DELAY) noexcept
+      : _mutex(mutex) {
+    if (_mutex) {
+      _locked = (xSemaphoreTake(_mutex, timeout) == pdTRUE);
+      if (_locked) {
+        _acquired_ms = millis();
+      }
+    }
+  }
+  ~MutexLocker() noexcept {
+    if (_mutex && _locked) {
+      uint32_t hold_ms = millis() - _acquired_ms;
+      if (hold_ms >= 50) { // Config::Timing::MAX_LOCK_HOLD_MS (50ms)
+        ESP_LOGW("LOCK", "Mutex held for %u ms (>= 50 ms threshold)",
+                 static_cast<unsigned>(hold_ms));
+      }
+      xSemaphoreGive(_mutex);
+    }
+  }
+  [[nodiscard]] bool isLocked() const noexcept { return _locked; }
+  explicit operator bool() const noexcept { return _locked; }
+  MutexLocker(const MutexLocker &) = delete;
+  MutexLocker &operator=(const MutexLocker &) = delete;
+  MutexLocker(MutexLocker &&) = delete;
+  MutexLocker &operator=(MutexLocker &&) = delete;
+};
+
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -131,3 +192,8 @@ extern std::atomic<bool> g_probe_convergence_reset;
 constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
 constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
 constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);
+
+void System_Restart(const char *reason);
+
+
+

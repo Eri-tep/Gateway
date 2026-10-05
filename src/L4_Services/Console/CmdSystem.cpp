@@ -3,7 +3,6 @@
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
 #include "L2_Channels/RS485_CH.h"
-#include "L1_Drivers/NVS_Driver.h"
 #include "L3_Routing/Wallpad_Protocol.h"
 #include "L4_Services/EW11_Service.h"
 #include <WiFi.h>

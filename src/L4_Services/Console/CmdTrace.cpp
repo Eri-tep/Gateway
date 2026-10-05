@@ -2,7 +2,6 @@
 #include "L4_Services/Console/ConsoleFmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/ConsoleCommands.h"
-#include "L2_Channels/RS485_CH.h"
 #include "L3_Routing/Wallpad_Protocol.h"
 #include "L3_Routing/Device_Registry.h"
 #include "L4_Services/EW11_Service.h"
@@ -280,22 +279,19 @@ void wallpadPrintStatus(AppendBuf &out) {
        static_cast<unsigned>(Config::Timing::WALLPAD_AUTO_IPG_MS));
   table.separator('-');
 
-  Config::Doorphone::FramingStatus dp_status =
-      g_doorphone_tracker.status.load(std::memory_order_relaxed);
+  FramingStatus dp_status = FramingStatus::WAITING;
+  uint8_t cur_dp_stx = 0;
+  uint8_t cur_dp_etx = 0;
+  uint8_t cur_dp_len = 0;
+  Wallpad_DoorphoneGetFraming(dp_status, cur_dp_stx, cur_dp_etx, cur_dp_len);
+
   const char *dp_status_str =
-      (dp_status == Config::Doorphone::FramingStatus::LOCKED)     ? "[LOCKED]"
-      : (dp_status == Config::Doorphone::FramingStatus::LEARNING) ? "[LEARNING]"
-      : (dp_status == Config::Doorphone::FramingStatus::NOISY)    ? "[NOISY]"
-                                                                  : "[WAITING]";
+      (dp_status == FramingStatus::LOCKED)     ? "[LOCKED]"
+      : (dp_status == FramingStatus::LEARNING) ? "[LEARNING]"
+      : (dp_status == FramingStatus::NOISY)    ? "[NOISY]"
+                                               : "[WAITING]";
 
-  uint8_t cur_dp_stx =
-      g_doorphone_tracker.candidate_stx.load(std::memory_order_relaxed);
-  uint8_t cur_dp_etx =
-      g_doorphone_tracker.candidate_etx.load(std::memory_order_relaxed);
-  uint8_t cur_dp_len =
-      g_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
-
-  if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
+  if (dp_status == FramingStatus::WAITING) {
     print_row("Doorphone (CH4)", "Framing", "-- .. --", dp_status_str);
   } else if (cur_dp_len > 0) {
     rowf("Doorphone (CH4)", "Framing", dp_status_str, "%02X .. %02X (%u Bytes)",
@@ -308,10 +304,10 @@ void wallpadPrintStatus(AppendBuf &out) {
   const DoorphoneSpec *dp_prof =
       ProfileMatcher::matchDoorphone(cur_dp_stx, cur_dp_etx, cur_dp_len);
   const char *dp_m_st =
-      dp_prof ? ((dp_status == Config::Doorphone::FramingStatus::LOCKED)
+      dp_prof ? ((dp_status == FramingStatus::LOCKED)
                      ? "[LOCKED]"
                      : "[LEARNING]")
-              : ((dp_status == Config::Doorphone::FramingStatus::WAITING)
+              : ((dp_status == FramingStatus::WAITING)
                      ? "[WAITING]"
                      : "[UNKNOWN]");
   FixedBuf<48> op_f, op_l;
@@ -324,7 +320,7 @@ void wallpadPrintStatus(AppendBuf &out) {
     op_l.appendFormat("Bell:%02X, Call:%02X, Open:%02X, End:%02X",
                       dp_prof->bell_lobby, dp_prof->call_lobby, dp_prof->open_lobby,
                       dp_prof->end_lobby);
-  } else if (dp_status == Config::Doorphone::FramingStatus::WAITING) {
+  } else if (dp_status == FramingStatus::WAITING) {
     dp_desc = "Waiting for traffic...";
     op_f.append("Waiting...");
     op_l.append("Waiting...");
@@ -664,21 +660,21 @@ void cmdWallpad(CliContext &ctx) {
       {"auto", "auto", "Switch to Universal Auto-Probing mode",
        [](int s, int, const Args &) {
          char dp_ns[16];
-         Config::Doorphone::FramingTracker::getNvsNamespace(0, dp_ns,
+         FramingTracker::getNvsNamespace(0, dp_ns,
                                                             sizeof(dp_ns));
          ProfileRepository::setActiveProfileIndex(0);
          g_auto_probing_engine.reset();
-         g_doorphone_tracker.clearNvs(dp_ns);
+         Wallpad_DoorphoneClearNvs(dp_ns);
          sendTelnetMsg(s, "[OK] Switched to Universal Auto-Probing mode "
                           "(Wallpad & Doorphone framing reset).\r\n");
        }},
       {"reset", "reset", "Reset auto-probing engine and re-learn",
        [](int s, int, const Args &) {
          char dp_ns[16];
-         Config::Doorphone::FramingTracker::getNvsNamespace(
+         FramingTracker::getNvsNamespace(
              g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
          g_auto_probing_engine.reset();
-         g_doorphone_tracker.clearNvs(dp_ns);
+         Wallpad_DoorphoneClearNvs(dp_ns);
          g_probe_convergence_reset.store(true, std::memory_order_release);
        }},
       {"simulate", "simulate <hex...>",

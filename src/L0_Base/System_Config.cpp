@@ -10,6 +10,19 @@ std::shared_mutex g_config_rw;
 portMUX_TYPE g_config_mux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> g_config_dirty{false};
 
+// ── RTC Fast SRAM Retention Variables ──
+RTC_NOINIT_ATTR uint32_t rtc_magic;
+RTC_NOINIT_ATTR uint32_t rtc_last_alive_ms[Config::Task::TASK_COUNT];
+RTC_NOINIT_ATTR volatile uint32_t g_telnet_stage = 0;
+RTC_NOINIT_ATTR uint32_t rtc_rescue_magic;
+RTC_NOINIT_ATTR uint32_t rtc_crash_counter;
+RTC_NOINIT_ATTR uint32_t rtc_clean_restart_magic;
+
+// ── System Boot & Rescue Status ──
+std::atomic<bool> g_rescue_mode{false};
+bool g_rollback_detected = false;
+
+
 namespace Config::Timing {
 uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept {
   if (baud == 0)
