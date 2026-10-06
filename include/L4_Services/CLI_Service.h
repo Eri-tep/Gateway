@@ -217,9 +217,10 @@ public:
   bool handlePassword(TelnetSession *session, const char *password);
   static void cmdExit(CliContext &ctx);
   explicit TelnetManager(uint16_t port = Config::TCP::TELNET_PORT);
-  void startServer();
+  void startServer() noexcept;
+  void stopServer() noexcept;
   void tick();
-  void shutdownForReboot();
+  void shutdownForReboot() noexcept;
   void sendScanResult(const WifiScanReq &req, const char *result_str);
   bool broadcastNoticeNonBlocking(const char *msg);
   bool hasActiveClients() const noexcept {

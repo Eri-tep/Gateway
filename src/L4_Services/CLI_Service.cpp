@@ -4,9 +4,9 @@
 // ============================================================================
 
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/Console/Console_Commands.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
 #include "L0_Foundation/System_Platform.h"
+#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L4_Services/Console/Console_Commands.h"
 
 #include <WiFi.h>
 #include <algorithm>
@@ -824,6 +824,28 @@ void TelnetManager::shutdownForReboot() {
   }
 }
 
+void TelnetManager::stopServer() noexcept {
+  g_telnet_tracer.setTrace(false);
+  g_telnet_tracer.setClient(-1);
+
+  if (_cli_mutex) {
+    MutexLocker cliLock(_cli_mutex);
+    for (auto &session : _sessions) {
+      if (session.sock >= 0) {
+        close(session.sock);
+        session.sock = -1;
+      }
+      session.reset();
+    }
+  }
+
+  if (_server_fd >= 0) {
+    close(_server_fd);
+    _server_fd = -1;
+  }
+  Serial.println("[TELNET] Server stopped (Network disconnected)");
+}
+
 void TelnetManager::startServer() {
   if (!_cli_mutex)
     _cli_mutex = xSemaphoreCreateMutex();
@@ -924,9 +946,10 @@ void TelnetManager::tick() {
     if (s.sock < 0)
       continue;
 
-    uint32_t session_timeout = (s.sessionState == SessionState::AWAITING_PASSWORD)
-                                   ? 30000
-                                   : Config::TCP::TELNET_SESSION_TIMEOUT_MS;
+    uint32_t session_timeout =
+        (s.sessionState == SessionState::AWAITING_PASSWORD)
+            ? 30000
+            : Config::TCP::TELNET_SESSION_TIMEOUT_MS;
     if (TimeUtils::isElapsed(s.last_activity_ms, session_timeout)) {
       sendTelnetMsg(s.sock, "\r\n[SYSTEM] Disconnected due to inactivity.\r\n");
       handleClientDisconnect(&s);
@@ -978,16 +1001,13 @@ void Task_Telnet(void *pvParameters) {
   TSTAGE(2);
   if (!s_tracer_sem)
     s_tracer_sem = xSemaphoreCreateBinary();
-  g_telnet_manager.startServer();
 
   SystemTraceSink sink;
   sink.trace_packet = [](uint8_t ch, bool tx, TraceType ty,
                          const StaticPacket &pkt) {
     g_telnet_tracer.trace(ch, tx, ty, pkt);
   };
-  sink.trace_msg = [](const char *msg) {
-    g_telnet_tracer.trace(msg);
-  };
+  sink.trace_msg = [](const char *msg) { g_telnet_tracer.trace(msg); };
   System_RegisterTraceSink(sink);
 
   System_RegisterShutdownHook([]() {
@@ -1000,17 +1020,16 @@ void Task_Telnet(void *pvParameters) {
   static bool first_feed = true;
   static uint32_t s_last_twdt_feed_ms = 0;
   static uint32_t s_max_twdt_interval_ms = 0;
-
   bool ota_notice_sent = false;
 
-  auto feed_twdt = [&]() {
+  auto feed_twdt = [&]() noexcept {
     if (twdt_registered) {
-      uint32_t now_ms = millis();
+      const uint32_t now_ms = millis();
       if (first_feed) {
         s_last_twdt_feed_ms = now_ms;
         first_feed = false;
       } else {
-        uint32_t interval = now_ms - s_last_twdt_feed_ms;
+        const uint32_t interval = now_ms - s_last_twdt_feed_ms;
         if (interval > s_max_twdt_interval_ms) {
           s_max_twdt_interval_ms = interval;
         }
@@ -1022,14 +1041,36 @@ void Task_Telnet(void *pvParameters) {
   };
 
   for (;;) {
+    TSTAGE(5);
+    feed_twdt();
+
+    // ⭐️ [FreeRTOS Event-Driven] 오프라인 시 이벤트 비트 대기 (CPU 점유 0%
+    // 슬립)
+    if (!System_IsNetworkReady()) {
+      g_telnet_manager.stopServer();
+
+      // 네트워크 비트가 켜질 때까지 슬립 (WDT 피딩을 위해 1초 단위 블로킹 대기)
+      while (!System_IsNetworkReady()) {
+        feed_twdt();
+        if (g_system_event_group) {
+          xEventGroupWaitBits(g_system_event_group, SYS_EVT_NETWORK_READY,
+                              pdFALSE, pdTRUE, pdMS_TO_TICKS(1000));
+        } else {
+          vTaskDelay(pdMS_TO_TICKS(100));
+        }
+      }
+
+      g_telnet_manager.startServer();
+    }
+
+    // ── 아래부터는 무조건 '네트워크 가용(Online)' 상태 보장 ──
+
+    // 1. OTA 진행 가드
     if (g_ota_in_progress.load(std::memory_order_acquire)) {
       TSTAGE(4);
       if (!ota_notice_sent) {
-        if (g_telnet_manager.broadcastNoticeNonBlocking(
-                "\r\n[OTA] Firmware update in progress. Telnet CLI "
-                "paused...\r\n")) {
-          ota_notice_sent = true;
-        }
+        ota_notice_sent = g_telnet_manager.broadcastNoticeNonBlocking(
+            "\r\n[OTA] Firmware update in progress. Telnet CLI paused...\r\n");
       }
       feed_twdt();
       vTaskDelay(pdMS_TO_TICKS(50));
@@ -1037,25 +1078,22 @@ void Task_Telnet(void *pvParameters) {
     }
     ota_notice_sent = false;
 
-    TSTAGE(5);
-    feed_twdt();
-
+    // 2. 시스템 재부팅 가드
     if (g_restart_pending.load(std::memory_order_acquire)) {
       g_restart_pending.store(false, std::memory_order_relaxed);
       System_Restart(g_restart_reason ? g_restart_reason : "Telnet Command");
     }
 
+    // 3. 온라인 메인 I/O 처리
     g_telnet_manager.tick();
 
     TSTAGE(11);
-    if (g_telnet_manager.hasActiveClients()) {
+    const bool has_clients = g_telnet_manager.hasActiveClients();
+    if (has_clients) {
       g_telnet_tracer.flushToClient();
-      TSTAGE(14);
-      xSemaphoreTake(s_tracer_sem, pdMS_TO_TICKS(5));
-    } else {
-      TSTAGE(14);
-      xSemaphoreTake(s_tracer_sem, 0);
     }
+    TSTAGE(14);
+    xSemaphoreTake(s_tracer_sem, has_clients ? pdMS_TO_TICKS(5) : 0);
   }
 }
 
@@ -1081,7 +1119,8 @@ bool TelnetTracer::passesFilter(uint8_t channel, TraceType type,
   if (mode == TraceType::DEVID) {
     uint8_t pkt_dev_id = 0, dummy_s1 = 0, dummy_s2 = 0;
     if (pkt.length >= 5 && pkt.data[0] == PKT_STX) {
-      ProtocolDiag_ExtractDeviceKey(pkt.data.data(), pkt.length, pkt_dev_id, dummy_s1, dummy_s2);
+      ProtocolDiag_ExtractDeviceKey(pkt.data.data(), pkt.length, pkt_dev_id,
+                                    dummy_s1, dummy_s2);
     } else if (pkt.length == 5 && pkt.data[0] == 0x7F) {
       pkt_dev_id = pkt.data[1];
     }
@@ -1210,7 +1249,8 @@ void TelnetTracer::flushToClient() {
     TracePacketEntry &entry = local_batch[i];
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
     if (entry.len >= 5 && entry.data[0] == PKT_STX) {
-      ProtocolDiag_ExtractDeviceKey(entry.data.data(), entry.len, dev_id, sub1, sub2);
+      ProtocolDiag_ExtractDeviceKey(entry.data.data(), entry.len, dev_id, sub1,
+                                    sub2);
     }
 
     long delay_ms = -1;
