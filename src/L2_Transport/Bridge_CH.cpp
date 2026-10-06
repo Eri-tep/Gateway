@@ -174,6 +174,14 @@ bool Bridge_SendRaw(uint8_t slot_idx, std::span<const uint8_t> data) noexcept {
   return Bridge_SendRaw(slot_idx, data.data(), data.size());
 }
 
+void Bridge_RecordSlotRx(uint8_t slot_idx) noexcept {
+  if (slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+    MutexLocker lock(s_ch5_mutex);
+    s_hub_slots[slot_idx].rx_pkts++;
+  }
+  System_RecordCh5Rx();
+}
+
 namespace {
 
 inline void consumeRxBuffer(HubClientSlot *slot, size_t consumed) {
@@ -191,7 +199,7 @@ inline void consumeRxBuffer(HubClientSlot *slot, size_t consumed) {
 static void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
                               size_t pkt_len);
 
-void demuxElevatorStream(HubClientSlot *slot) {
+void demuxPacketStream(HubClientSlot *slot) {
   uint8_t stx = s_dispatcher.onGetStx ? s_dispatcher.onGetStx() : PKT_STX;
 
   size_t p = 0;
@@ -236,55 +244,6 @@ void demuxElevatorStream(HubClientSlot *slot) {
 
     Hub_ProcessPacket(slot, &slot->rx_buf[p], p_len);
     p += p_len;
-  }
-
-  consumeRxBuffer(slot, p);
-}
-
-void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
-  size_t p = 0;
-  while (p < slot->rx_len) {
-    if (slot->rx_buf[p] != 0x01) {
-      p++;
-      continue;
-    }
-
-    size_t rem = slot->rx_len - p;
-    // 19바이트 0x03 상태 응답
-    if (rem >= 19 && slot->rx_buf[p + 1] == 0x03 &&
-        slot->rx_buf[p + 2] == 0x0E) {
-      slot->rx_pkts++;
-      System_RecordCh5Rx();
-      StaticPacket trace_pkt{5, 19};
-      std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 19], trace_pkt.data.begin());
-      System_TracePacket(5, false, TraceType::RMT, trace_pkt);
-      if (s_slot_rx_cb) {
-        s_slot_rx_cb(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
-      }
-      p += 19;
-      continue;
-    }
-
-    // 8바이트 0x06 / 0x10 제어 ACK
-    if (rem >= 8 &&
-        (slot->rx_buf[p + 1] == 0x06 || slot->rx_buf[p + 1] == 0x10)) {
-      slot->rx_pkts++;
-      System_RecordCh5Rx();
-      StaticPacket trace_pkt{5, 8};
-      std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 8], trace_pkt.data.begin());
-      System_TracePacket(5, false, TraceType::RMT, trace_pkt);
-      if (s_slot_rx_cb) {
-        s_slot_rx_cb(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
-      }
-      p += 8;
-      continue;
-    }
-
-    if (rem < 19) {
-      break;
-    }
-
-    p++;
   }
 
   consumeRxBuffer(slot, p);
@@ -414,9 +373,11 @@ void processStream(int slot_idx, HubClientSlot *slot) {
   if (!slot)
     return;
   if (slot_idx == 0) {
-    demuxElevatorStream(slot);
-  } else {
-    demuxModbusStream(slot_idx, slot);
+    demuxPacketStream(slot);
+  } else if (s_slot_rx_cb) {
+    size_t consumed = s_slot_rx_cb(static_cast<uint8_t>(slot_idx),
+                                  std::span<const uint8_t>(slot->rx_buf, slot->rx_len));
+    consumeRxBuffer(slot, consumed);
   }
 }
 

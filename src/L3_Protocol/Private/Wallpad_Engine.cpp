@@ -57,6 +57,16 @@ static std::atomic<uint32_t> s_stale_poll_cnt{0};
 
 bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
                                  uint8_t &poll_sub1, uint8_t &poll_sub2) noexcept {
+  if (Wallpad_TakeRelearnRequest()) {
+    Wallpad_CheckConvergence(true);
+    System_TraceMessage("[AUTO PROBE] Convergence state reset. Re-learning "
+                        "bus offsets...\r\n");
+  }
+
+  if (!s_convergence_done) {
+    Wallpad_CheckConvergence(false);
+  }
+
   g_polling_targets.sweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
 
   PollingTargetRegistry::PollingCandidate candidates[PollingTargetRegistry::MAX_TARGETS];
@@ -270,6 +280,9 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
     s_convergence_done = false;
     s_stable_start_ms = 0;
     s_last_active_tgts = 0;
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
+    }
     return false;
   }
 
@@ -834,6 +847,7 @@ void Wallpad_ResetDoorphoneBellState() noexcept {
 }
 
 void Wallpad_HandleDoorphonePacket(const StaticPacket &packet) noexcept {
+  Wallpad_DoorphoneCheckBellTimeout();
   if (packet.length < 3) return;
   uint8_t opcode = packet.data[1];
   uint32_t now = millis();

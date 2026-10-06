@@ -20,13 +20,10 @@ bool Bridge_ResetFramingTracker(uint8_t slot_idx);
 
 bool Bridge_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
                     const char *name = nullptr);
-inline bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                        const char *name = nullptr) {
-  return Bridge_SetSlot(slot_idx, enabled, ip, port, name);
-}
 
 bool Bridge_SendRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
 bool Bridge_SendRaw(uint8_t slot_idx, std::span<const uint8_t> data) noexcept;
+void Bridge_RecordSlotRx(uint8_t slot_idx) noexcept;
 
 void Bridge_Init();
 void Bridge_StartServer() noexcept;
@@ -52,15 +49,8 @@ struct Bridge_PacketDispatcher {
 void Bridge_RegisterDispatcher(const Bridge_PacketDispatcher &dispatcher) noexcept;
 
 // ── Higher-Layer Inversion Hooks (Zero Upward Includes, Rule 17) ──
-using BridgeRxCallback = void (*)(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
+using BridgeRxCallback = size_t (*)(uint8_t slot_idx, std::span<const uint8_t> stream) noexcept;
 using BridgeTickCallback = void (*)(uint32_t now_ms) noexcept;
 
 void Bridge_RegisterSlotRxCallback(BridgeRxCallback cb) noexcept;
 void Bridge_RegisterSlotTickCallback(BridgeTickCallback cb) noexcept;
-
-inline void Bridge_RegisterFcuRxCallback(BridgeRxCallback cb) noexcept {
-  Bridge_RegisterSlotRxCallback(cb);
-}
-inline void Bridge_RegisterFcuTickCallback(BridgeTickCallback cb) noexcept {
-  Bridge_RegisterSlotTickCallback(cb);
-}

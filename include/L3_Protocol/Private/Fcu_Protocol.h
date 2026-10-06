@@ -105,6 +105,8 @@ bool parseStatusResponse(const uint8_t *data, size_t len,
 // ── L3 Protocol Core FCU Engine APIs ──────────────────────────────────────────
 void Fcu_Init() noexcept;
 void Fcu_HandleRx(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
+[[nodiscard]] size_t Fcu_HandleRxStream(uint8_t slot_idx,
+                                        std::span<const uint8_t> stream) noexcept;
 void Fcu_PollTick(uint32_t now_ms) noexcept;
 
 bool Fcu_SetPower(uint8_t slot_idx, bool on) noexcept;

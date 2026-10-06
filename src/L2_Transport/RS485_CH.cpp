@@ -53,7 +53,6 @@ static QueueHandle_t s_ch4_passthrough_queue = nullptr;
 static SemaphoreHandle_t s_ctrl_queue_mutex = nullptr;
 static SemaphoreHandle_t s_uart0_mutex = nullptr, s_uart1_mutex = nullptr,
                          s_uart2_mutex = nullptr;
-static std::atomic<bool> s_initial_caching_complete{false};
 
 QueueHandle_t *Engine_GetUartEventQueuePtr(uint8_t uart_num) noexcept {
   if (uart_num == 0) return &s_uart0_event_queue;
@@ -558,8 +557,6 @@ void Task_Ch1(void *pvParameters) {
   StaticPacket ctrlPacket;
   size_t current_dev_idx = 0;
   Ch1State current_state = Ch1State::IDLE;
-
-  static bool s_convergence_done = false;
   uint32_t next_poll_due_ms = millis();
 
   for (;;) {
@@ -584,27 +581,6 @@ void Task_Ch1(void *pvParameters) {
       } else if (u_evt.type == UART_PARITY_ERR ||
                  u_evt.type == UART_FRAME_ERR) {
         Diag_RecordChannelCrcError(1);
-      }
-    }
-
-    if (s_dispatcher.onTakeRelearnRequest &&
-        s_dispatcher.onTakeRelearnRequest()) {
-      s_convergence_done = false;
-      s_initial_caching_complete.store(false, std::memory_order_release);
-      if (g_system_event_group) {
-        xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
-      }
-      if (s_dispatcher.onCheckConvergence) {
-        s_dispatcher.onCheckConvergence(true);
-      }
-      System_TraceMessage("[AUTO PROBE] Convergence state reset. Re-learning "
-                            "bus offsets...\r\n");
-    }
-
-    if (!s_convergence_done && s_dispatcher.onCheckConvergence) {
-      if (s_dispatcher.onCheckConvergence(false)) {
-        s_convergence_done = true;
-        s_initial_caching_complete.store(true, std::memory_order_release);
       }
     }
 
@@ -843,21 +819,16 @@ void Task_Ch4(void *pvParameters) {
                         pdFALSE, portMAX_DELAY);
   }
 
-  if (!s_initial_caching_complete.load(std::memory_order_acquire)) {
+  if (g_system_event_group) {
     const uint32_t wait_start = millis();
-    while (!s_initial_caching_complete.load(std::memory_order_acquire) &&
-           (millis() - wait_start <
-            Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS)) {
+    while (millis() - wait_start <
+           Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS) {
       System_FeedWdt(Config::Task::WDT_ID_CH4);
-      if (g_system_event_group) {
-        EventBits_t bits = xEventGroupWaitBits(
-            g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
-            pdMS_TO_TICKS(200));
-        if (bits & SYS_EVT_CACHE_READY) {
-          break;
-        }
-      } else {
-        vTaskDelay(pdMS_TO_TICKS(200));
+      EventBits_t bits = xEventGroupWaitBits(
+          g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
+          pdMS_TO_TICKS(200));
+      if (bits & SYS_EVT_CACHE_READY) {
+        break;
       }
     }
     System_FeedWdt(Config::Task::WDT_ID_CH4);
@@ -877,10 +848,6 @@ void Task_Ch4(void *pvParameters) {
 
     if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx, 0) == pdTRUE) {
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
-    }
-
-    if (s_dispatcher.onDoorphoneCheckBellTimeout) {
-      s_dispatcher.onDoorphoneCheckBellTimeout();
     }
 
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(

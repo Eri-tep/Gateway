@@ -261,6 +261,57 @@ void Fcu_HandleRx(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
   }
 }
 
+size_t Fcu_HandleRxStream(uint8_t slot_idx,
+                          std::span<const uint8_t> stream) noexcept {
+  if (slot_idx < 1 || slot_idx >= Config::TCP::MAX_EW11_SLOTS || stream.empty()) {
+    return 0;
+  }
+
+  size_t p = 0;
+  const size_t len = stream.size();
+  const uint8_t *buf = stream.data();
+
+  while (p < len) {
+    if (buf[p] != 0x01) {
+      p++;
+      continue;
+    }
+
+    size_t rem = len - p;
+    // 19바이트 0x03 상태 쿼리 응답
+    if (rem >= 19 && buf[p + 1] == 0x03 && buf[p + 2] == 0x0E) {
+      Router_RecordBridgeSlotRx(slot_idx);
+      StaticPacket trace_pkt{5, 19};
+      std::copy(&buf[p], &buf[p + 19], trace_pkt.data.begin());
+      System_TracePacket(5, false, TraceType::RMT, trace_pkt);
+
+      Fcu_HandleRx(slot_idx, &buf[p], 19);
+      p += 19;
+      continue;
+    }
+
+    // 8바이트 0x06 / 0x10 제어 ACK
+    if (rem >= 8 && (buf[p + 1] == 0x06 || buf[p + 1] == 0x10)) {
+      Router_RecordBridgeSlotRx(slot_idx);
+      StaticPacket trace_pkt{5, 8};
+      std::copy(&buf[p], &buf[p + 8], trace_pkt.data.begin());
+      System_TracePacket(5, false, TraceType::RMT, trace_pkt);
+
+      Fcu_HandleRx(slot_idx, &buf[p], 8);
+      p += 8;
+      continue;
+    }
+
+    if (rem < 19) {
+      break;
+    }
+
+    p++;
+  }
+
+  return p;
+}
+
 void Fcu_PollTick(uint32_t now_ms) noexcept {
   for (uint8_t slot_idx = 1; slot_idx < Config::TCP::MAX_EW11_SLOTS; ++slot_idx) {
     if (!Router_IsBridgeSlotOnline(slot_idx))

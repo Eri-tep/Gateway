@@ -107,8 +107,6 @@ struct RS485_PacketDispatcher {
                     uint8_t poll_sub2) noexcept{nullptr};
   bool (*onDispatchControl)(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept{nullptr};
   uint32_t (*onGetPollIntervalMs)() noexcept{nullptr};
-  bool (*onCheckConvergence)(bool reset) noexcept{nullptr};
-  bool (*onTakeRelearnRequest)() noexcept{nullptr};
   uint8_t (*onGetStx)() noexcept{nullptr};
   bool (*onIsAutoUnlocked)() noexcept{nullptr};
   void (*onFeedAutoFrame)(span<const uint8_t> frame) noexcept{nullptr};
@@ -124,7 +122,6 @@ struct RS485_PacketDispatcher {
                                uint8_t &out_fixed_len) noexcept{nullptr};
   bool (*onDoorphoneGetLockedFraming)(uint8_t &stx, uint8_t &etx, uint8_t &len) noexcept{nullptr};
   void (*onDoorphoneFrameDetected)(uint8_t stx, uint8_t etx, uint8_t len) noexcept{nullptr};
-  void (*onDoorphoneCheckBellTimeout)() noexcept{nullptr};
   bool (*onIsQueryPacket)(span<const uint8_t> frame) noexcept{nullptr};
 };
 

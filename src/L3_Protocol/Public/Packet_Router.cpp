@@ -229,7 +229,7 @@ bool Router_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept {
 
 bool Router_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
                                 uint16_t port, const char *name) noexcept {
-  return Hub_SetSlot(slot_idx, enabled, ip, port, name);
+  return Bridge_SetSlot(slot_idx, enabled, ip, port, name);
 }
 
 bool Router_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept {
@@ -250,6 +250,10 @@ bool Router_IsBridgeSlotOnline(uint8_t slot_idx) noexcept {
 
 bool Router_SendBridgeRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
   return Bridge_SendRaw(slot_idx, data, len);
+}
+
+void Router_RecordBridgeSlotRx(uint8_t slot_idx) noexcept {
+  Bridge_RecordSlotRx(slot_idx);
 }
 
 

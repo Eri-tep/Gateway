@@ -606,8 +606,8 @@ size_t DeviceRepository::getOnlineCount() const noexcept {
 void Device_Init() noexcept {
   s_device_repo.initDevices();
   Fcu_Init();
-  Bridge_RegisterFcuRxCallback(Fcu_HandleRx);
-  Bridge_RegisterFcuTickCallback(Fcu_PollTick);
+  Bridge_RegisterSlotRxCallback(Fcu_HandleRxStream);
+  Bridge_RegisterSlotTickCallback(Fcu_PollTick);
 }
 
 void Device_Clear() noexcept {

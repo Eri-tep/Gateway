@@ -20,6 +20,7 @@ void ProtocolDiag_WarmCacheSaveToNvs() noexcept {
 
 void ProtocolDiag_WarmCacheCheckNvsDebounce() noexcept {
   WarmCache_CheckNvsDebounce();
+  Wallpad_DoorphoneCheckBellTimeout();
 }
 
 void ProtocolDiag_GetWarmCacheStatus(uint8_t &out_source, uint8_t &out_restored_count) noexcept {
@@ -528,8 +529,6 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onTimeout = Router_HandlePollTimeout;
   dispatcher.onDispatchControl = Router_DispatchControl;
   dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
-  dispatcher.onCheckConvergence = Wallpad_CheckConvergence;
-  dispatcher.onTakeRelearnRequest = Wallpad_TakeRelearnRequest;
   dispatcher.onGetStx = Wallpad_GetStx;
   dispatcher.onIsAutoUnlocked = Wallpad_IsAutoUnlocked;
   dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
@@ -542,7 +541,6 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onMatchDoorphoneLock = Wallpad_MatchDoorphoneLock;
   dispatcher.onDoorphoneGetLockedFraming = Wallpad_DoorphoneGetLockedFraming;
   dispatcher.onDoorphoneFrameDetected = Wallpad_DoorphoneFrameDetected;
-  dispatcher.onDoorphoneCheckBellTimeout = Wallpad_DoorphoneCheckBellTimeout;
   dispatcher.onIsQueryPacket = Wallpad_IsQueryPacket;
 }
 
