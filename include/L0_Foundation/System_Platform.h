@@ -181,6 +181,12 @@ extern std::atomic<bool> g_probe_convergence_reset;
 constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
 constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
 constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);
+constexpr EventBits_t SYS_EVT_NETWORK_READY = (1 << 3);
+
+inline bool System_IsNetworkReady() noexcept {
+  return (g_system_event_group != nullptr) &&
+         ((xEventGroupGetBits(g_system_event_group) & SYS_EVT_NETWORK_READY) != 0);
+}
 
 void System_Restart(const char *reason);
 

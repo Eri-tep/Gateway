@@ -1,7 +1,3 @@
-// ============================================================================
-// RemoteService: Level 4 Network Remote Services
-// ============================================================================
-
 #include "L4_Services/Mgmt_Service.h"
 #include "L4_Services/Mgmt/Mgmt_Internal.h"
 #include "L3_Protocol/Public/Protocol_Diagnostics.h"
@@ -23,6 +19,7 @@ static DeviceControlHandler s_control_handler = nullptr;
 static int s_mgmt_server_fd = -1;
 static uint32_t s_chk_ms = 0, s_met_ms = 0, s_tcp_ms = 0;
 static uint32_t s_last_sta_retry_ms = 0;
+static bool s_last_net_ready = false;
 static uint32_t s_sta_retry_interval_ms = Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
 constexpr uint32_t kMaxStaRetryIntervalMs = 60000;
 
@@ -233,56 +230,103 @@ void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds,
                      });
 }
 
+namespace {
+
+enum class NetworkFsmState : uint8_t {
+  DISCONNECTED, // Wi-Fi STA disconnected, backing off
+  TESTING,      // Testing newly switched Wi-Fi credentials (15s guard)
+  OPERATIONAL,  // Connected and sockets active
+};
+
+NetworkFsmState s_net_fsm = NetworkFsmState::DISCONNECTED;
+
+void handleFsmOperational(uint32_t now, EventBits_t bits) noexcept {
+  // Check if disconnected
+  if (!System_IsNetworkReady() || (bits & WIFI_BIT_DISCONNECTED)) {
+    Remote_StopServer();
+    s_net_fsm = NetworkFsmState::DISCONNECTED;
+    s_last_sta_retry_ms = now;
+    s_sta_retry_interval_ms = Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
+    return;
+  }
+}
+
+void handleFsmTesting(uint32_t now, EventBits_t bits) noexcept {
+  // Success check: got IP while testing
+  if (System_IsNetworkReady() || (bits & WIFI_BIT_GOT_IP)) {
+    g_wifi_guard.testing.store(false, std::memory_order_release);
+    Config_Save();
+    Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved to NVS.\r\n",
+                  g_config.wifi_ssid);
+    Remote_StartServer();
+    s_net_fsm = NetworkFsmState::OPERATIONAL;
+    return;
+  }
+
+  // Timeout check: failed to connect within 15 seconds
+  if (TimeUtils::isElapsed(g_wifi_guard.start_ms, 15000)) {
+    g_wifi_guard.testing.store(false, std::memory_order_release);
+    Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed within 15s! Reverting to '%s'...\r\n",
+                  g_config.wifi_ssid, g_wifi_guard.prev_ssid);
+    {
+      std::unique_lock lock(g_config_rw);
+      strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid,
+              sizeof(g_config.wifi_ssid) - 1);
+      strncpy(g_config.wifi_password, g_wifi_guard.prev_pass,
+              sizeof(g_config.wifi_password) - 1);
+    }
+    WiFi.disconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
+    s_net_fsm = NetworkFsmState::DISCONNECTED;
+    s_last_sta_retry_ms = now;
+  }
+}
+
+void handleFsmDisconnected(uint32_t now, EventBits_t bits) noexcept {
+  // If credential testing started, transition immediately
+  if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
+    s_net_fsm = NetworkFsmState::TESTING;
+    return;
+  }
+
+  // If network came up (IP acquired)
+  if (System_IsNetworkReady() || (bits & WIFI_BIT_GOT_IP)) {
+    Remote_StartServer();
+    s_net_fsm = NetworkFsmState::OPERATIONAL;
+    s_sta_retry_interval_ms = Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
+    return;
+  }
+
+  // Periodic exponential backoff STA reconnection
+  if (TimeUtils::isElapsed(s_last_sta_retry_ms, s_sta_retry_interval_ms)) {
+    s_last_sta_retry_ms = now;
+    Serial.printf("[WIFI] Reconnection attempt (interval: %u ms)...\r\n",
+                  static_cast<unsigned>(s_sta_retry_interval_ms));
+    esp_wifi_connect();
+    s_sta_retry_interval_ms =
+        std::min(s_sta_retry_interval_ms * 2, kMaxStaRetryIntervalMs);
+  }
+}
+
+} // namespace
+
 void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
-  if (!g_rescue_mode.load(std::memory_order_relaxed) && g_wifi_event_group) {
-    EventBits_t bits = xEventGroupGetBits(g_wifi_event_group);
+  if (!g_rescue_mode.load(std::memory_order_relaxed)) {
+    const EventBits_t bits = g_wifi_event_group ? xEventGroupGetBits(g_wifi_event_group) : 0;
 
-    if (bits & WIFI_BIT_GOT_IP) {
-      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
-      if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
-        g_wifi_guard.testing.store(false, std::memory_order_release);
-        Config_Save();
-        Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved "
-                      "to NVS.\r\n",
-                      g_config.wifi_ssid);
-      }
-    }
-
-    if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
-      if (TimeUtils::isElapsed(g_wifi_guard.start_ms, 15000)) {
-        g_wifi_guard.testing.store(false, std::memory_order_release);
-        Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed to connect within 15s! "
-                      "Reverting to '%s'...\r\n",
-                      g_config.wifi_ssid, g_wifi_guard.prev_ssid);
-        {
-          std::unique_lock lock(g_config_rw);
-          strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid,
-                  sizeof(g_config.wifi_ssid) - 1);
-          strncpy(g_config.wifi_password, g_wifi_guard.prev_pass,
-                  sizeof(g_config.wifi_password) - 1);
-        }
-        WiFi.disconnect(false);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
-      }
-    }
-
-    if (bits & WIFI_BIT_CONNECTED) {
-      s_sta_retry_interval_ms =
-          Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
-    }
-
-    if (bits & WIFI_BIT_DISCONNECTED) {
-      if (TimeUtils::isElapsed(s_last_sta_retry_ms,
-                               s_sta_retry_interval_ms)) {
-        s_last_sta_retry_ms = now;
-        Serial.printf("[WIFI] Event: DISCONNECTED. Background STA "
-                      "reconnection attempt (interval: %u ms)...\r\n",
-                      static_cast<unsigned>(s_sta_retry_interval_ms));
-        esp_wifi_connect();
-        s_sta_retry_interval_ms =
-            std::min(s_sta_retry_interval_ms * 2, kMaxStaRetryIntervalMs);
-      }
+    switch (s_net_fsm) {
+    case NetworkFsmState::OPERATIONAL:
+      handleFsmOperational(now, bits);
+      break;
+    case NetworkFsmState::TESTING:
+      handleFsmTesting(now, bits);
+      break;
+    case NetworkFsmState::DISCONNECTED:
+      handleFsmDisconnected(now, bits);
+      break;
+    default:
+      std::unreachable();
     }
   }
 
@@ -296,32 +340,69 @@ void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
   ProtocolDiag_WarmCacheCheckNvsDebounce();
 }
 
-void Remote_Init() {
-  if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    s_mgmt_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s_mgmt_server_fd >= 0) {
-      int opt = 1;
-      setsockopt(s_mgmt_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-      int flags = fcntl(s_mgmt_server_fd, F_GETFL, 0);
-      fcntl(s_mgmt_server_fd, F_SETFL, flags | O_NONBLOCK);
+void Remote_StartServer() noexcept {
+  if (g_rescue_mode.load(std::memory_order_relaxed)) {
+    Serial.println(F("[RESCUE] CH6 TCP server port disabled in Rescue Mode."));
+    return;
+  }
 
-      struct sockaddr_in saddr;
-      memset(&saddr, 0, sizeof(saddr));
-      saddr.sin_family = AF_INET;
-      saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-      saddr.sin_port = htons(Config::TCP::MGMT_PORT);
-      if (bind(s_mgmt_server_fd, reinterpret_cast<struct sockaddr *>(&saddr),
-               sizeof(saddr)) < 0 ||
-          listen(s_mgmt_server_fd, Config::TCP::MAX_MGMT_CLIENTS) < 0) {
-        ESP_LOGE("NET", "Failed to bind/listen mgmt server (8900): errno %d",
-                 errno);
-        close(s_mgmt_server_fd);
-        s_mgmt_server_fd = -1;
-      }
+  if (s_mgmt_server_fd >= 0) {
+    return; // Already listening
+  }
+
+  s_mgmt_server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (s_mgmt_server_fd >= 0) {
+    int opt = 1;
+    setsockopt(s_mgmt_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    int flags = fcntl(s_mgmt_server_fd, F_GETFL, 0);
+    fcntl(s_mgmt_server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in saddr;
+    memset(&saddr, 0, sizeof(saddr));
+    saddr.sin_family = AF_INET;
+    saddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    saddr.sin_port = htons(Config::TCP::MGMT_PORT);
+    if (bind(s_mgmt_server_fd, reinterpret_cast<struct sockaddr *>(&saddr),
+             sizeof(saddr)) < 0 ||
+        listen(s_mgmt_server_fd, Config::TCP::MAX_MGMT_CLIENTS) < 0) {
+      ESP_LOGE("NET", "Failed to bind/listen mgmt server (8900): errno %d",
+               errno);
+      close(s_mgmt_server_fd);
+      s_mgmt_server_fd = -1;
+    } else {
+      ESP_LOGI("NET", "[CH6] Management TCP Server listening on port %u",
+               Config::TCP::MGMT_PORT);
     }
-  } else {
-    Serial.println(F("[RESCUE] CH6 TCP server port disabled in Rescue "
-                     "Mode. Dedicated to OTA & Telnet."));
+  }
+}
+
+void Remote_StopServer() noexcept {
+  if (!s_mgmt_mutex)
+    return;
+
+  MutexLocker lock(s_mgmt_mutex);
+  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+    if (s_mgmt_sessions[i].sock >= 0) {
+      close(s_mgmt_sessions[i].sock);
+      s_mgmt_sessions[i].sock = -1;
+      s_mgmt_sessions[i].len = 0;
+    }
+  }
+
+  if (s_mgmt_server_fd >= 0) {
+    close(s_mgmt_server_fd);
+    s_mgmt_server_fd = -1;
+  }
+  ESP_LOGI("NET", "[CH6] Management TCP Server stopped");
+}
+
+void Remote_Init() {
+  // Phase 1: Pure static resource and timing initialization (Zero socket calls)
+  s_mgmt_server_fd = -1;
+  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+    s_mgmt_sessions[i].sock = -1;
+    s_mgmt_sessions[i].len = 0;
+    s_mgmt_sessions[i].connected_at_ms = 0;
   }
 
   s_chk_ms = millis();

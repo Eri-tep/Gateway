@@ -1,7 +1,3 @@
-// ============================================================================
-// RemoteService: Level 4 Network Remote Services
-// ============================================================================
-
 #include "L4_Services/Mgmt/Mgmt_Internal.h"
 #include "L4_Services/Mgmt_Service.h"
 #include "L0_Foundation/System_Config.h"
@@ -31,6 +27,10 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
                   IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
     if (g_wifi_event_group) {
       xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
+      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
+    }
+    if (g_system_event_group) {
+      xEventGroupSetBits(g_system_event_group, SYS_EVT_NETWORK_READY);
     }
     break;
   case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -39,14 +39,31 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
                   info.wifi_sta_disconnected.reason, s_wifi_disconnect_count);
     if (g_wifi_event_group) {
       xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
-      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_CONNECTED);
+      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_CONNECTED | WIFI_BIT_GOT_IP);
+    }
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_NETWORK_READY);
     }
     break;
   case ARDUINO_EVENT_WIFI_AP_START:
     Serial.println(F("[WIFI EVENT] SoftAP Started"));
+    if (g_wifi_event_group) {
+      xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
+      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
+    }
+    if (g_system_event_group) {
+      xEventGroupSetBits(g_system_event_group, SYS_EVT_NETWORK_READY);
+    }
     break;
   case ARDUINO_EVENT_WIFI_AP_STOP:
     Serial.println(F("[WIFI EVENT] SoftAP Stopped"));
+    if (g_wifi_event_group) {
+      xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
+      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
+    }
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_NETWORK_READY);
+    }
     break;
   case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
     Serial.printf(

@@ -1180,6 +1180,19 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
 }
 
 void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept {
+  static bool s_last_net_ready = false;
+  const bool current_net_ready = System_IsNetworkReady();
+
+  // 1. Edge-triggered network lifecycle (Zero horizontal coupling)
+  if (current_net_ready != s_last_net_ready) {
+    s_last_net_ready = current_net_ready;
+    if (current_net_ready) {
+      Bridge_StartServer();
+    } else {
+      Bridge_StopServer();
+    }
+  }
+
   if (!ota_now) {
     MutexLocker lock(s_ch5_mutex);
     for (int s = 1; s < Config::TCP::MAX_EW11_SLOTS; s++) {
@@ -1191,6 +1204,56 @@ void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept {
   }
 }
 
+void Bridge_StartServer() noexcept {
+  if (g_rescue_mode.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    if (s_ew11_server_fds[s] >= 0) {
+      continue; // Already listening
+    }
+
+    uint16_t listen_port = s_hub_slots[s].target_port;
+    if (listen_port == 0) {
+      listen_port = Config::TCP::EW11_SLOT_PORTS[s];
+      s_hub_slots[s].target_port = listen_port;
+    }
+
+    int sfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sfd >= 0) {
+      int opt = 1;
+      setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+      int flags = fcntl(sfd, F_GETFL, 0);
+      fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
+
+      struct sockaddr_in saddr;
+      memset(&saddr, 0, sizeof(saddr));
+      saddr.sin_family = AF_INET;
+      saddr.sin_addr.s_addr = htonl(INADDR_ANY);
+      saddr.sin_port = htons(listen_port);
+      if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
+          listen(sfd, 1) < 0) {
+        ESP_LOGE("EW11",
+                 "Failed to bind/listen EW11 slot %d on port %u: errno %d", s,
+                 listen_port, errno);
+        close(sfd);
+        sfd = -1;
+      } else {
+        ESP_LOGI("EW11", "[CH5] Listening for EW11 slot %d (%s) on port %u",
+                 s, s_hub_slots[s].name, listen_port);
+      }
+    }
+    s_ew11_server_fds[s] = sfd;
+  }
+}
+
+void Bridge_StopServer() noexcept {
+  Bridge_ShutdownSockets();
+  ESP_LOGI("EW11", "[CH5] EW11 Bridge TCP Sockets stopped");
+}
+
 void Bridge_Init() {
   if (!s_ch5_mutex) {
     s_ch5_mutex = xSemaphoreCreateMutex();
@@ -1198,42 +1261,12 @@ void Bridge_Init() {
   Ew11Manager::init();
   Hub_LoadConfig();
 
-  if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      uint16_t listen_port = s_hub_slots[s].target_port;
-      if (listen_port == 0) {
-        listen_port = Config::TCP::EW11_SLOT_PORTS[s];
-        s_hub_slots[s].target_port = listen_port;
-      }
-
-      int sfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-      if (sfd >= 0) {
-        int opt = 1;
-        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        int flags = fcntl(sfd, F_GETFL, 0);
-        fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
-
-        struct sockaddr_in saddr;
-        memset(&saddr, 0, sizeof(saddr));
-        saddr.sin_family = AF_INET;
-        saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-        saddr.sin_port = htons(listen_port);
-        if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr),
-                 sizeof(saddr)) < 0 ||
-            listen(sfd, 1) < 0) {
-          ESP_LOGE("EW11",
-                   "Failed to bind/listen EW11 slot %d on port %u: errno %d", s,
-                   listen_port, errno);
-          close(sfd);
-          sfd = -1;
-        } else {
-          ESP_LOGI("EW11", "[CH5] Listening for EW11 slot %d (%s) on port %u",
-                   s, s_hub_slots[s].name, listen_port);
-        }
-      }
-      s_ew11_server_fds[s] = sfd;
-    }
+  // Phase 1: Pure static resource and registration (Zero socket calls)
+  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    s_ew11_server_fds[s] = -1;
+    s_hub_slots[s].sock = -1;
+    s_hub_slots[s].is_connected = false;
+    s_hub_slots[s].rx_len = 0;
   }
 
   ProtocolTcpParticipant p;

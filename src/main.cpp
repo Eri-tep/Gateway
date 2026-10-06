@@ -345,9 +345,9 @@ void setup() {
   Boot_InitSyncPrimitives();
   Boot_RestoreConfigAndState();
   Boot_InitSubsystems();
-  Boot_InitWifiAndOta();
   Boot_InitHardwareAndDevices();
   Boot_StartTasks();
+  Boot_InitWifiAndOta();
 
   Serial.println(F("[BOOT] All FreeRTOS tasks started successfully."));
   esp_task_wdt_delete(nullptr);

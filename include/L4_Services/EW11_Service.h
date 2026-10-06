@@ -62,6 +62,8 @@ bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
 bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
 
 void Bridge_Init();
+void Bridge_StartServer() noexcept;
+void Bridge_StopServer() noexcept;
 void Bridge_ShutdownSockets() noexcept;
 
 // ── Core 0 Network Reactor Interface ──

@@ -49,9 +49,11 @@ void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
 void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
 
-// ── Network Subsystem Entry Points ──
+// ── Network Subsystem Entry Points & Lifecycle ──
 void Wifi_Init();
 void Remote_Init();
+void Remote_StartServer() noexcept;
+void Remote_StopServer() noexcept;
 void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
 void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
 void Remote_Tick(bool ota_now, uint32_t now_ms) noexcept;
