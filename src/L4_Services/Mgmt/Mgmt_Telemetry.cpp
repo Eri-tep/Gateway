@@ -446,6 +446,56 @@ void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
   }
 }
 
+namespace {
+
+int formatDeviceStateJson(char *buf, size_t buf_size, uint8_t dev_id,
+                          uint8_t sub1, uint8_t sub2, DeviceClass dev_class,
+                          int power, int target_temp, int current_temp,
+                          int speed, const char *valve_state, float power_w,
+                          int floor, int direction, int ho, int vent_mode) noexcept {
+  switch (dev_class) {
+  case DeviceClass::THERMOSTAT:
+    return snprintf(buf, buf_size,
+                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
+                    "\"sub2\":%u,\"class\":\"thermostat\",\"power\":%d,\"target_"
+                    "temp\":%d,\"current_temp\":%d}\n",
+                    dev_id, sub1, sub2, power, target_temp, current_temp);
+
+  case DeviceClass::VENT:
+    return snprintf(buf, buf_size,
+                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,"
+                    "\"class\":\"vent\",\"power\":%d,\"fan_speed\":%d,\"vent_mode\":%d}\n",
+                    dev_id, sub1, sub2, power, speed, vent_mode);
+
+  case DeviceClass::GAS:
+    return snprintf(buf, buf_size,
+                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
+                    "\"sub2\":%u,\"class\":\"gas\",\"valve\":\"%s\"}\n",
+                    dev_id, sub1, sub2, valve_state ? valve_state : "closed");
+
+  case DeviceClass::OUTLET:
+    return snprintf(buf, buf_size,
+                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,"
+                    "\"class\":\"outlet\",\"power\":%d,\"power_w\":%.1f}\n",
+                    dev_id, sub1, sub2, power, power_w);
+
+  case DeviceClass::MOMENTARY:
+    return snprintf(buf, buf_size,
+                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
+                    "\"sub2\":%u,\"class\":\"momentary\",\"power\":%d,\"floor\":"
+                    "%d,\"direction\":%d,\"ho\":%d}\n",
+                    dev_id, sub1, sub2, power, floor, direction, ho);
+
+  default:
+    return snprintf(buf, buf_size,
+                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
+                    "\"sub2\":%u,\"class\":\"switch\",\"power\":%d}\n",
+                    dev_id, sub1, sub2, power);
+  }
+}
+
+} // namespace
+
 void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                DeviceClass dev_class, int power,
                                int target_temp, int current_temp, int speed,
@@ -453,49 +503,10 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                int floor, int direction, int ho,
                                int vent_mode) {
   char buf[256];
-  int len = 0;
-  switch (dev_class) {
-  case DeviceClass::THERMOSTAT:
-    len = snprintf(buf, sizeof(buf),
-                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
-                   "\"sub2\":%u,\"class\":\"thermostat\",\"power\":%d,\"target_"
-                   "temp\":%d,\"current_temp\":%d}\n",
-                   dev_id, sub1, sub2, power, target_temp, current_temp);
-    break;
-  case DeviceClass::VENT:
-    len = snprintf(
-        buf, sizeof(buf),
-        "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,"
-        "\"class\":\"vent\",\"power\":%d,\"fan_speed\":%d,\"vent_mode\":%d}\n",
-        dev_id, sub1, sub2, power, speed, vent_mode);
-    break;
-  case DeviceClass::GAS:
-    len = snprintf(buf, sizeof(buf),
-                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
-                   "\"sub2\":%u,\"class\":\"gas\",\"valve\":\"%s\"}\n",
-                   dev_id, sub1, sub2, valve_state ? valve_state : "closed");
-    break;
-  case DeviceClass::OUTLET:
-    len = snprintf(
-        buf, sizeof(buf),
-        "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,"
-        "\"class\":\"outlet\",\"power\":%d,\"power_w\":%.1f}\n",
-        dev_id, sub1, sub2, power, power_w);
-    break;
-  case DeviceClass::MOMENTARY:
-    len = snprintf(buf, sizeof(buf),
-                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
-                   "\"sub2\":%u,\"class\":\"momentary\",\"power\":%d,\"floor\":"
-                   "%d,\"direction\":%d,\"ho\":%d}\n",
-                   dev_id, sub1, sub2, power, floor, direction, ho);
-    break;
-  default:
-    len = snprintf(buf, sizeof(buf),
-                   "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"
-                   "\"sub2\":%u,\"class\":\"switch\",\"power\":%d}\n",
-                   dev_id, sub1, sub2, power);
-    break;
-  }
+  int len = formatDeviceStateJson(buf, sizeof(buf), dev_id, sub1, sub2,
+                                  dev_class, power, target_temp, current_temp,
+                                  speed, valve_state, power_w, floor, direction,
+                                  ho, vent_mode);
 
   if (len <= 0 || !Remote_GetSessionMutex())
     return;

@@ -498,7 +498,7 @@ void cmdTrace(CliContext &ctx) {
   g_telnet_tracer.setTrace(true);
 
   struct TraceFilterDef {
-    const char *key;
+    std::string_view key;
     TraceType type;
     const char *desc;
   };
@@ -511,26 +511,28 @@ void cmdTrace(CliContext &ctx) {
       {"drp", TraceType::DRP, "Dropped packets only"},
   };
 
+  std::string_view sub_sv(sub);
+
   for (const auto &f : kTraceFilters) {
-    if (strcasecmp(sub, f.key) == 0) {
+    if (f.key == sub_sv || strcasecmp(sub, f.key.data()) == 0) {
       g_telnet_tracer.setFilter(f.type);
       sendTelnetMsgf(sock, "Packet trace ENABLED: %s.\r\n", f.desc);
       return;
     }
   }
 
-  if (strcasecmp(sub, "ch") == 0 ||
-      (strncasecmp(sub, "ch", 2) == 0 &&
-       isdigit(static_cast<unsigned char>(sub[2])))) {
+  // Channel filter: "ch <1-6>" or "ch<1-6>"
+  bool is_ch_prefix = (sub_sv.rfind("ch", 0) == 0 || sub_sv.rfind("CH", 0) == 0);
+  if (is_ch_prefix) {
     int ch_val = 0;
     bool ch_ok = false;
-    if (strcasecmp(sub, "ch") == 0 && token_count >= 2) {
+    if (sub_sv.size() == 2 && token_count >= 2) {
       ch_ok = CliFmt::ParseInt(ctx.args.get(2), ch_val, 1, 6);
-    } else if (strncasecmp(sub, "ch", 2) == 0 &&
-               isdigit(static_cast<unsigned char>(sub[2]))) {
+    } else if (sub_sv.size() == 3 && isdigit(static_cast<unsigned char>(sub[2]))) {
       ch_val = sub[2] - '0';
       ch_ok = (ch_val >= 1 && ch_val <= 6);
     }
+
     if (ch_ok) {
       g_telnet_tracer.setFilter(TraceType::CH, static_cast<uint8_t>(ch_val));
       sendTelnetMsgf(sock, "Packet trace ENABLED: Channel %u only.\r\n",
@@ -538,21 +540,29 @@ void cmdTrace(CliContext &ctx) {
     } else {
       sendTelnetMsg(sock, "[ERROR] Invalid channel: trace ch <1-6>\r\n");
     }
-  } else if (strcasecmp(sub, "devid") == 0 || strncasecmp(sub, "0x", 2) == 0) {
+    return;
+  }
+
+  // Device ID filter: "devid <hex>" or "0x<hex>"
+  bool is_devid_cmd = (strcasecmp(sub, "devid") == 0);
+  bool is_hex_prefix = (sub_sv.rfind("0x", 0) == 0 || sub_sv.rfind("0X", 0) == 0);
+  if (is_devid_cmd || is_hex_prefix) {
     uint8_t id = 0;
-    if (strcasecmp(sub, "devid") == 0 && token_count >= 2) {
+    if (is_devid_cmd && token_count >= 2) {
       id = static_cast<uint8_t>(strtol(ctx.args.get(2), nullptr, 16));
-    } else if (strncasecmp(sub, "0x", 2) == 0) {
+    } else if (is_hex_prefix) {
       id = static_cast<uint8_t>(strtol(sub, nullptr, 16));
     }
     g_telnet_tracer.setFilter(TraceType::DEVID, id);
-    sendTelnetMsgf(sock, "Packet trace ENABLED: Device ID 0x%02X only.\r\n",
-                   id);
-    CliFmt::PrintSubCmdHelp(
-        sock, "TRACE COMMAND REFERENCE", kTraceHelp,
-        sizeof(kTraceHelp) / sizeof(kTraceHelp[0]),
-        "Tip: Use 'q' shortcut to quickly stop active tracing");
+    sendTelnetMsgf(sock, "Packet trace ENABLED: Device ID 0x%02X only.\r\n", id);
+    return;
   }
+
+  // If unrecognized, show reference help
+  CliFmt::PrintSubCmdHelp(
+      sock, "TRACE COMMAND REFERENCE", kTraceHelp,
+      sizeof(kTraceHelp) / sizeof(kTraceHelp[0]),
+      "Tip: Use 'q' shortcut to quickly stop active tracing");
 }
 
 void cmdStop(CliContext &ctx) {

@@ -360,14 +360,17 @@ static void HandleRpc_SetWifiMode(int sock, long req_id, const char *json_str,
                                   const IPAddress & /*client_ip*/) {
   char mode_buf[16] = {0};
   if (findJsonStringValue(json_str, "mode", mode_buf, sizeof(mode_buf))) {
+    std::string_view mode_sv(mode_buf);
+    wifi_mode_t target_mode = WIFI_STA;
+
     if (strcasecmp(mode_buf, "AP") == 0) {
-      WiFi.mode(WIFI_AP);
+      target_mode = WIFI_AP;
     } else if (strcasecmp(mode_buf, "AP_STA") == 0 ||
                strcasecmp(mode_buf, "AP+STA") == 0) {
-      WiFi.mode(WIFI_AP_STA);
-    } else {
-      WiFi.mode(WIFI_STA);
+      target_mode = WIFI_AP_STA;
     }
+
+    WiFi.mode(target_mode);
     sendRpcResponse(sock, req_id, "ok");
   } else {
     sendRpcResponse(sock, req_id, "error", "Missing mode parameter");

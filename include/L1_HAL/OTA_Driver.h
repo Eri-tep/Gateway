@@ -27,3 +27,6 @@ void System_StartHttpOta(const char *url);
 // OTA 시작 전 네트워크/소켓 정리 훅 등록
 using PreOtaHookFn = void (*)() noexcept;
 void SystemOta_RegisterPreOtaHook(PreOtaHookFn hook) noexcept;
+
+// ArduinoOTA 포트 및 콜백 수명주기 초기화 함수
+void SystemOta_InitArduinoOta(const char *hostname, const char *password);

@@ -1,33 +1,31 @@
+// ── L0 Foundation ──
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
+
+// ── L1 HAL Drivers ──
+#include "L1_HAL/Uart_Driver.h"
+#include "L1_HAL/Diagnostics_Driver.h"
+#include "L1_HAL/OTA_Driver.h"
+
+// ── L2 Transport Channels ──
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/TCP_CH.h"
-#include "L1_HAL/Uart_Driver.h"
+
+// ── L3 Protocol Routing ──
 #include "L3_Protocol/Public/Device_Registry.h"
 #include "L3_Protocol/Public/Packet_Router.h"
 #include "L3_Protocol/Public/Protocol_Diagnostics.h"
+
+// ── L4 Network Services ──
 #include "L4_Services/Mgmt_Service.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/EW11_Service.h"
-#include "L1_HAL/Diagnostics_Driver.h"
-#include "L1_HAL/OTA_Driver.h"
 
 #include "esp_attr.h"
 #include "esp_idf_version.h"
 #include "esp_ota_ops.h"
-#include "esp_sntp.h"
 #include "esp_task_wdt.h"
-#include "esp_wifi.h"
-#include "lwip/ip.h"
-#include "lwip/tcp.h"
-#include <ArduinoOTA.h>
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-#include <Network.h>
-#endif
-#include <WiFi.h>
-
-void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 
 // ============================================================================
 // FreeRTOS Task Priorities & Deployment Descriptors
@@ -179,13 +177,11 @@ static void Boot_InitSyncPrimitives() {
   ch2_config.event_queue_ptr = RS485_GetUartEventQueuePtr(1);
   ch3_config.event_queue_ptr = RS485_GetUartEventQueuePtr(2);
 
-  if (!g_wifi_event_group)
-    g_wifi_event_group = xEventGroupCreate();
+  static StaticEventGroup_t s_system_event_group_buf;
   if (!g_system_event_group) {
-    g_system_event_group = xEventGroupCreate();
+    g_system_event_group = xEventGroupCreateStatic(&s_system_event_group_buf);
     xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
   }
-  WiFi.onEvent(onWifiEvent);
 }
 
 // ============================================================================
@@ -264,90 +260,8 @@ static void Boot_InitHardwareAndDevices() {
 // ============================================================================
 static void Boot_InitWifiAndOta() {
   if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    Serial.printf("[WIFI] Connecting to '%s' (Timeout: %us)...\r\n",
-                  g_config.wifi_ssid, g_config.wifi_connect_timeout_s);
-    WiFi.persistent(false);
-    WiFi.setAutoReconnect(true);
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
-    esp_wifi_set_ps(WIFI_PS_NONE);
-
-    wifi_config_t w_conf;
-    memset(&w_conf, 0, sizeof(w_conf));
-    strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), g_config.wifi_ssid,
-            sizeof(w_conf.sta.ssid) - 1);
-    strncpy(reinterpret_cast<char *>(w_conf.sta.password),
-            g_config.wifi_password, sizeof(w_conf.sta.password) - 1);
-    w_conf.sta.scan_method = WIFI_FAST_SCAN;
-    w_conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-    w_conf.sta.pmf_cfg.capable = true;
-    w_conf.sta.pmf_cfg.required = false;
-    w_conf.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-
-    esp_wifi_set_config(WIFI_IF_STA, &w_conf);
-    esp_wifi_connect();
-
-    uint32_t t_start = millis();
-    uint32_t max_wait =
-        (g_config.wifi_connect_timeout_s ? g_config.wifi_connect_timeout_s
-                                         : 30) *
-        1000;
-    bool connected = false;
-
-    while (millis() - t_start < max_wait) {
-      if ((connected = (WiFi.status() == WL_CONNECTED)))
-        break;
-      vTaskDelay(pdMS_TO_TICKS(500));
-    }
-
-    if (connected) {
-      WiFi.setSleep(false);
-      Serial.printf("[WIFI] Connected successfully! IP: %s, RSSI: %d dBm\r\n",
-                    WiFi.localIP().toString().c_str(), WiFi.RSSI());
-      configTime(0, 0, "pool.ntp.org", "asia.pool.ntp.org");
-      setenv("TZ", "KST-9", 1);
-      tzset();
-    } else {
-      WiFi.mode(WIFI_AP_STA);
-      vTaskDelay(pdMS_TO_TICKS(100));
-
-      WiFi.softAPConfig(IPAddress(172, 30, 2, 1), IPAddress(172, 30, 2, 1),
-                        IPAddress(255, 255, 255, 0));
-      bool ap_ok = WiFi.softAP(g_config.ap_ssid, g_config.ap_password, 1, 0, 4);
-
-      WiFi.setSleep(false);
-      esp_wifi_set_max_tx_power(78);
-      Serial.printf("[WIFI] STA connect failed. Fallback SoftAP '%s' started: "
-                    "%s (IP: %s)\r\n",
-                    g_config.ap_ssid, ap_ok ? "SUCCESS" : "FAILED",
-                    WiFi.softAPIP().toString().c_str());
-    }
-
-    ArduinoOTA.setHostname("gateway-bridge");
-    ArduinoOTA.setPassword(OTA_PASSWORD);
-    ArduinoOTA.onStart([]() {
-      g_ota_in_progress.store(true, std::memory_order_release);
-      if (g_system_event_group) {
-        xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-      }
-      ::Serial.println(F("[ArduinoOTA] Start transfer..."));
-    });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-      esp_task_wdt_reset();
-      g_wdt_monitor.feed(4);
-    });
-    ArduinoOTA.onEnd([]() {
-      ::Serial.println(F("[ArduinoOTA] Finished successfully!"));
-      System_Restart("OTA Firmware Update");
-    });
-    ArduinoOTA.onError([](ota_error_t error) {
-      g_ota_in_progress.store(false, std::memory_order_release);
-      if (g_system_event_group) {
-        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-      }
-      ::Serial.printf("[ArduinoOTA] Error (%u)\r\n", (unsigned)error);
-    });
-    ArduinoOTA.begin();
+    Wifi_Init();
+    SystemOta_InitArduinoOta("gateway-bridge", OTA_PASSWORD);
   }
 }
 
@@ -430,9 +344,9 @@ void setup() {
   Boot_CheckCrashLoop();
   Boot_InitSyncPrimitives();
   Boot_RestoreConfigAndState();
-  Boot_InitHardwareAndDevices();
-  Boot_InitWifiAndOta();
   Boot_InitSubsystems();
+  Boot_InitWifiAndOta();
+  Boot_InitHardwareAndDevices();
   Boot_StartTasks();
 
   Serial.println(F("[BOOT] All FreeRTOS tasks started successfully."));

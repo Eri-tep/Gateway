@@ -1,7 +1,9 @@
 #include "L1_HAL/OTA_Driver.h"
+#include "L1_HAL/Diagnostics_Driver.h"
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
+#include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <Update.h>
 #include <WiFi.h>
@@ -756,4 +758,35 @@ void System_GetHttpOtaSnapshot(HttpOtaSnapshot &out) noexcept {
 bool System_IsHttpOtaInProgress() noexcept {
   return g_http_ota_state.in_progress.load(std::memory_order_relaxed);
 }
+
+void SystemOta_InitArduinoOta(const char *hostname, const char *password) {
+  ArduinoOTA.setHostname(hostname ? hostname : "gateway-bridge");
+  if (password && password[0]) {
+    ArduinoOTA.setPassword(password);
+  }
+  ArduinoOTA.onStart([]() {
+    g_ota_in_progress.store(true, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+    ::Serial.println(F("[ArduinoOTA] Start transfer..."));
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    esp_task_wdt_reset();
+    g_wdt_monitor.feed(4);
+  });
+  ArduinoOTA.onEnd([]() {
+    ::Serial.println(F("[ArduinoOTA] Finished successfully!"));
+    System_Restart("OTA Firmware Update");
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+    ::Serial.printf("[ArduinoOTA] Error (%u)\r\n", (unsigned)error);
+  });
+  ArduinoOTA.begin();
+}
+
 

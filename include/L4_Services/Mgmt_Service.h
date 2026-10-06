@@ -50,6 +50,7 @@ void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
 
 // ── Network Subsystem Entry Points ──
+void Wifi_Init();
 void Remote_Init();
 void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
 void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
