@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.0.5";
+constexpr const char *FIRMWARE_VERSION = "v2.0.6";
 } // namespace Config
 
 namespace Config::Task {
@@ -228,16 +228,11 @@ enum class TraceType : uint8_t {
   DEVID
 };
 
-// ── RTC Fast SRAM Retention Variables & Constants ──
+// ── RTC Fast SRAM Retention Constants ──
 constexpr uint32_t RTC_MAGIC_CLEAN_RESTART = 0x434C4E52; // 'CLNR'
 constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343;        // 'RESC'
 constexpr uint32_t RTC_MAGIC_WDT = 0x57445431;           // 'WDT1'
 
-extern uint32_t rtc_magic;
-extern uint32_t rtc_last_alive_ms[Config::Task::TASK_COUNT];
 // Stage breadcrumb is sealed in L1 (System_MarkStage); macro keeps call sites.
 #define TSTAGE(n)                                                              \
   System_MarkStage(0xA5A50000u | (static_cast<uint32_t>(n) & 0xFFFFu))
-extern uint32_t rtc_rescue_magic;
-extern uint32_t rtc_crash_counter;
-extern uint32_t rtc_clean_restart_magic;

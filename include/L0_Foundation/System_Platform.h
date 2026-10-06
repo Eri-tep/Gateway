@@ -192,12 +192,27 @@ struct StaticPacket {
 extern EventGroupHandle_t g_system_event_group;
 extern std::atomic<bool> g_ota_in_progress;
 
+inline EventGroupHandle_t System_GetEventGroup() noexcept {
+  return g_system_event_group;
+}
+inline void System_SetEventGroup(EventGroupHandle_t eg) noexcept {
+  g_system_event_group = eg;
+}
+
+inline bool System_IsOtaInProgress() noexcept {
+  return g_ota_in_progress.load(std::memory_order_relaxed);
+}
+inline void System_SetOtaInProgress(bool in_prog) noexcept {
+  g_ota_in_progress.store(in_prog, std::memory_order_relaxed);
+}
+
 // ── Sealed System State Contracts (implemented in L1 Diagnostics_Driver) ──
 /// Crash breadcrumb in RTC SRAM; read/cleared by System_DiagnoseStuck().
 void System_MarkStage(uint32_t stage) noexcept;
 bool System_IsRescueMode() noexcept;
 void System_SetRollbackDetected() noexcept;
 bool System_IsRollbackDetected() noexcept;
+uint32_t System_GetCrashCounter() noexcept;
 constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
 constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
 constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);
@@ -235,13 +250,100 @@ using ShutdownHook = ShutdownHookFn;
 void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept;
 void System_RegisterShutdownHook(ShutdownHookFn hook) noexcept;
 
-// ── System Snapshots & Hardware Inspection (L0 Universal Platform) ───────────
-struct SysSnapshot;
-struct HwSnapshot;
-struct StackSnapshot;
-struct PktSnapshot;
-struct LogEntry;
-struct HttpOtaSnapshot;
+// ── System Snapshots & Diagnostics DTOs (L0 Universal Platform) ──────────────
+enum class HubDeviceType : uint8_t {
+  WALLPAD_COMPATIBLE = 0,
+  AIR_CONDITIONER = 1
+};
+
+struct HubClientSlotSnapshot {
+  bool enabled{false};
+  bool is_connected{false};
+  char name[16]{""};
+  char target_ip[16]{""};
+  uint16_t target_port{0};
+  HubDeviceType dev_type{HubDeviceType::WALLPAD_COMPATIBLE};
+  uint32_t last_rx_ms{0};
+  uint32_t rx_pkts{0};
+  uint32_t tx_pkts{0};
+  uint32_t dropped_pkts{0};
+};
+
+struct MgmtSessionSnapshot {
+  bool is_active{false};
+  char peer_ip[16]{""};
+  uint32_t connected_at_ms{0};
+  uint32_t last_activity_ms{0};
+};
+
+struct HttpOtaSnapshot {
+  bool in_progress{false};
+  char status[64]{"Idle"};
+  uint8_t progress_pct{0};
+  char last_error[64]{""};
+};
+
+struct SysSnapshot {
+  uint32_t free_heap{0};
+  uint32_t min_free_heap{0};
+  uint32_t total_heap{0};
+  uint32_t sketch_size_kb{0};
+  uint32_t flash_total_kb{0};
+  uint32_t uptime_ms{0};
+  bool wifi_connected{false};
+  int8_t wifi_rssi{0};
+  char wifi_ip[16]{""};
+};
+
+struct HwSnapshot {
+  uint8_t cpu0_cur{0}, cpu0_15m_avg{0}, cpu0_15m_peak{0}, cpu0_24h_avg{0}, cpu0_24h_peak{0};
+  uint8_t cpu1_cur{0}, cpu1_15m_avg{0}, cpu1_15m_peak{0}, cpu1_24h_avg{0}, cpu1_24h_peak{0};
+  uint16_t ram_cur{0}, ram_15m_avg{0}, ram_15m_peak{0}, ram_24h_avg{0}, ram_24h_peak{0};
+  int8_t temp_cur{0}, temp_15m_avg{0}, temp_15m_peak{0}, temp_24h_avg{0}, temp_24h_peak{0};
+};
+
+struct StackSnapshot {
+  uint16_t ch1_stack{0}, ch2_stack{0}, ch3_stack{0}, ch4_stack{0}, net_stack{0}, telnet_stack{0};
+};
+
+struct ChanStats {
+  uint32_t rx_pkts{0};
+  uint32_t tx_pkts{0};
+  uint32_t crc_errors{0};
+  uint32_t invalid_frames{0};
+  uint32_t timeouts{0};
+  uint32_t lock_timeouts{0};
+  uint32_t uncached_pkts{0};
+  uint32_t last_activity_ms{0};
+};
+
+struct TcpChanStats {
+  uint32_t rx_pkts{0};
+  uint32_t tx_pkts{0};
+  uint32_t dropped_pkts{0};
+  uint32_t uncached_pkts{0};
+  uint16_t connection_count{0};
+  bool is_connected{false};
+};
+
+struct PktSnapshot {
+  ChanStats ch1;
+  ChanStats ch2;
+  ChanStats ch3;
+  ChanStats ch4;
+  TcpChanStats ch5;
+  TcpChanStats ch6;
+};
+
+struct LogEntry {
+  uint32_t timestamp{0};
+  char reason[32]{""};
+  SysSnapshot stats_snapshot;
+  HwSnapshot hw_snapshot;
+  StackSnapshot stack_snapshot;
+  PktSnapshot packet_stats_snapshot;
+};
+
 struct AppendBuf;
 
 void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
@@ -293,11 +395,13 @@ constexpr EventBits_t WIFI_BIT_GOT_IP = BIT2;
 void System_WifiInit() noexcept;
 bool System_WifiIsConnected() noexcept;
 IPAddress System_WifiGetIp() noexcept;
+IPAddress System_WifiGetSubnetMask() noexcept;
+IPAddress System_WifiGetApIp() noexcept;
+IPAddress System_WifiGetApSubnetMask() noexcept;
 int8_t System_WifiGetRssi() noexcept;
 void System_WifiReconnect() noexcept;
 
 // ── Bridge Transport Channel Slot Snapshot Contract ──────────────────────────
-struct HubClientSlotSnapshot;
 bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;
 
 // ── IP Subnet & Management Whitelist Filters (Global Security Policy) ────────

@@ -93,6 +93,13 @@ static TaskWdtMonitor s_wdt_monitor;
 PacketStatistics g_pkt_stats;
 Ch1StateMetrics g_ch1_state_metrics;
 
+// ── Sealed RTC Fast SRAM Retention State (L1-owned) ──
+static RTC_NOINIT_ATTR uint32_t s_rtc_magic;
+static RTC_NOINIT_ATTR uint32_t s_rtc_last_alive_ms[Config::Task::TASK_COUNT];
+static RTC_NOINIT_ATTR uint32_t s_rtc_rescue_magic;
+static RTC_NOINIT_ATTR uint32_t s_rtc_crash_counter;
+static RTC_NOINIT_ATTR uint32_t s_rtc_clean_restart_magic;
+
 static void Diagnostics_FeedWdtImpl(size_t index) noexcept {
   s_wdt_monitor.feed(index);
 }
@@ -119,7 +126,7 @@ void TaskWdtMonitor::feed(size_t index) noexcept {
     return;
 
   const uint32_t now = millis();
-  rtc_last_alive_ms[index] = now;
+  s_rtc_last_alive_ms[index] = now;
   const uint32_t prev =
       tasks[index].last_feed_ms.exchange(now, std::memory_order_relaxed);
   if (prev > 0) {
@@ -172,7 +179,7 @@ void System_Restart(const char *reason) {
   uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));
   uart_wait_tx_done(UART_NUM_2, pdMS_TO_TICKS(50));
 
-  rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
+  s_rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
   vTaskDelay(pdMS_TO_TICKS(150));
   esp_restart();
 }
@@ -193,6 +200,42 @@ bool System_IsRollbackDetected() noexcept {
   return s_rollback_detected.load(std::memory_order_acquire);
 }
 
+uint32_t Diag_EvaluateCrashCounter(esp_reset_reason_t reason) noexcept {
+  bool is_abnormal_crash =
+      (reason == ESP_RST_PANIC || reason == ESP_RST_TASK_WDT ||
+       reason == ESP_RST_INT_WDT || reason == ESP_RST_WDT ||
+       reason == ESP_RST_BROWNOUT);
+
+  if (s_rtc_rescue_magic != RTC_MAGIC_RESCUE || !is_abnormal_crash) {
+    s_rtc_rescue_magic = RTC_MAGIC_RESCUE;
+    s_rtc_crash_counter = 0;
+  } else {
+    s_rtc_crash_counter++;
+    ::Serial.printf("[BOOT] Consecutive crash count: %u (Reason: %d)\r\n",
+                    s_rtc_crash_counter, reason);
+  }
+  return s_rtc_crash_counter;
+}
+
+uint32_t Diag_GetCrashCounter() noexcept {
+  return s_rtc_crash_counter;
+}
+
+void Diag_ResetCrashCounter() noexcept {
+  s_rtc_crash_counter = 0;
+}
+
+void Diag_ResetTaskWdtAlive() noexcept {
+  uint32_t now = millis();
+  for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
+    s_rtc_last_alive_ms[i] = now;
+  }
+}
+
+uint32_t System_GetCrashCounter() noexcept {
+  return Diag_GetCrashCounter();
+}
+
 void Diag_DiagnoseStuck() {
   uint32_t saved_telnet_stage = s_stage_marker;
   s_stage_marker = 0;
@@ -205,16 +248,16 @@ void Diag_DiagnoseStuck() {
                 "WDT_ID_TELNET out of bounds");
 
   esp_reset_reason_t reason = esp_reset_reason();
-  if (rtc_magic != RTC_MAGIC_WDT || reason == ESP_RST_POWERON) {
-    rtc_magic = RTC_MAGIC_WDT;
-    memset(rtc_last_alive_ms, 0, sizeof(rtc_last_alive_ms));
+  if (s_rtc_magic != RTC_MAGIC_WDT || reason == ESP_RST_POWERON) {
+    s_rtc_magic = RTC_MAGIC_WDT;
+    memset(s_rtc_last_alive_ms, 0, sizeof(s_rtc_last_alive_ms));
     return;
   }
 
   uint32_t max_val = 0;
   for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
-    if (rtc_last_alive_ms[i] > max_val)
-      max_val = rtc_last_alive_ms[i];
+    if (s_rtc_last_alive_ms[i] > max_val)
+      max_val = s_rtc_last_alive_ms[i];
   }
 
   if (max_val == 0)
@@ -223,9 +266,9 @@ void Diag_DiagnoseStuck() {
   uint32_t max_gap = 0;
   int found_idx = -1;
   for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
-    if (rtc_last_alive_ms[i] > 0) {
-      uint32_t gap = (max_val >= rtc_last_alive_ms[i])
-                         ? (max_val - rtc_last_alive_ms[i])
+    if (s_rtc_last_alive_ms[i] > 0) {
+      uint32_t gap = (max_val >= s_rtc_last_alive_ms[i])
+                         ? (max_val - s_rtc_last_alive_ms[i])
                          : 0;
       if (gap >= 2000 && gap > max_gap) {
         max_gap = gap;
@@ -253,21 +296,21 @@ void Diag_DiagnoseStuck() {
              "Task WDT: All Tasks Stalled");
   }
 
-  memset(rtc_last_alive_ms, 0, sizeof(rtc_last_alive_ms));
+  memset(s_rtc_last_alive_ms, 0, sizeof(s_rtc_last_alive_ms));
 }
 
 void Diag_LogResetReason() {
   esp_reset_reason_t reason = esp_reset_reason();
 
   if (reason == ESP_RST_SW) {
-    if (rtc_clean_restart_magic == RTC_MAGIC_CLEAN_RESTART) {
-      rtc_clean_restart_magic = 0;
+    if (s_rtc_clean_restart_magic == RTC_MAGIC_CLEAN_RESTART) {
+      s_rtc_clean_restart_magic = 0;
       return;
     }
     s_pending_reboot_reason = "Software Reset (esp_restart)";
     return;
   }
-  rtc_clean_restart_magic = 0;
+  s_rtc_clean_restart_magic = 0;
 
   const char *reason_str = nullptr;
   switch (reason) {
@@ -357,7 +400,7 @@ void Diag_CheckOtaHealth() {
   }
 
   s_ota_validated.store(true, std::memory_order_release);
-  rtc_crash_counter = 0;
+  s_rtc_crash_counter = 0;
   const esp_partition_t *running = esp_ota_get_running_partition();
   if (running) {
     esp_ota_img_states_t ota_state;

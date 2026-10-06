@@ -196,6 +196,29 @@ IPAddress System_WifiGetIp() noexcept {
   return Wifi_Driver_GetIp();
 }
 
+IPAddress System_WifiGetSubnetMask() noexcept {
+  if (WiFi.status() == WL_CONNECTED) {
+    return WiFi.subnetMask();
+  }
+  return IPAddress(0, 0, 0, 0);
+}
+
+IPAddress System_WifiGetApIp() noexcept {
+  wifi_mode_t mode = WiFi.getMode();
+  if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
+    return WiFi.softAPIP();
+  }
+  return IPAddress(0, 0, 0, 0);
+}
+
+IPAddress System_WifiGetApSubnetMask() noexcept {
+  wifi_mode_t mode = WiFi.getMode();
+  if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
+    return WiFi.softAPSubnetMask();
+  }
+  return IPAddress(0, 0, 0, 0);
+}
+
 int8_t System_WifiGetRssi() noexcept {
   return Wifi_Driver_GetRssi();
 }

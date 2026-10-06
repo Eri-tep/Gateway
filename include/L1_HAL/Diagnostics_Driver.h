@@ -205,6 +205,10 @@ void Diag_CheckOtaHealth();
 void Diag_LogResetReason();
 void Diag_DiagnoseStuck();
 void Diag_CheckCoreDump();
+uint32_t Diag_EvaluateCrashCounter(esp_reset_reason_t reason) noexcept;
+uint32_t Diag_GetCrashCounter() noexcept;
+void Diag_ResetCrashCounter() noexcept;
+void Diag_ResetTaskWdtAlive() noexcept;
 
 const char *Diag_GetPendingRebootReason() noexcept;
 const char *Diag_ConsumePendingRebootReason() noexcept;

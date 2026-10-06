@@ -103,19 +103,7 @@ static void Boot_CheckCrashLoop() {
   }
 
   esp_reset_reason_t reset_reason = esp_reset_reason();
-  bool is_abnormal_crash =
-      (reset_reason == ESP_RST_PANIC || reset_reason == ESP_RST_TASK_WDT ||
-       reset_reason == ESP_RST_INT_WDT || reset_reason == ESP_RST_WDT ||
-       reset_reason == ESP_RST_BROWNOUT);
-
-  if (rtc_rescue_magic != RTC_MAGIC_RESCUE || !is_abnormal_crash) {
-    rtc_rescue_magic = RTC_MAGIC_RESCUE;
-    rtc_crash_counter = 0;
-  } else {
-    rtc_crash_counter++;
-    Serial.printf("[BOOT] Consecutive crash count: %u (Reason: %d)\r\n",
-                  rtc_crash_counter, reset_reason);
-  }
+  Diag_EvaluateCrashCounter(reset_reason);
 
   pinMode(Config::GPIO::BTN_PIN, INPUT_PULLUP);
   if (digitalRead(Config::GPIO::BTN_PIN) == LOW) {
@@ -148,7 +136,7 @@ static void Boot_CheckCrashLoop() {
   }
 
   if (!System_IsRescueMode() &&
-      rtc_crash_counter >= 3) {
+      Diag_GetCrashCounter() >= 3) {
     const esp_partition_t *run_p = esp_ota_get_running_partition();
     const esp_partition_t *next_p_check =
         esp_ota_get_next_update_partition(nullptr);
@@ -157,8 +145,8 @@ static void Boot_CheckCrashLoop() {
         strcmp(run_p->label, next_p_check->label) != 0) {
       Serial.printf("[RESCUE] ★ Crash Loop detected (%u crashes)! Rolling back "
                     "from '%s' to '%s'...\r\n",
-                    rtc_crash_counter, run_p->label, next_p_check->label);
-      rtc_crash_counter = 0;
+                    Diag_GetCrashCounter(), run_p->label, next_p_check->label);
+      Diag_ResetCrashCounter();
       esp_err_t err = esp_ota_set_boot_partition(next_p_check);
       if (err == ESP_OK) {
         Serial.println(F("[RESCUE] Boot partition switched successfully. "
@@ -174,7 +162,7 @@ static void Boot_CheckCrashLoop() {
 
     Serial.printf("[RESCUE] ★ Crash Loop detected (%u crashes)! Forcing Rescue "
                   "Safe Mode...\r\n",
-                  rtc_crash_counter);
+                  Diag_GetCrashCounter());
     if (!Config_IsFrozen()) {
       Config_Load();
       Config_Freeze();
@@ -348,10 +336,7 @@ static const TaskSpawnDescriptor kTaskDescriptors[] = {
 };
 
 static void Boot_StartTasks() {
-  uint32_t now = millis();
-  for (size_t i = 0; i < 6; i++) {
-    rtc_last_alive_ms[i] = now;
-  }
+  Diag_ResetTaskWdtAlive();
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
   esp_task_wdt_config_t twdt_config = {

@@ -1,4 +1,5 @@
 #include "L0_Foundation/System_Platform.h"
+#include <lwip/sockets.h>
 
 // ── System Lifecycle & Synchronization Primitives ──
 EventGroupHandle_t g_system_event_group = nullptr;
@@ -30,8 +31,6 @@ void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
 }
 
 // ── IP Subnet & Management Whitelist Filters ──────────────────────────────────
-#include <WiFi.h>
-
 bool Tcp_IsAllowedIP(IPAddress ip) {
   if (ip == IPAddress(127, 0, 0, 1))
     return true;
@@ -39,16 +38,16 @@ bool Tcp_IsAllowedIP(IPAddress ip) {
   if (ip[0] == 172 && ip[1] == 30 && (ip[2] == 1 || ip[2] == 2))
     return true;
 
-  if (WiFi.isConnected()) {
-    IPAddress sta_ip = WiFi.localIP();
-    IPAddress sta_mask = WiFi.subnetMask();
+  if (System_WifiIsConnected()) {
+    IPAddress sta_ip = System_WifiGetIp();
+    IPAddress sta_mask = System_WifiGetSubnetMask();
     if ((ip & sta_mask) == (sta_ip & sta_mask))
       return true;
   }
 
-  if (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA) {
-    IPAddress ap_ip = WiFi.softAPIP();
-    IPAddress ap_mask = WiFi.softAPSubnetMask();
+  IPAddress ap_ip = System_WifiGetApIp();
+  if (ap_ip != IPAddress(0, 0, 0, 0)) {
+    IPAddress ap_mask = System_WifiGetApSubnetMask();
     if ((ip & ap_mask) == (ap_ip & ap_mask))
       return true;
   }
@@ -77,8 +76,6 @@ void System_FeedWdt(size_t index) noexcept {
 }
 
 // ── Socket Keepalive Utility ─────────────────────────────────────────────────
-#include <lwip/sockets.h>
-
 void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
   if (sock < 0)
     return;

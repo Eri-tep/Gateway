@@ -14,13 +14,6 @@ static std::atomic<bool> s_frozen{false};
 static std::atomic<uint8_t> s_active_wallpad_profile{0};
 static std::mutex s_save_mutex;
 
-// ── RTC Fast SRAM Retention Variables ──
-RTC_NOINIT_ATTR uint32_t rtc_magic;
-RTC_NOINIT_ATTR uint32_t rtc_last_alive_ms[Config::Task::TASK_COUNT];
-RTC_NOINIT_ATTR uint32_t rtc_rescue_magic;
-RTC_NOINIT_ATTR uint32_t rtc_crash_counter;
-RTC_NOINIT_ATTR uint32_t rtc_clean_restart_magic;
-
 
 
 namespace Config::Timing {

@@ -602,7 +602,7 @@ void otaPrintStatus(AppendBuf &out) {
       System_GetBootTimeMs(), Config::Timing::OTA_VALIDATION_PERIOD_MS);
   timer_val.append(val_done ? "120s Passed" : "Evaluating (<120s)");
   crash_val.appendFormat("%u Consecutive Crashes",
-                         static_cast<unsigned>(rtc_crash_counter));
+                         static_cast<unsigned>(System_GetCrashCounter()));
   bool is_rescue = System_IsRescueMode();
 
   CliFmt::PrintBoxHeader(out, "DUAL-PARTITION OTA & ROLLBACK MONITOR");
@@ -640,7 +640,7 @@ void otaPrintStatus(AppendBuf &out) {
   table.row({"Safety Guard", "Health Timer", timer_val.c_str(),
              val_done ? "[STABLE]" : "[TESTING]"});
   table.row({"", "Crash Loop", crash_val.c_str(),
-             rtc_crash_counter == 0 ? "[STABLE]" : "[WARNING]"});
+             System_GetCrashCounter() == 0 ? "[STABLE]" : "[WARNING]"});
   table.row({"", "Rescue Mode",
              is_rescue ? "Forced Safe SoftAP" : "Standard Boot",
              is_rescue ? "[RESCUE]" : "[STABLE]"});
