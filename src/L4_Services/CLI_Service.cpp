@@ -4,10 +4,9 @@
 // ============================================================================
 
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/ConsoleCommands.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
-#include "L2_Channels/TCP_CH.h"
-#include "L3_Routing/Public/Protocol_Diagnostics.h"
+#include "L4_Services/Console/Console_Commands.h"
+#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L0_Foundation/System_Platform.h"
 
 #include <WiFi.h>
 #include <algorithm>
@@ -71,7 +70,7 @@ static void write(int sock, const char *data, size_t len) noexcept {
     }
     xSemaphoreGive(s_telnet_tx_sem);
   }
-  g_wdt_monitor.feed(5);
+  System_FeedWdt(5);
 }
 
 static inline void text(int sock, const char *s) noexcept {
@@ -1019,7 +1018,7 @@ void Task_Telnet(void *pvParameters) {
       }
       esp_task_wdt_reset();
     }
-    g_wdt_monitor.feed(Config::Task::WDT_ID_TELNET);
+    System_FeedWdt(Config::Task::WDT_ID_TELNET);
   };
 
   for (;;) {

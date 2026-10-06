@@ -4,9 +4,9 @@
 // BridgeService: Level 4 EW11 TCP Bridge & Air Conditioner (FCU) Subsystem
 // ============================================================================
 
-#include "L2_Channels/TCP_CH.h"
-#include "L3_Routing/Public/Device_Registry.h"
-#include "L3_Routing/Public/Modbus_Codec.h"
+#include "L0_Foundation/System_Buffer.h"
+#include "L3_Protocol/Public/Device_Registry.h"
+#include "L3_Protocol/Public/Modbus_Codec.h"
 #include <cstdint>
 #include <span>
 #include <sys/select.h>

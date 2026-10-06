@@ -4,9 +4,8 @@
 // ConsoleCli: Level 4 Telnet Socket Server & Interactive Console Engine
 // ============================================================================
 
-#include "L0_Base/System_Buffer.h"
-#include "L0_Base/System_Config.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
+#include "L0_Foundation/System_Buffer.h"
+#include "L0_Foundation/System_Config.h"
 #include <lwip/sockets.h>
 
 // ============================================================================

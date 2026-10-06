@@ -49,18 +49,18 @@ This document defines the system specifications, runtime topology, channel mappi
 
 ```
 include/
-├── L0_Base/                  [L0: Pure Foundation Soil Leaf]
+├── L0_Foundation/                  [L0: Pure Foundation Soil Leaf]
 │   ├── System_Buffer.h       (AppendBuf fixed scratch buffers, zero-heap utilities)
 │   ├── System_Config.h       (NVS keys, baud rates, timing constants, monadic parsers)
 │   └── System_Platform.h     (ESP32-S3 pin mappings, StaticPacket, System_TracePacket/Message)
-├── L1_Drivers/               [L1: Physical HAL Drivers]
+├── L1_HAL/               [L1: Physical HAL Drivers]
 │   ├── Uart_Driver.h         (Unified HW UART0~2 + Doorphone SW Serial HAL)
 │   ├── Diagnostics_Driver.h  (Heap/stack watermarks, CPU telemetry, Ch1StateMetrics)
 │   └── OTA_Driver.h          (Dual-partition rollback, rescue AP recovery)
-├── L2_Channels/              [L2: Transport & Data Link Channels]
+├── L2_Transport/              [L2: Transport & Data Link Channels]
 │   ├── RS485_CH.h            (Ch1~Ch4 serial channel manager, FreeRTOS timeslot loops)
 │   └── TCP_CH.h              (Core 0 TCP reactor, socket FSM, embedded IPFilter)
-├── L3_Routing/               [L3: Routing, Subsystem & Shell-Core Hub]
+├── L3_Protocol/               [L3: Routing, Subsystem & Shell-Core Hub]
 │   ├── Public/               [L3 Public Shell: External Gateways for L4 & L2]
 │   │   ├── Packet_Router.h   (Sole L3 ↔ L2 bidirectional packet gateway & downlink egress)
 │   │   ├── Device_Registry.h (SSOT device state repository & control ingress API)
@@ -73,33 +73,27 @@ include/
 │       ├── Auto_Probing.h    (Runtime automatic matrix solver & profile discovery)
 │       └── Control_Registry.h(Control blueprints, slot coverage & frame synthesis)
 └── L4_Services/              [L4: Application Services]
-    ├── ST_Service.h          (SmartThings LAN bridge, asynchronous REST/Webhook push)
+    ├── Mgmt_Service.h        (Port 8900 JSON-RPC remote bridge & session coordinator)
     ├── EW11_Service.h        (Virtual RS-485 EW11 TCP client/server session coordinator)
-    ├── CLI_Service.h         (UART0 serial diagnostic/administration console REPL)
+    ├── CLI_Service.h         (Telnet virtual stream diagnostic console REPL / TCP Port 23)
     ├── Console/              [CLI Submodules - Domain Modularization]
-    │   ├── ConsoleFmt.h      (ANSI styling and tabular text formatting utilities)
-    │   ├── CmdConfig.h       (NVS configuration and Wi-Fi parameter commands)
-    │   ├── CmdDevice.h       (Device control and real-time state query commands)
-    │   ├── CmdSystem.h       (FreeRTOS tasks, heap, stack, and mutex diagnostics)
-    │   └── CmdTrace.h        (Channel-specific real-time packet sniffer commands)
-    └── Remote/               [Remote & EW11 Submodules]
-        ├── RemoteInternal.h  (Internal session types and remote context definitions)
-        ├── MgmtRpc.h         (Remote JSON-RPC parser and management command handlers)
-        ├── RemoteTelemetry.h (Periodic system metric payload builders)
-        └── WifiManager.h     (Wi-Fi state machine and automatic reconnect logic)
+    │   ├── Console_Commands.h(Unified command table dispatch definition)
+    │   └── Console_Fmt.h     (ANSI styling and tabular text formatting utilities)
+    └── Mgmt/                 [Mgmt & Remote Submodules]
+        └── Mgmt_Internal.h   (Internal session types, mutexes, and fallback guards)
 
 src/
-├── L0_Base/
+├── L0_Foundation/
 │   ├── System_Config.cpp
 │   └── System_Platform.cpp   (Platform synchronization & decoupled trace message/packet sinks)
-├── L1_Drivers/
+├── L1_HAL/
 │   ├── Uart_Driver.cpp       (HW UART & SoftwareSerial fully sealed via file-static scope)
 │   ├── Diagnostics_Driver.cpp(System metrics, task watchdogs, hardware crash telemetry)
 │   └── OTA_Driver.cpp
-├── L2_Channels/
+├── L2_Transport/
 │   ├── RS485_CH.cpp          (Task_Ch1, Task_Ch2Ch3, Task_Ch4 FreeRTOS worker loops)
 │   └── TCP_CH.cpp            (Task_TcpCore0 socket polling and IP whitelist filter)
-├── L3_Routing/
+├── L3_Protocol/
 │   ├── Public/
 │   │   ├── Packet_Router.cpp (Downlink queue dispatch & horizontal bus routing)
 │   │   ├── Device_Registry.cpp(Mutex-protected snapshot API, 0% extern global state leaks)
@@ -112,11 +106,11 @@ src/
 │       ├── Auto_Probing.cpp  (Matrix solver & convergence detection)
 │       └── Control_Registry.cpp (Blueprint synthesis & action execution)
 ├── L4_Services/
-│   ├── ST_Service.cpp
+│   ├── Mgmt_Service.cpp
 │   ├── EW11_Service.cpp      (EW11 proxy coordinator with self-contained frame metadata)
 │   ├── CLI_Service.cpp       (Telnet virtual stream diagnostic console REPL / TCP Port 23; strictly network-only)
-│   ├── Console/              (CmdConfig.cpp, CmdDevice.cpp, CmdSystem.cpp, CmdTrace.cpp)
-│   └── Remote/               (MgmtRpc.cpp, RemoteTelemetry.cpp, WifiManager.cpp)
+│   ├── Console/              (Console_Commands.cpp, CmdConfig.cpp, CmdDevice.cpp, CmdSystem.cpp, CmdTrace.cpp)
+│   └── Mgmt/                 (Mgmt_Rpc.cpp, Mgmt_Telemetry.cpp, Wifi_Manager.cpp)
 └── main.cpp                  (Bootstrapping, dependency injection & task launches)
 ```
 

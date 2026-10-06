@@ -1,0 +1,1056 @@
+// ============================================================================
+// RS485_CH.cpp — L2 Transport / Data Link Channels
+// Physical RS-485 Channel Implementation (CH1~CH4)
+// ============================================================================
+//
+// STEP 4 MIGRATION: This file absorbs the full EngineTask.cpp God File contents.
+// All queue storage, Task_Ch1/Ch2Ch3/Ch4 bodies, and channel helpers now reside
+// here as the canonical L2 RS-485 channel implementation.
+//
+// STEP 5 CLEANUP (TODO): Split ControlDispatcher and L4 listener registration
+// into separate EngineCore.cpp under Service/ layer.
+//
+// INVARIANTS (AGENTS.md):
+//   - FreeRTOS queue handles are static (file-local). Zero extern leak (Rule 17).
+//   - No dynamic allocation in Task RX/TX paths (Rule 4).
+//   - RS485_EnqueueCh1Ctrl/Vip/Ch4Pass are the ONLY external TX entry points.
+// ============================================================================
+// ============================================================================
+// EngineTask: Level 4 RTOS Task Scheduling, Queues & RS-485 Engine
+// Implementation
+// ============================================================================
+
+#include "L2_Transport/RS485_CH.h"
+#include "L1_HAL/Diagnostics_Driver.h"
+#include "L1_HAL/Uart_Driver.h"
+
+#include "esp_task_wdt.h"
+#include <Arduino.h>
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+
+// ── Core Repositories & Metrics Trackers ──
+static RS485_PacketDispatcher s_dispatcher{};
+
+void RS485_RegisterDispatcher(const RS485_PacketDispatcher &dispatcher) noexcept {
+  s_dispatcher = dispatcher;
+}
+
+// ── Static FreeRTOS Queues & Storage Pools (File-local) ──
+static StaticQueue_t s_ch1_ctrl_queue_buf, s_ch4_pass_queue_buf, s_ch1_vip_queue_buf;
+static uint8_t
+    s_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
+static uint8_t s_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS *
+                                  sizeof(StaticPacket)];
+static uint8_t s_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
+
+static QueueHandle_t s_ch1_control_queue = nullptr, s_ch1_vip_queue = nullptr;
+static QueueSetHandle_t s_ch1_queue_set = nullptr;
+static QueueHandle_t s_uart0_event_queue = nullptr, s_uart1_event_queue = nullptr,
+                     s_uart2_event_queue = nullptr;
+static QueueHandle_t s_ch4_passthrough_queue = nullptr;
+static SemaphoreHandle_t s_ctrl_queue_mutex = nullptr;
+static SemaphoreHandle_t s_uart0_mutex = nullptr, s_uart1_mutex = nullptr,
+                         s_uart2_mutex = nullptr;
+static std::atomic<bool> s_initial_caching_complete{false};
+
+QueueHandle_t *Engine_GetUartEventQueuePtr(uint8_t uart_num) noexcept {
+  if (uart_num == 0) return &s_uart0_event_queue;
+  if (uart_num == 1) return &s_uart1_event_queue;
+  if (uart_num == 2) return &s_uart2_event_queue;
+  return nullptr;
+}
+
+void Engine_InitQueues() {
+  s_uart0_mutex = xSemaphoreCreateMutex();
+  s_uart1_mutex = xSemaphoreCreateMutex();
+  s_uart2_mutex = xSemaphoreCreateMutex();
+  s_ctrl_queue_mutex = xSemaphoreCreateMutex();
+
+  s_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
+                                           s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
+  s_ch1_vip_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_VIP, sizeof(StaticPacket),
+                                       s_ch1_vip_storage, &s_ch1_vip_queue_buf);
+  s_ch4_passthrough_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CH4_PASS, sizeof(StaticPacket),
+                                               s_ch4_pass_storage, &s_ch4_pass_queue_buf);
+
+  s_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL + Config::Queue::POOL_SIZE_VIP);
+  if (s_ch1_queue_set) {
+    xQueueAddToSet(s_ch1_vip_queue, s_ch1_queue_set);
+    xQueueAddToSet(s_ch1_control_queue, s_ch1_queue_set);
+  }
+}
+
+CoreDumpInfo g_coredump_info;
+
+bool Queue_EnqueueDropHead(QueueHandle_t queue,
+                           const StaticPacket &packet) noexcept {
+  if (UNLIKELY(!queue))
+    return false;
+  MutexLocker lock(s_ctrl_queue_mutex);
+  if (xQueueSend(queue, &packet, 0) == pdTRUE)
+    return true;
+  StaticPacket dummy;
+  xQueueReceive(queue, &dummy, 0);
+  return (xQueueSend(queue, &packet, 0) == pdTRUE);
+}
+
+bool Queue_EnqueueDropTail(QueueHandle_t queue,
+                           const StaticPacket &packet) noexcept {
+  if (UNLIKELY(!queue))
+    return false;
+  MutexLocker lock(s_ctrl_queue_mutex);
+  return (xQueueSend(queue, &packet, 0) == pdTRUE);
+}
+
+// ── RS-485 Channel TX Enqueue (canonical L2 → internal queue bridge) ─────────
+
+bool Engine_EnqueueCh1(const StaticPacket &pkt, bool vip) noexcept {
+  QueueHandle_t q = vip ? s_ch1_vip_queue : s_ch1_control_queue;
+  return Queue_EnqueueDropTail(q, pkt);
+}
+
+bool Engine_EnqueueCh4Pass(const StaticPacket &pkt) noexcept {
+  if (UNLIKELY(!s_ch4_passthrough_queue))
+    return false;
+  return (xQueueSend(s_ch4_passthrough_queue, &pkt, 0) == pdTRUE);
+}
+
+void RS485_EnqueueCh4Passthrough(const StaticPacket &pkt) noexcept {
+  Engine_EnqueueCh4Pass(pkt);
+}
+
+// ============================================================================
+// Internal Types & Forward Declarations
+// ============================================================================
+
+enum class UartRxStatus { SUCCESS, TIMEOUT };
+using UartPollCallback = void (*)(void *ctx);
+
+QueueHandle_t Uart_GetEventQueue(uart_port_t u_num);
+UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
+                             uint32_t tout_ms,
+                             UartPollCallback on_poll = nullptr,
+                             void *poll_ctx = nullptr,
+                             const StaticPacket *echo_match = nullptr);
+
+void Ch1_WaitBusIdle(uint32_t silence_ms);
+void Ch1_HandleCtrl(const StaticPacket &ctrlPacket);
+void Ch1_PollNext(size_t &current_dev_idx);
+void Ch1_SetState(Ch1State &cur_state, Ch1State new_state);
+
+// ============================================================================
+// 2. UART RX Stream Demux & Packet Validation (formerly UartRx.cpp)
+// ============================================================================
+
+static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
+                                            size_t &stream_len,
+                                            size_t max_stream_buf,
+                                            uint32_t &last_rx_ms) {
+  size_t avail = 0;
+  uart_get_buffered_data_len(u_num, &avail);
+  if (avail == 0)
+    return false;
+
+  uint8_t temp[Config::Packet::UART_READ_CHUNK];
+  size_t read_limit = std::min(avail, sizeof(temp));
+  int rx = uart_read_bytes(u_num, temp, read_limit, 0);
+  if (rx <= 0)
+    return false;
+
+  if (stream_len + rx > max_stream_buf) {
+    size_t overflow = (stream_len + rx) - max_stream_buf;
+    if (overflow < stream_len) {
+      memmove(stream, stream + overflow, stream_len - overflow);
+      stream_len -= overflow;
+    } else {
+      stream_len = 0;
+    }
+  }
+  size_t copy_len =
+      std::min(static_cast<size_t>(rx), max_stream_buf - stream_len);
+  memcpy(stream + stream_len, temp, copy_len);
+  stream_len += copy_len;
+  last_rx_ms = millis();
+  return true;
+}
+
+QueueHandle_t Uart_GetEventQueue(uart_port_t u_num) {
+  switch (u_num) {
+  case UART_NUM_0:
+    return s_uart0_event_queue;
+  case UART_NUM_1:
+    return s_uart1_event_queue;
+  case UART_NUM_2:
+    return s_uart2_event_queue;
+  default:
+    return nullptr;
+  }
+}
+
+UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
+                             uint32_t tout_ms, UartPollCallback on_poll,
+                             void *poll_ctx, const StaticPacket *echo_match) {
+  uint8_t stream[Config::Packet::MAX_STREAM_BUF];
+  size_t stream_len = 0;
+  uint32_t start_ms = millis();
+  uint32_t last_rx_ms = 0;
+  const bool is_auto_unlocked =
+      s_dispatcher.onIsAutoUnlocked ? s_dispatcher.onIsAutoUnlocked() : false;
+  const uint8_t stx =
+      s_dispatcher.onGetStx ? s_dispatcher.onGetStx() : PKT_STX;
+  QueueHandle_t evt_q = Uart_GetEventQueue(u_num);
+
+  while (millis() - start_ms < tout_ms) {
+    esp_task_wdt_reset();
+    if (on_poll)
+      on_poll(poll_ctx);
+
+    if (stream_len >= 3) {
+      if (is_auto_unlocked) {
+        if (last_rx_ms > 0 &&
+            TimeUtils::isElapsed(last_rx_ms,
+                                 Config::Timing::WALLPAD_AUTO_IPG_MS)) {
+          if (s_dispatcher.onFeedAutoFrame) {
+            s_dispatcher.onFeedAutoFrame(
+                span<const uint8_t>(stream, stream_len));
+          }
+
+          if (echo_match && echo_match->length == stream_len &&
+              memcmp(echo_match->data.data(), stream, stream_len) == 0) {
+            stream_len = 0;
+            last_rx_ms = 0;
+            continue;
+          }
+
+          size_t copy_len = std::min(stream_len, out.data.size());
+          out.length = static_cast<uint8_t>(copy_len);
+          memcpy(out.data.data(), stream, copy_len);
+          stream_len = 0;
+          last_rx_ms = 0;
+          return UartRxStatus::SUCCESS;
+        }
+      } else {
+        size_t idx = 0;
+        while (idx < stream_len) {
+          if (stream[idx] != stx) {
+            idx++;
+            continue;
+          }
+
+          int len_res =
+              s_dispatcher.onExtractLength
+                  ? s_dispatcher.onExtractLength(stream, stream_len, idx)
+                  : -1;
+          if (len_res == 0) {
+            break;
+          }
+          if (len_res < 0) {
+            idx++;
+            continue;
+          }
+
+          uint8_t pkt_len = static_cast<uint8_t>(len_res);
+          uint8_t *pkt = &stream[idx];
+          span<const uint8_t> pkt_span(pkt, pkt_len);
+          if (s_dispatcher.onValidatePacket &&
+              !s_dispatcher.onValidatePacket(pkt_span)) {
+            uint8_t ch = (u_num == UART_NUM_0)   ? 1
+                         : (u_num == UART_NUM_1) ? 2
+                                                 : 3;
+            StaticPacket drp_pkt{ch, pkt_len};
+            memcpy(drp_pkt.data.data(), pkt, pkt_len);
+            System_TracePacket(ch, false, TraceType::DRP, drp_pkt);
+            idx++;
+            continue;
+          }
+
+          if (echo_match && echo_match->length == pkt_len &&
+              memcmp(echo_match->data.data(), pkt, pkt_len) == 0) {
+            idx += pkt_len;
+            continue;
+          }
+
+          out.length = pkt_len;
+          memcpy(out.data.data(), pkt, pkt_len);
+          size_t consumed = idx + pkt_len;
+          if (consumed < stream_len)
+            memmove(stream, stream + consumed, stream_len - consumed);
+          stream_len = (consumed < stream_len) ? (stream_len - consumed) : 0;
+          return UartRxStatus::SUCCESS;
+        }
+
+        if (idx > 0) {
+          if (idx < stream_len)
+            memmove(stream, stream + idx, stream_len - idx);
+          stream_len = (idx < stream_len) ? (stream_len - idx) : 0;
+        }
+      }
+    }
+
+    uint32_t elapsed = millis() - start_ms;
+    if (elapsed >= tout_ms)
+      break;
+    uint32_t rem_ms = tout_ms - elapsed;
+    uint32_t wait_ms = std::min<uint32_t>(rem_ms, 5);
+
+    bool received_new_bytes = false;
+    if (evt_q) {
+      uart_event_t evt;
+      if (xQueueReceive(evt_q, &evt, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+        if (evt.type == UART_DATA) {
+          received_new_bytes = Uart_DrainToStreamBuffer(
+              u_num, stream, stream_len, sizeof(stream), last_rx_ms);
+        } else if (evt.type == UART_FIFO_OVF || evt.type == UART_BUFFER_FULL) {
+          uart_flush_input(u_num);
+          xQueueReset(evt_q);
+        }
+      }
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(std::min<uint32_t>(wait_ms, 2)));
+    }
+
+    if (!received_new_bytes) {
+      Uart_DrainToStreamBuffer(u_num, stream, stream_len, sizeof(stream),
+                               last_rx_ms);
+    }
+  }
+
+  if (stream_len >= 3 && is_auto_unlocked) {
+    if (s_dispatcher.onFeedAutoFrame) {
+      s_dispatcher.onFeedAutoFrame(span<const uint8_t>(stream, stream_len));
+    }
+    if (!(echo_match && echo_match->length == stream_len &&
+          memcmp(echo_match->data.data(), stream, stream_len) == 0)) {
+      size_t copy_len = std::min(stream_len, out.data.size());
+      out.length = static_cast<uint8_t>(copy_len);
+      memcpy(out.data.data(), stream, copy_len);
+      return UartRxStatus::SUCCESS;
+    }
+  }
+
+  return UartRxStatus::TIMEOUT;
+}
+
+// ============================================================================
+// 3. Control Enqueue Pipeline
+// ============================================================================
+
+bool RS485_EnqueueControl(const StaticPacket &pkt, bool vip) noexcept {
+  QueueHandle_t q = vip ? s_ch1_vip_queue : s_ch1_control_queue;
+  if (Queue_EnqueueDropTail(q, pkt)) {
+    System_TracePacket(1, true, TraceType::CTL, pkt);
+    return true;
+  }
+  return false;
+}
+
+static std::atomic<uint32_t> s_last_ch1_tx_ms{0};
+
+void Ch1_RecordTxFinish() {
+  s_last_ch1_tx_ms.store(millis(), std::memory_order_release);
+}
+
+void Ch1_WaitBusIdle(uint32_t silence_ms) {
+  // 1. 연속 제어 명령 간 120ms Guard Interval 보장
+  uint32_t last_tx = s_last_ch1_tx_ms.load(std::memory_order_acquire);
+  if (last_tx > 0) {
+    uint32_t now_tx = millis();
+    constexpr uint32_t kGuardIntervalMs = 120;
+    if (now_tx - last_tx < kGuardIntervalMs) {
+      uint32_t rem_tx = kGuardIntervalMs - (now_tx - last_tx);
+      if (rem_tx > 0) {
+        vTaskDelay(pdMS_TO_TICKS(rem_tx) > 0 ? pdMS_TO_TICKS(rem_tx) : 1);
+      }
+    }
+  }
+
+  uint32_t last_act = g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_acquire);
+  uint32_t now_ms = millis();
+
+  if (now_ms - last_act < silence_ms) {
+    uint32_t rem_ms = silence_ms - (now_ms - last_act);
+    if (rem_ms > 0) {
+      TickType_t delay_ticks = pdMS_TO_TICKS(rem_ms);
+      vTaskDelay(delay_ticks > 0 ? delay_ticks : 1);
+    }
+  }
+}
+
+void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
+  Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
+
+  {
+    MutexLocker lock(s_uart0_mutex, pdMS_TO_TICKS(100));
+    if (!lock.isLocked()) {
+      g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
+      System_TraceMessage(
+          "[WARN] Dropped CH1 ctrl packet, mutex timed out.\r\n");
+      return;
+    }
+
+    uart_flush_input(UART_NUM_0);
+    uart_write_bytes(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
+    uart_wait_tx_done(UART_NUM_0,
+                      pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
+    g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
+    Ch1_RecordTxFinish();
+    g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  StaticPacket ack;
+  if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
+                      nullptr, nullptr, &ctrlPacket) == UartRxStatus::SUCCESS) {
+    g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
+    System_TracePacket(1, false, TraceType::ACK, ack);
+    g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+    ack.channel_id = 1;
+    if (s_dispatcher.onBusPacket) {
+      s_dispatcher.onBusPacket(1, ack, &ctrlPacket);
+    }
+    ack.channel_id = ctrlPacket.channel_id;
+
+    struct WallpadForwardConfig {
+      uart_port_t uart_num;
+      SemaphoreHandle_t &mutex;
+      SingleChannelStats &stats;
+    };
+    const WallpadForwardConfig wp_cfg[] = {
+        {UART_NUM_1, s_uart1_mutex, g_pkt_stats.ch2}, // CH2
+        {UART_NUM_2, s_uart2_mutex, g_pkt_stats.ch3}, // CH3
+    };
+
+    int wp_idx =
+        static_cast<int>(ctrlPacket.channel_id) - 2; // CH2 → 0, CH3 → 1
+    if (wp_idx >= 0 && wp_idx <= 1) {
+      const WallpadForwardConfig &cfg = wp_cfg[wp_idx];
+      {
+        MutexLocker lock(cfg.mutex, pdMS_TO_TICKS(100));
+        if (lock.isLocked()) {
+          uart_write_bytes(cfg.uart_num, ack.data.data(), ack.length);
+          System_TracePacket(ctrlPacket.channel_id, true, TraceType::ACK,
+                                ack);
+          cfg.stats.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          System_TraceMessage("[WARN] UART mutex timeout forwarding ACK\r\n");
+        }
+      }
+    }
+  } else {
+    g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
+    System_TraceMessage(
+        "[WARN] Device did not ACK control packet in time.\r\n");
+  }
+}
+
+void Ch1_SetState(Ch1State &cur_state, Ch1State new_state) noexcept {
+  if (cur_state != new_state) {
+    const Ch1State old = cur_state;
+    cur_state = new_state;
+
+    constexpr size_t STATE_COUNT = 4;
+    std::atomic<uint32_t> *const metric_targets[STATE_COUNT] = {
+        nullptr,                         // IDLE (0)
+        &g_ch1_state_metrics.vip_cnt,    // VIP_CONTROL (1)
+        &g_ch1_state_metrics.normal_cnt, // NORMAL_CONTROL (2)
+        &g_ch1_state_metrics.poll_cnt    // POLL_DEVICE (3)
+    };
+
+    const auto idx = static_cast<size_t>(new_state);
+    if (idx < STATE_COUNT && metric_targets[idx] != nullptr) [[likely]] {
+      metric_targets[idx]->fetch_add(1, std::memory_order_relaxed);
+    }
+
+    g_ch1_state_metrics.last_from_state.store(static_cast<uint8_t>(old),
+                                              std::memory_order_relaxed);
+    g_ch1_state_metrics.last_to_state.store(static_cast<uint8_t>(new_state),
+                                            std::memory_order_relaxed);
+    g_ch1_state_metrics.last_transition_ms.store(millis(),
+                                                 std::memory_order_relaxed);
+  }
+}
+
+// ============================================================================
+// 4. CH1 Polling Master Loop & Task (formerly Ch1Polling.cpp)
+// ============================================================================
+
+void Ch1_PollNext(size_t &current_dev_idx) {
+  (void)current_dev_idx;
+  if (!s_dispatcher.onBuildPoll)
+    return;
+
+  StaticPacket q_pkt;
+  uint8_t poll_dev_id = 0, poll_sub1 = 0, poll_sub2 = 0;
+  if (!s_dispatcher.onBuildPoll(q_pkt, poll_dev_id, poll_sub1, poll_sub2)) {
+    return;
+  }
+
+  constexpr uint8_t kMaxRetries = 3;
+  constexpr uint32_t kDelayMs = Config::Timing::CH1_INTER_PACKET_DELAY_MS;
+  constexpr TickType_t kUartLockTimeout = pdMS_TO_TICKS(5);
+  bool sent = false;
+
+  for (uint8_t retry = 0; retry < kMaxRetries; ++retry) {
+    Ch1_WaitBusIdle(kDelayMs);
+
+    MutexLocker lock(s_uart0_mutex, kUartLockTimeout);
+    if (!lock.isLocked()) {
+      return;
+    }
+
+    uint32_t last_act =
+        g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_acquire);
+    uint32_t elapsed = millis() - last_act;
+    if (elapsed < kDelayMs) {
+      continue;
+    }
+
+    System_TracePacket(1, true, TraceType::QRY, q_pkt);
+
+    uart_flush_input(UART_NUM_0);
+    uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
+    uart_wait_tx_done(UART_NUM_0,
+                      pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
+    g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
+    g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+
+    StaticPacket ack;
+    if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
+                        nullptr, nullptr, &q_pkt) == UartRxStatus::SUCCESS) {
+      g_pkt_stats.ch1.last_activity_ms.store(millis(),
+                                             std::memory_order_release);
+      System_TracePacket(1, false, TraceType::ACK, ack);
+      g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+      ack.channel_id = 1;
+      if (s_dispatcher.onBusPacket) {
+        s_dispatcher.onBusPacket(1, ack, &q_pkt);
+      }
+    } else {
+      g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
+      if (s_dispatcher.onTimeout) {
+        s_dispatcher.onTimeout(poll_dev_id, poll_sub1, poll_sub2);
+      }
+    }
+
+    sent = true;
+    break;
+  }
+
+  if (!sent) {
+    return;
+  }
+}
+
+void Task_Ch1(void *pvParameters) {
+  esp_task_wdt_add(nullptr);
+  if (g_system_event_group) {
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
+                        pdFALSE, portMAX_DELAY);
+  }
+  StaticPacket ctrlPacket;
+  size_t current_dev_idx = 0;
+  Ch1State current_state = Ch1State::IDLE;
+
+  static bool s_convergence_done = false;
+  uint32_t next_poll_due_ms = millis();
+
+  for (;;) {
+    g_wdt_monitor.feed(0);
+    if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
+      Ch1_SetState(current_state, Ch1State::IDLE);
+      if (g_system_event_group) {
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
+                            pdFALSE, pdMS_TO_TICKS(1000));
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
+      next_poll_due_ms = millis();
+      continue;
+    }
+
+    uart_event_t u_evt;
+    while (xQueueReceive(s_uart0_event_queue, (void *)&u_evt, 0) == pdTRUE) {
+      if (u_evt.type == UART_FIFO_OVF || u_evt.type == UART_BUFFER_FULL) {
+        g_pkt_stats.ch1.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+        uart_flush_input(UART_NUM_0);
+      } else if (u_evt.type == UART_PARITY_ERR ||
+                 u_evt.type == UART_FRAME_ERR) {
+        g_pkt_stats.ch1.crc_errors.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+
+    if (g_probe_convergence_reset.load(std::memory_order_acquire)) {
+      g_probe_convergence_reset.store(false, std::memory_order_release);
+      s_convergence_done = false;
+      s_initial_caching_complete.store(false, std::memory_order_release);
+      if (g_system_event_group) {
+        xEventGroupClearBits(g_system_event_group, SYS_EVT_CACHE_READY);
+      }
+      if (s_dispatcher.onCheckConvergence) {
+        s_dispatcher.onCheckConvergence(true);
+      }
+      System_TraceMessage("[AUTO PROBE] Convergence state reset. Re-learning "
+                            "bus offsets...\r\n");
+    }
+
+    if (!s_convergence_done && s_dispatcher.onCheckConvergence) {
+      if (s_dispatcher.onCheckConvergence(false)) {
+        s_convergence_done = true;
+        s_initial_caching_complete.store(true, std::memory_order_release);
+      }
+    }
+
+    const uint32_t poll_interval = s_dispatcher.onGetPollIntervalMs
+                                       ? s_dispatcher.onGetPollIntervalMs()
+                                       : 1000;
+
+    uint32_t now = millis();
+    uint32_t rem_ms = (now < next_poll_due_ms) ? (next_poll_due_ms - now) : 0;
+    TickType_t wait_ticks = (rem_ms > 0) ? pdMS_TO_TICKS(rem_ms) : 1;
+
+    QueueSetMemberHandle_t activated = nullptr;
+    if (s_ch1_queue_set) {
+      activated = xQueueSelectFromSet(s_ch1_queue_set, wait_ticks);
+    } else {
+      vTaskDelay(wait_ticks);
+    }
+
+    if (s_ch1_vip_queue &&
+        xQueueReceive(s_ch1_vip_queue, &ctrlPacket, 0) == pdTRUE) {
+      Ch1_SetState(current_state, Ch1State::VIP_CONTROL);
+      Ch1_HandleCtrl(ctrlPacket);
+      Ch1_SetState(current_state, Ch1State::IDLE);
+      continue; // VIP 처리 완료 후 다음 루프로 즉시 재평가
+    }
+
+    if (activated == s_ch1_control_queue && s_ch1_control_queue &&
+        xQueueReceive(s_ch1_control_queue, &ctrlPacket, 0) == pdTRUE) {
+      span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
+      bool is_query = s_dispatcher.onIsQueryPacket
+                          ? s_dispatcher.onIsQueryPacket(frame)
+                          : false;
+
+      Ch1_SetState(current_state,
+                   is_query ? Ch1State::POLL_DEVICE : Ch1State::NORMAL_CONTROL);
+      Ch1_HandleCtrl(ctrlPacket);
+      Ch1_SetState(current_state, Ch1State::IDLE);
+      continue; // 일반 제어 처리 완료 후 다음 루프로 즉시 재평가
+    }
+
+    if (activated == nullptr || now >= next_poll_due_ms) {
+      Ch1_SetState(current_state, Ch1State::POLL_DEVICE);
+      Ch1_PollNext(current_dev_idx);
+      Ch1_SetState(current_state, Ch1State::IDLE);
+      next_poll_due_ms = millis() + poll_interval;
+    }
+  }
+}
+
+// ============================================================================
+// 5. CH2/CH3 HW Wallpad Slaves & CH4 SW Doorphone (formerly Ch23Engine.cpp)
+// ============================================================================
+
+struct TaskAckPollContext {
+  TimestampedPacketQueue<8> *ack_q;
+  const WallpadChannelConfig *cfg;
+  SingleChannelStats *stats;
+};
+
+static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
+  auto *ctx = static_cast<TaskAckPollContext *>(arg);
+  if (!ctx || !ctx->ack_q || !ctx->cfg || !ctx->stats)
+    return;
+
+  StaticPacket next_ack;
+  uint32_t next_due = 0;
+  uint32_t now = millis();
+
+  while (ctx->ack_q->peek(next_ack, next_due)) {
+    if (now < next_due)
+      break;
+    if (ctx->ack_q->dequeue(next_ack, next_due)) {
+      SemaphoreHandle_t u_mux =
+          (ctx->cfg->uart_num == UART_NUM_1) ? s_uart1_mutex : s_uart2_mutex;
+      if (u_mux) {
+        MutexLocker lock(u_mux, pdMS_TO_TICKS(100));
+        if (lock.isLocked()) {
+          uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
+                           next_ack.length);
+        } else {
+          ctx->stats->timeouts.fetch_add(1, std::memory_order_relaxed);
+          System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
+        }
+      } else {
+        uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
+                         next_ack.length);
+      }
+      System_TracePacket(ctx->cfg->channel_id, true, TraceType::ACK,
+                            next_ack);
+      ctx->stats->tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+}
+
+static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
+  if (!cfg)
+    return;
+
+  esp_task_wdt_add(nullptr);
+  SingleChannelStats *stats = (cfg->channel_id == 2)   ? &g_pkt_stats.ch2
+                              : (cfg->channel_id == 3) ? &g_pkt_stats.ch3
+                                                       : nullptr;
+  if (!stats) {
+    esp_task_wdt_delete(nullptr);
+    vTaskDelete(nullptr);
+    return;
+  }
+
+  uart_flush_input(cfg->uart_num);
+  TimestampedPacketQueue<8> ack_queue;
+
+  if (g_system_event_group) {
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
+                        pdFALSE, portMAX_DELAY);
+  }
+
+  TaskAckPollContext poll_ctx{&ack_queue, cfg, stats};
+
+  for (;;) {
+    g_wdt_monitor.feed(task_idx);
+    if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
+      if (g_system_event_group) {
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
+                            pdFALSE, pdMS_TO_TICKS(1000));
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
+      continue;
+    }
+
+    Ch2Ch3_DrainVirtualAckQueue(&poll_ctx);
+
+    StaticPacket req;
+    if (Uart_RecvPacket(cfg->uart_num, req, 100, Ch2Ch3_DrainVirtualAckQueue,
+                        &poll_ctx) == UartRxStatus::SUCCESS) {
+      stats->rx_pkts.fetch_add(1, std::memory_order_relaxed);
+      req.channel_id = cfg->channel_id;
+      span<const uint8_t> frame(req.data.data(), req.length);
+      StaticPacket virtual_ack;
+      if (s_dispatcher.onHandleSubBusQuery &&
+          s_dispatcher.onHandleSubBusQuery(cfg->channel_id, req, virtual_ack)) {
+        System_TracePacket(cfg->channel_id, false, TraceType::QRY, req);
+        uint32_t delay_ms = (cfg->channel_id == 2)
+                                ? g_timing_config.ch2_cache_delay_ms
+                                : g_timing_config.ch3_cache_delay_ms;
+        uint32_t target_due = millis() + delay_ms;
+        if (!ack_queue.enqueue(virtual_ack, target_due)) {
+          stats->uncached_pkts.fetch_add(1, std::memory_order_relaxed);
+          System_TraceMessage("[WARN] Wallpad virtual ACK queue overflow, "
+                              "packet dropped.\r\n");
+        }
+      } else {
+        if (s_dispatcher.onFeedControlFrame) {
+          s_dispatcher.onFeedControlFrame(frame);
+        }
+        StaticPacket dummy_ack;
+        if (s_dispatcher.onDispatchControl) {
+          s_dispatcher.onDispatchControl(req, dummy_ack);
+        }
+      }
+    }
+  }
+}
+
+void Task_Ch2(void *pvParameters) {
+  auto *cfg = static_cast<WallpadChannelConfig *>(pvParameters);
+  RunSlaveChannelLoop(cfg, 1 /* CH2 WDT Slot */);
+}
+
+void Task_Ch3(void *pvParameters) {
+  auto *cfg = static_cast<WallpadChannelConfig *>(pvParameters);
+  RunSlaveChannelLoop(cfg, 2 /* CH3 WDT Slot */);
+}
+
+// ============================================================================
+// 6. Channel 4 Sub-Wallpad Passthrough & Doorphone Bridge Engine
+// ============================================================================
+
+static inline void Ch4_SendPassthrough(const StaticPacket &pkt,
+                                       StaticPacket &last_tx_pkt,
+                                       uint32_t &last_tx_ms) {
+  if (pkt.length >= 3 && s_dispatcher.onDoorphoneFrameDetected) {
+    s_dispatcher.onDoorphoneFrameDetected(pkt.data[0], pkt.data[pkt.length - 1], pkt.length);
+  }
+  System_TracePacket(4, true, TraceType::RMT, pkt);
+  last_tx_pkt = pkt; // Correctly recorded in all code paths to avoid echo
+                     // reflection misinterpretation
+  Uart_WriteDoorphone(pkt.data.data(), pkt.length);
+  last_tx_ms = millis();
+  g_pkt_stats.ch4.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+}
+
+static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
+                                            StaticPacket &last_pkt,
+                                            uint32_t &last_pkt_ms,
+                                            uint32_t now) {
+  bool is_debounce =
+      (packet.length == last_pkt.length &&
+       memcmp(packet.data.data(), last_pkt.data.data(), packet.length) == 0 &&
+       !TimeUtils::isElapsed(last_pkt_ms,
+                             Config::Timing::DOORPHONE_DEBOUNCE_MS));
+  if (is_debounce)
+    return;
+
+  last_pkt = packet;
+  last_pkt_ms = now;
+
+  if (s_dispatcher.onDoorphonePacket) {
+    s_dispatcher.onDoorphonePacket(packet);
+  }
+
+  System_TracePacket(4, false, TraceType::RMT, packet);
+  g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+}
+
+static inline void Ch4_DropInvalidFrame(const uint8_t *data, size_t len) {
+  StaticPacket drp_pkt{4, static_cast<uint8_t>(std::min<size_t>(len, 16))};
+  memcpy(drp_pkt.data.data(), data, drp_pkt.length);
+  System_TracePacket(4, false, TraceType::DRP, drp_pkt);
+  g_pkt_stats.ch4.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Task_Ch4(void *pvParameters) {
+  esp_task_wdt_add(nullptr);
+  StaticPacket packet_to_tx;
+
+  uint8_t buf[128] = {0};
+  size_t buf_len = 0;
+  uint32_t last_byte_ms = 0; // 마지막 수신 바이트 타임스탬프
+  StaticPacket last_tx_pkt{};
+  uint32_t last_tx_ms = 0;
+  StaticPacket last_pkt{};
+  uint32_t last_pkt_ms = 0;
+
+  if (g_system_event_group) {
+    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
+                        pdFALSE, portMAX_DELAY);
+  }
+
+  if (!s_initial_caching_complete.load(std::memory_order_acquire)) {
+    const uint32_t wait_start = millis();
+    while (!s_initial_caching_complete.load(std::memory_order_acquire) &&
+           (millis() - wait_start <
+            Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS)) {
+      g_wdt_monitor.feed(3);
+      if (g_system_event_group) {
+        EventBits_t bits = xEventGroupWaitBits(
+            g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
+            pdMS_TO_TICKS(200));
+        if (bits & SYS_EVT_CACHE_READY) {
+          break;
+        }
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(200));
+      }
+    }
+    g_wdt_monitor.feed(3);
+  }
+
+  for (;;) {
+    g_wdt_monitor.feed(3);
+    if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
+      if (g_system_event_group) {
+        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
+                            pdFALSE, pdMS_TO_TICKS(1000));
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
+      continue;
+    }
+
+    if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx, 0) == pdTRUE) {
+      Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
+    }
+
+    if (s_dispatcher.onDoorphoneCheckBellTimeout) {
+      s_dispatcher.onDoorphoneCheckBellTimeout();
+    }
+
+    const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
+        g_config.doorphone_baud_rate);
+    uint32_t burst_spin_total = 0;
+    while (Uart_AvailableDoorphone() > 0) {
+      uint8_t byte = 0;
+      Uart_ReadDoorphone(&byte, 1);
+      uint32_t now = millis();
+
+      if (buf_len > 0 && last_byte_ms > 0 &&
+          TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
+        buf_len = 0;
+      }
+
+      if (buf_len < sizeof(buf)) {
+        buf[buf_len++] = byte;
+      } else {
+        memmove(buf, buf + 1, buf_len - 1);
+        buf_len--;
+        buf[buf_len++] = byte;
+      }
+      last_byte_ms = now;
+
+      if (burst_spin_total < 20) {
+        uint32_t drain_start = millis();
+        while (Uart_AvailableDoorphone() == 0 &&
+               (millis() - drain_start < 6)) {
+          esp_rom_delay_us(100);
+        }
+        burst_spin_total += (millis() - drain_start);
+      }
+    }
+
+    uint8_t target_stx = 0;
+    uint8_t target_etx = 0;
+    uint8_t target_len = 0;
+    bool is_locked = s_dispatcher.onDoorphoneGetLockedFraming
+        ? s_dispatcher.onDoorphoneGetLockedFraming(target_stx, target_etx, target_len)
+        : false;
+
+    if (is_locked && buf_len >= 3) {
+      size_t p = 0;
+      while (p < buf_len) {
+        if (buf[p] != target_stx) {
+          p++;
+          continue;
+        }
+
+        bool frame_found = false;
+        size_t found_len = 0;
+
+        if (target_len >= 3 && target_len <= 64) {
+          if (buf_len - p >= target_len) {
+            if (buf[p + target_len - 1] == target_etx) {
+              frame_found = true;
+              found_len = target_len;
+            } else {
+              Ch4_DropInvalidFrame(&buf[p], buf_len - p);
+              p++;
+              continue;
+            }
+          } else {
+            break;
+          }
+        } else {
+          for (size_t i = p + 2; i < buf_len && (i - p + 1) <= 64; ++i) {
+            if (buf[i] == target_etx) {
+              frame_found = true;
+              found_len = (i - p) + 1;
+              break;
+            }
+          }
+        }
+
+        if (frame_found) {
+          if (last_tx_pkt.length == found_len &&
+              memcmp(last_tx_pkt.data.data(), &buf[p], found_len) == 0 &&
+              last_tx_ms > 0 && !TimeUtils::isElapsed(last_tx_ms, 250)) {
+            p += found_len;
+            last_byte_ms = 0;
+            continue;
+          }
+
+          StaticPacket packet{4, static_cast<uint8_t>(found_len)};
+          memcpy(packet.data.data(), &buf[p], found_len);
+
+          Ch4_HandleDoorphoneEvent(packet, last_pkt, last_pkt_ms, millis());
+
+          p += found_len;
+          last_byte_ms = 0;
+        } else {
+          if (buf_len - p >= 64) {
+            Ch4_DropInvalidFrame(&buf[p], buf_len - p);
+            p++;
+            continue;
+          }
+          break;
+        }
+      }
+
+      if (p > 0) {
+        if (p < buf_len) {
+          memmove(buf, buf + p, buf_len - p);
+          buf_len -= p;
+        } else {
+          buf_len = 0;
+        }
+      }
+    }
+
+    if (last_byte_ms > 0 &&
+        TimeUtils::isElapsed(last_byte_ms, Config::Timing::DOORPHONE_IPG_MS)) {
+
+      if (is_locked) {
+        buf_len = 0;
+      } else {
+        if (buf_len >= 3) {
+          StaticPacket packet{4, static_cast<uint8_t>(buf_len)};
+          memcpy(packet.data.data(), buf, buf_len);
+
+          uint8_t pkt_stx = packet.data[0];
+          uint8_t pkt_etx = packet.data[packet.length - 1];
+
+          if (s_dispatcher.onDoorphoneFrameDetected) {
+            s_dispatcher.onDoorphoneFrameDetected(pkt_stx, pkt_etx, packet.length);
+          }
+
+          Ch4_HandleDoorphoneEvent(packet, last_pkt, last_pkt_ms, millis());
+        }
+        buf_len = 0;
+      }
+      last_byte_ms = 0;
+    }
+
+    uint32_t wait_ms = (buf_len > 0) ? 1 : 5;
+    if (last_byte_ms > 0) {
+      uint32_t elapsed = millis() - last_byte_ms;
+      if (elapsed < Config::Timing::DOORPHONE_IPG_MS) {
+        wait_ms =
+            (buf_len > 0) ? 1 : (Config::Timing::DOORPHONE_IPG_MS - elapsed);
+      } else {
+        wait_ms = 1;
+      }
+    }
+    wait_ms = std::max<uint32_t>(wait_ms, 1);
+
+    if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx,
+                      pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+      Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
+    }
+  }
+}
+
+// ============================================================================
+// RS485_CH Public API Implementation (Canonical L2 TX Entry Points)
+// ============================================================================
+// These are the ONLY externally-visible paths into the CH1/CH4 TX queues.
+// All other code must use these functions — never access queue handles directly.
+
+void RS485_InitQueues() {
+  Engine_InitQueues();
+}
+
+QueueHandle_t *RS485_GetUartEventQueuePtr(uint8_t uart_num) noexcept {
+  return Engine_GetUartEventQueuePtr(uart_num);
+}
+
+[[nodiscard]] bool RS485_EnqueueCh1Ctrl(const StaticPacket &pkt) noexcept {
+  return Engine_EnqueueCh1(pkt, false);
+}
+
+[[nodiscard]] bool RS485_EnqueueCh1Vip(const StaticPacket &pkt) noexcept {
+  return Engine_EnqueueCh1(pkt, true);
+}
+
+[[nodiscard]] bool RS485_EnqueueCh4Pass(const StaticPacket &pkt) noexcept {
+  return Engine_EnqueueCh4Pass(pkt);
+}

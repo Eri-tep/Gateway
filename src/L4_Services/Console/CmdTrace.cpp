@@ -1,8 +1,8 @@
-#include "L4_Services/Console/ConsoleFmt.h"
+#include "L4_Services/Console/Console_Fmt.h"
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/ConsoleCommands.h"
-#include "L3_Routing/Public/Protocol_Diagnostics.h"
-#include "L3_Routing/Public/Device_Registry.h"
+#include "L4_Services/Console/Console_Commands.h"
+#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Device_Registry.h"
 #include "L4_Services/EW11_Service.h"
 #include <WiFi.h>
 

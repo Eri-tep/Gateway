@@ -3,12 +3,9 @@
 // ============================================================================
 
 #include "L4_Services/EW11_Service.h"
-#include "L3_Routing/Public/Device_Registry.h"
-#include "L3_Routing/Public/Protocol_Diagnostics.h"
-#include "L1_Drivers/Diagnostics_Driver.h"
-#include "L2_Channels/TCP_CH.h"
-#include "L2_Channels/RS485_CH.h"
-#include "L3_Routing/Public/Packet_Router.h"
+#include "L3_Protocol/Public/Packet_Router.h"
+#include "L3_Protocol/Public/Device_Registry.h"
+#include "L3_Protocol/Public/Protocol_Diagnostics.h"
 
 #include <algorithm>
 #include <array>
@@ -212,7 +209,7 @@ void demuxElevatorStream(HubClientSlot *slot) {
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + p_len],
                 drp_pkt.data.begin());
       System_TracePacket(5, false, TraceType::DRP, drp_pkt);
-      g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
+      System_RecordCh5Dropped();
       p += p_len;
       continue;
     }
@@ -237,7 +234,7 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
     if (rem >= 19 && slot->rx_buf[p + 1] == 0x03 &&
         slot->rx_buf[p + 2] == 0x0E) {
       slot->rx_pkts++;
-      g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+      System_RecordCh5Rx();
       StaticPacket trace_pkt{5, 19};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 19], trace_pkt.data.begin());
       System_TracePacket(5, false, TraceType::RMT, trace_pkt);
@@ -250,7 +247,7 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
     if (rem >= 8 &&
         (slot->rx_buf[p + 1] == 0x06 || slot->rx_buf[p + 1] == 0x10)) {
       slot->rx_pkts++;
-      g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+      System_RecordCh5Rx();
       StaticPacket trace_pkt{5, 8};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 8], trace_pkt.data.begin());
       System_TracePacket(5, false, TraceType::RMT, trace_pkt);
@@ -520,7 +517,7 @@ bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
       (send(slot.sock, pkt, len, MSG_DONTWAIT) == static_cast<ssize_t>(len));
   if (ok) {
     slot.tx_pkts++;
-    g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    System_RecordCh5Tx();
     StaticPacket trace_pkt{5, static_cast<uint8_t>(len)};
     std::copy(pkt, pkt + len, trace_pkt.data.begin());
     System_TracePacket(5, true, TraceType::CTL, trace_pkt);
@@ -631,7 +628,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
       if (send(slot->sock, temp_frame.data(), temp_frame.size(),
                MSG_DONTWAIT) == static_cast<ssize_t>(temp_frame.size())) {
         slot->tx_pkts++;
-        g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        System_RecordCh5Tx();
         StaticPacket trace_pkt{5, static_cast<uint8_t>(temp_frame.size())};
         std::copy(temp_frame.begin(), temp_frame.end(), trace_pkt.data.begin());
         System_TracePacket(5, true, TraceType::CTL, trace_pkt);
@@ -651,7 +648,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
       if (send(slot->sock, rt.pending_cmd_buf, len, MSG_DONTWAIT) ==
           static_cast<ssize_t>(len)) {
         slot->tx_pkts++;
-        g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        System_RecordCh5Tx();
         StaticPacket trace_pkt{5, len};
         std::copy(rt.pending_cmd_buf, rt.pending_cmd_buf + len, trace_pkt.data.begin());
         System_TracePacket(5, true, TraceType::CTL, trace_pkt);
@@ -692,7 +689,7 @@ void handleSlotLoop(uint8_t slot_idx, HubClientSlot *slot, uint32_t now) {
              ModbusRtu::kQueryPkt.size(), MSG_DONTWAIT) ==
         static_cast<ssize_t>(ModbusRtu::kQueryPkt.size())) {
       slot->tx_pkts++;
-      g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      System_RecordCh5Tx();
       StaticPacket trace_pkt{5, static_cast<uint8_t>(ModbusRtu::kQueryPkt.size())};
       std::copy(ModbusRtu::kQueryPkt.begin(), ModbusRtu::kQueryPkt.end(), trace_pkt.data.begin());
       System_TracePacket(5, true, TraceType::QRY, trace_pkt);
@@ -896,8 +893,7 @@ int Hub_AcceptClient(int slot_idx, int server_fd) {
     slot.target_ip[sizeof(slot.target_ip) - 1] = '\0';
   }
 
-  g_pkt_stats.ch5.is_connected.store(true, std::memory_order_relaxed);
-  g_pkt_stats.ch5.connection_count.fetch_add(1, std::memory_order_relaxed);
+  System_RecordCh5Connection();
   ESP_LOGI(TAG, "[CH5] Accepted EW11 client %s on port %u -> Slot %d (%s)",
            client_ip_str, slot.target_port, slot_idx, slot.name);
   return new_sock;
@@ -912,7 +908,7 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
   std::copy(pkt_data, pkt_data + pkt_len, pkt.data.begin());
 
   slot->rx_pkts++;
-  g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+  System_RecordCh5Rx();
   System_TracePacket(5, false, TraceType::RMT, pkt);
 
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
@@ -1112,7 +1108,7 @@ bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
   int s = send(slot.sock, pkt.data.data(), pkt.length, MSG_DONTWAIT);
   if (s == static_cast<int>(pkt.length)) {
     slot.tx_pkts++;
-    g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    System_RecordCh5Tx();
     return true;
   }
   return false;
@@ -1240,12 +1236,12 @@ void Bridge_Init() {
     }
   }
 
-  Transport::ReactorParticipant p;
+  ProtocolTcpParticipant p;
   p.name = "BridgeService";
   p.populateFds = Bridge_PopulateFds;
   p.processEvents = Bridge_ProcessEvents;
   p.tick = Bridge_Tick;
-  Transport::TcpReactor::registerParticipant(p);
+  ProtocolDiag_RegisterTcpParticipant(p);
 }
 
 void Bridge_ShutdownSockets() noexcept {

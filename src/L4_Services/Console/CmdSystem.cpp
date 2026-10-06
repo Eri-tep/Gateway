@@ -1,9 +1,8 @@
-#include "L4_Services/Console/ConsoleFmt.h"
+#include "L4_Services/Console/Console_Fmt.h"
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/ConsoleCommands.h"
+#include "L4_Services/Console/Console_Commands.h"
 #include "L4_Services/EW11_Service.h"
-#include "L4_Services/ST_Service.h"
-#include "L3_Routing/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Protocol_Diagnostics.h"
 #include <WiFi.h>
 #include <esp_core_dump.h>
 #include <esp_heap_caps.h>
@@ -299,7 +298,7 @@ void printStats(int sock) {
 
   printSystemOverview(out);
 
-  g_wdt_monitor.feed(5);
+  System_FeedWdt(5);
   SysSnapshot sys_snap;
   HwSnapshot hw_snap;
   StackSnapshot stack_snap;
@@ -314,24 +313,25 @@ void printStats(int sock) {
   out.appendFormat("%-55s %24s\r\n", "Metric / Event",
                    "Value / Counter / Status");
   out.append(Fmt::DIV80);
+
+  uint32_t poll_cnt = 0, vip_cnt = 0, norm_cnt = 0;
+  System_GetCh1Metrics(poll_cnt, vip_cnt, norm_cnt);
+
   out.appendFormat(
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n",
       "Total Device Polls",
-      static_cast<unsigned>(
-          g_ch1_state_metrics.poll_cnt.load(std::memory_order_relaxed)),
+      static_cast<unsigned>(poll_cnt),
       "VIP Controls (SmartThings App)",
-      static_cast<unsigned>(
-          g_ch1_state_metrics.vip_cnt.load(std::memory_order_relaxed)),
+      static_cast<unsigned>(vip_cnt),
       "Normal Controls (Wallpad)",
-      static_cast<unsigned>(
-          g_ch1_state_metrics.normal_cnt.load(std::memory_order_relaxed)),
+      static_cast<unsigned>(norm_cnt),
       "Stale Emerg Polls",
       static_cast<unsigned>(ProtocolDiag_GetStalePollCount()));
 
-  Fmt::FormatTaskStacks(out, stack_snap, g_wdt_monitor);
+  System_FormatTaskStacks(out, stack_snap);
   out.append("================================================================="
              "===============\r\n\r\n");
 
@@ -346,9 +346,8 @@ void cmdStats(CliContext &ctx) {
   if (argc > 0) {
     const char *sub = ctx.args.get(1);
     if (strcasecmp(sub, "clear") == 0) {
-      g_pkt_stats.resetAll();
+      System_ResetTrafficStats();
       ProtocolDiag_PollingResetHits();
-      g_metrics.reset();
       sendTelnetMsg(client, "All traffic statistics, hits, and metrics history "
                             "CLEARED to 0.\r\n");
       return;
@@ -364,17 +363,67 @@ void cmdReboot(CliContext &ctx) {
   g_restart_pending.store(true, std::memory_order_release);
 }
 
+static void FormatRebootLogEntry(AppendBuf &out, const LogEntry &e, size_t idx, size_t count) {
+  char t_buf[32] = "N/A";
+  const char *t_src = "RTC/Uptime (Unsynced)";
+  if (e.timestamp > 0) {
+    struct tm ti;
+    time_t sec = static_cast<time_t>(e.timestamp);
+    localtime_r(&sec, &ti);
+    if (ti.tm_year >= 124) {
+      strftime(t_buf, sizeof(t_buf), "%Y-%m-%d %H:%M:%S", &ti);
+      t_src = "NTP: Synced KST";
+    } else {
+      snprintf(t_buf, sizeof(t_buf), "%04d-%02d-%02d %02d:%02d:%02d",
+               ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday, ti.tm_hour,
+               ti.tm_min, ti.tm_sec);
+    }
+  }
+
+  uint32_t s = e.stats_snapshot.uptime_ms / 1000;
+  char w_str[64] = "Disconnected";
+  if (e.stats_snapshot.wifi_connected) {
+    snprintf(w_str, sizeof(w_str), "Connected (%d dBm, IP: %s)",
+             e.stats_snapshot.wifi_rssi, e.stats_snapshot.wifi_ip);
+  }
+
+  out.appendFormat("\r\n%s", Fmt::DIV80EQ);
+  out.appendFormat("                   GATEWAY BRIDGE REBOOT SNAPSHOT MONITOR                     \r\n");
+  out.appendFormat("%s", Fmt::DIV80EQ);
+  out.appendFormat("Log Index       : #%zu / %zu\r\n", idx + 1, count);
+  out.appendFormat("Reboot Reason   : %s\r\n", e.reason);
+  out.appendFormat("Firmware        : %s\r\n", Config::FIRMWARE_VERSION);
+  out.appendFormat("Log Time        : %s (%s)\r\n", t_buf, t_src);
+  out.appendFormat("Uptime          : %ud %02uh %02um %02us\r\n", s / 86400,
+                   (s % 86400) / 3600, (s % 3600) / 60, s % 60);
+  out.appendFormat("WiFi Connection : %s\r\n", w_str);
+  out.appendFormat(
+      "Heap Memory     : Free %u KB / Min Free %u KB / Total %u KB\r\n",
+      static_cast<unsigned>(e.stats_snapshot.free_heap / 1024),
+      static_cast<unsigned>(e.stats_snapshot.min_free_heap / 1024),
+      static_cast<unsigned>(e.stats_snapshot.total_heap / 1024));
+  out.appendFormat("Flash Storage   : Sketch %u KB / Total Flash %u KB\r\n\r\n",
+                   static_cast<unsigned>(e.stats_snapshot.sketch_size_kb),
+                   static_cast<unsigned>(e.stats_snapshot.flash_total_kb));
+
+  Fmt::FormatHwMetrics(out, e.hw_snapshot);
+  Fmt::FormatNetworkStats(out, e.packet_stats_snapshot);
+  Fmt::FormatRs485Stats(out, e.packet_stats_snapshot);
+  System_FormatTaskStacks(out, e.stack_snapshot);
+  out.appendFormat("%s\r\n", Fmt::DIV80EQ);
+}
+
 void cmdLogView(CliContext &ctx) {
   int client = ctx.sock;
   const char *sub_cmd = (ctx.args.count() > 0) ? ctx.args.get(1) : "list";
 
   if (strcasecmp(sub_cmd, "clear") == 0) {
-    LogManager::clearRebootLog();
+    System_ClearRebootLog();
     sendTelnetMsg(client, "Reboot log history CLEARED from NVS flash.\r\n");
     return;
   }
 
-  size_t count = LogManager::getLogCount();
+  size_t count = System_GetRebootLogCount();
   if (count == 0) {
     sendTelnetMsg(client,
                   "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
@@ -385,9 +434,8 @@ void cmdLogView(CliContext &ctx) {
     withScratchBuf(client, [count](AppendBuf &out) {
       CliFmt::PrintBoxHeader(out, "PERSISTENT REBOOT LOG HISTORY");
       CliFmt::PrintBoxSubtitlef(
-          out, "Total Stored: %u / %u Logs | Non-Volatile RTC/NVS",
-          static_cast<unsigned>(count),
-          static_cast<unsigned>(LogManager::MAX_LOG_ENTRIES));
+          out, "Total Stored: %u / 20 Logs | Non-Volatile RTC/NVS",
+          static_cast<unsigned>(count));
 
       static constexpr Column REBOOT_COLS[] = {
           {"No", 3, Align::CENTER, Align::CENTER},
@@ -404,7 +452,7 @@ void cmdLogView(CliContext &ctx) {
 
       for (size_t i = 0; i < count; i++) {
         LogEntry entry;
-        if (LogManager::getLogEntry(i, entry)) {
+        if (System_GetRebootLogEntry(i, entry)) {
           time_buf.reset();
           if (entry.timestamp > 0) {
             struct tm timeinfo;
@@ -460,8 +508,15 @@ void cmdLogView(CliContext &ctx) {
 
   char *scratch = Cli_GetScratchBuffer();
   size_t scratch_sz = Cli_GetScratchBufferSize();
-  LogManager::readRebootLog(scratch, scratch_sz, target_idx);
-  sendTelnetMsg(client, scratch);
+  scratch[0] = '\0';
+  AppendBuf out{scratch, scratch_sz};
+  LogEntry e;
+  if (System_GetRebootLogEntry(target_idx, e)) {
+    FormatRebootLogEntry(out, e, target_idx, count);
+    sendTelnetMsgLen(client, out.buf, out.offset);
+  } else {
+    sendTelnetMsg(client, "\r\n[LOGVIEW] Failed to read reboot log entry.\r\n");
+  }
 }
 
 void cmdCoreDump(CliContext &ctx) {
@@ -542,7 +597,7 @@ void otaPrintStatus(AppendBuf &out) {
                         next ? static_cast<unsigned>(next->size / 1024) : 3712);
 
   bool val_done = TimeUtils::isElapsed(
-      Diag_GetBootTimeMs(), Config::Timing::OTA_VALIDATION_PERIOD_MS);
+      System_GetBootTimeMs(), Config::Timing::OTA_VALIDATION_PERIOD_MS);
   timer_val.append(val_done ? "120s Passed" : "Evaluating (<120s)");
   crash_val.appendFormat("%u Consecutive Crashes",
                          static_cast<unsigned>(rtc_crash_counter));
@@ -634,7 +689,7 @@ void cmdOta(CliContext &ctx) {
          sendTelnetMsg(
              s,
              "[OTA] Initiating GitHub Cloud HTTP(S) OTA in background...\r\n");
-         Mgmt_StartHttpOta(url);
+         System_StartHttpOta(url);
        }},
   };
 
@@ -780,39 +835,6 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   }
 }
 
-void FormatTaskStacks(AppendBuf &out, const StackSnapshot &st,
-                      const TaskWdtMonitor &wdt) {
-  auto gtag = [](uint16_t b) {
-    return b >= 1000 ? "SAFE" : b >= 500 ? "WARN" : "CRIT";
-  };
 
-  const uint16_t stacks[6] = {st.ch1_stack, st.ch2_stack, st.ch3_stack,
-                              st.ch4_stack, st.net_stack, st.telnet_stack};
-  const char *names[6] = {"CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
-                          "CH#4_WP#3", "Network",   "Telnet_CLI"};
-  const char *scopes[6] = {"IoT Master Comm",    "Wallpad#1 HW Slave",
-                           "Wallpad#2 HW Slave", "Wallpad#3 SW Slave",
-                           "WiFi & TCP Manager", "Telnet CLI Server"};
-
-  out.append(DIV80);
-  out.appendFormat("%-11s %-12s %-10s %-12s %-8s %-18s\r\n", "Task Name",
-                   "Min Stack", "Last Feed", "Peak Intvl", "Status",
-                   "Task Scope");
-  out.append(DIV80);
-
-  uint32_t now = millis();
-  for (size_t i = 0; i < 6; ++i) {
-    uint32_t last_feed =
-        wdt.tasks[i].last_feed_ms.load(std::memory_order_relaxed);
-    uint32_t elapsed =
-        (last_feed > 0 && now >= last_feed) ? (now - last_feed) : 0;
-    uint32_t peak =
-        wdt.tasks[i].max_interval_ms.load(std::memory_order_relaxed);
-
-    out.appendFormat("%-11s %5u Bytes  %5u ms     %5u ms       %-7s %-18s\r\n",
-                     names[i], stacks[i], static_cast<unsigned>(elapsed),
-                     static_cast<unsigned>(peak), gtag(stacks[i]), scopes[i]);
-  }
-}
 
 } // namespace Fmt
