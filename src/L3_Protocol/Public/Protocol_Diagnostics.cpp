@@ -19,9 +19,13 @@ void ProtocolDiag_WarmCacheSaveToNvs() noexcept {
 }
 
 void ProtocolDiag_WarmCacheCheckNvsDebounce() noexcept {
-  WarmCache_CheckNvsDebounce();
+  // NVS write (WarmCache_CheckNvsDebounce) is intentionally NOT called here.
+  // Network task (Core 0) must never block on Preferences NVS write.
+  // Actual NVS flush is performed inside Wallpad_BuildNextPollPacket()
+  // which runs on Task_Ch1 (Core 1) every polling cycle.
   Wallpad_DoorphoneCheckBellTimeout();
 }
+
 
 void ProtocolDiag_GetWarmCacheStatus(uint8_t &out_source, uint8_t &out_restored_count) noexcept {
   out_source = g_warm_cache_source;

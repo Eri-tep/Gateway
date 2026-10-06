@@ -5,6 +5,7 @@
 // ============================================================================
 
 #include "L3_Protocol/Private/Wallpad_Engine.h"
+#include "L3_Protocol/Private/Polling_Registry.h"
 #include "L3_Protocol/Public/Device_Registry.h"
 #include "L3_Protocol/Public/Packet_Router.h"
 #include "L3_Protocol/Private/Control_Registry.h"
@@ -57,6 +58,10 @@ static std::atomic<uint32_t> s_stale_poll_cnt{0};
 
 bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
                                  uint8_t &poll_sub1, uint8_t &poll_sub2) noexcept {
+  // Flush deferred NVS write here (Core 1 / Task_Ch1).
+  // Network task (Core 0) deliberately skips this to avoid WDT-fatal blocking.
+  WarmCache_CheckNvsDebounce();
+
   if (Wallpad_TakeRelearnRequest()) {
     Wallpad_CheckConvergence(true);
     System_TraceMessage("[AUTO PROBE] Convergence state reset. Re-learning "
