@@ -79,7 +79,6 @@ static void Boot_CheckCrashLoop() {
   Diag_DiagnoseStuck();
   Diag_CheckCoreDump();
   Diag_LogResetReason();
-  g_metrics.init();
 
   Serial.println(F("\r\n========================================"));
   Serial.printf("  GATEWAY BRIDGE %s BOOT INITIALIZATION\r\n",

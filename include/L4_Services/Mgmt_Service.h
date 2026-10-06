@@ -57,8 +57,6 @@ void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept
 void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
 void Remote_Tick(bool ota_now, uint32_t now_ms) noexcept;
 
-extern EventGroupHandle_t g_wifi_event_group;
-
 // ── Remote Control Handler Registration ──
 using DeviceControlHandler = bool (*)(StaticPacket &req,
                                       StaticPacket &out_ack) noexcept;

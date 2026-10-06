@@ -68,7 +68,7 @@ void Uart_InitHw(uart_port_t port, int tx_pin, int rx_pin,
                       event_queue_out, 0);
 }
 
-void Uart_InitDoorphone(uint32_t baud, uint8_t data_bits, uint8_t parity,
+void Uart_InitSwSerial(uint32_t baud, uint8_t data_bits, uint8_t parity,
                         uint8_t stop_bits, int rx_pin, int tx_pin) {
   s_doorphone_serial.begin(baud,
                            priv_doorSerialConfig(data_bits, parity, stop_bits),
@@ -91,19 +91,17 @@ void Uart_ReconfigHw(uart_port_t port, uint32_t baud,
   uart_flush_input(port);
 }
 
-void Uart_ReconfigDoorphone(const UartHwConfig &cfg) {
-  Uart_ReconfigDoorphone(cfg.baud, cfg.data_bits, cfg.parity, cfg.stop_bits);
+void Uart_ReconfigSwSerial(const UartHwConfig &cfg) {
+  Uart_ReconfigSwSerial(cfg.baud, cfg.data_bits, cfg.parity, cfg.stop_bits);
 }
 
-void Uart_ReconfigDoorphone(uint32_t baud, uint8_t data_bits,
-                             uint8_t parity, uint8_t stop_bits) {
+void Uart_ReconfigSwSerial(uint32_t baud, uint8_t data_bits,
+                            uint8_t parity, uint8_t stop_bits) {
   s_doorphone_serial.begin(baud,
                            priv_doorSerialConfig(data_bits, parity, stop_bits),
                            Config::GPIO::RX_GPIO, Config::GPIO::TX_GPIO);
   pinMode(Config::GPIO::RX_GPIO, INPUT_PULLUP);
 }
-
-
 
 // ── Write ─────────────────────────────────────────────────────────────────────
 
@@ -112,8 +110,16 @@ int Uart_WriteHw(uart_port_t port, const uint8_t *buf, size_t len) {
                           static_cast<int>(len));
 }
 
-void Uart_WriteDoorphone(const uint8_t *buf, size_t len) {
+int Uart_WriteHw(uart_port_t port, std::span<const uint8_t> data) {
+  return Uart_WriteHw(port, data.data(), data.size());
+}
+
+void Uart_WriteSwSerial(const uint8_t *buf, size_t len) {
   s_doorphone_serial.write(buf, len);
+}
+
+void Uart_WriteSwSerial(std::span<const uint8_t> data) {
+  Uart_WriteSwSerial(data.data(), data.size());
 }
 
 // ── Read ──────────────────────────────────────────────────────────────────────
@@ -123,12 +129,20 @@ size_t Uart_ReadHw(uart_port_t port, uint8_t *buf, size_t max_len) {
   return (n > 0) ? static_cast<size_t>(n) : 0u;
 }
 
-size_t Uart_ReadDoorphone(uint8_t *buf, size_t max_len) {
+size_t Uart_ReadHw(uart_port_t port, std::span<uint8_t> out_buf) {
+  return Uart_ReadHw(port, out_buf.data(), out_buf.size());
+}
+
+size_t Uart_ReadSwSerial(uint8_t *buf, size_t max_len) {
   size_t count = 0;
   while (count < max_len && s_doorphone_serial.available() > 0) {
     buf[count++] = static_cast<uint8_t>(s_doorphone_serial.read());
   }
   return count;
+}
+
+size_t Uart_ReadSwSerial(std::span<uint8_t> out_buf) {
+  return Uart_ReadSwSerial(out_buf.data(), out_buf.size());
 }
 
 // ── Poll ──────────────────────────────────────────────────────────────────────
@@ -139,7 +153,7 @@ size_t Uart_AvailableHw(uart_port_t port) {
   return avail;
 }
 
-size_t Uart_AvailableDoorphone() {
+size_t Uart_AvailableSwSerial() {
   int n = s_doorphone_serial.available();
   return (n > 0) ? static_cast<size_t>(n) : 0u;
 }

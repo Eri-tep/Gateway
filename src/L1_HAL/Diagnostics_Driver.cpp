@@ -88,10 +88,20 @@ TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept {
 
 // ── Global Diagnostics Instances ──
 
-SystemMetricsTracker g_metrics;
+static SystemMetricsTracker s_metrics;
 static TaskWdtMonitor s_wdt_monitor;
-PacketStatistics g_pkt_stats;
-Ch1StateMetrics g_ch1_state_metrics;
+
+struct Ch1StateMetrics {
+  std::atomic<uint32_t> poll_cnt{0};
+  std::atomic<uint32_t> vip_cnt{0};
+  std::atomic<uint32_t> normal_cnt{0};
+  std::atomic<uint8_t> last_from_state{0};
+  std::atomic<uint8_t> last_to_state{0};
+  std::atomic<uint32_t> last_transition_ms{0};
+};
+
+static PacketStatistics s_pkt_stats;
+static Ch1StateMetrics s_ch1_state_metrics;
 
 // ── Sealed RTC Fast SRAM Retention State (L1-owned) ──
 static RTC_NOINIT_ATTR uint32_t s_rtc_magic;
@@ -106,6 +116,7 @@ static void Diagnostics_FeedWdtImpl(size_t index) noexcept {
 
 void Diagnostics_Init() noexcept {
   System_RegisterWdtHook(Diagnostics_FeedWdtImpl);
+  s_metrics.init();
 }
 
 namespace {
@@ -386,11 +397,11 @@ void Diag_CheckOtaHealth() {
     return;
 
   bool wifi_ok = (WiFi.status() == WL_CONNECTED);
-  bool hub_ok = g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed) ||
-                g_pkt_stats.ch5.is_connected.load(std::memory_order_relaxed);
+  bool hub_ok = s_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed) ||
+                s_pkt_stats.ch5.is_connected.load(std::memory_order_relaxed);
 
   bool rs485_ok =
-      (millis() - g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) < 15000);
+      (millis() - s_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) < 15000);
   bool time_ok = TimeUtils::isElapsed(s_boot_start_ms,
                                       Config::Timing::OTA_VALIDATION_PERIOD_MS);
   bool extended_time_ok = TimeUtils::isElapsed(s_boot_start_ms, 60000);
@@ -788,18 +799,18 @@ void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
   uint32_t now_ms = millis();
   uint32_t prev_ms = s_last_time_ms.load(std::memory_order_relaxed);
 
-  uint32_t cur_ch1 = g_pkt_stats.ch1.rx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch1.tx_pkts.load(std::memory_order_relaxed);
-  uint32_t cur_ch23 = g_pkt_stats.ch2.rx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch2.tx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch3.rx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch3.tx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch4.rx_pkts.load(std::memory_order_relaxed) +
-                      g_pkt_stats.ch4.tx_pkts.load(std::memory_order_relaxed);
-  uint32_t cur_tcp = g_pkt_stats.ch5.rx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch5.tx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch6.rx_pkts.load(std::memory_order_relaxed) +
-                     g_pkt_stats.ch6.tx_pkts.load(std::memory_order_relaxed);
+  uint32_t cur_ch1 = s_pkt_stats.ch1.rx_pkts.load(std::memory_order_relaxed) +
+                     s_pkt_stats.ch1.tx_pkts.load(std::memory_order_relaxed);
+  uint32_t cur_ch23 = s_pkt_stats.ch2.rx_pkts.load(std::memory_order_relaxed) +
+                      s_pkt_stats.ch2.tx_pkts.load(std::memory_order_relaxed) +
+                      s_pkt_stats.ch3.rx_pkts.load(std::memory_order_relaxed) +
+                      s_pkt_stats.ch3.tx_pkts.load(std::memory_order_relaxed) +
+                      s_pkt_stats.ch4.rx_pkts.load(std::memory_order_relaxed) +
+                      s_pkt_stats.ch4.tx_pkts.load(std::memory_order_relaxed);
+  uint32_t cur_tcp = s_pkt_stats.ch5.rx_pkts.load(std::memory_order_relaxed) +
+                     s_pkt_stats.ch5.tx_pkts.load(std::memory_order_relaxed) +
+                     s_pkt_stats.ch6.rx_pkts.load(std::memory_order_relaxed) +
+                     s_pkt_stats.ch6.tx_pkts.load(std::memory_order_relaxed);
 
   uint32_t elapsed_ms = now_ms - prev_ms;
   if (!prev_ms || elapsed_ms < MIN_SAMPLE_INTERVAL_MS) {
@@ -829,7 +840,7 @@ void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
   uint32_t load0 = CPU0_BASE_LOAD + (tcp_pps / CPU0_PPS_DIVISOR);
   if (WiFi.isConnected())
     load0 += 1;
-  if (g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed))
+  if (s_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed))
     load0 += 1;
 
   uint32_t uart_pps = static_cast<uint32_t>(
@@ -858,8 +869,8 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
     strncpy(sys.wifi_ip, "0.0.0.0", sizeof(sys.wifi_ip));
   }
 
-  auto s15 = g_metrics.get15m();
-  auto s24 = g_metrics.get24h();
+  auto s15 = s_metrics.get15m();
+  auto s24 = s_metrics.get24h();
 
   uint8_t c0 = 0, c1 = 0;
   System_ReadCpuPct(c0, c1);
@@ -899,12 +910,12 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   st.net_stack = get_stack(SystemTaskId::NETWORK);
   st.telnet_stack = get_stack(SystemTaskId::TELNET);
 
-  pkt.ch1 = SingleChannelToSnapshot(g_pkt_stats.ch1);
-  pkt.ch2 = SingleChannelToSnapshot(g_pkt_stats.ch2);
-  pkt.ch3 = SingleChannelToSnapshot(g_pkt_stats.ch3);
-  pkt.ch4 = SingleChannelToSnapshot(g_pkt_stats.ch4);
-  pkt.ch5 = TcpSocketToSnapshot(g_pkt_stats.ch5);
-  pkt.ch6 = TcpSocketToSnapshot(g_pkt_stats.ch6);
+  pkt.ch1 = SingleChannelToSnapshot(s_pkt_stats.ch1);
+  pkt.ch2 = SingleChannelToSnapshot(s_pkt_stats.ch2);
+  pkt.ch3 = SingleChannelToSnapshot(s_pkt_stats.ch3);
+  pkt.ch4 = SingleChannelToSnapshot(s_pkt_stats.ch4);
+  pkt.ch5 = TcpSocketToSnapshot(s_pkt_stats.ch5);
+  pkt.ch6 = TcpSocketToSnapshot(s_pkt_stats.ch6);
 }
 
 void System_GetCpuAndTemp(uint8_t &cpu0, uint8_t &cpu1, int8_t &temp_c) noexcept {
@@ -913,67 +924,131 @@ void System_GetCpuAndTemp(uint8_t &cpu0, uint8_t &cpu1, int8_t &temp_c) noexcept
 }
 
 void System_GetPktSnapshot(PktSnapshot &pkt) noexcept {
-  pkt.ch1 = SingleChannelToSnapshot(g_pkt_stats.ch1);
-  pkt.ch2 = SingleChannelToSnapshot(g_pkt_stats.ch2);
-  pkt.ch3 = SingleChannelToSnapshot(g_pkt_stats.ch3);
-  pkt.ch4 = SingleChannelToSnapshot(g_pkt_stats.ch4);
-  pkt.ch5 = TcpSocketToSnapshot(g_pkt_stats.ch5);
-  pkt.ch6 = TcpSocketToSnapshot(g_pkt_stats.ch6);
+  pkt.ch1 = SingleChannelToSnapshot(s_pkt_stats.ch1);
+  pkt.ch2 = SingleChannelToSnapshot(s_pkt_stats.ch2);
+  pkt.ch3 = SingleChannelToSnapshot(s_pkt_stats.ch3);
+  pkt.ch4 = SingleChannelToSnapshot(s_pkt_stats.ch4);
+  pkt.ch5 = TcpSocketToSnapshot(s_pkt_stats.ch5);
+  pkt.ch6 = TcpSocketToSnapshot(s_pkt_stats.ch6);
 }
 
 void System_GetCh1Metrics(uint32_t &poll_cnt, uint32_t &vip_cnt, uint32_t &normal_cnt) noexcept {
-  poll_cnt = g_ch1_state_metrics.poll_cnt.load(std::memory_order_relaxed);
-  vip_cnt = g_ch1_state_metrics.vip_cnt.load(std::memory_order_relaxed);
-  normal_cnt = g_ch1_state_metrics.normal_cnt.load(std::memory_order_relaxed);
+  poll_cnt = s_ch1_state_metrics.poll_cnt.load(std::memory_order_relaxed);
+  vip_cnt = s_ch1_state_metrics.vip_cnt.load(std::memory_order_relaxed);
+  normal_cnt = s_ch1_state_metrics.normal_cnt.load(std::memory_order_relaxed);
 }
 
 void System_RecordMetricsSample(uint16_t used_ram_kb) noexcept {
   uint8_t c0 = 0, c1 = 0;
   System_ReadCpuPct(c0, c1);
-  g_metrics.addSample(c0, c1, used_ram_kb, System_ReadTempC());
+  s_metrics.addSample(c0, c1, used_ram_kb, System_ReadTempC());
 }
 
 void System_ResetTrafficStats() noexcept {
-  g_pkt_stats.resetAll();
-  g_metrics.reset();
+  s_pkt_stats.resetAll();
+  s_metrics.reset();
 }
 
 void System_RecordCh5Tx() noexcept {
-  g_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+  s_pkt_stats.ch5.tx_pkts.fetch_add(1, std::memory_order_relaxed);
 }
 
 void System_RecordCh5Rx() noexcept {
-  g_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+  s_pkt_stats.ch5.rx_pkts.fetch_add(1, std::memory_order_relaxed);
 }
 
 void System_RecordCh5Dropped() noexcept {
-  g_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
+  s_pkt_stats.ch5.dropped_pkts.fetch_add(1, std::memory_order_relaxed);
 }
 
 void System_SetCh5Connected(bool conn) noexcept {
-  g_pkt_stats.ch5.is_connected.store(conn, std::memory_order_relaxed);
+  s_pkt_stats.ch5.is_connected.store(conn, std::memory_order_relaxed);
 }
 
 void System_RecordCh5Connection() noexcept {
-  g_pkt_stats.ch5.is_connected.store(true, std::memory_order_relaxed);
-  g_pkt_stats.ch5.connection_count.fetch_add(1, std::memory_order_relaxed);
+  s_pkt_stats.ch5.is_connected.store(true, std::memory_order_relaxed);
+  s_pkt_stats.ch5.connection_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 void System_RecordCh6Tx() noexcept {
-  g_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+  s_pkt_stats.ch6.tx_pkts.fetch_add(1, std::memory_order_relaxed);
 }
 
 void System_RecordCh6Rx() noexcept {
-  g_pkt_stats.ch6.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+  s_pkt_stats.ch6.rx_pkts.fetch_add(1, std::memory_order_relaxed);
 }
 
 void System_SetCh6Connected(bool conn) noexcept {
-  g_pkt_stats.ch6.is_connected.store(conn, std::memory_order_relaxed);
+  s_pkt_stats.ch6.is_connected.store(conn, std::memory_order_relaxed);
 }
 
 void System_RecordCh6Connection() noexcept {
-  g_pkt_stats.ch6.is_connected.store(true, std::memory_order_relaxed);
-  g_pkt_stats.ch6.connection_count.fetch_add(1, std::memory_order_relaxed);
+  s_pkt_stats.ch6.is_connected.store(true, std::memory_order_relaxed);
+  s_pkt_stats.ch6.connection_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+SingleChannelStats *Diag_GetChannelStats(uint8_t ch) noexcept {
+  switch (ch) {
+  case 1: return &s_pkt_stats.ch1;
+  case 2: return &s_pkt_stats.ch2;
+  case 3: return &s_pkt_stats.ch3;
+  case 4: return &s_pkt_stats.ch4;
+  default: return nullptr;
+  }
+}
+
+TcpSocketStats *Diag_GetTcpStats(uint8_t ch) noexcept {
+  switch (ch) {
+  case 5: return &s_pkt_stats.ch5;
+  case 6: return &s_pkt_stats.ch6;
+  default: return nullptr;
+  }
+}
+
+void Diag_RecordChannelTx(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->tx_pkts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Diag_RecordChannelRx(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->rx_pkts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Diag_RecordChannelTimeout(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->timeouts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Diag_RecordChannelLockTimeout(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Diag_RecordChannelInvalidFrame(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->invalid_frames.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Diag_RecordChannelCrcError(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->crc_errors.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Diag_RecordChannelActivity(uint8_t ch, uint32_t now_ms) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->last_activity_ms.store(now_ms, std::memory_order_release);
+}
+
+uint32_t Diag_GetChannelLastActivityMs(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) return s->last_activity_ms.load(std::memory_order_acquire);
+  return 0;
+}
+
+void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_t now_ms) noexcept {
+  if (to_state == 1) {
+    s_ch1_state_metrics.vip_cnt.fetch_add(1, std::memory_order_relaxed);
+  } else if (to_state == 2) {
+    s_ch1_state_metrics.normal_cnt.fetch_add(1, std::memory_order_relaxed);
+  } else if (to_state == 3) {
+    s_ch1_state_metrics.poll_cnt.fetch_add(1, std::memory_order_relaxed);
+  }
+  s_ch1_state_metrics.last_from_state.store(from_state, std::memory_order_relaxed);
+  s_ch1_state_metrics.last_to_state.store(to_state, std::memory_order_relaxed);
+  s_ch1_state_metrics.last_transition_ms.store(now_ms, std::memory_order_relaxed);
 }
 
 

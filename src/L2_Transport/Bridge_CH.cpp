@@ -50,19 +50,23 @@ static SemaphoreHandle_t s_ch5_mutex = nullptr;
 static int s_ew11_server_fds[Config::TCP::MAX_EW11_SLOTS] = {-1, -1, -1, -1, -1};
 
 static Bridge_PacketDispatcher s_dispatcher{};
-static BridgeRxCallback s_fcu_rx_cb = nullptr;
-static BridgeTickCallback s_fcu_tick_cb = nullptr;
+static BridgeRxCallback s_slot_rx_cb = nullptr;
+static BridgeTickCallback s_slot_tick_cb = nullptr;
+
+static void Hub_LoadConfig();
+static void Hub_SaveConfig();
+static bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
 
 void Bridge_RegisterDispatcher(const Bridge_PacketDispatcher &dispatcher) noexcept {
   s_dispatcher = dispatcher;
 }
 
-void Bridge_RegisterFcuRxCallback(BridgeRxCallback cb) noexcept {
-  s_fcu_rx_cb = cb;
+void Bridge_RegisterSlotRxCallback(BridgeRxCallback cb) noexcept {
+  s_slot_rx_cb = cb;
 }
 
-void Bridge_RegisterFcuTickCallback(BridgeTickCallback cb) noexcept {
-  s_fcu_tick_cb = cb;
+void Bridge_RegisterSlotTickCallback(BridgeTickCallback cb) noexcept {
+  s_slot_tick_cb = cb;
 }
 
 bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) {
@@ -166,6 +170,10 @@ bool Bridge_SendRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept 
   return false;
 }
 
+bool Bridge_SendRaw(uint8_t slot_idx, std::span<const uint8_t> data) noexcept {
+  return Bridge_SendRaw(slot_idx, data.data(), data.size());
+}
+
 namespace {
 
 inline void consumeRxBuffer(HubClientSlot *slot, size_t consumed) {
@@ -250,8 +258,8 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
       StaticPacket trace_pkt{5, 19};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 19], trace_pkt.data.begin());
       System_TracePacket(5, false, TraceType::RMT, trace_pkt);
-      if (s_fcu_rx_cb) {
-        s_fcu_rx_cb(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
+      if (s_slot_rx_cb) {
+        s_slot_rx_cb(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 19);
       }
       p += 19;
       continue;
@@ -265,8 +273,8 @@ void demuxModbusStream(int slot_idx, HubClientSlot *slot) {
       StaticPacket trace_pkt{5, 8};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + 8], trace_pkt.data.begin());
       System_TracePacket(5, false, TraceType::RMT, trace_pkt);
-      if (s_fcu_rx_cb) {
-        s_fcu_rx_cb(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
+      if (s_slot_rx_cb) {
+        s_slot_rx_cb(static_cast<uint8_t>(slot_idx), &slot->rx_buf[p], 8);
       }
       p += 8;
       continue;
@@ -535,7 +543,7 @@ bool Bridge_ForwardPacket(uint8_t slot_idx, const StaticPacket &pkt,
   }
 }
 
-void Hub_LoadConfig() {
+static void Hub_LoadConfig() {
   Preferences p;
   p.begin("ew11-config", true);
   MutexLocker lock(s_ch5_mutex);
@@ -597,7 +605,7 @@ void Hub_LoadConfig() {
   p.end();
 }
 
-void Hub_SaveConfig() {
+static void Hub_SaveConfig() {
   Preferences p;
   p.begin("ew11-config", false);
   MutexLocker lock(s_ch5_mutex);
@@ -617,8 +625,8 @@ void Hub_SaveConfig() {
   p.end();
 }
 
-bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                 const char *name) {
+bool Bridge_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                    const char *name) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
     return false;
 
@@ -663,7 +671,7 @@ bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
   return true;
 }
 
-bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
+static bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
     return false;
   MutexLocker lock(s_ch5_mutex);
@@ -807,8 +815,8 @@ void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept {
   }
 
   if (!ota_now) {
-    if (s_fcu_tick_cb) {
-      s_fcu_tick_cb(now_ms);
+    if (s_slot_tick_cb) {
+      s_slot_tick_cb(now_ms);
     }
   }
 }

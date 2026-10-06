@@ -9,7 +9,7 @@
 #include <WiFi.h>
 #include "esp_wifi.h"
 
-EventGroupHandle_t g_wifi_event_group = nullptr;
+static EventGroupHandle_t s_wifi_event_group = nullptr;
 static StaticEventGroup_t s_wifi_event_group_buf;
 static uint32_t s_wifi_disconnect_count = 0;
 
@@ -20,18 +20,18 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     break;
   case ARDUINO_EVENT_WIFI_STA_CONNECTED:
     Serial.println(F("[WIFI EVENT] STA Connected to AP"));
-    if (g_wifi_event_group) {
-      xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_CONNECTED);
-      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
+    if (s_wifi_event_group) {
+      xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_CONNECTED);
+      xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
     }
     break;
   case ARDUINO_EVENT_WIFI_STA_GOT_IP:
     s_wifi_disconnect_count = 0;
     Serial.printf("[WIFI EVENT] STA Got IP: %s\r\n",
                   IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
-    if (g_wifi_event_group) {
-      xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
-      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
+    if (s_wifi_event_group) {
+      xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
+      xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
     }
     if (g_system_event_group) {
       xEventGroupSetBits(g_system_event_group, SYS_EVT_NETWORK_READY);
@@ -41,9 +41,9 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     s_wifi_disconnect_count++;
     Serial.printf("[WIFI EVENT] STA Disconnected (Reason: %d, Count: %u)\r\n",
                   info.wifi_sta_disconnected.reason, s_wifi_disconnect_count);
-    if (g_wifi_event_group) {
-      xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
-      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_CONNECTED | WIFI_BIT_GOT_IP);
+    if (s_wifi_event_group) {
+      xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
+      xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_CONNECTED | WIFI_BIT_GOT_IP);
     }
     if (g_system_event_group) {
       xEventGroupClearBits(g_system_event_group, SYS_EVT_NETWORK_READY);
@@ -51,9 +51,9 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     break;
   case ARDUINO_EVENT_WIFI_AP_START:
     Serial.println(F("[WIFI EVENT] SoftAP Started"));
-    if (g_wifi_event_group) {
-      xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
-      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
+    if (s_wifi_event_group) {
+      xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
+      xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
     }
     if (g_system_event_group) {
       xEventGroupSetBits(g_system_event_group, SYS_EVT_NETWORK_READY);
@@ -61,9 +61,9 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     break;
   case ARDUINO_EVENT_WIFI_AP_STOP:
     Serial.println(F("[WIFI EVENT] SoftAP Stopped"));
-    if (g_wifi_event_group) {
-      xEventGroupSetBits(g_wifi_event_group, WIFI_BIT_DISCONNECTED);
-      xEventGroupClearBits(g_wifi_event_group, WIFI_BIT_GOT_IP);
+    if (s_wifi_event_group) {
+      xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
+      xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
     }
     if (g_system_event_group) {
       xEventGroupClearBits(g_system_event_group, SYS_EVT_NETWORK_READY);
@@ -95,8 +95,8 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 }
 
 void Wifi_Driver_Init(const WifiHwConfig &cfg) {
-  if (!g_wifi_event_group) {
-    g_wifi_event_group = xEventGroupCreateStatic(&s_wifi_event_group_buf);
+  if (!s_wifi_event_group) {
+    s_wifi_event_group = xEventGroupCreateStatic(&s_wifi_event_group_buf);
   }
   WiFi.onEvent(onWifiEvent);
 
@@ -225,4 +225,12 @@ int8_t System_WifiGetRssi() noexcept {
 
 void System_WifiReconnect() noexcept {
   Wifi_Driver_Reconnect();
+}
+
+EventBits_t Wifi_Driver_GetEventBits() noexcept {
+  return s_wifi_event_group ? xEventGroupGetBits(s_wifi_event_group) : 0;
+}
+
+EventBits_t System_WifiGetEventBits() noexcept {
+  return Wifi_Driver_GetEventBits();
 }

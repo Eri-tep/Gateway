@@ -307,7 +307,7 @@ void handleFsmDisconnected(uint32_t now, EventBits_t bits) noexcept {
 
 void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
   if (!System_IsRescueMode()) {
-    const EventBits_t bits = g_wifi_event_group ? xEventGroupGetBits(g_wifi_event_group) : 0;
+    const EventBits_t bits = System_WifiGetEventBits();
 
     switch (s_net_fsm) {
     case NetworkFsmState::OPERATIONAL:

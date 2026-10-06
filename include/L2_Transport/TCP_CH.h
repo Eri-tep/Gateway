@@ -24,6 +24,7 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
+#include "L0_Foundation/System_Platform.h"
 #include <IPAddress.h>
 #include <sys/select.h>
 #include <cstddef>
@@ -61,8 +62,6 @@ public:
 };
 
 } // namespace Transport
-
-#include "L0_Foundation/System_Platform.h"
 
 // ── Task Entry Point (Core 0) ─────────────────────────────────────────────────
 

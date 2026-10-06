@@ -9,6 +9,7 @@
 #include "L0_Foundation/System_Config.h"
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <sys/select.h>
 
 // ── EW11 Slot Snapshot & Management API (0-extern 정보 은닉) ──
@@ -17,12 +18,15 @@ bool Bridge_SetSlotEnabled(uint8_t slot_idx, bool enabled);
 bool Bridge_SetFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len);
 bool Bridge_ResetFramingTracker(uint8_t slot_idx);
 
-void Hub_LoadConfig();
-void Hub_SaveConfig();
-bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                 const char *name = nullptr);
-bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
+bool Bridge_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                    const char *name = nullptr);
+inline bool Hub_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
+                        const char *name = nullptr) {
+  return Bridge_SetSlot(slot_idx, enabled, ip, port, name);
+}
+
 bool Bridge_SendRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
+bool Bridge_SendRaw(uint8_t slot_idx, std::span<const uint8_t> data) noexcept;
 
 void Bridge_Init();
 void Bridge_StartServer() noexcept;
@@ -51,5 +55,12 @@ void Bridge_RegisterDispatcher(const Bridge_PacketDispatcher &dispatcher) noexce
 using BridgeRxCallback = void (*)(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
 using BridgeTickCallback = void (*)(uint32_t now_ms) noexcept;
 
-void Bridge_RegisterFcuRxCallback(BridgeRxCallback cb) noexcept;
-void Bridge_RegisterFcuTickCallback(BridgeTickCallback cb) noexcept;
+void Bridge_RegisterSlotRxCallback(BridgeRxCallback cb) noexcept;
+void Bridge_RegisterSlotTickCallback(BridgeTickCallback cb) noexcept;
+
+inline void Bridge_RegisterFcuRxCallback(BridgeRxCallback cb) noexcept {
+  Bridge_RegisterSlotRxCallback(cb);
+}
+inline void Bridge_RegisterFcuTickCallback(BridgeTickCallback cb) noexcept {
+  Bridge_RegisterSlotTickCallback(cb);
+}

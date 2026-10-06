@@ -2,8 +2,17 @@
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
+#include <ArduinoOTA.h>
+#include <HTTPClient.h>
+#include <Update.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <cstdio>
 #include <cstring>
+#include <esp_idf_version.h>
+#include <esp_task_wdt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
 #include <strings.h>
 
 // ── Pure OTA URL Trust Policy (Consolidated L1 Physical HAL) ─────────────────
@@ -143,20 +152,15 @@ bool Ota_IsTrustedUrl(const char *url, OtaUrlContext context) {
   return false;
 }
 } // namespace
-#include <ArduinoOTA.h>
-#include <HTTPClient.h>
-#include <Update.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <esp_idf_version.h>
-#include <esp_task_wdt.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/event_groups.h>
 
-HttpOtaState g_http_ota_state{};
+static HttpOtaState s_http_ota_state{};
 static char s_ota_target_url[256] = {0};
 
 static constexpr size_t MAX_REDIRECT_LOCATION_LEN = 1024;
+
+static WiFiClientSecure s_secure_client;
+static WiFiClient s_plain_client;
+static HTTPClient s_http;
 
 static PreOtaHookFn s_pre_ota_hook = nullptr;
 void SystemOta_RegisterPreOtaHook(PreOtaHookFn hook) noexcept {
@@ -213,11 +217,11 @@ private:
 static void ota_fail(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
-  vsnprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+  vsnprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
             fmt, args);
   va_end(args);
-  snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Failed");
-  ::Serial.printf("[OTA] Error: %s\r\n", g_http_ota_state.last_error);
+  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status), "Failed");
+  ::Serial.printf("[OTA] Error: %s\r\n", s_http_ota_state.last_error);
 }
 
 static bool Ota_ResolveDownloadUrl(const char *initial_url,
@@ -226,11 +230,12 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
                                    WiFiClient &plain_client, HTTPClient &http,
                                    int &out_content_length) {
   char initial_host[128] = {0};
-  char initial_path[256] = {0};
+  char host[128] = {0};
+  char path[256] = {0};
   int initial_port = 0;
   bool is_https_initial = false;
   Ota_ExtractUrlComponents(initial_url, initial_host, sizeof(initial_host),
-                         initial_port, initial_path, sizeof(initial_path),
+                         initial_port, path, sizeof(path),
                          is_https_initial);
 
   if (!Ota_IsPrivateHost(initial_host) && time(nullptr) < 1700000000) {
@@ -240,10 +245,10 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
 
   ::Serial.printf("[OTA] Starting Stream OTA to target host: %s (port %d)\r\n",
                   initial_host, initial_port);
-  snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
            "Connecting...");
-  g_http_ota_state.progress_pct = 0;
-  g_http_ota_state.last_error[0] = '\0';
+  s_http_ota_state.progress_pct = 0;
+  s_http_ota_state.last_error[0] = '\0';
 
   // 사전 등록된 정리 훅 실행 (소켓 일시 해제 및 lwIP pcb + 수신 버퍼 힙 확보)
   if (s_pre_ota_hook) {
@@ -267,8 +272,8 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
   while (redirect_count <= 2) {
     esp_task_wdt_reset();
 
-    char host[128] = {0};
-    char path[256] = {0};
+    memset(host, 0, sizeof(host));
+    memset(path, 0, sizeof(path));
     int port = 0;
     bool is_https = false;
     Ota_ExtractUrlComponents(current_url.c_str(), host, sizeof(host), port, path,
@@ -337,25 +342,25 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
         return false;
       }
 
-      char next_host[128] = {0};
-      char next_path[256] = {0};
       int next_port = 0;
       bool next_is_https = false;
-      if (!Ota_ExtractUrlComponents(location.c_str(), next_host,
-                                  sizeof(next_host), next_port, next_path,
-                                  sizeof(next_path), next_is_https)) {
+      memset(host, 0, sizeof(host));
+      memset(path, 0, sizeof(path));
+      if (!Ota_ExtractUrlComponents(location.c_str(), host,
+                                  sizeof(host), next_port, path,
+                                  sizeof(path), next_is_https)) {
         ota_fail("Failed to parse redirect URL");
         return false;
       }
 
-      if (Ota_IsPrivateHost(next_host) != Ota_IsPrivateHost(initial_host)) {
+      if (Ota_IsPrivateHost(host) != Ota_IsPrivateHost(initial_host)) {
         ota_fail("Redirect crosses trust boundary");
         return false;
       }
 
       current_url = location;
       ::Serial.printf("[OTA] Redirect #%d (%d) -> to host: %s (port %d)\r\n",
-                      redirect_count, httpCode, next_host, next_port);
+                      redirect_count, httpCode, host, next_port);
     } else {
       ota_fail("HTTP GET failed, code: %d", httpCode);
       http.end();
@@ -402,7 +407,7 @@ static bool Ota_StreamAndWritePartition(HTTPClient &http,
     return false;
   }
 
-  snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
            "Downloading...");
   ::Serial.printf(
       "[OTA] Phase 3: Update.begin OK. Starting stream write...\r\n");
@@ -485,7 +490,7 @@ static bool Ota_StreamAndWritePartition(HTTPClient &http,
     last_progress_time = millis();
 
     int pct = (written * 100) / contentLength;
-    g_http_ota_state.progress_pct = pct;
+    s_http_ota_state.progress_pct = pct;
     if (pct != last_pct && (pct % 10 == 0 || pct == 100)) {
       last_pct = pct;
       ::Serial.printf("[OTA] Progress: %d%% (%u / %d bytes)\r\n", pct,
@@ -539,24 +544,21 @@ static bool Ota_StreamAndWritePartition(HTTPClient &http,
 static bool do_ota(const char *initial_url) {
   OtaInProgressGuard ota_guard;
 
-  WiFiClientSecure secure_client;
-  WiFiClient plain_client;
-  HTTPClient http;
   String final_url;
   int content_length = 0;
 
-  if (!Ota_ResolveDownloadUrl(initial_url, final_url, secure_client,
-                              plain_client, http, content_length)) {
+  if (!Ota_ResolveDownloadUrl(initial_url, final_url, s_secure_client,
+                              s_plain_client, s_http, content_length)) {
     return false;
   }
 
-  if (!Ota_StreamAndWritePartition(http, secure_client, plain_client,
+  if (!Ota_StreamAndWritePartition(s_http, s_secure_client, s_plain_client,
                                    content_length)) {
     return false;
   }
 
-  snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status), "Success");
-  g_http_ota_state.progress_pct = 100;
+  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status), "Success");
+  s_http_ota_state.progress_pct = 100;
   ::Serial.printf(
       "[OTA] Firmware update SUCCESS! Rebooting in 1 second...\r\n");
   ota_guard.dismiss();
@@ -583,7 +585,7 @@ static void Task_HttpOta(void *pvParameters) {
       xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
     }
     g_ota_in_progress.store(false, std::memory_order_release);
-    g_http_ota_state.in_progress.store(false, std::memory_order_release);
+    s_http_ota_state.in_progress.store(false, std::memory_order_release);
     ::Serial.printf("[OTA] Task aborted. Stack high water mark: %u bytes\r\n",
                     (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     vTaskDelete(nullptr);
@@ -608,7 +610,7 @@ static void Task_HttpOta(void *pvParameters) {
     xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
   }
   g_ota_in_progress.store(false, std::memory_order_release);
-  g_http_ota_state.in_progress.store(false, std::memory_order_release);
+  s_http_ota_state.in_progress.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 
@@ -623,7 +625,7 @@ public:
   ~OtaAdmissionGuard() {
     if (!_dismissed) {
       g_ota_in_progress.store(false, std::memory_order_release);
-      g_http_ota_state.in_progress.store(false, std::memory_order_release);
+      s_http_ota_state.in_progress.store(false, std::memory_order_release);
       if (g_system_event_group) {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
       }
@@ -640,7 +642,7 @@ private:
 void System_StartHttpOta(const char *url) {
   // 1. 이미 진행 중인지 원자적으로 확인 (CAS)
   bool expected = false;
-  if (!g_http_ota_state.in_progress.compare_exchange_strong(
+  if (!s_http_ota_state.in_progress.compare_exchange_strong(
           expected, true, std::memory_order_acq_rel)) {
     ::Serial.println("[OTA] Start requested but already in progress");
     return;
@@ -658,9 +660,9 @@ void System_StartHttpOta(const char *url) {
   if (strlen(target) > MAX_INITIAL_URL_LEN) {
     ::Serial.printf("[OTA] Initial URL too long (%u bytes, max %u)\r\n",
                     (unsigned)strlen(target), (unsigned)MAX_INITIAL_URL_LEN);
-    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+    snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
              "Failed");
-    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+    snprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
              "Initial OTA URL too long");
     return;
   }
@@ -676,9 +678,9 @@ void System_StartHttpOta(const char *url) {
   // 인증서 검증 실패 방지)
   if (!Ota_IsPrivateHost(target_host) && time(nullptr) < 1700000000) {
     ::Serial.println("[OTA] System time not synced (NTP required for TLS)");
-    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+    snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
              "Failed");
-    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+    snprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
              "System time not synced (NTP required)");
     return;
   }
@@ -687,9 +689,9 @@ void System_StartHttpOta(const char *url) {
     ::Serial.printf("[OTA] Untrusted OTA URL: host=%s, port=%d, path=%s\r\n",
                     target_host[0] ? target_host : "invalid", target_port,
                     target_path);
-    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+    snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
              "Failed");
-    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+    snprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
              "Untrusted OTA URL domain, port, or path");
     return;
   }
@@ -708,9 +710,9 @@ void System_StartHttpOta(const char *url) {
     ::Serial.printf("[OTA] Heap too low/fragmented: %u bytes (largest %u, need "
                     ">= 60000 / 30000)\r\n",
                     (unsigned)free_heap, (unsigned)largest_block);
-    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+    snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
              "Failed");
-    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+    snprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
              "Heap too low (%u bytes, largest %u, need >= 60000)",
              (unsigned)free_heap, (unsigned)largest_block);
     return;
@@ -719,10 +721,10 @@ void System_StartHttpOta(const char *url) {
   strncpy(s_ota_target_url, target, sizeof(s_ota_target_url) - 1);
   s_ota_target_url[sizeof(s_ota_target_url) - 1] = '\0';
 
-  snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
            "Starting...");
-  g_http_ota_state.progress_pct = 0;
-  g_http_ota_state.last_error[0] = '\0';
+  s_http_ota_state.progress_pct = 0;
+  s_http_ota_state.last_error[0] = '\0';
 
   // 5. OTA 전용 백그라운드 태스크 생성 (Core 1, 우선순위 10, 스택 12KB)
   BaseType_t res = xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 12288,
@@ -730,9 +732,9 @@ void System_StartHttpOta(const char *url) {
 
   if (res != pdPASS) {
     ::Serial.printf("[OTA] Failed to create HttpOtaTask: %d\r\n", res);
-    snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
+    snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
              "Failed");
-    snprintf(g_http_ota_state.last_error, sizeof(g_http_ota_state.last_error),
+    snprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
              "Failed to spawn OTA task");
     return;
   }
@@ -742,16 +744,16 @@ void System_StartHttpOta(const char *url) {
 }
 
 void System_GetHttpOtaSnapshot(HttpOtaSnapshot &out) noexcept {
-  out.in_progress = g_http_ota_state.in_progress.load(std::memory_order_relaxed);
-  strncpy(out.status, g_http_ota_state.status, sizeof(out.status) - 1);
+  out.in_progress = s_http_ota_state.in_progress.load(std::memory_order_relaxed);
+  strncpy(out.status, s_http_ota_state.status, sizeof(out.status) - 1);
   out.status[sizeof(out.status) - 1] = '\0';
-  out.progress_pct = g_http_ota_state.progress_pct;
-  strncpy(out.last_error, g_http_ota_state.last_error, sizeof(out.last_error) - 1);
+  out.progress_pct = s_http_ota_state.progress_pct;
+  strncpy(out.last_error, s_http_ota_state.last_error, sizeof(out.last_error) - 1);
   out.last_error[sizeof(out.last_error) - 1] = '\0';
 }
 
 bool System_IsHttpOtaInProgress() noexcept {
-  return g_http_ota_state.in_progress.load(std::memory_order_relaxed);
+  return s_http_ota_state.in_progress.load(std::memory_order_relaxed);
 }
 
 void SystemOta_InitArduinoOta(const char *hostname, const char *password) {

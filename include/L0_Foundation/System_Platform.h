@@ -400,6 +400,7 @@ IPAddress System_WifiGetApIp() noexcept;
 IPAddress System_WifiGetApSubnetMask() noexcept;
 int8_t System_WifiGetRssi() noexcept;
 void System_WifiReconnect() noexcept;
+EventBits_t System_WifiGetEventBits() noexcept;
 
 // ── Bridge Transport Channel Slot Snapshot Contract ──────────────────────────
 bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;

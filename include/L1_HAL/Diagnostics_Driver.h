@@ -217,20 +217,22 @@ void Diag_SetPendingRebootReason(const char *reason) noexcept;
 uint32_t Diag_GetBootTimeMs() noexcept;
 void Diag_SetBootTimeMs(uint32_t ms) noexcept;
 
-extern SystemMetricsTracker g_metrics;
 void Diagnostics_Init() noexcept;
-extern PacketStatistics g_pkt_stats;
 
-struct Ch1StateMetrics {
-  std::atomic<uint32_t> poll_cnt{0};
-  std::atomic<uint32_t> vip_cnt{0};
-  std::atomic<uint32_t> normal_cnt{0};
-  std::atomic<uint8_t> last_from_state{0};
-  std::atomic<uint8_t> last_to_state{0};
-  std::atomic<uint32_t> last_transition_ms{0};
-};
+// ── Packet & Channel Statistics Recording API (100% Encapsulated) ──
+SingleChannelStats *Diag_GetChannelStats(uint8_t ch) noexcept;
+TcpSocketStats *Diag_GetTcpStats(uint8_t ch) noexcept;
 
-extern Ch1StateMetrics g_ch1_state_metrics;
+void Diag_RecordChannelTx(uint8_t ch) noexcept;
+void Diag_RecordChannelRx(uint8_t ch) noexcept;
+void Diag_RecordChannelTimeout(uint8_t ch) noexcept;
+void Diag_RecordChannelLockTimeout(uint8_t ch) noexcept;
+void Diag_RecordChannelInvalidFrame(uint8_t ch) noexcept;
+void Diag_RecordChannelCrcError(uint8_t ch) noexcept;
+void Diag_RecordChannelActivity(uint8_t ch, uint32_t now_ms) noexcept;
+uint32_t Diag_GetChannelLastActivityMs(uint8_t ch) noexcept;
+
+void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_t now_ms) noexcept;
 
 // ── Unified System Trace Sink & Shutdown Hooks are canonically in System_Platform.h ──
 

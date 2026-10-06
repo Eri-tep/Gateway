@@ -92,7 +92,7 @@ bool Queue_EnqueueDropHead(QueueHandle_t queue,
     return false;
   MutexLocker lock(s_ctrl_queue_mutex, kQueueLockTimeout);
   if (!lock.isLocked()) {
-    g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    Diag_RecordChannelLockTimeout(1);
     return false;
   }
   if (xQueueSend(queue, &packet, 0) == pdTRUE)
@@ -108,7 +108,7 @@ bool Queue_EnqueueDropTail(QueueHandle_t queue,
     return false;
   MutexLocker lock(s_ctrl_queue_mutex, kQueueLockTimeout);
   if (!lock.isLocked()) {
-    g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    Diag_RecordChannelLockTimeout(1);
     return false;
   }
   return (xQueueSend(queue, &packet, 0) == pdTRUE);
@@ -376,7 +376,7 @@ void Ch1_WaitBusIdle(uint32_t silence_ms) {
     }
   }
 
-  uint32_t last_act = g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_acquire);
+  uint32_t last_act = Diag_GetChannelLastActivityMs(1);
   uint32_t now_ms = millis();
 
   if (now_ms - last_act < silence_ms) {
@@ -397,7 +397,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
   {
     MutexLocker lock(s_uart0_mutex, pdMS_TO_TICKS(100));
     if (!lock.isLocked()) {
-      g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+      Diag_RecordChannelLockTimeout(1);
       System_TraceMessage(
           "[WARN] Dropped CH1 ctrl packet, mutex timed out.\r\n");
       return;
@@ -407,18 +407,18 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     uart_write_bytes(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
     uart_wait_tx_done(UART_NUM_0,
                       pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
-    g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
+    Diag_RecordChannelActivity(1, millis());
     Ch1_RecordTxFinish();
-    g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+    Diag_RecordChannelTx(1);
 
     got_ack = (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
                                nullptr, nullptr, &ctrlPacket) == UartRxStatus::SUCCESS);
   }
 
   if (got_ack) {
-    g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
+    Diag_RecordChannelActivity(1, millis());
     System_TracePacket(1, false, TraceType::ACK, ack);
-    g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+    Diag_RecordChannelRx(1);
     ack.channel_id = 1;
     if (s_dispatcher.onBusPacket) {
       s_dispatcher.onBusPacket(1, ack, &ctrlPacket);
@@ -428,11 +428,11 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     struct WallpadForwardConfig {
       uart_port_t uart_num;
       SemaphoreHandle_t &mutex;
-      SingleChannelStats &stats;
+      uint8_t channel_id;
     };
     const WallpadForwardConfig wp_cfg[] = {
-        {UART_NUM_1, s_uart1_mutex, g_pkt_stats.ch2}, // CH2
-        {UART_NUM_2, s_uart2_mutex, g_pkt_stats.ch3}, // CH3
+        {UART_NUM_1, s_uart1_mutex, 2}, // CH2
+        {UART_NUM_2, s_uart2_mutex, 3}, // CH3
     };
 
     int wp_idx =
@@ -446,17 +446,17 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
           uart_write_bytes(cfg.uart_num, ack.data.data(), ack.length);
           fwd_success = true;
         } else {
-          cfg.stats.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+          Diag_RecordChannelLockTimeout(cfg.channel_id);
           System_TraceMessage("[WARN] UART mutex timeout forwarding ACK\r\n");
         }
       }
       if (fwd_success) {
         System_TracePacket(ctrlPacket.channel_id, true, TraceType::ACK, ack);
-        cfg.stats.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+        Diag_RecordChannelTx(cfg.channel_id);
       }
     }
   } else {
-    g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
+    Diag_RecordChannelTimeout(1);
     System_TraceMessage(
         "[WARN] Device did not ACK control packet in time.\r\n");
   }
@@ -466,26 +466,9 @@ void Ch1_SetState(Ch1State &cur_state, Ch1State new_state) noexcept {
   if (cur_state != new_state) {
     const Ch1State old = cur_state;
     cur_state = new_state;
-
-    constexpr size_t STATE_COUNT = 4;
-    std::atomic<uint32_t> *const metric_targets[STATE_COUNT] = {
-        nullptr,                         // IDLE (0)
-        &g_ch1_state_metrics.vip_cnt,    // VIP_CONTROL (1)
-        &g_ch1_state_metrics.normal_cnt, // NORMAL_CONTROL (2)
-        &g_ch1_state_metrics.poll_cnt    // POLL_DEVICE (3)
-    };
-
-    const auto idx = static_cast<size_t>(new_state);
-    if (idx < STATE_COUNT && metric_targets[idx] != nullptr) [[likely]] {
-      metric_targets[idx]->fetch_add(1, std::memory_order_relaxed);
-    }
-
-    g_ch1_state_metrics.last_from_state.store(static_cast<uint8_t>(old),
-                                              std::memory_order_relaxed);
-    g_ch1_state_metrics.last_to_state.store(static_cast<uint8_t>(new_state),
-                                            std::memory_order_relaxed);
-    g_ch1_state_metrics.last_transition_ms.store(millis(),
-                                                 std::memory_order_relaxed);
+    Diag_RecordCh1StateTransition(static_cast<uint8_t>(old),
+                                  static_cast<uint8_t>(new_state),
+                                  millis());
   }
 }
 
@@ -517,13 +500,12 @@ void Ch1_PollNext(size_t &current_dev_idx) {
     {
       MutexLocker lock(s_uart0_mutex, kUartLockTimeout);
       if (!lock.isLocked()) {
-        g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+        Diag_RecordChannelLockTimeout(1);
         System_TraceMessage("[WARN] UART0 mutex timeout on poll\r\n");
         return;
       }
 
-      uint32_t last_act =
-          g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_acquire);
+      uint32_t last_act = Diag_GetChannelLastActivityMs(1);
       uint32_t elapsed = millis() - last_act;
       if (elapsed < kDelayMs) {
         continue;
@@ -533,8 +515,8 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
       uart_wait_tx_done(UART_NUM_0,
                         pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
-      g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
-      g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      Diag_RecordChannelActivity(1, millis());
+      Diag_RecordChannelTx(1);
       tx_executed = true;
 
       got_ack = (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
@@ -552,16 +534,15 @@ void Ch1_PollNext(size_t &current_dev_idx) {
   }
 
   if (got_ack) {
-    g_pkt_stats.ch1.last_activity_ms.store(millis(),
-                                           std::memory_order_release);
+    Diag_RecordChannelActivity(1, millis());
     System_TracePacket(1, false, TraceType::ACK, ack);
-    g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+    Diag_RecordChannelRx(1);
     ack.channel_id = 1;
     if (s_dispatcher.onBusPacket) {
       s_dispatcher.onBusPacket(1, ack, &q_pkt);
     }
   } else {
-    g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
+    Diag_RecordChannelTimeout(1);
     if (s_dispatcher.onTimeout) {
       s_dispatcher.onTimeout(poll_dev_id, poll_sub1, poll_sub2);
     }
@@ -598,11 +579,11 @@ void Task_Ch1(void *pvParameters) {
     uart_event_t u_evt;
     while (xQueueReceive(s_uart0_event_queue, (void *)&u_evt, 0) == pdTRUE) {
       if (u_evt.type == UART_FIFO_OVF || u_evt.type == UART_BUFFER_FULL) {
-        g_pkt_stats.ch1.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+        Diag_RecordChannelInvalidFrame(1);
         uart_flush_input(UART_NUM_0);
       } else if (u_evt.type == UART_PARITY_ERR ||
                  u_evt.type == UART_FRAME_ERR) {
-        g_pkt_stats.ch1.crc_errors.fetch_add(1, std::memory_order_relaxed);
+        Diag_RecordChannelCrcError(1);
       }
     }
 
@@ -723,9 +704,7 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
     return;
 
   esp_task_wdt_add(nullptr);
-  SingleChannelStats *stats = (cfg->channel_id == 2)   ? &g_pkt_stats.ch2
-                              : (cfg->channel_id == 3) ? &g_pkt_stats.ch3
-                                                       : nullptr;
+  SingleChannelStats *stats = Diag_GetChannelStats(cfg->channel_id);
   if (!stats) {
     esp_task_wdt_delete(nullptr);
     vTaskDelete(nullptr);
@@ -814,7 +793,7 @@ static inline void Ch4_SendPassthrough(const StaticPacket &pkt,
                      // reflection misinterpretation
   Uart_WriteDoorphone(pkt.data.data(), pkt.length);
   last_tx_ms = millis();
-  g_pkt_stats.ch4.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+  Diag_RecordChannelTx(4);
 }
 
 static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
@@ -837,14 +816,14 @@ static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
   }
 
   System_TracePacket(4, false, TraceType::RMT, packet);
-  g_pkt_stats.ch4.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+  Diag_RecordChannelRx(4);
 }
 
 static inline void Ch4_DropInvalidFrame(const uint8_t *data, size_t len) {
   StaticPacket drp_pkt{4, static_cast<uint8_t>(std::min<size_t>(len, 16))};
   memcpy(drp_pkt.data.data(), data, drp_pkt.length);
   System_TracePacket(4, false, TraceType::DRP, drp_pkt);
-  g_pkt_stats.ch4.invalid_frames.fetch_add(1, std::memory_order_relaxed);
+  Diag_RecordChannelInvalidFrame(4);
 }
 
 void Task_Ch4(void *pvParameters) {
