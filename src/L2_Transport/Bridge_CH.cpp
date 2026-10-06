@@ -176,7 +176,6 @@ bool Bridge_SendRaw(uint8_t slot_idx, std::span<const uint8_t> data) noexcept {
 
 void Bridge_RecordSlotRx(uint8_t slot_idx) noexcept {
   if (slot_idx < Config::TCP::MAX_EW11_SLOTS) {
-    MutexLocker lock(s_ch5_mutex);
     s_hub_slots[slot_idx].rx_pkts++;
   }
   System_RecordCh5Rx();
@@ -679,34 +678,57 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
   }
 
   if (!ota_now) {
-    MutexLocker lock(s_ch5_mutex);
-    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-      auto &slot = s_hub_slots[s];
-      if (slot.sock < 0)
-        continue;
+    struct PendingChunk {
+      int slot_idx{-1};
+      uint8_t buf[Config::TCP::POLL_RX_CHUNK_SIZE];
+      int len{0};
+    };
+    PendingChunk pending[Config::TCP::MAX_EW11_SLOTS];
+    size_t pending_count = 0;
 
-      if (FD_ISSET(slot.sock, &errorfds)) {
-        close(slot.sock);
-        slot.sock = -1;
-        slot.is_connected = false;
-        slot.rx_len = 0;
-        ESP_LOGW("EW11", "[CH5] Slot %d (%s) socket error detected. Closed.", s,
-                 slot.name);
-        continue;
-      }
+    {
+      MutexLocker lock(s_ch5_mutex);
+      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        auto &slot = s_hub_slots[s];
+        if (slot.sock < 0)
+          continue;
 
-      if (FD_ISSET(slot.sock, &readfds)) {
-        uint8_t temp_buf[Config::TCP::POLL_RX_CHUNK_SIZE];
-        int r = recv(slot.sock, temp_buf, sizeof(temp_buf), 0);
-        if (r > 0) {
-          Hub_Data(&slot, temp_buf, r);
-        } else if (r == 0 ||
-                   (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        if (FD_ISSET(slot.sock, &errorfds)) {
           close(slot.sock);
           slot.sock = -1;
           slot.is_connected = false;
           slot.rx_len = 0;
+          ESP_LOGW("EW11", "[CH5] Slot %d (%s) socket error detected. Closed.", s,
+                   slot.name);
+          continue;
         }
+
+        if (FD_ISSET(slot.sock, &readfds)) {
+          uint8_t temp_buf[Config::TCP::POLL_RX_CHUNK_SIZE];
+          int r = recv(slot.sock, temp_buf, sizeof(temp_buf), 0);
+          if (r > 0) {
+            if (pending_count < Config::TCP::MAX_EW11_SLOTS) {
+              pending[pending_count].slot_idx = s;
+              pending[pending_count].len = r;
+              std::copy(temp_buf, temp_buf + r, pending[pending_count].buf);
+              pending_count++;
+            }
+          } else if (r == 0 ||
+                     (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+            close(slot.sock);
+            slot.sock = -1;
+            slot.is_connected = false;
+            slot.rx_len = 0;
+          }
+        }
+      }
+    } // s_ch5_mutex 해제 완료
+
+    // 패킷 스트림 파싱 및 L3 비즈니스 콜백은 뮤텍스 밖에서 안전하게 디스패치
+    for (size_t i = 0; i < pending_count; ++i) {
+      int s = pending[i].slot_idx;
+      if (s >= 0 && s < Config::TCP::MAX_EW11_SLOTS) {
+        Hub_Data(&s_hub_slots[s], pending[i].buf, pending[i].len);
       }
     }
   }
