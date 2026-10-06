@@ -10,15 +10,15 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.0.0";
+constexpr const char *FIRMWARE_VERSION = "v2.0.1";
 } // namespace Config
 
 namespace Config::Task {
 constexpr size_t STACK_SIZE_CORE1 = 6144;
-constexpr size_t STACK_SIZE_SLAVE = 5632;
+constexpr size_t STACK_SIZE_SLAVE = 4096;
 constexpr size_t STACK_SIZE_CH4 = 4096;
 constexpr size_t STACK_SIZE_CORE0 = 8192;
-constexpr size_t STACK_SIZE_TELNET = 6144;
+constexpr size_t STACK_SIZE_TELNET = 8192;
 constexpr size_t TASK_COUNT = 6;
 constexpr uint8_t WDT_ID_TELNET = 5;
 static_assert(WDT_ID_TELNET < TASK_COUNT, "WDT_ID_TELNET out of range");
