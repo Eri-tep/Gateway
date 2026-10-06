@@ -108,6 +108,7 @@ struct RS485_PacketDispatcher {
   bool (*onDispatchControl)(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept{nullptr};
   uint32_t (*onGetPollIntervalMs)() noexcept{nullptr};
   bool (*onCheckConvergence)(bool reset) noexcept{nullptr};
+  bool (*onTakeRelearnRequest)() noexcept{nullptr};
   uint8_t (*onGetStx)() noexcept{nullptr};
   bool (*onIsAutoUnlocked)() noexcept{nullptr};
   void (*onFeedAutoFrame)(span<const uint8_t> frame) noexcept{nullptr};

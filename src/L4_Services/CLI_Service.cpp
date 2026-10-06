@@ -328,13 +328,11 @@ TelnetManager::AuthResult TelnetManager::evaluateAuth(const char *clean_pw,
   // 대소문자 구분 비교로 보안 엔트로피 강화 [C-4]
   if (!auth_ok && strcmp(clean_pw, DEFAULT_TELNET_PASS) == 0) {
     auth_ok = true;
-    {
-      CriticalSectionLocker lock(&g_config_mux);
-      strncpy(g_config.telnet_pass_hash, input_hash,
-              sizeof(g_config.telnet_pass_hash) - 1);
-      g_config.telnet_pass_hash[sizeof(g_config.telnet_pass_hash) - 1] = '\0';
+    Preferences p;
+    if (p.begin("runtime-config", false)) {
+      p.putString("telnet_hash", input_hash);
+      p.end();
     }
-    Config_Save();
   }
 #endif
 
@@ -390,7 +388,8 @@ bool TelnetManager::handlePassword(TelnetSession *session,
     }
   }
 
-  AuthResult res = evaluateAuth(clean_pw, g_config.telnet_pass_hash, blk, now);
+  AuthResult res =
+      evaluateAuth(clean_pw, Config_Get().telnet_pass_hash, blk, now);
 
   if (res == AuthResult::LOCKED_OUT) {
     sendTelnetMsg(
@@ -405,7 +404,7 @@ bool TelnetManager::handlePassword(TelnetSession *session,
                                  "Type 'help' for available commands, "
                                  "or press [TAB] to auto-complete.\r\n\r\n");
 
-    if (g_rollback_detected) {
+    if (System_IsRollbackDetected()) {
       char warn_msg[384];
       const esp_partition_t *cur = esp_ota_get_running_partition();
       const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
@@ -422,7 +421,7 @@ bool TelnetManager::handlePassword(TelnetSession *session,
           cur ? cur->label : "app0", other ? other->label : "app1");
       sendTelnetMsg(session->sock, warn_msg);
     }
-    if (g_rescue_mode.load(std::memory_order_relaxed)) {
+    if (System_IsRescueMode()) {
       sendTelnetMsg(session->sock,
                     "=========================================================="
                     "======================\r\n"
@@ -1087,6 +1086,9 @@ void Task_Telnet(void *pvParameters) {
     // 3. 온라인 메인 I/O 처리
     g_telnet_manager.tick();
 
+    // 4. 비동기 NVS 저장 커밋 (Task_Ch1으로부터 분리된 저우선순위 백그라운드 플러시)
+    ProtocolDiag_CommitAutoProfileNvsIfPending();
+
     TSTAGE(11);
     const bool has_clients = g_telnet_manager.hasActiveClients();
     if (has_clients) {
@@ -1223,7 +1225,7 @@ void TelnetTracer::flushToClient() {
 
   TSTAGE(12);
 
-  constexpr size_t BATCH_SIZE = 8;
+  constexpr size_t BATCH_SIZE = 4;
   TracePacketEntry local_batch[BATCH_SIZE];
   size_t batch_count = 0;
 

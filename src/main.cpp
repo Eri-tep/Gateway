@@ -23,7 +23,6 @@
 #include "L4_Services/Mgmt_Service.h"
 #include "L4_Services/CLI_Service.h"
 
-#include "esp_attr.h"
 #include "esp_idf_version.h"
 #include "esp_ota_ops.h"
 #include "esp_task_wdt.h"
@@ -77,9 +76,9 @@ static void Boot_CheckCrashLoop() {
   Serial.setTxTimeoutMs(0);
   Diag_SetBootTimeMs(millis());
   Diagnostics_Init();
-  System_DiagnoseStuck();
-  System_CheckCoreDump();
-  System_LogResetReason();
+  Diag_DiagnoseStuck();
+  Diag_CheckCoreDump();
+  Diag_LogResetReason();
   g_metrics.init();
 
   Serial.println(F("\r\n========================================"));
@@ -95,7 +94,7 @@ static void Boot_CheckCrashLoop() {
   if (next_p && esp_ota_get_state_partition(next_p, &next_state) == ESP_OK) {
     if (next_state == ESP_OTA_IMG_INVALID ||
         next_state == ESP_OTA_IMG_ABORTED) {
-      g_rollback_detected = true;
+      System_SetRollbackDetected();
       const esp_partition_t *run_p = esp_ota_get_running_partition();
       Serial.printf("[BOOT] ★ AUTO-ROLLBACK ACTIVE: Rolled back from failed "
                     "'%s' to stable '%s'!\r\n",
@@ -134,11 +133,21 @@ static void Boot_CheckCrashLoop() {
     if (held) {
       Serial.println(F("[SAFE BOOT] ★ Front Button Held (2.5s) -> Forcing "
                        "Rescue Safe Mode!"));
-      System_EnterRescueMode("Hardware Button Override");
+      if (!Config_IsFrozen()) {
+        Config_Load();
+        Config_Freeze();
+      }
+      const auto &cfg = Config_Get();
+      RescueHwConfig r_cfg{
+          .reason = "Hardware Button Override",
+          .sta_ssid = cfg.wifi_ssid,
+          .sta_password = cfg.wifi_password,
+      };
+      Diag_StartRescueAp(r_cfg);
     }
   }
 
-  if (!g_rescue_mode.load(std::memory_order_relaxed) &&
+  if (!System_IsRescueMode() &&
       rtc_crash_counter >= 3) {
     const esp_partition_t *run_p = esp_ota_get_running_partition();
     const esp_partition_t *next_p_check =
@@ -166,7 +175,17 @@ static void Boot_CheckCrashLoop() {
     Serial.printf("[RESCUE] ★ Crash Loop detected (%u crashes)! Forcing Rescue "
                   "Safe Mode...\r\n",
                   rtc_crash_counter);
-    System_EnterRescueMode("Consecutive Crash Loop (>=3)");
+    if (!Config_IsFrozen()) {
+      Config_Load();
+      Config_Freeze();
+    }
+    const auto &cfg = Config_Get();
+    RescueHwConfig r_cfg{
+        .reason = "Consecutive Crash Loop (>=3)",
+        .sta_ssid = cfg.wifi_ssid,
+        .sta_password = cfg.wifi_password,
+    };
+    Diag_StartRescueAp(r_cfg);
   }
 }
 
@@ -190,14 +209,19 @@ static void Boot_InitSyncPrimitives() {
 // Stage 3 & 4: Configuration, State & Subsystem Registries
 // ============================================================================
 static void Boot_RestoreConfigAndState() {
-  Config_Load();
+  if (!Config_IsFrozen()) {
+    Config_Load();
+    TimingConfig_Load();
+    Config_Freeze();
+  }
+  const auto &cfg = Config_Get();
   Serial.printf("[CONFIG] WiFi SSID: '%s', Timeout: %us, AP SSID: '%s'\r\n",
-                g_config.wifi_ssid, g_config.wifi_connect_timeout_s,
-                g_config.ap_ssid);
+                cfg.wifi_ssid, cfg.wifi_connect_timeout_s,
+                cfg.ap_ssid);
   Protocol_WarmCacheRestoreOnBoot();
   System_RegisterShutdownHook(ProtocolDiag_WarmCacheSaveToNvs);
   char dp_ns[16];
-  ProtocolDiag_GetFramingNamespace(g_config.wallpad_profile, dp_ns, sizeof(dp_ns));
+  ProtocolDiag_GetFramingNamespace(Config_GetWallpadProfile(), dp_ns, sizeof(dp_ns));
   Protocol_DoorphoneRestoreNvs(dp_ns);
 }
 
@@ -249,23 +273,24 @@ static void Boot_InitSubsystems() {
 // ============================================================================
 
 static void Boot_InitHardwareAndDevices() {
+  const auto &cfg = Config_Get();
   Uart_InitHw(UART_NUM_0, 2, 1,
-              g_config.uart_baud_rate, g_config.uart_data_bits,
-              g_config.uart_parity, g_config.uart_stop_bits,
+              cfg.uart_baud_rate, cfg.uart_data_bits,
+              cfg.uart_parity, cfg.uart_stop_bits,
               RS485_GetUartEventQueuePtr(0));
   Uart_InitHw(UART_NUM_1, 6, 5,
-              g_config.ch2_baud_rate, g_config.ch2_data_bits,
-              g_config.ch2_parity, g_config.ch2_stop_bits,
+              cfg.ch2_baud_rate, cfg.ch2_data_bits,
+              cfg.ch2_parity, cfg.ch2_stop_bits,
               RS485_GetUartEventQueuePtr(1));
   Uart_InitHw(UART_NUM_2, 8, 7,
-              g_config.ch3_baud_rate, g_config.ch3_data_bits,
-              g_config.ch3_parity, g_config.ch3_stop_bits,
+              cfg.ch3_baud_rate, cfg.ch3_data_bits,
+              cfg.ch3_parity, cfg.ch3_stop_bits,
               RS485_GetUartEventQueuePtr(2));
 
-  Uart_InitDoorphone(g_config.doorphone_baud_rate,
-                     g_config.doorphone_data_bits,
-                     g_config.doorphone_parity,
-                     g_config.doorphone_stop_bits,
+  Uart_InitDoorphone(cfg.doorphone_baud_rate,
+                     cfg.doorphone_data_bits,
+                     cfg.doorphone_parity,
+                     cfg.doorphone_stop_bits,
                      Config::GPIO::RX_GPIO, Config::GPIO::TX_GPIO);
   Device_Init();
 }
@@ -274,8 +299,16 @@ static void Boot_InitHardwareAndDevices() {
 // Stage 6: Network Stack, SoftAP Fallback & ArduinoOTA Lifecycle
 // ============================================================================
 static void Boot_InitWifiAndOta() {
-  if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    Wifi_Driver_Init();
+  if (!System_IsRescueMode()) {
+    const auto &cfg = Config_Get();
+    WifiHwConfig w_cfg{
+        .sta_ssid = cfg.wifi_ssid,
+        .sta_password = cfg.wifi_password,
+        .timeout_s = cfg.wifi_connect_timeout_s,
+        .ap_ssid = cfg.ap_ssid,
+        .ap_password = cfg.ap_password,
+    };
+    Wifi_Driver_Init(w_cfg);
     SystemOta_InitArduinoOta("gateway-bridge", OTA_PASSWORD);
   }
 }
@@ -331,7 +364,7 @@ static void Boot_StartTasks() {
   esp_task_wdt_init(30, true);
 #endif
 
-  bool rescue_active = g_rescue_mode.load(std::memory_order_relaxed);
+  bool rescue_active = System_IsRescueMode();
 
   for (const auto &desc : kTaskDescriptors) {
     if (rescue_active && desc.bypass_in_rescue) {

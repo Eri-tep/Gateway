@@ -104,7 +104,7 @@ public:
   // L2.3 DeviceRepository decoupled hooks
   using OnlineCountFn = size_t (*)();
   using DeviceAckLookupFn = bool (*)(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                     const uint8_t **out_ack, size_t *out_len);
+                                     uint8_t *out_buf, size_t max_len, size_t *out_len);
   using UpdateFromBusFn = void (*)(StaticPacket &ack);
   static void setDeviceHooks(OnlineCountFn count_fn, DeviceAckLookupFn lookup_fn,
                              UpdateFromBusFn update_fn);

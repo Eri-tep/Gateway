@@ -78,6 +78,10 @@ void Uart_InitDoorphone(uint32_t baud, uint8_t data_bits, uint8_t parity,
 
 // ── Dynamic Reconfiguration ───────────────────────────────────────────────────
 
+void Uart_ReconfigHw(uart_port_t port, const UartHwConfig &cfg) {
+  Uart_ReconfigHw(port, cfg.baud, cfg.data_bits, cfg.parity, cfg.stop_bits);
+}
+
 void Uart_ReconfigHw(uart_port_t port, uint32_t baud,
                      uint8_t data_bits, uint8_t parity, uint8_t stop_bits) {
   uart_set_baudrate(port, baud);
@@ -85,6 +89,10 @@ void Uart_ReconfigHw(uart_port_t port, uint32_t baud,
   uart_set_parity(port, priv_toParity(parity));
   uart_set_stop_bits(port, priv_toStopBits(stop_bits));
   uart_flush_input(port);
+}
+
+void Uart_ReconfigDoorphone(const UartHwConfig &cfg) {
+  Uart_ReconfigDoorphone(cfg.baud, cfg.data_bits, cfg.parity, cfg.stop_bits);
 }
 
 void Uart_ReconfigDoorphone(uint32_t baud, uint8_t data_bits,
@@ -95,59 +103,7 @@ void Uart_ReconfigDoorphone(uint32_t baud, uint8_t data_bits,
   pinMode(Config::GPIO::RX_GPIO, INPUT_PULLUP);
 }
 
-bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format) {
-  uint8_t db = 8, pr = 0, sb = 1;
-  if (!parseFramingStr(format, db, pr, sb))
-    return false;
-  if (baud < 1200 || baud > 921600)
-    return false;
 
-  {
-    std::unique_lock lock(g_config_rw);
-    switch (ch) {
-    case 1:
-      g_config.uart_baud_rate = baud;
-      g_config.uart_data_bits = db;
-      g_config.uart_parity = pr;
-      g_config.uart_stop_bits = sb;
-      break;
-    case 2:
-      g_config.ch2_baud_rate = baud;
-      g_config.ch2_data_bits = db;
-      g_config.ch2_parity = pr;
-      g_config.ch2_stop_bits = sb;
-      break;
-    case 3:
-      g_config.ch3_baud_rate = baud;
-      g_config.ch3_data_bits = db;
-      g_config.ch3_parity = pr;
-      g_config.ch3_stop_bits = sb;
-      break;
-    case 4:
-      g_config.doorphone_baud_rate = baud;
-      g_config.doorphone_data_bits = db;
-      g_config.doorphone_parity = pr;
-      g_config.doorphone_stop_bits = sb;
-      break;
-    default:
-      return false;
-    }
-    g_config_dirty.store(true, std::memory_order_release);
-  }
-
-  if (ch >= 1 && ch <= 3) {
-    uart_port_t port = (ch == 1)   ? UART_NUM_0
-                       : (ch == 2) ? UART_NUM_1
-                                   : UART_NUM_2;
-    Uart_ReconfigHw(port, baud, db, pr, sb);
-  } else if (ch == 4) {
-    Uart_ReconfigDoorphone(baud, db, pr, sb);
-  }
-
-  Config_Save();
-  ::Serial.printf("[UART] CH%u reconfigured: %u bps, %s\r\n", ch, baud, format);
-  return true;
-}
 
 // ── Write ─────────────────────────────────────────────────────────────────────
 

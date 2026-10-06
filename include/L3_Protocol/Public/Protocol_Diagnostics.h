@@ -179,6 +179,10 @@ bool ProtocolDiag_SaveCurrentProfileAs(const char *name, size_t &saved_slot) noe
 bool ProtocolDiag_DeleteProfile(size_t idx) noexcept;
 size_t ProtocolDiag_GetMaxProfiles() noexcept;
 void ProtocolDiag_WallpadReset() noexcept;
+/// Request the CH1 worker to re-run auto-probing convergence (one-shot).
+void ProtocolDiag_RequestRelearn() noexcept;
+/// Background commit for auto-probing profile learning result (Task_Ch1 non-blocking).
+bool ProtocolDiag_CommitAutoProfileNvsIfPending() noexcept;
 
 // ── Doorphone Management Facade ──────────────────────────────────────────────
 void ProtocolDiag_DoorphoneClearNvs(const char *nvs_ns) noexcept;
@@ -192,6 +196,7 @@ bool ProtocolDiag_BuildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                      StaticPacket &out_req) noexcept;
 size_t ProtocolDiag_GetGroupCount() noexcept;
 const char *ProtocolDiag_GetGroupName(uint8_t dev_id) noexcept;
+bool ProtocolDiag_GetBlueprintAt(size_t index, BlueprintSnapshot &out) noexcept;
 size_t ProtocolDiag_GetBlueprintsSnapshot(BlueprintSnapshot *out_array, size_t max_count) noexcept;
 bool ProtocolDiag_GetBlueprint(uint8_t dev_id, BlueprintSnapshot &out) noexcept;
 bool ProtocolDiag_SetGroupName(uint8_t dev_id, const char *name) noexcept;

@@ -125,8 +125,9 @@ void cmdWifi(CliContext &ctx) {
            FixedBuf<16> rssi_b;
            rssi_b.appendFormat("%d dBm", WiFi.RSSI());
 
+           const auto &cfg = Config_Get();
            table.row({"Station (STA)", "SSID",
-                      sta_ok ? WiFi.SSID().c_str() : g_config.wifi_ssid,
+                      sta_ok ? WiFi.SSID().c_str() : cfg.wifi_ssid,
                       sta_ok ? "[CONNECTED]" : "[DISCONNECTED]"});
            table.row({"", "IP Address",
                       sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0",
@@ -137,7 +138,7 @@ void cmdWifi(CliContext &ctx) {
 
            bool ap_active = (WiFi.getMode() == WIFI_MODE_AP ||
                              WiFi.getMode() == WIFI_MODE_APSTA);
-           table.row({"SoftAP (AP)", "SSID", g_config.ap_ssid,
+           table.row({"SoftAP (AP)", "SSID", cfg.ap_ssid,
                       ap_active ? "[BROADCASTING]" : "[DISABLED]"});
            table.row(
                {"", "AP IP",
@@ -174,21 +175,19 @@ void cmdWifi(CliContext &ctx) {
          }
          const char *ssid_arg = args.get(2);
          const char *pass_arg = (ac >= 3) ? args.get(3) : "";
-         {
-           CriticalSectionLocker lock(&g_config_mux);
-           strncpy(g_config.wifi_ssid, ssid_arg,
-                   sizeof(g_config.wifi_ssid) - 1);
-           g_config.wifi_ssid[sizeof(g_config.wifi_ssid) - 1] = '\0';
-           strncpy(g_config.wifi_password, pass_arg,
-                   sizeof(g_config.wifi_password) - 1);
-           g_config.wifi_password[sizeof(g_config.wifi_password) - 1] = '\0';
-         }
-         Config_Save();
+         RuntimeConfig staged_cfg = Config_Get();
+         strncpy(staged_cfg.wifi_ssid, ssid_arg,
+                 sizeof(staged_cfg.wifi_ssid) - 1);
+         staged_cfg.wifi_ssid[sizeof(staged_cfg.wifi_ssid) - 1] = '\0';
+         strncpy(staged_cfg.wifi_password, pass_arg,
+                 sizeof(staged_cfg.wifi_password) - 1);
+         staged_cfg.wifi_password[sizeof(staged_cfg.wifi_password) - 1] = '\0';
+         Config_SaveStaged(staged_cfg, TimingConfig_Get());
          sendTelnetMsgf(s, "[WIFI] Saved SSID '%s' to NVS. Connecting...\r\n",
                         ssid_arg);
          WiFi.disconnect(false);
          vTaskDelay(pdMS_TO_TICKS(100));
-         WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
+         WiFi.begin(ssid_arg, pass_arg);
        }},
       {"disconnect", "disconnect", "Disconnect from current Wi-Fi AP",
        [](int s, int, const Args &) {
@@ -546,6 +545,9 @@ void cmdCoreDump(CliContext &ctx) {
                      static_cast<unsigned>(summary.exc_pc));
     out.appendFormat("| Exception Cause : %-58lu |\r\n",
                      static_cast<unsigned long>(summary.ex_info.exc_cause));
+    out.appendFormat("| Exception VAddr : 0x%08X                               "
+                     "                  |\r\n",
+                     static_cast<unsigned>(summary.ex_info.exc_vaddr));
     out.appendFormat("| Backtrace Depth : %-2d frames%-48s |\r\n",
                      summary.exc_bt_info.depth,
                      summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
@@ -601,7 +603,7 @@ void otaPrintStatus(AppendBuf &out) {
   timer_val.append(val_done ? "120s Passed" : "Evaluating (<120s)");
   crash_val.appendFormat("%u Consecutive Crashes",
                          static_cast<unsigned>(rtc_crash_counter));
-  bool is_rescue = g_rescue_mode.load(std::memory_order_relaxed);
+  bool is_rescue = System_IsRescueMode();
 
   CliFmt::PrintBoxHeader(out, "DUAL-PARTITION OTA & ROLLBACK MONITOR");
   static constexpr Column OTA_COLS[] = {

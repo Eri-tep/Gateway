@@ -528,12 +528,11 @@ bool ProfileRepository::getProfileByKey(const char *key,
   return i >= 0 && getProfile(static_cast<size_t>(i), out);
 }
 
+static_assert(ProfileRepository::MAX_PROFILES - 1 == kWallpadProfileMax,
+              "Profile count mismatch between L0 and L3");
+
 bool ProfileRepository::getActiveProfile(VendorProfileDescriptor &out) {
-  uint8_t idx;
-  {
-    CriticalSectionLocker lock(&g_config_mux);
-    idx = g_config.wallpad_profile;
-  }
+  const uint8_t idx = Config_GetWallpadProfile();
   return getProfile(idx, out);
 }
 
@@ -559,16 +558,11 @@ void ProfileRepository::setProfileChangeListener(ProfileChangeCallbackFn cb) {
 bool ProfileRepository::setActiveProfileIndex(size_t index) {
   if (index >= MAX_PROFILES)
     return false;
-  uint8_t old_idx;
-  {
-    CriticalSectionLocker lock(&g_config_mux);
-    old_idx = g_config.wallpad_profile;
-    g_config.wallpad_profile = static_cast<uint8_t>(index);
-    g_config_dirty.store(true, std::memory_order_release);
-  }
-  Config_Save();
-
+  const uint8_t old_idx = Config_GetWallpadProfile();
   const uint8_t new_idx = static_cast<uint8_t>(index);
+  Config_SetWallpadProfile(new_idx);
+  Config_SaveWallpadProfile();
+
   if (old_idx != new_idx) {
     for (size_t i = 0; i < s_profile_change_cb_count; ++i) {
       if (s_profile_change_cbs[i]) {
@@ -749,15 +743,13 @@ bool ProfileRepository::deleteProfile(size_t index) {
     return false;
   init();
   saveCustomProfile(index, s_default_profiles[index]);
-  uint8_t cur;
-  {
-    CriticalSectionLocker lock(&g_config_mux);
-    cur = g_config.wallpad_profile;
-  }
+  const uint8_t cur = Config_GetWallpadProfile();
   if (cur == index)
     setActiveProfileIndex(0);
   return true;
 }
+
+static std::atomic<bool> s_auto_nvs_sync_pending{false};
 
 void ProfileRepository::syncAutoProfileToNvs(const AutoProbeDescriptor &a) {
   init();
@@ -783,7 +775,31 @@ void ProfileRepository::syncAutoProfileToNvs(const AutoProbeDescriptor &a) {
     }
     s_active_profiles[0] = d;
   }
-  nvsPutEnvNs("wp_profiles", "p_0", d);
+  // Decoupled: Signal pending NVS commit to background task.
+  // Task_Ch1 must NEVER execute flash NVS writes directly to prevent stack overflow
+  // and UART/SoftwareSerial interrupt latency degradation.
+  s_auto_nvs_sync_pending.store(true, std::memory_order_release);
+}
+
+bool ProfileRepository::commitAutoProfileNvsIfPending() noexcept {
+  if (!s_auto_nvs_sync_pending.exchange(false, std::memory_order_acq_rel)) {
+    return false;
+  }
+  VendorProfileDescriptor d;
+  {
+    CriticalSectionLocker lock(&s_prof_mux);
+    d = s_active_profiles[0];
+  }
+
+  // Flash wear leveling guard: skip write if NVS already contains identical data.
+  VendorProfileDescriptor existing{};
+  if (nvsGetEnvNs("wp_profiles", "p_0", existing)) {
+    if (memcmp(&existing, &d, sizeof(VendorProfileDescriptor)) == 0) {
+      return false; // Identical, flash write avoided
+    }
+  }
+
+  return nvsPutEnvNs("wp_profiles", "p_0", d);
 }
 
 void ProfileRepository::resetAllToDefaults() {

@@ -77,7 +77,8 @@ static void serializeProfileAndTiming(
   snprintf(bp_buf, sizeof(bp_buf), "%u Groups",
            static_cast<unsigned>(ProtocolDiag_GetGroupCount()));
 
-  bool fully_locked = (g_config.wallpad_profile != 0) ||
+  const uint8_t active_profile_idx = Config_GetWallpadProfile();
+  bool fully_locked = (active_profile_idx != 0) ||
                       (auto_desc.is_locked && auto_desc.opcodes_locked &&
                        auto_desc.offsets_locked);
 
@@ -90,7 +91,7 @@ static void serializeProfileAndTiming(
       "\"cs_algo\":\"%s\",\"opcodes\":{\"query\":\"0x%02X\",\"control\":\"0x%"
       "02X\",\"ack\":\"0x%02X\"},"
       "\"match_count\":%u},",
-      static_cast<unsigned>(g_config.wallpad_profile), active_prof.key,
+      static_cast<unsigned>(active_profile_idx), active_prof.key,
       active_prof.name, auto_desc.is_locked ? "true" : "false",
       fully_locked ? "true" : "false", cat_match_buf, bp_buf, auto_desc.stx,
       auto_desc.etx, auto_desc.checksum_algo_name,
@@ -100,12 +101,13 @@ static void serializeProfileAndTiming(
   uint32_t ch1_poll_cnt = 0, ch1_vip_cnt = 0, ch1_norm_cnt = 0;
   System_GetCh1Metrics(ch1_poll_cnt, ch1_vip_cnt, ch1_norm_cnt);
 
+  const auto &timing = TimingConfig_Get();
   out.appendFormat("\"timing\":{\"ch1_poll_interval_ms\":%u,\"ch2_ack_delay_"
                    "ms\":%u,\"ch3_ack_delay_ms\":%u,"
                    "\"vip_preemptions\":%u,\"last_cmd_latency_ms\":%u},",
-                   static_cast<unsigned>(g_timing_config.ch1_poll_interval_ms),
-                   static_cast<unsigned>(g_timing_config.ch2_cache_delay_ms),
-                   static_cast<unsigned>(g_timing_config.ch3_cache_delay_ms),
+                   static_cast<unsigned>(timing.ch1_poll_interval_ms),
+                   static_cast<unsigned>(timing.ch2_cache_delay_ms),
+                   static_cast<unsigned>(timing.ch3_cache_delay_ms),
                    ch1_vip_cnt,
                    22);
 
@@ -118,33 +120,34 @@ static void serializeProfileAndTiming(
            ? (100.0f - (static_cast<float>(ch2_uncached) * 100.0f / ch2_rx))
            : 100.0f));
 
+  const auto &cfg = Config_Get();
   const char *f1 = formatFramingStr(
-      g_config.uart_data_bits, g_config.uart_parity, g_config.uart_stop_bits);
-  const char *f2 = formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity,
-                                    g_config.ch2_stop_bits);
-  const char *f3 = formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity,
-                                    g_config.ch3_stop_bits);
+      cfg.uart_data_bits, cfg.uart_parity, cfg.uart_stop_bits);
+  const char *f2 = formatFramingStr(cfg.ch2_data_bits, cfg.ch2_parity,
+                                    cfg.ch2_stop_bits);
+  const char *f3 = formatFramingStr(cfg.ch3_data_bits, cfg.ch3_parity,
+                                    cfg.ch3_stop_bits);
   const char *f4 =
-      formatFramingStr(g_config.doorphone_data_bits, g_config.doorphone_parity,
-                       g_config.doorphone_stop_bits);
+      formatFramingStr(cfg.doorphone_data_bits, cfg.doorphone_parity,
+                       cfg.doorphone_stop_bits);
 
   out.appendFormat("\"uart\":{"
                    "\"ch1\":{\"baud\":%u,\"format\":\"%s\"},"
                    "\"ch2\":{\"baud\":%u,\"format\":\"%s\"},"
                    "\"ch3\":{\"baud\":%u,\"format\":\"%s\"},"
                    "\"ch4\":{\"baud\":%u,\"format\":\"%s\"}},",
-                   static_cast<unsigned>(g_config.uart_baud_rate), f1,
-                   static_cast<unsigned>(g_config.ch2_baud_rate), f2,
-                   static_cast<unsigned>(g_config.ch3_baud_rate), f3,
-                   static_cast<unsigned>(g_config.doorphone_baud_rate), f4);
+                   static_cast<unsigned>(cfg.uart_baud_rate), f1,
+                   static_cast<unsigned>(cfg.ch2_baud_rate), f2,
+                   static_cast<unsigned>(cfg.ch3_baud_rate), f3,
+                   static_cast<unsigned>(cfg.doorphone_baud_rate), f4);
 }
 
 static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
   out.append("\"diagnostics\":{");
   out.appendFormat("\"last_reboot_reason\":\"%s\",\"rollback_detected\":%s,"
                    "\"rescue_mode\":%s,",
-                   rst_reason, g_rollback_detected ? "true" : "false",
-                   g_rescue_mode.load(std::memory_order_relaxed) ? "true"
+                   rst_reason, System_IsRollbackDetected() ? "true" : "false",
+                   System_IsRescueMode() ? "true"
                                                                  : "false");
 
   out.append("\"coredump\":{");
@@ -212,7 +215,7 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
   bool ntp_synced = (time(nullptr) > 1672531200);
 
   ProfileInfoSnapshot active_prof{};
-  ProtocolDiag_GetProfileInfo(g_config.wallpad_profile, active_prof);
+  ProtocolDiag_GetProfileInfo(Config_GetWallpadProfile(), active_prof);
   AutoProbingDescriptorSnapshot auto_desc{};
   ProtocolDiag_GetAutoProbingDescriptor(auto_desc);
 
@@ -316,66 +319,72 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
   } else {
     out.append("{\"res\":\"ok\",\"devices\":[");
   }
-  size_t count = Device_GetCount();
+  size_t total_count = Device_GetCount();
   size_t locked_count = 0;
 
-  for (size_t i = 0; i < count; ++i) {
-    DeviceStateEntry snap{};
-    if (!Device_GetSnapshot(i, snap) || snap.dev_id == 0)
-      continue;
+  constexpr size_t kChunkSize = 8;
+  DeviceStateEntry chunk[kChunkSize];
 
-    StaticPacket ack{};
-    ack.length = snap.last_ack_len;
-    memcpy(ack.data.data(), snap.last_ack_data.data(),
-           std::min<size_t>(snap.last_ack_len, 32));
+  for (size_t start = 0; start < total_count; start += kChunkSize) {
+    size_t chunk_len = Device_GetSnapshotChunk(start, chunk, kChunkSize);
+    for (size_t i = 0; i < chunk_len; ++i) {
+      const auto &snap = chunk[i];
+      if (snap.dev_id == 0)
+        continue;
 
-    DecodedDeviceState st{};
-    if (!Device_DecodeState(snap.dev_id, ack, &snap, st))
-      continue;
+      StaticPacket ack{};
+      ack.length = snap.last_ack_len;
+      memcpy(ack.data.data(), snap.last_ack_data.data(),
+             std::min<size_t>(snap.last_ack_len, 32));
 
-    DeviceClass dc = st.dev_class;
-    const char *cls_str = DeviceClassToTelemetryString(dc);
-    const char *grp_name = ProtocolDiag_GetGroupName(snap.dev_id);
-    bool is_outlet = (dc == DeviceClass::OUTLET);
+      DecodedDeviceState st{};
+      if (!Device_DecodeState(snap.dev_id, ack, &snap, st))
+        continue;
 
-    char name_buf[32];
-    if (dc == DeviceClass::GAS || dc == DeviceClass::VENT ||
-        dc == DeviceClass::MOMENTARY) {
-      snprintf(name_buf, sizeof(name_buf), "%s", grp_name);
-    } else {
-      snprintf(name_buf, sizeof(name_buf), "%s %u-%u", grp_name, snap.sub1,
-               snap.sub2);
+      DeviceClass dc = st.dev_class;
+      const char *cls_str = DeviceClassToTelemetryString(dc);
+      const char *grp_name = ProtocolDiag_GetGroupName(snap.dev_id);
+      bool is_outlet = (dc == DeviceClass::OUTLET);
+
+      char name_buf[32];
+      if (dc == DeviceClass::GAS || dc == DeviceClass::VENT ||
+          dc == DeviceClass::MOMENTARY) {
+        snprintf(name_buf, sizeof(name_buf), "%s", grp_name);
+      } else {
+        snprintf(name_buf, sizeof(name_buf), "%s %u-%u", grp_name, snap.sub1,
+                 snap.sub2);
+      }
+
+      RouteEndpoint ep{1, -1, 0};
+      uint8_t ch = 1;
+      if (Router_LookupRoute(snap.dev_id, snap.sub1, snap.sub2, ep)) {
+        ch = ep.channel_id;
+      }
+
+      if (locked_count > 0)
+        out.append(",");
+      out.appendFormat("{\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\","
+                       "\"name\":\"%s\",\"channel\":%u,\"power\":%d",
+                       snap.dev_id, snap.sub1, snap.sub2, cls_str, name_buf, ch,
+                       st.power);
+
+      if (dc == DeviceClass::THERMOSTAT) {
+        out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d",
+                         st.target_temp, st.current_temp);
+      } else if (dc == DeviceClass::VENT) {
+        out.appendFormat(",\"fan_speed\":%d,\"vent_mode\":%d", st.fan_speed,
+                         st.vent_mode);
+      } else if (dc == DeviceClass::GAS) {
+        out.appendFormat(",\"valve\":\"%s\"", st.valve_state);
+      } else if (is_outlet) {
+        out.appendFormat(",\"power_w\":%.1f", st.power_w);
+      } else if (dc == DeviceClass::MOMENTARY) {
+        out.appendFormat(",\"floor\":%d,\"direction\":%d", st.floor,
+                         st.direction);
+      }
+      out.append("}");
+      locked_count++;
     }
-
-    RouteEndpoint ep{1, -1, 0};
-    uint8_t ch = 1;
-    if (Router_LookupRoute(snap.dev_id, snap.sub1, snap.sub2, ep)) {
-      ch = ep.channel_id;
-    }
-
-    if (locked_count > 0)
-      out.append(",");
-    out.appendFormat("{\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,\"class\":\"%s\","
-                     "\"name\":\"%s\",\"channel\":%u,\"power\":%d",
-                     snap.dev_id, snap.sub1, snap.sub2, cls_str, name_buf, ch,
-                     st.power);
-
-    if (dc == DeviceClass::THERMOSTAT) {
-      out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d",
-                       st.target_temp, st.current_temp);
-    } else if (dc == DeviceClass::VENT) {
-      out.appendFormat(",\"fan_speed\":%d,\"vent_mode\":%d", st.fan_speed,
-                       st.vent_mode);
-    } else if (dc == DeviceClass::GAS) {
-      out.appendFormat(",\"valve\":\"%s\"", st.valve_state);
-    } else if (is_outlet) {
-      out.appendFormat(",\"power_w\":%.1f", st.power_w);
-    } else if (dc == DeviceClass::MOMENTARY) {
-      out.appendFormat(",\"floor\":%d,\"direction\":%d", st.floor,
-                       st.direction);
-    }
-    out.append("}");
-    locked_count++;
   }
 
   // ── CH5 FCU 슬롯(1~4) 활성 기기 직렬화 (SmartThings get_devices 자식 기기
@@ -384,14 +393,14 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
     for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
       HubClientSlotSnapshot slot;
       System_GetBridgeSlotSnapshot(s, slot);
-      const DeviceStateEntry *fcu_dev =
-          Device_Find(Config::FCU::DEV_ID, s, 0);
+      DeviceStateEntry fcu_dev{};
+      bool has_fcu_dev = Device_FindCopy(Config::FCU::DEV_ID, s, 0, fcu_dev);
 
       // 소켓 설정이 활성화되어 있거나 수신 이력이 있는 경우 노출
       FcuDeviceSnapshot fcu_snap{};
       bool has_fcu_snap = Device_GetFcuSnapshot(s, fcu_snap);
       if (slot.enabled || (has_fcu_snap && fcu_snap.is_online) ||
-          (fcu_dev && fcu_dev->last_ack_len > 0)) {
+          (has_fcu_dev && fcu_dev.last_ack_len > 0)) {
         if (locked_count > 0)
           out.append(",");
         char name_buf[32];
@@ -404,13 +413,13 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
         int swg = static_cast<int>(fcu_snap.swing);
         int tgt = (fcu_snap.target_temp > 0)
                       ? fcu_snap.target_temp
-                      : ((fcu_dev && fcu_dev->last_target_temp > 0)
-                             ? fcu_dev->last_target_temp
+                      : ((has_fcu_dev && fcu_dev.last_target_temp > 0)
+                             ? fcu_dev.last_target_temp
                              : 24);
         int cur = (fcu_snap.room_temp > 0)
                       ? fcu_snap.room_temp
-                      : ((fcu_dev && fcu_dev->last_current_temp > 0)
-                             ? fcu_dev->last_current_temp
+                      : ((has_fcu_dev && fcu_dev.last_current_temp > 0)
+                             ? fcu_dev.last_current_temp
                              : tgt);
 
         int err_code = 0;

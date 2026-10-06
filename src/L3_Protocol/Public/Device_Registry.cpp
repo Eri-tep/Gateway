@@ -53,15 +53,18 @@ DoorphoneOpenHandler s_dp_open_handler = nullptr;
 std::atomic<bool> s_dp_front_bell{false};
 std::atomic<bool> s_dp_lobby_bell{false};
 std::atomic<uint32_t> s_dp_last_bell_ms{0};
+static std::atomic<uint32_t> s_cache_lock_timeouts{0};
 
 class DeviceRepository {
 private:
   static constexpr size_t MAX_DEVICES = 48;
+  static constexpr TickType_t kCacheLockTimeout = pdMS_TO_TICKS(10);
   DeviceStateEntry cache[MAX_DEVICES]{};
   int8_t dev_lookup_map[256]{};
   size_t device_count = 0;
   std::atomic<size_t> _online_count{0};
-  SemaphoreHandle_t _cache_mutex = nullptr;
+  mutable StaticSemaphore_t _cache_mutex_buf{};
+  mutable SemaphoreHandle_t _cache_mutex = nullptr;
 
   const DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
                                        uint8_t sub2) const noexcept;
@@ -82,12 +85,13 @@ public:
                                 bool auto_create = false) noexcept;
   void initDevices();
   void clear();
-  [[nodiscard]] const DeviceStateEntry *find(uint8_t dev_id, uint8_t sub1,
-                                             uint8_t sub2) const noexcept;
-  [[nodiscard]] const DeviceStateEntry *getAt(size_t index) const noexcept;
-  [[nodiscard]] DeviceStateEntry *getAt(size_t index) noexcept;
+  [[nodiscard]] bool findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                              DeviceStateEntry &out_copy) const noexcept;
   [[nodiscard]] bool getSnapshot(size_t index,
-                                 DeviceStateEntry &out_copy) noexcept;
+                                 DeviceStateEntry &out_copy) const noexcept;
+  [[nodiscard]] size_t getSnapshotChunk(size_t start_idx,
+                                        DeviceStateEntry *out_buf,
+                                        size_t max_count) const noexcept;
   [[nodiscard]] size_t count() const noexcept;
   [[nodiscard]] size_t getOnlineCount() const noexcept;
   void setLastStalePollMs(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
@@ -198,45 +202,49 @@ DeviceStateEntry *DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
   return findMutable(dev_id, sub1, sub2, false);
 }
 
-const DeviceStateEntry *DeviceRepository::find(uint8_t dev_id, uint8_t sub1,
-                                               uint8_t sub2) const noexcept {
-  MutexLocker lock(_cache_mutex);
-  return findInternal(dev_id, sub1, sub2);
-}
-
-const DeviceStateEntry *DeviceRepository::getAt(size_t index) const noexcept {
-  MutexLocker lock(_cache_mutex);
-  return (index < device_count) ? &cache[index] : nullptr;
-}
-
-DeviceStateEntry *DeviceRepository::getAt(size_t index) noexcept {
-  MutexLocker lock(_cache_mutex);
-  return (index < device_count) ? &cache[index] : nullptr;
+bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                DeviceStateEntry &out_copy) const noexcept {
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked())
+    return false;
+  const DeviceStateEntry *e = findInternal(dev_id, sub1, sub2);
+  if (!e)
+    return false;
+  out_copy = *e;
+  return true;
 }
 
 bool DeviceRepository::getSnapshot(size_t index,
-                                   DeviceStateEntry &out_copy) noexcept {
-  MutexLocker lock(_cache_mutex);
-  if (index >= device_count)
+                                   DeviceStateEntry &out_copy) const noexcept {
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked() || index >= device_count)
     return false;
-  out_copy.dev_id = cache[index].dev_id;
-  out_copy.sub1 = cache[index].sub1;
-  out_copy.sub2 = cache[index].sub2;
-  uint8_t ack_len = std::min<uint8_t>(cache[index].last_ack_len,
-                                      sizeof(out_copy.last_ack_data));
-  out_copy.last_ack_len = ack_len;
-  if (ack_len > 0)
-    memcpy(out_copy.last_ack_data.data(), cache[index].last_ack_data.data(),
-           ack_len);
-  out_copy.last_updated_ms = cache[index].last_updated_ms;
-  out_copy.timeout_count = cache[index].timeout_count;
-  out_copy.is_online = cache[index].is_online;
+  out_copy = cache[index];
   return true;
+}
+
+size_t DeviceRepository::getSnapshotChunk(size_t start_idx,
+                                          DeviceStateEntry *out_buf,
+                                          size_t max_count) const noexcept {
+  if (!out_buf || max_count == 0)
+    return 0;
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked() || start_idx >= device_count)
+    return 0;
+  size_t to_copy = std::min(max_count, device_count - start_idx);
+  for (size_t i = 0; i < to_copy; ++i) {
+    out_buf[i] = cache[start_idx + i];
+  }
+  return to_copy;
 }
 
 bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                      uint8_t temp) noexcept {
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked()) {
+    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev) {
     dev->last_target_temp = temp;
@@ -248,7 +256,9 @@ bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
                                       uint8_t sub2,
                                       StaticPacket &out) noexcept {
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked())
+    return false;
   const auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev && dev->last_ack_len > 0) {
     out.length = dev->last_ack_len;
@@ -260,7 +270,11 @@ bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
 
 void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8_t room_temp,
                                     bool is_online, const uint8_t *raw_pkt, size_t raw_len) noexcept {
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked()) {
+    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   DeviceStateEntry *dev = findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
   if (!dev) return;
 
@@ -282,7 +296,11 @@ void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8
 
 void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
                                           uint8_t sub2, uint32_t ms) noexcept {
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked()) {
+    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev) {
     dev->last_stale_poll_ms = ms;
@@ -291,7 +309,11 @@ void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
 
 void DeviceRepository::setLastStalePollMsByIndex(size_t index,
                                                  uint32_t ms) noexcept {
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked()) {
+    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   if (index < device_count) {
     cache[index].last_stale_poll_ms = ms;
   }
@@ -299,9 +321,13 @@ void DeviceRepository::setLastStalePollMsByIndex(size_t index,
 
 void DeviceRepository::initDevices() {
   if (!_cache_mutex)
-    _cache_mutex = xSemaphoreCreateMutex();
+    _cache_mutex = xSemaphoreCreateMutexStatic(&_cache_mutex_buf);
   {
-    MutexLocker lock(_cache_mutex);
+    MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+    if (!lock.isLocked()) {
+      s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
     memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
     device_count = 0;
     _online_count.store(0, std::memory_order_relaxed);
@@ -309,7 +335,11 @@ void DeviceRepository::initDevices() {
 }
 
 void DeviceRepository::clear() {
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked()) {
+    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   device_count = 0;
   _online_count.store(0, std::memory_order_relaxed);
@@ -339,7 +369,11 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
     uint8_t r_sub1 = 0x10 + r;
     int r_pwr = (r_state == 0x01) ? 1 : ((r_state == 0x07) ? 2 : 0);
     {
-      MutexLocker lock(mutex);
+      MutexLocker lock(mutex, pdMS_TO_TICKS(10));
+      if (!lock.isLocked()) {
+        s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
       DeviceStateEntry *r_dev = repo.findMutable(0x18, r_sub1, 0, true);
       if (r_dev) {
         r_dev->last_updated_ms = millis();
@@ -440,7 +474,11 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
   uint8_t prev_ho = 0;
 
   {
-    MutexLocker lock(_cache_mutex);
+    MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+    if (!lock.isLocked()) {
+      s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+      return res;
+    }
     DeviceStateEntry *dev = findMutable(dev_id, sub1, sub2, true);
     if (UNLIKELY(!dev)) {
       return res;
@@ -492,13 +530,17 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
                                 (st.direction != prev_dir) || (st.ho != prev_ho);
         if (ev_state_changed) {
           st.should_broadcast = true;
-          MutexLocker lock(_cache_mutex);
-          auto *mdev = findMutable(dev_id, sub1, sub2, false);
-          if (mdev) {
-            mdev->last_current_temp = static_cast<uint8_t>(st.floor);
-            mdev->last_target_temp = static_cast<uint8_t>(st.direction);
-            mdev->last_ack_data[0] = static_cast<uint8_t>(st.power);
-            mdev->last_ack_data[1] = static_cast<uint8_t>(st.ho);
+          MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+          if (lock.isLocked()) {
+            auto *mdev = findMutable(dev_id, sub1, sub2, false);
+            if (mdev) {
+              mdev->last_current_temp = static_cast<uint8_t>(st.floor);
+              mdev->last_target_temp = static_cast<uint8_t>(st.direction);
+              mdev->last_ack_data[0] = static_cast<uint8_t>(st.power);
+              mdev->last_ack_data[1] = static_cast<uint8_t>(st.ho);
+            }
+          } else {
+            s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
           }
         }
       } else {
@@ -520,7 +562,11 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
 void DeviceRepository::handlePollingTimeout(const DeviceStateEntry *dev) {
   if (!dev)
     return;
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked()) {
+    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   auto *mdev = const_cast<DeviceStateEntry *>(dev);
   if (mdev->is_online && ++mdev->timeout_count >= 3) {
     mdev->is_online = false;
@@ -532,7 +578,11 @@ void DeviceRepository::handlePollingTimeout(const DeviceStateEntry *dev) {
 
 void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
                                             uint8_t sub2) {
-  MutexLocker lock(_cache_mutex);
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  if (!lock.isLocked()) {
+    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   auto *mdev = findMutable(dev_id, sub1, sub2, true);
   if (mdev && mdev->is_online && ++mdev->timeout_count >= 3) {
     mdev->is_online = false;
@@ -543,8 +593,8 @@ void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
 }
 
 size_t DeviceRepository::count() const noexcept {
-  MutexLocker lock(_cache_mutex);
-  return device_count;
+  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
+  return lock.isLocked() ? device_count : 0;
 }
 
 size_t DeviceRepository::getOnlineCount() const noexcept {
@@ -566,10 +616,7 @@ void Device_Clear() noexcept {
 
 bool Device_GetSnapshot(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                          DeviceStateEntry &out_copy) noexcept {
-  const auto *e = s_device_repo.findEntry(dev_id, sub1, sub2);
-  if (!e) return false;
-  out_copy = *e;
-  return true;
+  return s_device_repo.findCopy(dev_id, sub1, sub2, out_copy);
 }
 
 bool Device_GetSnapshot(size_t index, DeviceStateEntry &out_copy) noexcept {
@@ -580,6 +627,11 @@ bool Device_GetSnapshotAt(size_t index, DeviceStateEntry &out_copy) noexcept {
   return s_device_repo.getSnapshot(index, out_copy);
 }
 
+size_t Device_GetSnapshotChunk(size_t start_idx, DeviceStateEntry *out_buf,
+                               size_t max_count) noexcept {
+  return s_device_repo.getSnapshotChunk(start_idx, out_buf, max_count);
+}
+
 size_t Device_GetOnlineCount() noexcept {
   return s_device_repo.getOnlineCount();
 }
@@ -588,13 +640,17 @@ size_t Device_GetCount() noexcept {
   return s_device_repo.count();
 }
 
-const DeviceStateEntry *Device_Find(uint8_t dev_id, uint8_t sub1,
-                                    uint8_t sub2) noexcept {
-  return s_device_repo.find(dev_id, sub1, sub2);
+uint32_t Device_GetCacheLockTimeouts() noexcept {
+  return s_cache_lock_timeouts.load(std::memory_order_relaxed);
 }
 
-const DeviceStateEntry *Device_GetAt(size_t index) noexcept {
-  return s_device_repo.getAt(index);
+bool Device_FindCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                     DeviceStateEntry &out_copy) noexcept {
+  return s_device_repo.findCopy(dev_id, sub1, sub2, out_copy);
+}
+
+bool Device_GetAtCopy(size_t index, DeviceStateEntry &out_copy) noexcept {
+  return s_device_repo.getSnapshot(index, out_copy);
 }
 
 void Device_RegisterFcu(uint8_t slot_idx) noexcept {

@@ -4,12 +4,24 @@
 // SystemPlatform: Level 0 Pure Base Infrastructure Definitions
 // ============================================================================
 
+// ── Standard Library Includes ──
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+
+// ── Platform & ESP-IDF Includes ──
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include <Arduino.h>
+#include <IPAddress.h>
 #include <Preferences.h>
 
 // ── RAII FreeRTOS Synchronization Primitives ──
@@ -70,20 +82,12 @@ public:
   MutexLocker &operator=(MutexLocker &&) = delete;
 };
 
-#include <array>
-#include <atomic>
-#include <string_view>
-#include <type_traits>
-
 #ifndef LIKELY
 #define LIKELY(x) __builtin_expect(!!(x), 1)
 #endif
 #ifndef UNLIKELY
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #endif
-
-#include <span>
-#include <utility>
 
 using std::span;
 using std::string_view;
@@ -137,6 +141,16 @@ inline bool nvsPutEnv(Preferences &p, const char *key, const T &v) {
 }
 
 template <class T>
+inline bool nvsGetEnvNs(const char *ns, const char *key, T &out) {
+  Preferences p;
+  if (!p.begin(ns, true))
+    return false;
+  bool ok = nvsGetEnv(p, key, out);
+  p.end();
+  return ok;
+}
+
+template <class T>
 inline bool nvsPutEnvNs(const char *ns, const char *key, const T &v) {
   Preferences p;
   if (!p.begin(ns, false))
@@ -177,7 +191,13 @@ struct StaticPacket {
 // ── System Lifecycle & Synchronization Primitives ──
 extern EventGroupHandle_t g_system_event_group;
 extern std::atomic<bool> g_ota_in_progress;
-extern std::atomic<bool> g_probe_convergence_reset;
+
+// ── Sealed System State Contracts (implemented in L1 Diagnostics_Driver) ──
+/// Crash breadcrumb in RTC SRAM; read/cleared by System_DiagnoseStuck().
+void System_MarkStage(uint32_t stage) noexcept;
+bool System_IsRescueMode() noexcept;
+void System_SetRollbackDetected() noexcept;
+bool System_IsRollbackDetected() noexcept;
 constexpr EventBits_t SYS_EVT_OTA_IDLE = (1 << 0);
 constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
 constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);
@@ -281,8 +301,6 @@ struct HubClientSlotSnapshot;
 bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;
 
 // ── IP Subnet & Management Whitelist Filters (Global Security Policy) ────────
-#include <IPAddress.h>
-
 [[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip);
 [[nodiscard]] bool Telnet_IsAllowedIP(IPAddress ip);
 

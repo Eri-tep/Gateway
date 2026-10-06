@@ -10,13 +10,13 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.0.4";
+constexpr const char *FIRMWARE_VERSION = "v2.0.5";
 } // namespace Config
 
 namespace Config::Task {
 constexpr size_t STACK_SIZE_CORE1 = 6144;
 constexpr size_t STACK_SIZE_SLAVE = 5120;
-constexpr size_t STACK_SIZE_CH4 = 3584;
+constexpr size_t STACK_SIZE_CH4 = 4096;
 constexpr size_t STACK_SIZE_CORE0 = 8192;
 constexpr size_t STACK_SIZE_TELNET = 8192;
 constexpr size_t TASK_COUNT = 6;
@@ -140,6 +140,9 @@ enum class WallpadProfileIndex : uint8_t {
   COUNT = 4
 };
 
+constexpr uint8_t kWallpadProfileMax =
+    static_cast<uint8_t>(WallpadProfileIndex::COUNT) - 1;
+
 struct RuntimeConfig {
   uint32_t uart_baud_rate{9600};
   uint32_t ch2_baud_rate{9600};
@@ -166,10 +169,24 @@ struct RuntimeConfig {
   uint8_t wallpad_profile{0};
 };
 
-extern RuntimeConfig g_config;
-extern std::shared_mutex g_config_rw;
-extern portMUX_TYPE g_config_mux;
-extern std::atomic<bool> g_config_dirty;
+struct RuntimeTimingConfig {
+  uint16_t ch1_poll_interval_ms{1000};
+  uint16_t ch2_cache_delay_ms{30};
+  uint16_t ch3_cache_delay_ms{240};
+};
+
+[[nodiscard]] const RuntimeConfig &Config_Get() noexcept;
+[[nodiscard]] const RuntimeTimingConfig &TimingConfig_Get() noexcept;
+
+void Config_Freeze() noexcept;
+[[nodiscard]] bool Config_IsFrozen() noexcept;
+
+[[nodiscard]] uint8_t Config_GetWallpadProfile() noexcept;
+bool Config_SetWallpadProfile(uint8_t profile) noexcept;
+bool Config_SaveWallpadProfile() noexcept;
+
+bool Config_SaveStaged(const RuntimeConfig &cfg,
+                       const RuntimeTimingConfig &timing) noexcept;
 
 struct FramingConfig {
   uint8_t data_bits{8};
@@ -188,20 +205,13 @@ parseFramingStr(std::string_view str) noexcept;
 bool parseFramingStr(const char *str, uint8_t &data_bits, uint8_t &parity,
                      uint8_t &stop_bits) noexcept;
 
-bool System_ApplyUartConfig(uint8_t ch, uint32_t baud, const char *format);
+bool Config_SetUartFraming(uint8_t ch, uint32_t baud, uint8_t data_bits,
+                           uint8_t parity, uint8_t stop_bits) noexcept;
 
 void Config_Load();
 void Config_Save();
 void Config_ResetDefaults();
 void System_Sha256ToHex(const char *input, char *output);
-
-struct RuntimeTimingConfig {
-  uint16_t ch1_poll_interval_ms{1000};
-  uint16_t ch2_cache_delay_ms{30};
-  uint16_t ch3_cache_delay_ms{240};
-};
-
-extern RuntimeTimingConfig g_timing_config;
 
 void TimingConfig_Load();
 void TimingConfig_Save();
@@ -218,8 +228,6 @@ enum class TraceType : uint8_t {
   DEVID
 };
 
-extern std::atomic<bool> g_mgmt_client_connected;
-
 // ── RTC Fast SRAM Retention Variables & Constants ──
 constexpr uint32_t RTC_MAGIC_CLEAN_RESTART = 0x434C4E52; // 'CLNR'
 constexpr uint32_t RTC_MAGIC_RESCUE = 0x52455343;        // 'RESC'
@@ -227,13 +235,9 @@ constexpr uint32_t RTC_MAGIC_WDT = 0x57445431;           // 'WDT1'
 
 extern uint32_t rtc_magic;
 extern uint32_t rtc_last_alive_ms[Config::Task::TASK_COUNT];
-extern volatile uint32_t g_telnet_stage;
+// Stage breadcrumb is sealed in L1 (System_MarkStage); macro keeps call sites.
 #define TSTAGE(n)                                                              \
-  (g_telnet_stage = (0xA5A50000u | (static_cast<uint32_t>(n) & 0xFFFFu)))
+  System_MarkStage(0xA5A50000u | (static_cast<uint32_t>(n) & 0xFFFFu))
 extern uint32_t rtc_rescue_magic;
 extern uint32_t rtc_crash_counter;
 extern uint32_t rtc_clean_restart_magic;
-
-// ── System Boot & Rescue Status ──
-extern std::atomic<bool> g_rescue_mode;
-extern bool g_rollback_detected;

@@ -36,9 +36,10 @@ void wallpadPrintStatus(AppendBuf &out) {
     out.appendFormat("| %-76.76s |\r\n", buf.c_str());
   };
 
+  const uint8_t active_prof = Config_GetWallpadProfile();
   print_meta("Active Profile  : %s (ID: %u)", prof_key_buf,
-             static_cast<unsigned>(g_config.wallpad_profile));
-  if (g_config.wallpad_profile == 0) {
+             static_cast<unsigned>(active_prof));
+  if (active_prof == 0) {
     print_meta("Profile Mode    : Auto Adaptive [%s]", phase_str);
   } else {
     print_meta("Profile Mode    : Manual Fixed");
@@ -212,8 +213,9 @@ void wallpadPrintStatus(AppendBuf &out) {
        ProtocolDiag_GetActiveEtx());
   table.separator('-');
 
-  uint32_t b1 = g_config.uart_baud_rate, b2 = g_config.ch2_baud_rate,
-           b3 = g_config.ch3_baud_rate;
+  const auto &cfg = Config_Get();
+  uint32_t b1 = cfg.uart_baud_rate, b2 = cfg.ch2_baud_rate,
+           b3 = cfg.ch3_baud_rate;
   if (b1 == b2 && b2 == b3) {
     rowf("Bus Physical", "Baudrate", "[CONFIG]", "%u bps : CH1~3",
          static_cast<unsigned>(b1));
@@ -281,7 +283,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   print_row("", "Opcodes(L)", op_l.c_str(), dp_m_st);
 
   rowf("", "Baudrate", "[CONFIG]", "%u bps",
-       static_cast<unsigned>(g_config.doorphone_baud_rate));
+       static_cast<unsigned>(Config_Get().doorphone_baud_rate));
   rowf("", "Time-gap", "[CONFIG]", "%u ms",
        static_cast<unsigned>(Config::Timing::DOORPHONE_IPG_MS));
   rowf("", "Debounce", "[CONFIG]", "%u ms",
@@ -361,10 +363,11 @@ void wallpadListProfiles(AppendBuf &out) {
 
   FixedBuf<8> id_buf;
   size_t prof_cnt = ProtocolDiag_GetProfileCount();
+  const uint8_t cur_prof = Config_GetWallpadProfile();
   for (size_t i = 0; i < prof_cnt; ++i) {
     ProfileInfoSnapshot p_desc;
     if (ProtocolDiag_GetProfileInfo(i, p_desc)) {
-      bool is_current = (g_config.wallpad_profile == i);
+      bool is_current = (cur_prof == i);
       bool is_empty = (i > 0 && strncmp(p_desc.name, "[Empty", 6) == 0);
       const char *status_str = is_current
                                    ? ">> ACTIVE <<"
@@ -622,7 +625,7 @@ void cmdWallpad(CliContext &ctx) {
       {"reset", "reset", "Reset auto-probing engine and re-learn",
        [](int s, int, const Args &) {
          ProtocolDiag_WallpadReset();
-         g_probe_convergence_reset.store(true, std::memory_order_release);
+         ProtocolDiag_RequestRelearn();
        }},
       {"simulate", "simulate <hex...>",
        "Inject raw hex packet into probing engine",

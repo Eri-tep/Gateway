@@ -744,7 +744,7 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
 }
 
 void Bridge_StartServer() noexcept {
-  if (g_rescue_mode.load(std::memory_order_relaxed)) {
+  if (System_IsRescueMode()) {
     return;
   }
 

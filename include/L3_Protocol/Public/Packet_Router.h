@@ -100,6 +100,8 @@ bool Router_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
                                 uint16_t port, const char *name) noexcept;
 bool Router_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept;
 bool Router_ResetBridgeFraming(uint8_t slot_idx) noexcept;
+[[nodiscard]] bool Router_IsBridgeSlotOnline(uint8_t slot_idx) noexcept;
+bool Router_SendBridgeRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
 
 
 

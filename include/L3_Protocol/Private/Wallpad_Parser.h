@@ -70,6 +70,7 @@ public:
   static bool saveCurrentAutoAs(const char *name, size_t &saved_idx);
   static bool deleteProfile(size_t index);
   static void syncAutoProfileToNvs(const AutoProbeDescriptor &auto_desc);
+  static bool commitAutoProfileNvsIfPending() noexcept;
   static void resetAllToDefaults();
   static void inferVendorDescription(const AutoProbeDescriptor &ad,
                                      char *out_desc, size_t max_len);

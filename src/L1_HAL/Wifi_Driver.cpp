@@ -4,7 +4,6 @@
 // ============================================================================
 
 #include "L1_HAL/Wifi_Driver.h"
-#include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -95,14 +94,17 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   }
 }
 
-void Wifi_Driver_Init() {
+void Wifi_Driver_Init(const WifiHwConfig &cfg) {
   if (!g_wifi_event_group) {
     g_wifi_event_group = xEventGroupCreateStatic(&s_wifi_event_group_buf);
   }
   WiFi.onEvent(onWifiEvent);
 
-  Serial.printf("[WIFI] Connecting to '%s' (Timeout: %us)...\r\n",
-                g_config.wifi_ssid, g_config.wifi_connect_timeout_s);
+  const char *ssid = (cfg.sta_ssid && cfg.sta_ssid[0]) ? cfg.sta_ssid : "";
+  const char *pass = cfg.sta_password ? cfg.sta_password : "";
+  uint16_t tout = cfg.timeout_s ? cfg.timeout_s : 30;
+
+  Serial.printf("[WIFI] Connecting to '%s' (Timeout: %us)...\r\n", ssid, tout);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
   WiFi.mode(WIFI_STA);
@@ -111,10 +113,10 @@ void Wifi_Driver_Init() {
 
   wifi_config_t w_conf;
   memset(&w_conf, 0, sizeof(w_conf));
-  strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), g_config.wifi_ssid,
+  strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), ssid,
           sizeof(w_conf.sta.ssid) - 1);
-  strncpy(reinterpret_cast<char *>(w_conf.sta.password),
-          g_config.wifi_password, sizeof(w_conf.sta.password) - 1);
+  strncpy(reinterpret_cast<char *>(w_conf.sta.password), pass,
+          sizeof(w_conf.sta.password) - 1);
   w_conf.sta.scan_method = WIFI_FAST_SCAN;
   w_conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
   w_conf.sta.pmf_cfg.capable = true;
@@ -125,10 +127,7 @@ void Wifi_Driver_Init() {
   esp_wifi_connect();
 
   uint32_t t_start = millis();
-  uint32_t max_wait =
-      (g_config.wifi_connect_timeout_s ? g_config.wifi_connect_timeout_s
-                                       : 30) *
-      1000;
+  uint32_t max_wait = tout * 1000;
   bool connected = false;
 
   while (millis() - t_start < max_wait) {
@@ -150,13 +149,17 @@ void Wifi_Driver_Init() {
 
     WiFi.softAPConfig(IPAddress(172, 30, 2, 1), IPAddress(172, 30, 2, 1),
                       IPAddress(255, 255, 255, 0));
-    bool ap_ok = WiFi.softAP(g_config.ap_ssid, g_config.ap_password, 1, 0, 4);
+    const char *fallback_ap =
+        (cfg.ap_ssid && cfg.ap_ssid[0]) ? cfg.ap_ssid : "Sweet_Home_Rescue";
+    const char *fallback_pass =
+        (cfg.ap_password && cfg.ap_password[0]) ? cfg.ap_password : "";
+    bool ap_ok = WiFi.softAP(fallback_ap, fallback_pass, 1, 0, 4);
 
     WiFi.setSleep(false);
     esp_wifi_set_max_tx_power(78);
     Serial.printf("[WIFI] STA connect failed. Fallback SoftAP '%s' started: "
                   "%s (IP: %s)\r\n",
-                  g_config.ap_ssid, ap_ok ? "SUCCESS" : "FAILED",
+                  fallback_ap, ap_ok ? "SUCCESS" : "FAILED",
                   WiFi.softAPIP().toString().c_str());
   }
 }
@@ -182,7 +185,7 @@ void Wifi_Driver_Reconnect() noexcept {
 
 // ── L0 Foundation Universal Contract Implementations ──
 void System_WifiInit() noexcept {
-  Wifi_Driver_Init();
+  // Wifi is initialized explicitly at boot via Wifi_Driver_Init() with config
 }
 
 bool System_WifiIsConnected() noexcept {

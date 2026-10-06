@@ -10,12 +10,31 @@
 // During phased migration (Step 3), it re-exports the legacy DeviceRegistry
 // and adds the new Domain_VerbNoun accessor APIs that replace raw extern access.
 //
-// SSOT Rules:
+// SSOT & Synchronization Invariants:
 //   - All device state writes must go through Device_UpdateFromBus() or
 //     Device_SetDesiredState() — never modify DeviceStateEntry fields directly.
-//   - All reads must use Device_GetSnapshot() or Device_FindEntry() — never
-//     store raw pointers across task boundaries.
-//   - g_device_repo is static-sealed in DeviceRegistry.cpp (Rule 17).
+//   - All reads must use snapshot copy APIs (Device_GetSnapshot, Device_FindCopy,
+//     Device_GetSnapshotChunk) — NEVER return/store raw entry pointers (zero tearing).
+//   - Lock Hierarchy & Synchronization Matrix (Single-Ownership Invariant):
+//     +--------------------+-------------------+-------+----------------------------------+
+//     | Lock Name          | Type / Primitive  | Layer | Protected Resource / Invariant   |
+//     +--------------------+-------------------+-------+----------------------------------+
+//     | s_uart0_mutex      | SemaphoreHandle_t | L2    | CH1 UART0 half-duplex TX/RX      |
+//     | s_uart1_mutex      | SemaphoreHandle_t | L2    | CH2 UART1 half-duplex TX/RX      |
+//     | s_uart2_mutex      | SemaphoreHandle_t | L2    | CH3 UART2 half-duplex TX/RX      |
+//     | s_ctrl_queue_mutex | SemaphoreHandle_t | L2    | CH1 Control Packet FIFO Queue    |
+//     | s_ch5_mutex        | SemaphoreHandle_t | L2    | CH5 Modbus RTU FCU half-duplex   |
+//     | _cache_mutex       | StaticSemaphore_t | L3    | Device Registry 48 slots cache   |
+//     | _mutex             | StaticSemaphore_t | L3    | Control Registry learned specs   |
+//     | _nvs_mutex         | StaticSemaphore_t | L3    | Control Registry NVS profile     |
+//     | s_save_mutex       | std::mutex        | L0    | System Config NVS save/reset     |
+//     | _cli_mutex         | SemaphoreHandle_t | L4    | Telnet CLI session print locks   |
+//     | s_telnet_tx_sem    | SemaphoreHandle_t | L4    | Telnet CLI socket TX pacing      |
+//     | s_mgmt_mutex       | SemaphoreHandle_t | L4    | TCP Mgmt session multiplexing    |
+//     +--------------------+-------------------+-------+----------------------------------+
+//     * Invariant: Nested lock acquisition is STRICTLY FORBIDDEN. All locks follow
+//       single-ownership. Callbacks and packet tracing execute 100% outside locks.
+//   - g_device_repo is static-sealed in Device_Registry.cpp (Rule 17).
 //     External callers use the functional API below, NOT the extern object.
 // ============================================================================
 
@@ -145,6 +164,9 @@ struct DeviceStateEntry {
   }
 };
 
+static_assert(std::is_trivially_copyable_v<DeviceStateEntry>,
+              "DeviceStateEntry must be trivially copyable");
+
 struct DeviceUpdateResult {
   bool updated{false};
   bool should_broadcast{false};
@@ -186,18 +208,30 @@ void Device_Clear() noexcept;
 [[nodiscard]] bool Device_GetSnapshotAt(size_t index,
                                          DeviceStateEntry &out_copy) noexcept;
 
+/// Chunked snapshot reader for safe iteration without stack exhaustion.
+/// Copies up to max_count entries starting at start_idx within a single lock.
+/// Note: Across multiple chunk iterations, a slight time-skew between chunks is
+/// acceptable and intended for telemetry/reporting to keep lock holding minimal.
+[[nodiscard]] size_t Device_GetSnapshotChunk(size_t start_idx,
+                                             DeviceStateEntry *out_buf,
+                                             size_t max_count) noexcept;
+
+/// Returns total mutex timeout occurrences while accessing device cache.
+[[nodiscard]] uint32_t Device_GetCacheLockTimeouts() noexcept;
+
 /// Returns current online device count (all channels combined).
 [[nodiscard]] size_t Device_GetOnlineCount() noexcept;
 
 /// Returns total registered device count.
 [[nodiscard]] size_t Device_GetCount() noexcept;
 
-/// Find pointer to device entry (read-only inspect).
-[[nodiscard]] const DeviceStateEntry *Device_Find(uint8_t dev_id, uint8_t sub1,
-                                                  uint8_t sub2) noexcept;
+/// Find copy of device entry (thread-safe copy).
+[[nodiscard]] bool Device_FindCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                   DeviceStateEntry &out_copy) noexcept;
 
-/// Get device entry at index (read-only inspect).
-[[nodiscard]] const DeviceStateEntry *Device_GetAt(size_t index) noexcept;
+/// Get copy of device entry at index (thread-safe copy).
+[[nodiscard]] bool Device_GetAtCopy(size_t index,
+                                    DeviceStateEntry &out_copy) noexcept;
 
 /// Register FCU sub-device slot into repository cache.
 void Device_RegisterFcu(uint8_t slot_idx) noexcept;

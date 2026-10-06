@@ -230,7 +230,7 @@ void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
   }
   const char *catalog_vendor = vendor_name_buf;
 
-  if (g_config.wallpad_profile == 0) {
+  if (Config_GetWallpadProfile() == 0) {
     snprintf(out_buf, max_len,
              desc.is_locked ? "Auto Detect (%s)" : "Auto Detect (Learning...)",
              catalog_vendor);
@@ -286,7 +286,7 @@ bool ProtocolDiag_GetProfileInfo(size_t idx, ProfileInfoSnapshot &out) noexcept 
   out.query_op = p_desc.query_op;
   out.ctrl_op = p_desc.ctrl_op;
   out.ack_op = p_desc.ack_op;
-  out.is_active = (g_config.wallpad_profile == idx);
+  out.is_active = (Config_GetWallpadProfile() == idx);
   return true;
 }
 
@@ -327,6 +327,14 @@ void ProtocolDiag_WallpadReset() noexcept {
   ProtocolDiag_GetFramingNamespace(0, dp_ns, sizeof(dp_ns));
   g_auto_probing_engine.reset();
   Wallpad_DoorphoneClearNvs(dp_ns);
+}
+
+void ProtocolDiag_RequestRelearn() noexcept {
+  Wallpad_RequestRelearn();
+}
+
+bool ProtocolDiag_CommitAutoProfileNvsIfPending() noexcept {
+  return ProfileRepository::commitAutoProfileNvsIfPending();
 }
 
 void ProtocolDiag_DoorphoneClearNvs(const char *nvs_ns) noexcept {
@@ -435,14 +443,24 @@ static void CopyTemplateToSnapshot(const GroupControlTemplate &grp, BlueprintSna
   out.qry_wattage_offset = grp.query_slots.power_w_offset;
 }
 
+bool ProtocolDiag_GetBlueprintAt(size_t index, BlueprintSnapshot &out) noexcept {
+  GroupControlTemplate grp{};
+  if (!g_control_registry.getGroupByIndex(index, grp))
+    return false;
+  CopyTemplateToSnapshot(grp, out);
+  return true;
+}
+
 size_t ProtocolDiag_GetBlueprintsSnapshot(BlueprintSnapshot *out_array, size_t max_count) noexcept {
   if (!out_array || max_count == 0)
     return 0;
-  GroupControlTemplate grps[ControlTemplateRegistry::MAX_GROUPS];
-  size_t count = g_control_registry.getGroupsSnapshot(grps, ControlTemplateRegistry::MAX_GROUPS);
-  size_t out_cnt = std::min(count, max_count);
+  const size_t total = g_control_registry.getGroupCount();
+  const size_t out_cnt = std::min(total, max_count);
   for (size_t i = 0; i < out_cnt; ++i) {
-    CopyTemplateToSnapshot(grps[i], out_array[i]);
+    GroupControlTemplate grp{};
+    if (g_control_registry.getGroupByIndex(i, grp)) {
+      CopyTemplateToSnapshot(grp, out_array[i]);
+    }
   }
   return out_cnt;
 }
@@ -511,6 +529,7 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onDispatchControl = Router_DispatchControl;
   dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
   dispatcher.onCheckConvergence = Wallpad_CheckConvergence;
+  dispatcher.onTakeRelearnRequest = Wallpad_TakeRelearnRequest;
   dispatcher.onGetStx = Wallpad_GetStx;
   dispatcher.onIsAutoUnlocked = Wallpad_IsAutoUnlocked;
   dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
@@ -561,8 +580,10 @@ static void Protocol_OnBridgePacketReceived(uint8_t slot_idx, const StaticPacket
         ESP_LOGI("ProtocolDiag", "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor, ho);
         Device_NotifyElevatorEvent(sub1, sub2, floor, ho, 0, true);
       }
-    } else if (dev_id != 0x2A) {
-      bool is_query = Wallpad_IsQueryPacket(std::span<const uint8_t>(pkt.data.data(), pkt.length));
+    }
+    if (dev_id != 0x2A) {
+      bool is_arrival = (dev_id == 0x34 && pkt.length == 13 && pkt.data[4] == 0x01 && pkt.data[8] == 0x01);
+      bool is_query = Wallpad_IsQueryPacket(std::span<const uint8_t>(pkt.data.data(), pkt.length)) && !is_arrival;
       bool is_ack = (pkt.length >= 5 && pkt.data[4] == 0x04);
       if (is_query) {
         ProtocolDiag_PollingRegisterOrTouch(5, dev_id, sub1, sub2, pkt.data.data(), pkt.length);

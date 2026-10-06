@@ -153,6 +153,10 @@ ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_a
 // 3. Timing & Convergence
 uint32_t Wallpad_GetPollIntervalMs() noexcept;
 bool Wallpad_CheckConvergence(bool reset) noexcept;
+/// Post a relearn request (any task). Consumed once by the CH1 worker.
+void Wallpad_RequestRelearn() noexcept;
+/// Atomically consume the pending relearn request. Returns true exactly once.
+bool Wallpad_TakeRelearnRequest() noexcept;
 uint32_t Wallpad_GetStalePollCount() noexcept;
 
 // 4. Stream Framing & Parsing SPI

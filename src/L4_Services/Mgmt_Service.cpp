@@ -254,9 +254,8 @@ void handleFsmTesting(uint32_t now, EventBits_t bits) noexcept {
   // Success check: got IP while testing
   if (System_IsNetworkReady() || (bits & WIFI_BIT_GOT_IP)) {
     g_wifi_guard.testing.store(false, std::memory_order_release);
-    Config_Save();
-    Serial.printf("[WIFI] ★ New Wi-Fi '%s' connected successfully! Saved to NVS.\r\n",
-                  g_config.wifi_ssid);
+    Serial.println(
+        F("[WIFI] ★ New Wi-Fi connected successfully! Saved to NVS."));
     Remote_StartServer();
     s_net_fsm = NetworkFsmState::OPERATIONAL;
     return;
@@ -265,18 +264,14 @@ void handleFsmTesting(uint32_t now, EventBits_t bits) noexcept {
   // Timeout check: failed to connect within 15 seconds
   if (TimeUtils::isElapsed(g_wifi_guard.start_ms, 15000)) {
     g_wifi_guard.testing.store(false, std::memory_order_release);
-    Serial.printf("[WIFI] ⚠️ New Wi-Fi '%s' failed within 15s! Reverting to '%s'...\r\n",
-                  g_config.wifi_ssid, g_wifi_guard.prev_ssid);
-    {
-      std::unique_lock lock(g_config_rw);
-      strncpy(g_config.wifi_ssid, g_wifi_guard.prev_ssid,
-              sizeof(g_config.wifi_ssid) - 1);
-      strncpy(g_config.wifi_password, g_wifi_guard.prev_pass,
-              sizeof(g_config.wifi_password) - 1);
-    }
+    const auto &cfg = Config_Get();
+    Serial.printf(
+        "[WIFI] ⚠️ New Wi-Fi failed within 15s! Reverting to '%s'...\r\n",
+        cfg.wifi_ssid);
+    Config_SaveStaged(cfg, TimingConfig_Get());
     WiFi.disconnect(false);
     vTaskDelay(pdMS_TO_TICKS(100));
-    WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
+    WiFi.begin(cfg.wifi_ssid, cfg.wifi_password);
     s_net_fsm = NetworkFsmState::DISCONNECTED;
     s_last_sta_retry_ms = now;
   }
@@ -311,7 +306,7 @@ void handleFsmDisconnected(uint32_t now, EventBits_t bits) noexcept {
 } // namespace
 
 void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
-  if (!g_rescue_mode.load(std::memory_order_relaxed)) {
+  if (!System_IsRescueMode()) {
     const EventBits_t bits = g_wifi_event_group ? xEventGroupGetBits(g_wifi_event_group) : 0;
 
     switch (s_net_fsm) {
@@ -340,7 +335,7 @@ void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
 }
 
 void Remote_StartServer() noexcept {
-  if (g_rescue_mode.load(std::memory_order_relaxed)) {
+  if (System_IsRescueMode()) {
     Serial.println(F("[RESCUE] CH6 TCP server port disabled in Rescue Mode."));
     return;
   }

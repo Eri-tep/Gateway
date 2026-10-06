@@ -78,8 +78,9 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
     for (size_t i = 0; i < active_cnt; i++) {
       size_t idx = (s_current_dev_idx + i) % active_cnt;
       const auto &tgt = candidates[idx];
-      const auto *cached_dev = Device_Find(tgt.dev_id, tgt.sub1, tgt.sub2);
-      int score = Wallpad_ScoreCandidate(tgt, cached_dev);
+      DeviceStateEntry cached_dev_snap{};
+      bool has_cached = Device_FindCopy(tgt.dev_id, tgt.sub1, tgt.sub2, cached_dev_snap);
+      int score = Wallpad_ScoreCandidate(tgt, has_cached ? &cached_dev_snap : nullptr);
 
       if (score <= 3) {
         chosen_idx = idx;
@@ -110,19 +111,20 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
     size_t dev_cnt = Device_GetCount();
     if (dev_cnt > 0) {
       size_t idx = s_current_dev_idx % dev_cnt;
-      auto *dev = Device_GetAt(idx);
+      DeviceStateEntry dev_snap{};
+      bool has_dev = Device_GetAtCopy(idx, dev_snap);
       s_current_dev_idx = (idx + 1) % dev_cnt;
-      if (dev && dev->dev_id != Config::FCU::DEV_ID &&
-          (dev->is_online || dev->last_updated_ms == 0 ||
-           TimeUtils::isElapsed(dev->last_stale_poll_ms,
+      if (has_dev && dev_snap.dev_id != Config::FCU::DEV_ID &&
+          (dev_snap.is_online || dev_snap.last_updated_ms == 0 ||
+           TimeUtils::isElapsed(dev_snap.last_stale_poll_ms,
                                 Config::Timing::CH1_STALE_POLL_INTERVAL_MS))) {
         RouteEndpoint ep;
-        if (!Router_LookupRoute(dev->dev_id, dev->sub1, dev->sub2, ep) ||
+        if (!Router_LookupRoute(dev_snap.dev_id, dev_snap.sub1, dev_snap.sub2, ep) ||
             ep.channel_id != 5) {
-          poll_dev_id = dev->dev_id;
-          poll_sub1 = dev->sub1;
-          poll_sub2 = dev->sub2;
-          if (!dev->is_online)
+          poll_dev_id = dev_snap.dev_id;
+          poll_sub1 = dev_snap.sub1;
+          poll_sub2 = dev_snap.sub2;
+          if (!dev_snap.is_online)
             Device_SetLastStalePollMsByIndex(idx, now);
           target_selected = true;
         }
@@ -249,8 +251,18 @@ ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_a
 uint32_t Wallpad_GetPollIntervalMs() noexcept {
   size_t active_tgts = g_polling_targets.activeCount();
   return (s_convergence_done || active_tgts == 0)
-             ? g_timing_config.ch1_poll_interval_ms
+             ? TimingConfig_Get().ch1_poll_interval_ms
              : 20;
+}
+
+static std::atomic<bool> s_relearn_requested{false};
+
+void Wallpad_RequestRelearn() noexcept {
+  s_relearn_requested.store(true, std::memory_order_release);
+}
+
+bool Wallpad_TakeRelearnRequest() noexcept {
+  return s_relearn_requested.exchange(false, std::memory_order_acq_rel);
 }
 
 bool Wallpad_CheckConvergence(bool reset) noexcept {
@@ -659,11 +671,14 @@ void Wallpad_InitDecoupledHooks() noexcept {
     []() -> size_t {
       return Device_GetOnlineCount();
     },
-    [](uint8_t dev_id, uint8_t sub1, uint8_t sub2, const uint8_t **out_ack, size_t *out_len) -> bool {
-      const DeviceStateEntry *dev = Device_Find(dev_id, sub1, sub2);
-      if (dev && dev->is_online && dev->last_ack_len >= 4) {
-        *out_ack = dev->last_ack_data.data();
-        *out_len = dev->last_ack_len;
+    [](uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+       uint8_t *out_buf, size_t max_len, size_t *out_len) -> bool {
+      if (!out_buf || !out_len || max_len == 0) return false;
+      DeviceStateEntry snap{};
+      if (Device_FindCopy(dev_id, sub1, sub2, snap) && snap.is_online && snap.last_ack_len >= 4) {
+        size_t c_len = std::min(static_cast<size_t>(snap.last_ack_len), max_len);
+        memcpy(out_buf, snap.last_ack_data.data(), c_len);
+        *out_len = c_len;
         return true;
       }
       return false;
@@ -760,7 +775,7 @@ bool Wallpad_DoorphoneGetLockedFraming(uint8_t &stx, uint8_t &etx, uint8_t &len)
 
 void Wallpad_DoorphoneFrameDetected(uint8_t stx, uint8_t etx, uint8_t len) noexcept {
   char cur_dp_ns[16];
-  FramingTracker::getNvsNamespace(g_config.wallpad_profile, cur_dp_ns, sizeof(cur_dp_ns));
+  FramingTracker::getNvsNamespace(Config_GetWallpadProfile(), cur_dp_ns, sizeof(cur_dp_ns));
 
   uint8_t fixed_len = 0;
   if (Wallpad_MatchDoorphoneLock(stx, etx, len, fixed_len) && len >= 5) {

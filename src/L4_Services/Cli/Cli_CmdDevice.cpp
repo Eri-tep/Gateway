@@ -102,10 +102,12 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
   CliFmt::PrintBoxHeader(out,
                          "[2ND-TIER CACHE] PHYSICAL DEVICE HEALTH MONITOR");
 
+  const uint32_t lock_timeouts = Device_GetCacheLockTimeouts();
   CliFmt::PrintBoxSubtitlef(
-      out, "Discovered: %zu Nodes on Bus | Online [OK]: %zu | Offline: %zu",
+      out, "Discovered: %zu Nodes on Bus | Online [OK]: %zu | Offline: %zu | Lock Timeouts: %lu",
       total_count, online_count,
-      (total_count >= online_count) ? (total_count - online_count) : 0);
+      (total_count >= online_count) ? (total_count - online_count) : 0,
+      static_cast<unsigned long>(lock_timeouts));
 
   static constexpr Column TIER2_COLS[] = {
       {"No", 3, Align::CENTER, Align::CENTER},
@@ -480,8 +482,7 @@ void cmdCtl(CliContext &ctx) {
 void wallpadPrintControlTable(AppendBuf &out) {
   CliFmt::PrintBoxHeader(out, "DEVICE CONTROL BLUEPRINTS & ACTION SLOTS");
 
-  BlueprintSnapshot grps[8];
-  size_t count = ProtocolDiag_GetBlueprintsSnapshot(grps, 8);
+  const size_t count = ProtocolDiag_GetGroupCount();
 
   CliFmt::PrintBoxSubtitlef(
       out, "Registered Blueprints: %zu Groups | Auto-Mapped & NVS Persisted",
@@ -511,8 +512,8 @@ void wallpadPrintControlTable(AppendBuf &out) {
   FixedBuf<8> ctl_len_str, qry_len_str, id_str;
 
   for (size_t i = 0; i < count; ++i) {
-    const BlueprintSnapshot &grp = grps[i];
-    if (grp.dev_id == 0)
+    BlueprintSnapshot grp{};
+    if (!ProtocolDiag_GetBlueprintAt(i, grp) || grp.dev_id == 0)
       continue;
 
     const char *cls_str = DeviceClassToCliString(grp.dev_class);

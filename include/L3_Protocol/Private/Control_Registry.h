@@ -148,9 +148,9 @@ public:
   void matchAndInject(const struct AutoProbeDescriptor &ad);
 
   // NVS 저장 / 복원 (프로파일 격리 지원)
-  void saveToNvs();
+  bool saveToNvs();
   void loadFromNvs();
-  void saveToNvsForProfile(uint8_t prof_idx);
+  bool saveToNvsForProfile(uint8_t prof_idx);
   void loadFromNvsForProfile(uint8_t prof_idx);
   void onProfileChanged(uint8_t old_prof_idx, uint8_t new_prof_idx);
 
@@ -176,8 +176,7 @@ inline void getControlNamespace(char *out_ns, size_t max_len,
 }
 
 inline uint8_t getCurrentProfileIndex() {
-  CriticalSectionLocker lock(&g_config_mux);
-  return g_config.wallpad_profile;
+  return Config_GetWallpadProfile();
 }
 } // namespace ControlTemplateUtils
 

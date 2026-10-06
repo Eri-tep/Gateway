@@ -546,41 +546,58 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
   return true;
 }
 
-void ControlTemplateRegistry::saveToNvs() {
-  saveToNvsForProfile(getCurrentProfileIndex());
+bool ControlTemplateRegistry::saveToNvs() {
+  return saveToNvsForProfile(getCurrentProfileIndex());
 }
 void ControlTemplateRegistry::loadFromNvs() {
   loadFromNvsForProfile(getCurrentProfileIndex());
 }
 
-void ControlTemplateRegistry::saveToNvsForProfile(uint8_t prof_idx) {
-  MutexLocker nvs_lock(_nvs_mutex, kManageLockTimeout);
-  if (!nvs_lock.isLocked())
-    return;
-
+bool ControlTemplateRegistry::saveToNvsForProfile(uint8_t prof_idx) {
   uint8_t save_count = 0;
+  bool ram_locked = false;
+  bool nvs_opened = false;
+
   {
-    MutexLocker ram_lock(_mutex, kManageLockTimeout);
-    if (!ram_lock.isLocked())
-      return;
-    for (size_t i = 0; i < _group_count; ++i)
-      if (_groups[i].dev_id != 0)
-        s_nvs_transfer_buf[save_count++] = _groups[i];
+    MutexLocker nvs_lock(_nvs_mutex, kManageLockTimeout);
+    if (!nvs_lock.isLocked()) {
+      ESP_LOGW("CTRL_REG", "[WARN] _nvs_mutex timeout saving profile %u", prof_idx);
+      return false;
+    }
+
+    {
+      MutexLocker ram_lock(_mutex, kManageLockTimeout);
+      if (ram_lock.isLocked()) {
+        ram_locked = true;
+        for (size_t i = 0; i < _group_count; ++i)
+          if (_groups[i].dev_id != 0)
+            s_nvs_transfer_buf[save_count++] = _groups[i];
+      }
+    }
+
+    if (!ram_locked) {
+      ESP_LOGW("CTRL_REG", "[WARN] _mutex timeout copying RAM snapshot for profile %u", prof_idx);
+      return false;
+    }
+
+    char ns[16];
+    getControlNamespace(ns, sizeof(ns), prof_idx);
+    Preferences prefs;
+    if (prefs.begin(ns, false)) {
+      nvs_opened = true;
+      prefs.putUChar("cnt", save_count);
+      for (size_t i = 0; i < save_count; ++i) {
+        char key[16];
+        snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
+        nvsPutEnv(prefs, key, s_nvs_transfer_buf[i]);
+      }
+      prefs.end();
+    } else {
+      ESP_LOGW("CTRL_REG", "[WARN] Failed to open NVS namespace %s", ns);
+    }
   }
 
-  char ns[16];
-  getControlNamespace(ns, sizeof(ns), prof_idx);
-  Preferences prefs;
-  if (!prefs.begin(ns, false))
-    return;
-
-  prefs.putUChar("cnt", save_count);
-  for (size_t i = 0; i < save_count; ++i) {
-    char key[16];
-    snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
-    nvsPutEnv(prefs, key, s_nvs_transfer_buf[i]);
-  }
-  prefs.end();
+  return nvs_opened;
 }
 
 void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {

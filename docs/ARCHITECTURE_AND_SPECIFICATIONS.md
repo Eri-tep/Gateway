@@ -14,17 +14,17 @@ This document defines the system specifications, runtime topology, channel mappi
 - **Zero Upward Include**: Higher layers must never be included by lower layers ($L_M \rightarrow L_N$ where $M < N$ is strictly forbidden).
 
 #### 0.1 Layer Hierarchy & Responsibilities
-> 1. **Foundation Soil (L0 Base Leaf)**: Universal static foundation (`System_Buffer.h`, `System_Config.h`, `System_Platform.h`). Zero upward dependencies; accessible directly by any layer ($L1 \sim L4$). Acts as the **universal pure foundation leaf** defining global types, synchronization primitives, and **abstract platform service contracts (`System_*`)**.
-> 2. **L1 Physical HAL Drivers**: Hardware abstractions (`Uart_Driver`, `Diagnostics_Driver`, `OTA_Driver`). Complete information hiding. Exclusively implements physical driver health, dual-partition OTA engine, NVS/RTC reboot logs, and hardware telemetry.
-> 3. **L2 Transport & Data Link Channels**: Raw frame transport, timeslot scheduling, and socket polling (`RS485_CH`, `TCP_CH`). Pure transport leaves; zero awareness of L3 device state, scheduler strategies, or L4 listeners.
+> 1. **Foundation Soil (L0 Base Leaf)**: Universal static foundation (`System_Buffer.h`, `System_Config.h`, `System_Platform.h`). Zero upward dependencies; accessible directly by any layer ($L1 \sim L4$). Acts as the **universal pure foundation leaf** defining global types, synchronization primitives, abstract platform service contracts (`System_*`), and sealed system state accessors (`System_MarkStage`, `System_IsRescueMode`, `System_IsRollbackDetected`, `System_SetRollbackDetected`). All higher-domain hooks (e.g. protocol convergence flags) are permanently eradicated from L0.
+> 2. **L1 Physical HAL Drivers**: Hardware abstractions (`Uart_Driver`, `Diagnostics_Driver`, `OTA_Driver`, `Wifi_Driver`). Complete information hiding. Exclusively implements physical driver health, dual-partition OTA engine, NVS/RTC reboot logs, Wi-Fi connectivity/reconnect FSM (bound to L0 `System_Wifi*`), and hardware telemetry. 4 canonical drivers maintain strict cohesion and 1:1 header-source parity.
+> 3. **L2 Transport & Data Link Channels**: Raw frame transport, timeslot scheduling, and socket polling (`RS485_CH`, `TCP_CH`). Pure transport leaves; zero awareness of L3 device state, scheduler strategies, or L4 listeners. Consumes upper-layer requests strictly via injected raw DI callbacks (`onTakeRelearnRequest`, `onCheckConvergence`, `onBuildPoll`).
 > 4. **L3 Routing, Subsystem & Shell-Core Engine**:
 >    - **L3 Public Shell (External Boundary Gateways)**:
 >      - `Packet_Router` : **The ONLY bidirectional packet gateway** between L3 and L2 (`Router_EnqueueDownlink`, `Router_BuildNextPoll`).
 >      - `Device_Registry`: SSOT device repository and decoupled control/state ingress.
->      - `Protocol_Diagnostics`: Pure protocol & routing diagnostics facade for L4 (strictly zero hardware HAL includes; zero non-protocol state).
+>      - `Protocol_Diagnostics`: Pure protocol & routing diagnostics facade for L4 (strictly zero hardware HAL includes; zero non-protocol state; includes `ProtocolDiag_RequestRelearn()`).
 >      - `Modbus_Codec`: FCU Modbus RTU byte stream encoder, decoder & CRC-16.
 >    - **L3 Private Core (100% Encapsulated Engines)**:
->      - `Wallpad_Engine`: Internal protocol FSM and doorphone state machine (`FramingTracker` sealed here).
+>      - `Wallpad_Engine`: Internal protocol FSM and doorphone state machine (`FramingTracker` sealed here; sole owner of protocol convergence & relearn state `s_relearn_requested`).
 >      - `Wallpad_Parser`: Binary frame parser and checksum validation.
 >      - `Polling_Registry`: Dynamic polling target registry, warm cache, and **sole owner of internal `stale_poll_cnt`**.
 >      - `Auto_Probing`: Runtime heuristic protocol matrix solver.
@@ -40,7 +40,8 @@ include/
 ├── L1_HAL/                         [L1: Physical HAL Drivers]
 │   ├── Uart_Driver.h         (Unified HW UART0~2 + Doorphone SW Serial HAL)
 │   ├── Diagnostics_Driver.h  (Heap/stack watermarks, NVS LogManager, Ch1StateMetrics)
-│   └── OTA_Driver.h          (Dual-partition rollback, rescue AP recovery, HttpOtaState)
+│   ├── OTA_Driver.h          (Dual-partition rollback, rescue AP recovery, HttpOtaState)
+│   └── Wifi_Driver.h         (Physical Wi-Fi HAL driver & System_Wifi* platform binding)
 ├── L2_Transport/                   [L2: Transport & Data Link Channels]
 │   ├── RS485_CH.h            (Ch1~Ch4 serial channel manager, FreeRTOS timeslot loops)
 │   └── TCP_CH.h              (Core 0 TCP reactor, socket FSM, embedded IPFilter)
@@ -73,8 +74,9 @@ src/
 │   └── System_Platform.cpp   (Platform synchronization & decoupled trace message/packet sinks)
 ├── L1_HAL/
 │   ├── Uart_Driver.cpp       (HW UART & SoftwareSerial fully sealed via file-static scope)
-│   ├── Diagnostics_Driver.cpp(System metrics, task watchdogs, hardware crash telemetry, NVS LogManager)
-│   └── OTA_Driver.cpp        (Background HTTP/HTTPS OTA task, dual-slot validation)
+│   ├── Diagnostics_Driver.cpp(Trace/shutdown hooks, metrics tracker, task handles, Task WDT, NVS reboot log, crash/rescue lifecycle)
+│   ├── OTA_Driver.cpp        (Background HTTP/HTTPS OTA task, dual-slot validation, URL trust policy)
+│   └── Wifi_Driver.cpp       (WiFi event handler, reconnect FSM & System_Wifi* binding)
 ├── L2_Transport/
 │   ├── RS485_CH.cpp          (Task_Ch1, Task_Ch2Ch3, Task_Ch4 FreeRTOS worker loops)
 │   └── TCP_CH.cpp            (Task_TcpCore0 socket polling and IP whitelist filter)
@@ -114,7 +116,8 @@ src/
    - L3 protocol convergence (`Wallpad_CheckConvergence`) must only stabilize its own cache and signal system milestone `SYS_EVT_CACHE_READY`. It is strictly forbidden for L3 to wipe or reset L1 hardware metrics (`g_pkt_stats`, `g_metrics`).
 5. **L0 Base Foundation Soil & Cross-Cutting Platform DIP (Rule 17)**:
    - L0 Foundation (`System_Platform.h`, `System_Config.h`, `System_Buffer.h`) is the universal "Foundation Soil" accessible directly by all tiers ($L1 \sim L4$).
-   - Cross-cutting platform concerns (Task WDT, HTTP OTA, Reboot Log in RTC/NVS, CPU/Temp metrics, Network/Transport traffic counters, Trace Sinks, Shutdown Hooks) are declared as abstract C++ contracts in `include/L0_Foundation/System_Platform.h` (`System_*`), implemented in L1 HAL (`Diagnostics_Driver.cpp`, `OTA_Driver.cpp`), and consumed directly by L4 Services.
+   - Cross-cutting platform concerns (Task WDT, HTTP OTA, Reboot Log in RTC/NVS, CPU/Temp metrics, Network/Transport traffic counters, Trace Sinks, Shutdown Hooks, Wi-Fi contracts) are declared as abstract C++ contracts in `include/L0_Foundation/System_Platform.h` (`System_*`), implemented in L1 HAL (`Diagnostics_Driver.cpp`, `OTA_Driver.cpp`, `Wifi_Driver.cpp`), and consumed directly by L4 Services.
+   - **Zero Domain Hooks in L0**: Higher-domain flags (such as protocol convergence `g_probe_convergence_reset`) are permanently eradicated from L0. Protocol state is 100% sealed inside L3 Private (`Wallpad_Engine::s_relearn_requested`). L4 requests relearn via L3 Public facade (`ProtocolDiag_RequestRelearn()`), and L2 polls it via injected DI callback (`onTakeRelearnRequest`).
    - **Zero HAL Pollution in L3**: $L3$ Protocol must never include $L1$ HAL headers. Artificial middle-man passthrough wrappers in $L3$ (`ProtocolDiag_GetSystemSnapshot`, `ProtocolDiag_TaskWdtFeed`, `ProtocolDiag_StartHttpOta`, etc.) are permanently eradicated.
 6. **Framing & State Ownership**:
    - Framing engines (`FramingTracker`) belong strictly to their operational domain (`Wallpad_Engine` for Doorphone CH4). Services such as `EW11_Service` must encapsulate their own framing parameters without coupling to L3 core engines.
@@ -130,8 +133,9 @@ src/
     - Under bus traffic bursts or network disconnects:
       - State and polling queues utilize **Drop-Head** (discard oldest stale frames, preserve newest state).
       - VIP and control command queues utilize **Drop-Tail** with synchronous error reporting (reject new command with error code to prompt immediate client retry).
-11. **Flash Endurance Protection via RTC SRAM**:
+11. **Flash Endurance Protection & Sealed System State via RTC SRAM**:
     - Dynamic polling cache, probing matrix, and volatile runtime tracking are preserved across soft resets and WDT reboots in RTC Fast/Slow SRAM (`RTC_NOINIT_ATTR`). Flash NVS commits are strictly debounced and executed only upon cache convergence (`SYS_EVT_CACHE_READY`) or explicit shutdown.
+    - System state variables (crash stage marker `s_stage_marker`, rescue flag `s_rescue_mode`, rollback flag `s_rollback_detected`) are 100% sealed as file-static variables inside L1 HAL (`Diagnostics_Driver.cpp`), exposed exclusively via L0 abstract contracts (`System_MarkStage`, `System_IsRescueMode`, `System_IsRollbackDetected`, `System_SetRollbackDetected`). All `extern` leaks for these variables are permanently eliminated.
 
 ---
 

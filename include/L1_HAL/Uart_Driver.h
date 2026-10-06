@@ -50,14 +50,20 @@ void Uart_InitDoorphone(uint32_t baud, uint8_t data_bits, uint8_t parity,
 
 // ── Dynamic Reconfiguration ───────────────────────────────────────────────────
 
+struct UartHwConfig {
+  uint32_t baud{115200};
+  uint8_t data_bits{8};
+  uint8_t parity{0};
+  uint8_t stop_bits{1};
+};
+
 /// Apply new baud + framing to a live HW UART port without reinstalling driver.
-/// @param port  UART_NUM_0 / UART_NUM_1 / UART_NUM_2
-/// @param baud  New baud rate
-/// @param data_bits / parity / stop_bits  New framing
+void Uart_ReconfigHw(uart_port_t port, const UartHwConfig &cfg);
 void Uart_ReconfigHw(uart_port_t port, uint32_t baud,
                      uint8_t data_bits, uint8_t parity, uint8_t stop_bits);
 
 /// Reconfigure CH4 Doorphone SW Serial with new framing (re-calls begin()).
+void Uart_ReconfigDoorphone(const UartHwConfig &cfg);
 void Uart_ReconfigDoorphone(uint32_t baud, uint8_t data_bits,
                              uint8_t parity, uint8_t stop_bits);
 

@@ -4,7 +4,6 @@
 
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 
-#include <Preferences.h>
 #include <algorithm>
 #include <array>
 #include <bitset>
@@ -362,23 +361,43 @@ void AutoProbingEngine::injectControlSpec(uint8_t ctrl_op, uint8_t ctrl_len) {
 }
 
 // ----------------------------------------------------------------------------
+namespace {
+// ── Matrix Analysis Structures ──────────────────────────────────────────────
+// Header analysis only inspects first 32 bytes (min_len <= 32).
+struct SlimPacket {
+  uint8_t length{0};
+  std::array<uint8_t, 32> data{};
+};
+
+struct SlimPktPair {
+  SlimPacket q;
+  SlimPacket r;
+};
+
+// Strict: Task_Ch1 exclusive path (Single-caller invariant).
+// Static allocation in BSS prevents Task_Ch1 stack overflow (~5KB saved).
+constexpr size_t MAX_MATRIX_PAIRS = 32;
+static SlimPktPair s_matrix_pairs[MAX_MATRIX_PAIRS];
+static int16_t s_work_map[256];
+} // namespace
+
+// ----------------------------------------------------------------------------
 // 전체 매트릭스 분석: 쿼리/응답 쌍의 컬럼 통계로 헤더 필드 위치를 추정
 // (std::set/map 제거 → bitset/배열 사용, 반복 패턴은 람다로 공통화)
+// Strict: Task_Ch1 exclusive path.
 // ----------------------------------------------------------------------------
 bool AutoProbingEngine::analyzeCacheMatrix() {
   const size_t online_dev_count = s_online_count_fn ? s_online_count_fn() : 0;
   if (g_polling_targets.ackedCount() < 2 && online_dev_count < 2)
     return false;
 
-  struct PktPair {
-    StaticPacket q, r;
-  };
-  constexpr size_t MAX_PAIRS = 32;
-  std::array<PktPair, MAX_PAIRS> pairs{};
+  // Re-initialize memory on every entry to guarantee zero residue from previous runs.
+  memset(s_matrix_pairs, 0, sizeof(s_matrix_pairs));
+  std::fill(std::begin(s_work_map), std::end(s_work_map), int16_t(-1));
   size_t pair_count = 0;
   const size_t target_count = g_polling_targets.totalCount();
 
-  for (size_t i = 0; i < target_count && pair_count < MAX_PAIRS; ++i) {
+  for (size_t i = 0; i < target_count && pair_count < MAX_MATRIX_PAIRS; ++i) {
     PollingTargetEntry t;
     if (!g_polling_targets.getEntry(i, t) || !t.is_active ||
         t.raw_query_len < 4 ||
@@ -391,28 +410,30 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
       ack = t.raw_ack_data.data();
       ack_len = t.raw_ack_len;
     } else if (s_lookup_fn) {
-      const uint8_t *dev_ack = nullptr;
       size_t dev_ack_len = 0;
-      if (s_lookup_fn(t.dev_id, t.sub1, t.sub2, &dev_ack, &dev_ack_len)) {
-        ack = dev_ack;
+      if (s_lookup_fn(t.dev_id, t.sub1, t.sub2,
+                      s_matrix_pairs[pair_count].r.data.data(),
+                      s_matrix_pairs[pair_count].r.data.size(),
+                      &dev_ack_len)) {
+        ack = s_matrix_pairs[pair_count].r.data.data();
         ack_len = dev_ack_len;
       }
     }
     if (!ack)
       continue;
 
-    PktPair &p = pairs[pair_count++];
-    p.q.length = t.raw_query_len;
-    memcpy(p.q.data.data(), t.raw_query_data.data(), t.raw_query_len);
-    p.r.length = ack_len;
-    memcpy(p.r.data.data(), ack, ack_len);
+    SlimPktPair &p = s_matrix_pairs[pair_count++];
+    p.q.length = static_cast<uint8_t>(std::min<size_t>(t.raw_query_len, 32));
+    memcpy(p.q.data.data(), t.raw_query_data.data(), p.q.length);
+    p.r.length = static_cast<uint8_t>(std::min<size_t>(ack_len, 32));
+    memcpy(p.r.data.data(), ack, p.r.length);
   }
 
   const size_t N = pair_count;
   if (N < 2)
     return false;
 
-  auto pairs_span = std::span<const PktPair>(pairs.data(), N);
+  auto pairs_span = std::span<const SlimPktPair>(s_matrix_pairs, N);
 
   size_t min_len = 256;
   for (const auto &p : pairs_span)
@@ -447,9 +468,9 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     return false;
   };
   auto combo = [&](size_t a, size_t b) { // (a,b) 컬럼 조합의 고유 개수
-    std::array<uint16_t, MAX_PAIRS> v{};
+    std::array<uint16_t, MAX_MATRIX_PAIRS> v{};
     for (size_t i = 0; i < N; ++i)
-      v[i] = static_cast<uint16_t>((pairs[i].q.data[a] << 8) | pairs[i].q.data[b]);
+      v[i] = static_cast<uint16_t>((s_matrix_pairs[i].q.data[a] << 8) | s_matrix_pairs[i].q.data[b]);
     std::sort(v.begin(), v.begin() + N);
     return static_cast<size_t>(std::unique(v.begin(), v.begin() + N) - v.begin());
   };
@@ -458,7 +479,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   int len_idx = -1;
   for (size_t k = 1; k < K && len_idx < 0; ++k) {
     for (int delta : {0, 2, 3, 4, 5}) {
-      if (all([&](const PktPair &p) {
+      if (all([&](const SlimPktPair &p) {
             return p.q.data[k] == int(p.q.length) - delta &&
                    p.r.data[k] == int(p.r.length) - delta;
           })) {
@@ -474,10 +495,10 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   for (size_t k = 1; k < K; ++k) {
     if (int(k) == len_idx)
       continue;
-    const uint8_t cq = pairs[0].q.data[k], cr = pairs[0].r.data[k];
+    const uint8_t cq = s_matrix_pairs[0].q.data[k], cr = s_matrix_pairs[0].r.data[k];
     if (cq == cr)
       continue;
-    if (all([&](const PktPair &p) {
+    if (all([&](const SlimPktPair &p) {
           return p.q.data[k] == cq && p.r.data[k] == cr;
         })) {
       opcode_idx = int(k);
@@ -495,7 +516,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     for (size_t j = i + 1; j < K; ++j) {
       if (in(int(j), {len_idx, opcode_idx}))
         continue;
-      if (!all([&](const PktPair &p) {
+      if (!all([&](const SlimPktPair &p) {
             return p.q.data[i] == p.r.data[j] && p.q.data[j] == p.r.data[i] &&
                    p.q.data[i] != p.q.data[j];
           }))
@@ -527,8 +548,8 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
         continue;
       bool inc = true;
       for (size_t m = 0; m + 1 < N && inc; ++m)
-        inc = static_cast<uint8_t>(pairs[m + 1].q.data[k] -
-                                   pairs[m].q.data[k]) == 1;
+        inc = static_cast<uint8_t>(s_matrix_pairs[m + 1].q.data[k] -
+                                   s_matrix_pairs[m].q.data[k]) == 1;
       if (inc)
         seq_idx = int(k);
     }
@@ -540,26 +561,25 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (in(int(k),
            {len_idx, opcode_idx, swap_i, swap_j, seq_idx, promoted_dev_idx}))
       continue;
-    if (!all([&](const PktPair &p) { return p.q.data[k] == p.r.data[k]; }))
+    if (!all([&](const SlimPktPair &p) { return p.q.data[k] == p.r.data[k]; }))
       continue;
 
     if (qBits(k).count() == 1) {
       if (master_gw_idx < 0)
         master_gw_idx = int(k);
     } else if (promoted_dev_idx >= 0) {
-      int16_t dep[256];
-      std::fill(std::begin(dep), std::end(dep), int16_t(-1));
+      std::fill(std::begin(s_work_map), std::end(s_work_map), int16_t(-1));
       bool pure = true;
       size_t keys = 0;
-      for (const auto &p : pairs) {
+      for (const auto &p : pairs_span) {
         const uint8_t dt = p.q.data[promoted_dev_idx], sc = p.q.data[k];
-        if (dep[dt] >= 0 && dep[dt] != sc) {
+        if (s_work_map[dt] >= 0 && s_work_map[dt] != sc) {
           pure = false;
           break;
         }
-        if (dep[dt] < 0)
+        if (s_work_map[dt] < 0)
           ++keys;
-        dep[dt] = sc;
+        s_work_map[dt] = sc;
       }
       if (pure && keys > 1) {
         sub_cmd_idx = int(k);
@@ -585,25 +605,24 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
 
   if (dev_type_idx < 0) { // 응답 길이를 결정하는 컬럼 = 기기 타입
     for (size_t cand : cols_span) {
-      int16_t lenOf[256];
-      std::fill(std::begin(lenOf), std::end(lenOf), int16_t(-1));
+      std::fill(std::begin(s_work_map), std::end(s_work_map), int16_t(-1));
       bool ok = true;
       size_t keys = 0;
       for (const auto &p : pairs_span) {
         const uint8_t v = p.q.data[cand];
         const int16_t rl = static_cast<int16_t>(p.r.length);
-        if (lenOf[v] >= 0 && lenOf[v] != rl) {
+        if (s_work_map[v] >= 0 && s_work_map[v] != rl) {
           ok = false;
           break;
         }
-        if (lenOf[v] < 0)
+        if (s_work_map[v] < 0)
           ++keys;
-        lenOf[v] = rl;
+        s_work_map[v] = rl;
       }
       if (!ok || keys <= 1)
         continue;
       Bits distinct;
-      for (int16_t l : lenOf)
+      for (int16_t l : s_work_map)
         if (l >= 0)
           distinct.set(static_cast<size_t>(l));
       if (distinct.count() > 1) {
@@ -683,7 +702,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
 
     if (master_gw_idx >= 0) {
       _desc.gw_addr_offset = uint8_t(master_gw_idx);
-      _desc.gw_addr = pairs[0].q.data[master_gw_idx];
+      _desc.gw_addr = s_matrix_pairs[0].q.data[master_gw_idx];
     } else if (!_desc.is_swapped_addr && dev_type_idx >= 0) {
       _desc.gw_addr_offset = _desc.dev_id_offset;
     }
@@ -698,7 +717,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
 
     // 제로 분산 패딩 스킵: max_hdr 직후 모든 응답에서 0x00 고정인 열
     int payload_start = max_hdr + 1;
-    while (payload_start < int(min_len) - 2 && all([&](const PktPair &p) {
+    while (payload_start < int(min_len) - 2 && all([&](const SlimPktPair &p) {
              return p.r.data[payload_start] == 0x00;
            }))
       ++payload_start;

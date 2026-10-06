@@ -240,5 +240,17 @@ bool Router_ResetBridgeFraming(uint8_t slot_idx) noexcept {
   return Bridge_ResetFramingTracker(slot_idx);
 }
 
+bool Router_IsBridgeSlotOnline(uint8_t slot_idx) noexcept {
+  HubClientSlotSnapshot slot{};
+  if (!Bridge_GetSlotSnapshot(slot_idx, slot)) {
+    return false;
+  }
+  return slot.enabled && slot.is_connected;
+}
+
+bool Router_SendBridgeRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
+  return Bridge_SendRaw(slot_idx, data, len);
+}
+
 
 

@@ -23,6 +23,20 @@ enum ParamType {
   PARAM_TIMING_CH3
 };
 
+static RuntimeConfig s_staged_config;
+static RuntimeTimingConfig s_staged_timing;
+static bool s_staged_initialized = false;
+static bool s_has_staged_changes = false;
+
+static void ensureStagingInitialized() {
+  if (!s_staged_initialized) {
+    s_staged_config = Config_Get();
+    s_staged_timing = TimingConfig_Get();
+    s_staged_initialized = true;
+    s_has_staged_changes = false;
+  }
+}
+
 struct ConfigParamDef {
   const char *name;
   ParamType type;
@@ -41,25 +55,25 @@ static const ConfigParamDef PARAM_TABLE[] = {
     // Channel Baudrates
     {"ch1_baud",
      PARAM_UINT32,
-     {.u32 = &g_config.uart_baud_rate},
+     {.u32 = &s_staged_config.uart_baud_rate},
      1200,
      115200,
      "CH1 Device Master Baudrate (bps)"},
     {"ch2_baud",
      PARAM_UINT32,
-     {.u32 = &g_config.ch2_baud_rate},
+     {.u32 = &s_staged_config.ch2_baud_rate},
      1200,
      115200,
      "CH2 Main Wallpad Baudrate (bps)"},
     {"ch3_baud",
      PARAM_UINT32,
-     {.u32 = &g_config.ch3_baud_rate},
+     {.u32 = &s_staged_config.ch3_baud_rate},
      1200,
      115200,
      "CH3 Sub Wallpad Baudrate (bps)"},
     {"ch4_baud",
      PARAM_UINT32,
-     {.u32 = &g_config.doorphone_baud_rate},
+     {.u32 = &s_staged_config.doorphone_baud_rate},
      1200,
      115200,
      "CH4 Doorphone Baudrate (bps)"},
@@ -93,27 +107,27 @@ static const ConfigParamDef PARAM_TABLE[] = {
     // Channel Delays
     {"ch1_poll",
      PARAM_TIMING_CH1,
-     {.u16 = &g_timing_config.ch1_poll_interval_ms},
+     {.u16 = &s_staged_timing.ch1_poll_interval_ms},
      200,
      5000,
      "CH1 Master Polling Interval (ms)"},
     {"ch2_ack",
      PARAM_TIMING_CH2,
-     {.u16 = &g_timing_config.ch2_cache_delay_ms},
+     {.u16 = &s_staged_timing.ch2_cache_delay_ms},
      5,
      300,
      "CH2 Main Wallpad Virtual ACK (ms)"},
     {"ch3_ack",
      PARAM_TIMING_CH3,
-     {.u16 = &g_timing_config.ch3_cache_delay_ms},
+     {.u16 = &s_staged_timing.ch3_cache_delay_ms},
      20,
      1000,
      "CH3 Sub Wallpad Virtual ACK (ms)"},
 
-    // Wallpad Profile
+    // Wallpad Profile (Dynamic immediate action)
     {"profile",
      PARAM_UCHAR,
-     {.u8 = &g_config.wallpad_profile},
+     {.u8 = nullptr},
      0,
      3,
      "Wallpad Profile Slot (0=Auto, 1=Custom1, etc)"},
@@ -121,31 +135,31 @@ static const ConfigParamDef PARAM_TABLE[] = {
     // Wi-Fi & Network
     {"wifi_ssid",
      PARAM_STRING,
-     {.str = g_config.wifi_ssid},
+     {.str = s_staged_config.wifi_ssid},
      0,
-     sizeof(g_config.wifi_ssid) - 1,
+     sizeof(s_staged_config.wifi_ssid) - 1,
      "Station Wi-Fi SSID"},
     {"wifi_pass",
      PARAM_STRING,
-     {.str = g_config.wifi_password},
+     {.str = s_staged_config.wifi_password},
      0,
-     sizeof(g_config.wifi_password) - 1,
+     sizeof(s_staged_config.wifi_password) - 1,
      "Station Wi-Fi Password"},
     {"ap_ssid",
      PARAM_STRING,
-     {.str = g_config.ap_ssid},
+     {.str = s_staged_config.ap_ssid},
      0,
-     sizeof(g_config.ap_ssid) - 1,
+     sizeof(s_staged_config.ap_ssid) - 1,
      "SoftAP SSID"},
     {"ap_pass",
      PARAM_STRING,
-     {.str = g_config.ap_password},
+     {.str = s_staged_config.ap_password},
      0,
-     sizeof(g_config.ap_password) - 1,
+     sizeof(s_staged_config.ap_password) - 1,
      "SoftAP Password"},
     {"wifi_timeout",
      PARAM_UINT16,
-     {.u16 = &g_config.wifi_connect_timeout_s},
+     {.u16 = &s_staged_config.wifi_connect_timeout_s},
      5,
      120,
      "Wi-Fi Connection Timeout (seconds)"},
@@ -153,7 +167,7 @@ static const ConfigParamDef PARAM_TABLE[] = {
     // Security
     {"telnet_pass",
      PARAM_PASS_HASH,
-     {.str = g_config.telnet_pass_hash},
+     {.str = s_staged_config.telnet_pass_hash},
      0,
      0,
      "Telnet Login Password"},
@@ -161,8 +175,9 @@ static const ConfigParamDef PARAM_TABLE[] = {
 static const size_t PARAM_COUNT = sizeof(PARAM_TABLE) / sizeof(ConfigParamDef);
 
 void printConfig(int sock) {
+  ensureStagingInitialized();
   withScratchBuf(sock, [](AppendBuf &out) {
-    CliFmt::PrintBoxHeader(out, "RUNTIME GATEWAY CONFIGURATION (NVS)");
+    CliFmt::PrintBoxHeader(out, "RUNTIME GATEWAY CONFIGURATION (* = Staged Change)");
     static constexpr Column CFG_COLS[] = {
         {"Parameter Key", 25, Align::LEFT, Align::CENTER},
         {"Configured Value", 48, Align::LEFT, Align::CENTER},
@@ -170,52 +185,94 @@ void printConfig(int sock) {
     TableRenderer table(out, CFG_COLS, 2);
     table.header(false);
 
-    auto rowf = [&](const char *k, const char *fmt, ...) {
+    const auto &active = Config_Get();
+    const auto &active_timing = TimingConfig_Get();
+    const uint8_t active_profile = Config_GetWallpadProfile();
+
+    auto rowf = [&](bool diff, const char *k, const char *fmt, ...) {
+      FixedBuf<32> k_buf;
+      if (diff) {
+        k_buf.append("* ");
+      }
+      k_buf.append(k);
       FixedBuf<64> v;
       va_list va;
       va_start(va, fmt);
       v.appendFormatV(fmt, va);
       va_end(va);
-      table.row({k, v.c_str()});
+      table.row({k_buf.c_str(), v.c_str()});
     };
 
-    rowf("wifi_ssid", "\"%s\"",
-         g_config.wifi_ssid[0] ? g_config.wifi_ssid : "(Not Configured)");
-    rowf("ap_ssid", "\"%s\"",
-         g_config.ap_ssid[0] ? g_config.ap_ssid : "(Disabled)");
-    rowf("wifi_timeout", "%u sec", g_config.wifi_connect_timeout_s);
-    table.row({"telnet_pass", g_config.telnet_pass_hash[0]
-                                  ? "Configured (SHA-256)"
-                                  : "Default (None)"});
+    bool d_ssid = strcmp(s_staged_config.wifi_ssid, active.wifi_ssid) != 0;
+    rowf(d_ssid, "wifi_ssid", "\"%s\"",
+         s_staged_config.wifi_ssid[0] ? s_staged_config.wifi_ssid : "(Not Configured)");
+
+    bool d_ap = strcmp(s_staged_config.ap_ssid, active.ap_ssid) != 0;
+    rowf(d_ap, "ap_ssid", "\"%s\"",
+         s_staged_config.ap_ssid[0] ? s_staged_config.ap_ssid : "(Disabled)");
+
+    bool d_wtout = (s_staged_config.wifi_connect_timeout_s != active.wifi_connect_timeout_s);
+    rowf(d_wtout, "wifi_timeout", "%u sec", s_staged_config.wifi_connect_timeout_s);
+
+    bool d_pass = strcmp(s_staged_config.telnet_pass_hash, active.telnet_pass_hash) != 0;
+    table.row({d_pass ? "* telnet_pass" : "telnet_pass",
+               s_staged_config.telnet_pass_hash[0]
+                   ? "Configured (SHA-256)"
+                   : "Default (None)"});
+
     table.row({"wallpad_profile",
-               (g_config.wallpad_profile == 1)   ? "1 (Custom Slot 1)"
-               : (g_config.wallpad_profile == 2) ? "2 (Custom Slot 2)"
-               : (g_config.wallpad_profile == 3)
+               (active_profile == 1)   ? "1 (Custom Slot 1)"
+               : (active_profile == 2) ? "2 (Custom Slot 2)"
+               : (active_profile == 3)
                    ? "3 (Custom Slot 3)"
                    : "0 (Auto-Discovered & Learned)"});
-    rowf("uart_baud_rate (CH1)", "%u bps (%s)",
-         static_cast<unsigned>(g_config.uart_baud_rate),
-         formatFramingStr(g_config.uart_data_bits, g_config.uart_parity,
-                          g_config.uart_stop_bits));
-    rowf("ch2_baud_rate (CH2)", "%u bps (%s)",
-         static_cast<unsigned>(g_config.ch2_baud_rate),
-         formatFramingStr(g_config.ch2_data_bits, g_config.ch2_parity,
-                          g_config.ch2_stop_bits));
-    rowf("ch3_baud_rate (CH3)", "%u bps (%s)",
-         static_cast<unsigned>(g_config.ch3_baud_rate),
-         formatFramingStr(g_config.ch3_data_bits, g_config.ch3_parity,
-                          g_config.ch3_stop_bits));
-    rowf("doorphone_baud_rate (CH4)", "%u bps (%s)",
-         static_cast<unsigned>(g_config.doorphone_baud_rate),
-         formatFramingStr(g_config.doorphone_data_bits,
-                          g_config.doorphone_parity,
-                          g_config.doorphone_stop_bits));
-    rowf("ch1_poll_interval", "%u ms", g_timing_config.ch1_poll_interval_ms);
-    rowf("ch2_cache_delay", "%u ms", g_timing_config.ch2_cache_delay_ms);
-    rowf("ch3_cache_delay", "%u ms", g_timing_config.ch3_cache_delay_ms);
+
+    bool d_b1 = (s_staged_config.uart_baud_rate != active.uart_baud_rate) ||
+                (s_staged_config.uart_data_bits != active.uart_data_bits) ||
+                (s_staged_config.uart_parity != active.uart_parity) ||
+                (s_staged_config.uart_stop_bits != active.uart_stop_bits);
+    rowf(d_b1, "uart_baud_rate (CH1)", "%u bps (%s)",
+         static_cast<unsigned>(s_staged_config.uart_baud_rate),
+         formatFramingStr(s_staged_config.uart_data_bits, s_staged_config.uart_parity,
+                          s_staged_config.uart_stop_bits));
+
+    bool d_b2 = (s_staged_config.ch2_baud_rate != active.ch2_baud_rate) ||
+                (s_staged_config.ch2_data_bits != active.ch2_data_bits) ||
+                (s_staged_config.ch2_parity != active.ch2_parity) ||
+                (s_staged_config.ch2_stop_bits != active.ch2_stop_bits);
+    rowf(d_b2, "ch2_baud_rate (CH2)", "%u bps (%s)",
+         static_cast<unsigned>(s_staged_config.ch2_baud_rate),
+         formatFramingStr(s_staged_config.ch2_data_bits, s_staged_config.ch2_parity,
+                          s_staged_config.ch2_stop_bits));
+
+    bool d_b3 = (s_staged_config.ch3_baud_rate != active.ch3_baud_rate) ||
+                (s_staged_config.ch3_data_bits != active.ch3_data_bits) ||
+                (s_staged_config.ch3_parity != active.ch3_parity) ||
+                (s_staged_config.ch3_stop_bits != active.ch3_stop_bits);
+    rowf(d_b3, "ch3_baud_rate (CH3)", "%u bps (%s)",
+         static_cast<unsigned>(s_staged_config.ch3_baud_rate),
+         formatFramingStr(s_staged_config.ch3_data_bits, s_staged_config.ch3_parity,
+                          s_staged_config.ch3_stop_bits));
+
+    bool d_b4 = (s_staged_config.doorphone_baud_rate != active.doorphone_baud_rate) ||
+                (s_staged_config.doorphone_data_bits != active.doorphone_data_bits) ||
+                (s_staged_config.doorphone_parity != active.doorphone_parity) ||
+                (s_staged_config.doorphone_stop_bits != active.doorphone_stop_bits);
+    rowf(d_b4, "doorphone_baud_rate (CH4)", "%u bps (%s)",
+         static_cast<unsigned>(s_staged_config.doorphone_baud_rate),
+         formatFramingStr(s_staged_config.doorphone_data_bits,
+                          s_staged_config.doorphone_parity,
+                          s_staged_config.doorphone_stop_bits));
+
+    bool d_p1 = (s_staged_timing.ch1_poll_interval_ms != active_timing.ch1_poll_interval_ms);
+    rowf(d_p1, "ch1_poll_interval", "%u ms", s_staged_timing.ch1_poll_interval_ms);
+    bool d_p2 = (s_staged_timing.ch2_cache_delay_ms != active_timing.ch2_cache_delay_ms);
+    rowf(d_p2, "ch2_cache_delay", "%u ms", s_staged_timing.ch2_cache_delay_ms);
+    bool d_p3 = (s_staged_timing.ch3_cache_delay_ms != active_timing.ch3_cache_delay_ms);
+    rowf(d_p3, "ch3_cache_delay", "%u ms", s_staged_timing.ch3_cache_delay_ms);
     table.end('-');
     CliFmt::PrintBoxFooter(
-        out, "Use 'config set <key> <val>' and 'save' to persist to NVS");
+        out, "Use 'config set <key> <val>', 'config discard', 'save' to commit");
   });
 }
 
@@ -271,9 +328,10 @@ static bool applyUintParam(T *dest, const char *value, unsigned long min_val,
     return false;
   }
   *dest = static_cast<T>(v);
-  g_config_dirty.store(true, std::memory_order_relaxed);
+  s_has_staged_changes = true;
   sendTelnetMsgf(
-      sock, "[OK] Set %s = %lu (RAM only. Use 'save' to commit to NVS)\r\n",
+      sock,
+      "[OK] Staged %s = %lu (Run 'save' and 'system restart' to apply)\r\n",
       key, v);
   return true;
 }
@@ -291,9 +349,10 @@ static bool applyFraming(uint8_t &dbits, uint8_t &parity, uint8_t &sbits,
   dbits = d;
   parity = p;
   sbits = s;
-  g_config_dirty.store(true, std::memory_order_relaxed);
+  s_has_staged_changes = true;
   sendTelnetMsgf(
-      sock, "[OK] Set %s = '%s' (RAM only. Use 'save' to commit to NVS)\r\n",
+      sock,
+      "[OK] Staged %s = '%s' (Run 'save' and 'system restart' to apply)\r\n",
       key, value);
   return true;
 }
@@ -304,11 +363,11 @@ void setConfig(int sock, const char *key, const char *value) {
                   "[ERROR] Missing argument: config set <key> <value>\r\n");
     return;
   }
+  ensureStagingInitialized();
 
   for (size_t i = 0; i < PARAM_COUNT; ++i) {
     const auto &p = PARAM_TABLE[i];
     if (strcasecmp(p.name, key) == 0) {
-      CriticalSectionLocker lock(&g_config_mux);
       switch (p.type) {
       case PARAM_UINT32:
         return (void)applyUintParam(p.ptr.u32, value, p.minVal, p.maxVal, sock,
@@ -316,50 +375,54 @@ void setConfig(int sock, const char *key, const char *value) {
       case PARAM_UINT16:
         return (void)applyUintParam(p.ptr.u16, value, p.minVal, p.maxVal, sock,
                                     key);
-      case PARAM_UCHAR:
-        return (void)applyUintParam(p.ptr.u8, value, p.minVal, p.maxVal, sock,
-                                    key);
-      case PARAM_TIMING_CH1:
-      case PARAM_TIMING_CH2:
-      case PARAM_TIMING_CH3: {
+      case PARAM_UCHAR: {
         char *endp = nullptr;
         unsigned long v = strtoul(value, &endp, 10);
-        if (!endp || *endp != '\0' || v < p.minVal || v > p.maxVal) {
-          sendTelnetMsgf(
-              sock,
-              "[ERROR] Invalid delay '%s' for '%s' (Allowed: %lu ~ %lu ms)\r\n",
-              value, key, (unsigned long)p.minVal, (unsigned long)p.maxVal);
+        if (!endp || *endp != '\0' || v > 3) {
+          sendTelnetMsg(sock, "[ERROR] Profile slot must be 0 ~ 3.\r\n");
           return;
         }
-        *p.ptr.u16 = static_cast<uint16_t>(v);
-        TimingConfig_Save();
+        Config_SetWallpadProfile(static_cast<uint8_t>(v));
+        Config_SaveWallpadProfile();
         sendTelnetMsgf(
             sock,
-            "[OK] Set %s = %lu ms (Saved to timing_cfg NVS immediately)\r\n",
-            key, v);
+            "[OK] Active wallpad profile set to %lu & saved immediately.\r\n",
+            v);
         return;
       }
+      case PARAM_TIMING_CH1:
+      case PARAM_TIMING_CH2:
+      case PARAM_TIMING_CH3:
+        return (void)applyUintParam(p.ptr.u16, value, p.minVal, p.maxVal, sock,
+                                    key);
       case PARAM_FRAMING_CH1:
-        return (void)applyFraming(g_config.uart_data_bits, g_config.uart_parity,
-                                  g_config.uart_stop_bits, value, sock, key);
+        return (void)applyFraming(s_staged_config.uart_data_bits,
+                                  s_staged_config.uart_parity,
+                                  s_staged_config.uart_stop_bits, value, sock,
+                                  key);
       case PARAM_FRAMING_CH2:
-        return (void)applyFraming(g_config.ch2_data_bits, g_config.ch2_parity,
-                                  g_config.ch2_stop_bits, value, sock, key);
+        return (void)applyFraming(s_staged_config.ch2_data_bits,
+                                  s_staged_config.ch2_parity,
+                                  s_staged_config.ch2_stop_bits, value, sock,
+                                  key);
       case PARAM_FRAMING_CH3:
-        return (void)applyFraming(g_config.ch3_data_bits, g_config.ch3_parity,
-                                  g_config.ch3_stop_bits, value, sock, key);
+        return (void)applyFraming(s_staged_config.ch3_data_bits,
+                                  s_staged_config.ch3_parity,
+                                  s_staged_config.ch3_stop_bits, value, sock,
+                                  key);
       case PARAM_FRAMING_CH4:
-        return (void)applyFraming(
-            g_config.doorphone_data_bits, g_config.doorphone_parity,
-            g_config.doorphone_stop_bits, value, sock, key);
+        return (void)applyFraming(s_staged_config.doorphone_data_bits,
+                                  s_staged_config.doorphone_parity,
+                                  s_staged_config.doorphone_stop_bits, value,
+                                  sock, key);
       case PARAM_STRING: {
         if (strlen(value) <= p.maxVal) {
           strncpy(p.ptr.str, value, p.maxVal);
           p.ptr.str[p.maxVal] = '\0';
-          g_config_dirty.store(true, std::memory_order_relaxed);
+          s_has_staged_changes = true;
           sendTelnetMsgf(
               sock,
-              "[OK] Set %s = '%s' (RAM only. Use 'save' to commit to NVS)\r\n",
+              "[OK] Staged %s = '%s' (Run 'save' and 'system restart' to apply)\r\n",
               key, value);
         } else {
           sendTelnetMsgf(
@@ -372,12 +435,13 @@ void setConfig(int sock, const char *key, const char *value) {
       case PARAM_PASS_HASH: {
         char hash_hex[68];
         System_Sha256ToHex(value, hash_hex);
-        strncpy(g_config.telnet_pass_hash, hash_hex,
-                sizeof(g_config.telnet_pass_hash) - 1);
-        g_config.telnet_pass_hash[sizeof(g_config.telnet_pass_hash) - 1] = '\0';
-        g_config_dirty.store(true, std::memory_order_relaxed);
-        sendTelnetMsg(sock, "[OK] Telnet password updated & SHA-256 hashed. "
-                            "Use 'save' to commit to NVS.\r\n");
+        strncpy(s_staged_config.telnet_pass_hash, hash_hex,
+                sizeof(s_staged_config.telnet_pass_hash) - 1);
+        s_staged_config.telnet_pass_hash[sizeof(s_staged_config.telnet_pass_hash) - 1] =
+            '\0';
+        s_has_staged_changes = true;
+        sendTelnetMsg(sock, "[OK] Staged telnet password (SHA-256 hashed). "
+                            "Run 'save' and 'system restart' to apply.\r\n");
         return;
       }
       default:
@@ -399,11 +463,12 @@ void cmdConfig(CliContext &ctx) {
     printConfig(sock);
     return;
   }
+  ensureStagingInitialized();
 
   static const CliFmt::SubCmdDef kConfigDefs[] = {
       {"list", "list", "Display runtime configuration table",
        [](int s, int, const Args &) { printConfig(s); }},
-      {"set", "set <key> <value>", "Set configuration parameter in RAM",
+      {"set", "set <key> <value>", "Stage configuration parameter in buffer",
        [](int s, int ac, const Args &args) {
          if (ac >= 3)
            setConfig(s, args.get(2), args.get(3));
@@ -411,11 +476,23 @@ void cmdConfig(CliContext &ctx) {
            sendTelnetMsg(
                s, "[ERROR] Missing argument: config set <key> <value>\r\n");
        }},
-      {"reset", "reset", "Reset configuration to defaults",
+      {"discard", "discard", "Discard uncommitted staged changes",
        [](int s, int, const Args &) {
-         Config_ResetDefaults();
-         sendTelnetMsg(s, "[OK] Runtime configuration reset to system factory "
-                          "defaults. (RAM only. Use 'save' to commit)\r\n");
+         s_staged_config = Config_Get();
+         s_staged_timing = TimingConfig_Get();
+         s_has_staged_changes = false;
+         sendTelnetMsg(
+             s,
+             "[OK] Staged changes discarded. Reverted to active config.\r\n");
+       }},
+      {"reset", "reset", "Reset staged configuration to factory defaults",
+       [](int s, int, const Args &) {
+         s_staged_config = RuntimeConfig{};
+         s_staged_timing = RuntimeTimingConfig{};
+         s_has_staged_changes = true;
+         sendTelnetMsg(
+             s, "[OK] Staged configuration reset to factory defaults. "
+                "Run 'save' to commit to NVS.\r\n");
        }},
   };
 
@@ -429,10 +506,18 @@ void cmdConfig(CliContext &ctx) {
 
 void cmdSave(CliContext &ctx) {
   int sock = ctx.sock;
-  Config_Save();
-  sendTelnetMsg(
-      sock,
-      "[OK] Configuration successfully committed and saved to NVS flash!\r\n");
+  ensureStagingInitialized();
+  if (Config_SaveStaged(s_staged_config, s_staged_timing)) {
+    s_has_staged_changes = false;
+    sendTelnetMsg(
+        sock,
+        "[OK] Configuration successfully committed and saved to NVS flash!\r\n"
+        "[NOTICE] Run 'system restart' to apply modified parameters.\r\n");
+  } else {
+    sendTelnetMsg(
+        sock,
+        "[ERROR] Failed to validate or commit staged configuration to NVS.\r\n");
+  }
 }
 
 static bool ew11ParseSlot(int sock, const char *arg, int &slot,

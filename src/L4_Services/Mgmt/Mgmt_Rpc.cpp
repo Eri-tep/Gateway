@@ -108,11 +108,8 @@ static void HandleRpc_SetProfile(int sock, long req_id, const char *json_str,
   long slot = findJsonIntValue(json_str, "slot", -1);
   if (slot >= 0 && slot < static_cast<long>(ProtocolDiag_GetMaxProfiles())) {
     ProtocolDiag_SetActiveProfile(static_cast<size_t>(slot));
-    {
-      std::unique_lock lock(g_config_rw);
-      g_config.wallpad_profile = static_cast<uint8_t>(slot);
-    }
-    Config_Save();
+    Config_SetWallpadProfile(static_cast<uint8_t>(slot));
+    Config_SaveWallpadProfile();
     sendRpcResponse(sock, req_id, "ok", "Profile updated");
   } else {
     sendRpcResponse(sock, req_id, "error", "Invalid profile slot (0~3)");
@@ -155,26 +152,27 @@ static void HandleRpc_SetTiming(int sock, long req_id, const char *json_str,
   long ch2_del = findJsonIntValue(json_str, "ch2_delay", -1);
   long ch3_del = findJsonIntValue(json_str, "ch3_delay", -1);
 
+  RuntimeTimingConfig staged_timing = TimingConfig_Get();
   bool updated = false;
-  if (ch1_poll >= 50 && ch1_poll <= 5000) {
-    g_timing_config.ch1_poll_interval_ms = static_cast<uint16_t>(ch1_poll);
+  if (ch1_poll >= 200 && ch1_poll <= 5000) {
+    staged_timing.ch1_poll_interval_ms = static_cast<uint16_t>(ch1_poll);
     updated = true;
   }
-  if (ch2_del >= 0 && ch2_del <= 500) {
-    g_timing_config.ch2_cache_delay_ms = static_cast<uint16_t>(ch2_del);
+  if (ch2_del >= 5 && ch2_del <= 300) {
+    staged_timing.ch2_cache_delay_ms = static_cast<uint16_t>(ch2_del);
     updated = true;
   }
-  if (ch3_del >= 0 && ch3_del <= 1000) {
-    g_timing_config.ch3_cache_delay_ms = static_cast<uint16_t>(ch3_del);
+  if (ch3_del >= 20 && ch3_del <= 1000) {
+    staged_timing.ch3_cache_delay_ms = static_cast<uint16_t>(ch3_del);
     updated = true;
   }
 
-  if (updated) {
-    TimingConfig_Save();
-    sendRpcResponse(sock, req_id, "ok", "Timing config updated & saved to NVS");
+  if (updated && Config_SaveStaged(Config_Get(), staged_timing)) {
+    sendRpcResponse(sock, req_id, "ok",
+                    "Timing config saved to NVS. Reboot required to apply.");
   } else {
     sendRpcResponse(sock, req_id, "error",
-                    "No valid timing parameters provided");
+                    "Invalid timing parameters (ch1: 200-5000, ch2: 5-300, ch3: 20-1000)");
   }
 }
 
@@ -203,7 +201,7 @@ static void HandleRpc_CachePurgeRescan(int sock, long req_id,
   ProtocolDiag_WallpadReset();
   ProtocolDiag_PollingClear();
   Device_Clear();
-  g_probe_convergence_reset.store(true, std::memory_order_release);
+  ProtocolDiag_RequestRelearn();
   sendRpcResponse(sock, req_id, "ok",
                   "Auto-probing reset and cache purged, bus rescan triggered");
 }
@@ -214,7 +212,7 @@ static void HandleRpc_WallpadReset(int sock, long req_id,
   ProtocolDiag_WallpadReset();
   ProtocolDiag_PollingClear();
   Device_Clear();
-  g_probe_convergence_reset.store(true, std::memory_order_release);
+  ProtocolDiag_RequestRelearn();
   sendRpcResponse(sock, req_id, "ok",
                   "Wallpad auto-probing and framing reset completed");
 }
@@ -413,22 +411,25 @@ static void HandleRpc_SetWifi(int sock, long req_id, const char *json_str,
     return;
   }
 
-  strncpy(g_wifi_guard.prev_ssid, g_config.wifi_ssid,
+  const auto &cfg = Config_Get();
+  strncpy(g_wifi_guard.prev_ssid, cfg.wifi_ssid,
           sizeof(g_wifi_guard.prev_ssid) - 1);
-  strncpy(g_wifi_guard.prev_pass, g_config.wifi_password,
+  strncpy(g_wifi_guard.prev_pass, cfg.wifi_password,
           sizeof(g_wifi_guard.prev_pass) - 1);
   g_wifi_guard.start_ms = millis();
   g_wifi_guard.testing.store(true, std::memory_order_release);
 
-  strncpy(g_config.wifi_ssid, new_ssid, sizeof(g_config.wifi_ssid) - 1);
-  strncpy(g_config.wifi_password, new_pass, sizeof(g_config.wifi_password) - 1);
+  RuntimeConfig staged_cfg = cfg;
+  strncpy(staged_cfg.wifi_ssid, new_ssid, sizeof(staged_cfg.wifi_ssid) - 1);
+  strncpy(staged_cfg.wifi_password, new_pass, sizeof(staged_cfg.wifi_password) - 1);
+  Config_SaveStaged(staged_cfg, TimingConfig_Get());
 
   sendRpcResponse(sock, req_id, "ok");
   vTaskDelay(pdMS_TO_TICKS(50));
 
   WiFi.disconnect(false);
   vTaskDelay(pdMS_TO_TICKS(50));
-  WiFi.begin(g_config.wifi_ssid, g_config.wifi_password);
+  WiFi.begin(new_ssid, new_pass);
 }
 
 static void HandleRpc_SetUart(int sock, long req_id, const char *json_str,
@@ -438,10 +439,14 @@ static void HandleRpc_SetUart(int sock, long req_id, const char *json_str,
   char format[16] = {0};
   findJsonStringValue(json_str, "format", format, sizeof(format));
 
-  if (ch >= 1 && ch <= 4 && baud >= 1200 && baud <= 921600 && format[0]) {
-    if (System_ApplyUartConfig(static_cast<uint8_t>(ch),
-                               static_cast<uint32_t>(baud), format)) {
-      sendRpcResponse(sock, req_id, "ok");
+  uint8_t db = 8, pr = 0, sb = 1;
+  if (ch >= 1 && ch <= 4 && baud >= 1200 && baud <= 921600 &&
+      parseFramingStr(format, db, pr, sb)) {
+    if (Config_SetUartFraming(static_cast<uint8_t>(ch),
+                              static_cast<uint32_t>(baud), db, pr, sb)) {
+      Config_Save();
+      sendRpcResponse(sock, req_id, "ok",
+                      "UART configuration updated (restart recommended)");
       return;
     }
   }

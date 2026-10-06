@@ -2,53 +2,16 @@
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
-#include <ArduinoOTA.h>
-#include <HTTPClient.h>
-#include <Update.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <esp_idf_version.h>
-#include <esp_task_wdt.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/event_groups.h>
+#include <cstdio>
+#include <cstring>
+#include <strings.h>
 
-HttpOtaState g_http_ota_state{};
-static char s_ota_target_url[256] = {0};
-
-static constexpr char OTA_REPO_PREFIX[] = "/Eri-tep/Gateway/";
-static constexpr size_t MAX_REDIRECT_LOCATION_LEN = 1024;
-
-static PreOtaHookFn s_pre_ota_hook = nullptr;
-void SystemOta_RegisterPreOtaHook(PreOtaHookFn hook) noexcept {
-  s_pre_ota_hook = hook;
-}
-
+// ── Pure OTA URL Trust Policy (Consolidated L1 Physical HAL) ─────────────────
+namespace {
 enum class OtaUrlContext { Initial, Redirect };
+constexpr char OTA_REPO_PREFIX[] = "/Eri-tep/Gateway/";
 
-static void configure_public_tls(WiFiClientSecure &client) {
-  // 이전 홉의 setInsecure() 잔여 상태(_use_insecure = true)를 확실히 해제
-  client.setCACert(nullptr);
-
-#if defined(ESP_ARDUINO_VERSION) &&                                            \
-    (ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 3, 12))
-  client.useBuiltinCACertBundle();
-#else
-  extern const uint8_t x509_crt_bundle_start[] asm(
-      "_binary_x509_crt_bundle_start");
-  extern const uint8_t x509_crt_bundle_end[] asm(
-      "_binary_x509_crt_bundle_end");
-#if defined(ESP_IDF_VERSION) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-  client.setCACertBundle(x509_crt_bundle_start,
-                         static_cast<size_t>(x509_crt_bundle_end - x509_crt_bundle_start));
-#else
-  client.setCACertBundle(x509_crt_bundle_start);
-#endif
-#endif
-  client.setTimeout(5);
-  client.setHandshakeTimeout(8); // CA 체인 검증을 감안하여 8초 확보
-}
-
-static bool is_private_host(const char *host) {
+bool Ota_IsPrivateHost(const char *host) {
   if (!host)
     return false;
   if (strcmp(host, "localhost") == 0 || strcmp(host, "127.0.0.1") == 0) {
@@ -65,7 +28,7 @@ static bool is_private_host(const char *host) {
   return (n > 6 && strcasecmp(host + n - 6, ".local") == 0);
 }
 
-static bool has_unsafe_path_segments(const char *path) {
+bool Ota_HasUnsafePathSegments(const char *path) {
   if (!path)
     return true;
   return (strstr(path, "/./") != nullptr || strstr(path, "/../") != nullptr ||
@@ -73,10 +36,10 @@ static bool has_unsafe_path_segments(const char *path) {
           strstr(path, "/%2E") != nullptr || strstr(path, "\\") != nullptr);
 }
 
-static bool extract_url_components(const char *url, char *out_host,
-                                   size_t max_host_len, int &out_port,
-                                   char *out_path, size_t max_path_len,
-                                   bool &out_is_https) {
+bool Ota_ExtractUrlComponents(const char *url, char *out_host,
+                              size_t max_host_len, int &out_port,
+                              char *out_path, size_t max_path_len,
+                              bool &out_is_https) {
   if (!url)
     return false;
   out_is_https = (strncmp(url, "https://", 8) == 0);
@@ -87,21 +50,17 @@ static bool extract_url_components(const char *url, char *out_host,
   out_port = out_is_https ? 443 : 80;
   const char *host_start = out_is_https ? (url + 8) : (url + 7);
 
-  // Authority 끝 지점 파싱: RFC 3986에 따라 '/', '?', '#' 중 가장 빠른 지점
-  // 탐색
   const char *p = host_start;
   while (*p && *p != '/' && *p != '?' && *p != '#') {
     p++;
   }
   const char *auth_end = p;
 
-  // 1. Userinfo ('@') 우회 공격 차단
   if (memchr(host_start, '@', static_cast<size_t>(auth_end - host_start)) !=
       nullptr) {
     return false;
   }
 
-  // 2. 포트 번호 분리 및 엄격 검증
   const char *colon = static_cast<const char *>(
       memchr(host_start, ':', static_cast<size_t>(auth_end - host_start)));
   const char *host_end = colon ? colon : auth_end;
@@ -129,7 +88,6 @@ static bool extract_url_components(const char *url, char *out_host,
     out_port = port;
   }
 
-  // 3. Path 추출
   if (*auth_end == '/') {
     const char *path_end = auth_end;
     while (*path_end && *path_end != '?' && *path_end != '#') {
@@ -150,37 +108,32 @@ static bool extract_url_components(const char *url, char *out_host,
   return true;
 }
 
-static bool is_trusted_ota_url(const char *url, OtaUrlContext context) {
+bool Ota_IsTrustedUrl(const char *url, OtaUrlContext context) {
   char host[128] = {0};
   char path[256] = {0};
   int port = 0;
   bool is_https = false;
-  if (!extract_url_components(url, host, sizeof(host), port, path, sizeof(path),
+  if (!Ota_ExtractUrlComponents(url, host, sizeof(host), port, path, sizeof(path),
                               is_https)) {
     return false;
   }
 
-  // 1. 로컬/사설망 IP 및 로컬 호스트 허용 (임의 포트, 임의 경로 허용)
-  if (is_private_host(host)) {
+  if (Ota_IsPrivateHost(host)) {
     return true;
   }
 
-  // 2. 외부 인터넷 도메인은 반드시 HTTPS + 443 포트여야 함
   if (!is_https || port != 443) {
     return false;
   }
 
-  // 3. 공식 GitHub 저장소 호스트: 경로 검증 및 상위 디렉터리 순회(/../) 차단
   if (strcasecmp(host, "raw.githubusercontent.com") == 0 ||
       strcasecmp(host, "github.com") == 0) {
-    if (has_unsafe_path_segments(path)) {
+    if (Ota_HasUnsafePathSegments(path)) {
       return false;
     }
     return (strncmp(path, OTA_REPO_PREFIX, sizeof(OTA_REPO_PREFIX) - 1) == 0);
   }
 
-  // 4. 공식 GitHub CDN 도메인: Redirect 컨텍스트에서만 허용 (최초 URL 직접 지정
-  // 금지)
   if (strcasecmp(host, "objects.githubusercontent.com") == 0 ||
       strcasecmp(host, "release-assets.githubusercontent.com") == 0 ||
       strcasecmp(host, "github-releases.githubusercontent.com") == 0) {
@@ -188,6 +141,49 @@ static bool is_trusted_ota_url(const char *url, OtaUrlContext context) {
   }
 
   return false;
+}
+} // namespace
+#include <ArduinoOTA.h>
+#include <HTTPClient.h>
+#include <Update.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <esp_idf_version.h>
+#include <esp_task_wdt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
+
+HttpOtaState g_http_ota_state{};
+static char s_ota_target_url[256] = {0};
+
+static constexpr size_t MAX_REDIRECT_LOCATION_LEN = 1024;
+
+static PreOtaHookFn s_pre_ota_hook = nullptr;
+void SystemOta_RegisterPreOtaHook(PreOtaHookFn hook) noexcept {
+  s_pre_ota_hook = hook;
+}
+
+static void configure_public_tls(WiFiClientSecure &client) {
+  // 이전 홉의 setInsecure() 잔여 상태(_use_insecure = true)를 확실히 해제
+  client.setCACert(nullptr);
+
+#if defined(ESP_ARDUINO_VERSION) &&                                            \
+    (ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 3, 12))
+  client.useBuiltinCACertBundle();
+#else
+  extern const uint8_t x509_crt_bundle_start[] asm(
+      "_binary_x509_crt_bundle_start");
+  extern const uint8_t x509_crt_bundle_end[] asm(
+      "_binary_x509_crt_bundle_end");
+#if defined(ESP_IDF_VERSION) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+  client.setCACertBundle(x509_crt_bundle_start,
+                         static_cast<size_t>(x509_crt_bundle_end - x509_crt_bundle_start));
+#else
+  client.setCACertBundle(x509_crt_bundle_start);
+#endif
+#endif
+  client.setTimeout(5);
+  client.setHandshakeTimeout(8); // CA 체인 검증을 감안하여 8초 확보
 }
 
 class OtaInProgressGuard {
@@ -233,11 +229,11 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
   char initial_path[256] = {0};
   int initial_port = 0;
   bool is_https_initial = false;
-  extract_url_components(initial_url, initial_host, sizeof(initial_host),
+  Ota_ExtractUrlComponents(initial_url, initial_host, sizeof(initial_host),
                          initial_port, initial_path, sizeof(initial_path),
                          is_https_initial);
 
-  if (!is_private_host(initial_host) && time(nullptr) < 1700000000) {
+  if (!Ota_IsPrivateHost(initial_host) && time(nullptr) < 1700000000) {
     ota_fail("System time not synced (NTP required for TLS)");
     return false;
   }
@@ -275,12 +271,12 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
     char path[256] = {0};
     int port = 0;
     bool is_https = false;
-    extract_url_components(current_url.c_str(), host, sizeof(host), port, path,
+    Ota_ExtractUrlComponents(current_url.c_str(), host, sizeof(host), port, path,
                            sizeof(path), is_https);
 
     OtaUrlContext ctx = (redirect_count == 0) ? OtaUrlContext::Initial
                                               : OtaUrlContext::Redirect;
-    if (!is_trusted_ota_url(current_url.c_str(), ctx)) {
+    if (!Ota_IsTrustedUrl(current_url.c_str(), ctx)) {
       ota_fail("Untrusted URL in chain (host: %s, port: %d)",
                host[0] ? host : "invalid", port);
       http.end();
@@ -291,7 +287,7 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
 
     WiFiClient *transport = nullptr;
     if (is_https) {
-      if (is_private_host(host)) {
+      if (Ota_IsPrivateHost(host)) {
         secure_client.setInsecure();
       } else {
         configure_public_tls(secure_client);
@@ -345,14 +341,14 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
       char next_path[256] = {0};
       int next_port = 0;
       bool next_is_https = false;
-      if (!extract_url_components(location.c_str(), next_host,
+      if (!Ota_ExtractUrlComponents(location.c_str(), next_host,
                                   sizeof(next_host), next_port, next_path,
                                   sizeof(next_path), next_is_https)) {
         ota_fail("Failed to parse redirect URL");
         return false;
       }
 
-      if (is_private_host(next_host) != is_private_host(initial_host)) {
+      if (Ota_IsPrivateHost(next_host) != Ota_IsPrivateHost(initial_host)) {
         ota_fail("Redirect crosses trust boundary");
         return false;
       }
@@ -673,12 +669,12 @@ void System_StartHttpOta(const char *url) {
   char target_path[256] = {0};
   int target_port = 0;
   bool target_is_https = false;
-  extract_url_components(target, target_host, sizeof(target_host), target_port,
+  Ota_ExtractUrlComponents(target, target_host, sizeof(target_host), target_port,
                          target_path, sizeof(target_path), target_is_https);
 
   // 3. 외부 HTTPS인 경우 유효한 시스템 시간 Sanity check (NTP 미동기화 시
   // 인증서 검증 실패 방지)
-  if (!is_private_host(target_host) && time(nullptr) < 1700000000) {
+  if (!Ota_IsPrivateHost(target_host) && time(nullptr) < 1700000000) {
     ::Serial.println("[OTA] System time not synced (NTP required for TLS)");
     snprintf(g_http_ota_state.status, sizeof(g_http_ota_state.status),
              "Failed");
@@ -687,7 +683,7 @@ void System_StartHttpOta(const char *url) {
     return;
   }
 
-  if (!is_trusted_ota_url(target, OtaUrlContext::Initial)) {
+  if (!Ota_IsTrustedUrl(target, OtaUrlContext::Initial)) {
     ::Serial.printf("[OTA] Untrusted OTA URL: host=%s, port=%d, path=%s\r\n",
                     target_host[0] ? target_host : "invalid", target_port,
                     target_path);

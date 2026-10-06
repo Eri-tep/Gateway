@@ -97,6 +97,7 @@ struct ChanStats {
   uint32_t crc_errors{0};
   uint32_t invalid_frames{0};
   uint32_t timeouts{0};
+  uint32_t lock_timeouts{0};
   uint32_t uncached_pkts{0};
   uint32_t last_activity_ms{0};
 };

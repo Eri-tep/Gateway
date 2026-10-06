@@ -84,11 +84,17 @@ void Engine_InitQueues() {
 
 CoreDumpInfo g_coredump_info;
 
+constexpr TickType_t kQueueLockTimeout = pdMS_TO_TICKS(10);
+
 bool Queue_EnqueueDropHead(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
   if (UNLIKELY(!queue))
     return false;
-  MutexLocker lock(s_ctrl_queue_mutex);
+  MutexLocker lock(s_ctrl_queue_mutex, kQueueLockTimeout);
+  if (!lock.isLocked()) {
+    g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   if (xQueueSend(queue, &packet, 0) == pdTRUE)
     return true;
   StaticPacket dummy;
@@ -100,7 +106,11 @@ bool Queue_EnqueueDropTail(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
   if (UNLIKELY(!queue))
     return false;
-  MutexLocker lock(s_ctrl_queue_mutex);
+  MutexLocker lock(s_ctrl_queue_mutex, kQueueLockTimeout);
+  if (!lock.isLocked()) {
+    g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   return (xQueueSend(queue, &packet, 0) == pdTRUE);
 }
 
@@ -381,10 +391,13 @@ void Ch1_WaitBusIdle(uint32_t silence_ms) {
 void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
   Ch1_WaitBusIdle(Config::Timing::CH1_INTER_PACKET_DELAY_MS);
 
+  StaticPacket ack;
+  bool got_ack = false;
+
   {
     MutexLocker lock(s_uart0_mutex, pdMS_TO_TICKS(100));
     if (!lock.isLocked()) {
-      g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
+      g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
       System_TraceMessage(
           "[WARN] Dropped CH1 ctrl packet, mutex timed out.\r\n");
       return;
@@ -397,11 +410,12 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
     Ch1_RecordTxFinish();
     g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+
+    got_ack = (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
+                               nullptr, nullptr, &ctrlPacket) == UartRxStatus::SUCCESS);
   }
 
-  StaticPacket ack;
-  if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
-                      nullptr, nullptr, &ctrlPacket) == UartRxStatus::SUCCESS) {
+  if (got_ack) {
     g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
     System_TracePacket(1, false, TraceType::ACK, ack);
     g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
@@ -425,16 +439,20 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
         static_cast<int>(ctrlPacket.channel_id) - 2; // CH2 → 0, CH3 → 1
     if (wp_idx >= 0 && wp_idx <= 1) {
       const WallpadForwardConfig &cfg = wp_cfg[wp_idx];
+      bool fwd_success = false;
       {
         MutexLocker lock(cfg.mutex, pdMS_TO_TICKS(100));
         if (lock.isLocked()) {
           uart_write_bytes(cfg.uart_num, ack.data.data(), ack.length);
-          System_TracePacket(ctrlPacket.channel_id, true, TraceType::ACK,
-                                ack);
-          cfg.stats.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+          fwd_success = true;
         } else {
+          cfg.stats.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
           System_TraceMessage("[WARN] UART mutex timeout forwarding ACK\r\n");
         }
+      }
+      if (fwd_success) {
+        System_TracePacket(ctrlPacket.channel_id, true, TraceType::ACK, ack);
+        cfg.stats.tx_pkts.fetch_add(1, std::memory_order_relaxed);
       }
     }
   } else {
@@ -488,57 +506,65 @@ void Ch1_PollNext(size_t &current_dev_idx) {
 
   constexpr uint8_t kMaxRetries = 3;
   constexpr uint32_t kDelayMs = Config::Timing::CH1_INTER_PACKET_DELAY_MS;
-  constexpr TickType_t kUartLockTimeout = pdMS_TO_TICKS(5);
-  bool sent = false;
+  constexpr TickType_t kUartLockTimeout = pdMS_TO_TICKS(50);
+  StaticPacket ack;
+  bool got_ack = false;
+  bool tx_executed = false;
 
   for (uint8_t retry = 0; retry < kMaxRetries; ++retry) {
     Ch1_WaitBusIdle(kDelayMs);
 
-    MutexLocker lock(s_uart0_mutex, kUartLockTimeout);
-    if (!lock.isLocked()) {
-      return;
-    }
-
-    uint32_t last_act =
-        g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_acquire);
-    uint32_t elapsed = millis() - last_act;
-    if (elapsed < kDelayMs) {
-      continue;
-    }
-
-    System_TracePacket(1, true, TraceType::QRY, q_pkt);
-
-    uart_flush_input(UART_NUM_0);
-    uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
-    uart_wait_tx_done(UART_NUM_0,
-                      pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
-    g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
-    g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
-
-    StaticPacket ack;
-    if (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
-                        nullptr, nullptr, &q_pkt) == UartRxStatus::SUCCESS) {
-      g_pkt_stats.ch1.last_activity_ms.store(millis(),
-                                             std::memory_order_release);
-      System_TracePacket(1, false, TraceType::ACK, ack);
-      g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
-      ack.channel_id = 1;
-      if (s_dispatcher.onBusPacket) {
-        s_dispatcher.onBusPacket(1, ack, &q_pkt);
+    {
+      MutexLocker lock(s_uart0_mutex, kUartLockTimeout);
+      if (!lock.isLocked()) {
+        g_pkt_stats.ch1.lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+        System_TraceMessage("[WARN] UART0 mutex timeout on poll\r\n");
+        return;
       }
-    } else {
-      g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
-      if (s_dispatcher.onTimeout) {
-        s_dispatcher.onTimeout(poll_dev_id, poll_sub1, poll_sub2);
+
+      uint32_t last_act =
+          g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_acquire);
+      uint32_t elapsed = millis() - last_act;
+      if (elapsed < kDelayMs) {
+        continue;
       }
+
+      uart_flush_input(UART_NUM_0);
+      uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
+      uart_wait_tx_done(UART_NUM_0,
+                        pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
+      g_pkt_stats.ch1.last_activity_ms.store(millis(), std::memory_order_release);
+      g_pkt_stats.ch1.tx_pkts.fetch_add(1, std::memory_order_relaxed);
+      tx_executed = true;
+
+      got_ack = (Uart_RecvPacket(UART_NUM_0, ack, Config::Timing::CH1_POLL_TIMEOUT_MS,
+                                 nullptr, nullptr, &q_pkt) == UartRxStatus::SUCCESS);
     }
 
-    sent = true;
-    break;
+    if (tx_executed) {
+      System_TracePacket(1, true, TraceType::QRY, q_pkt);
+      break;
+    }
   }
 
-  if (!sent) {
+  if (!tx_executed) {
     return;
+  }
+
+  if (got_ack) {
+    g_pkt_stats.ch1.last_activity_ms.store(millis(),
+                                           std::memory_order_release);
+    System_TracePacket(1, false, TraceType::ACK, ack);
+    g_pkt_stats.ch1.rx_pkts.fetch_add(1, std::memory_order_relaxed);
+    ack.channel_id = 1;
+    if (s_dispatcher.onBusPacket) {
+      s_dispatcher.onBusPacket(1, ack, &q_pkt);
+    }
+  } else {
+    g_pkt_stats.ch1.timeouts.fetch_add(1, std::memory_order_relaxed);
+    if (s_dispatcher.onTimeout) {
+      s_dispatcher.onTimeout(poll_dev_id, poll_sub1, poll_sub2);
+    }
   }
 }
 
@@ -580,8 +606,8 @@ void Task_Ch1(void *pvParameters) {
       }
     }
 
-    if (g_probe_convergence_reset.load(std::memory_order_acquire)) {
-      g_probe_convergence_reset.store(false, std::memory_order_release);
+    if (s_dispatcher.onTakeRelearnRequest &&
+        s_dispatcher.onTakeRelearnRequest()) {
       s_convergence_done = false;
       s_initial_caching_complete.store(false, std::memory_order_release);
       if (g_system_event_group) {
@@ -678,7 +704,7 @@ static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
           uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
                            next_ack.length);
         } else {
-          ctx->stats->timeouts.fetch_add(1, std::memory_order_relaxed);
+          ctx->stats->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
           System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
         }
       } else {
@@ -740,9 +766,10 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
       if (s_dispatcher.onHandleSubBusQuery &&
           s_dispatcher.onHandleSubBusQuery(cfg->channel_id, req, virtual_ack)) {
         System_TracePacket(cfg->channel_id, false, TraceType::QRY, req);
+        const auto &timing = TimingConfig_Get();
         uint32_t delay_ms = (cfg->channel_id == 2)
-                                ? g_timing_config.ch2_cache_delay_ms
-                                : g_timing_config.ch3_cache_delay_ms;
+                                ? timing.ch2_cache_delay_ms
+                                : timing.ch3_cache_delay_ms;
         uint32_t target_due = millis() + delay_ms;
         if (!ack_queue.enqueue(virtual_ack, target_due)) {
           stats->uncached_pkts.fetch_add(1, std::memory_order_relaxed);
@@ -878,7 +905,7 @@ void Task_Ch4(void *pvParameters) {
     }
 
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
-        g_config.doorphone_baud_rate);
+        Config_Get().doorphone_baud_rate);
     uint32_t burst_spin_total = 0;
     while (Uart_AvailableDoorphone() > 0) {
       uint8_t byte = 0;

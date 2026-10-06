@@ -9,11 +9,16 @@
 #include <driver/uart.h>
 #include <esp_ota_ops.h>
 #include <esp_wifi.h>
-#include <sys/time.h>
-#include <time.h>
-#include <unistd.h>
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
 #include <esp_core_dump.h>
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+float temperatureRead(void);
+#ifdef __cplusplus
+}
 #endif
 
 static uint32_t s_boot_start_ms = 0;
@@ -106,15 +111,488 @@ struct AutoRegisterWdtHook {
 
 
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-float temperatureRead(void);
-#ifdef __cplusplus
-}
-#endif
 
-// ── SystemMetricsTracker Implementation ──
+// ── TaskWdtMonitor Implementation ──
+
+void TaskWdtMonitor::feed(size_t index) noexcept {
+  if (UNLIKELY(index >= TASK_COUNT))
+    return;
+
+  const uint32_t now = millis();
+  rtc_last_alive_ms[index] = now;
+  const uint32_t prev =
+      tasks[index].last_feed_ms.exchange(now, std::memory_order_relaxed);
+  if (prev > 0) {
+    const uint32_t gap = (now >= prev) ? (now - prev) : 0;
+    uint32_t cur_max =
+        tasks[index].max_interval_ms.load(std::memory_order_relaxed);
+    while (gap > cur_max && !tasks[index].max_interval_ms.compare_exchange_weak(
+                                cur_max, gap, std::memory_order_relaxed,
+                                std::memory_order_relaxed)) {
+    }
+  }
+  tasks[index].feed_count.fetch_add(1, std::memory_order_relaxed);
+  esp_task_wdt_reset();
+}
+
+
+// ── Diagnostics Functions Implementation ──
+
+namespace {
+struct StuckTaskDiag {
+  bool found{false};
+  char msg[36]{0};
+};
+static StuckTaskDiag s_stuck_diag;
+static std::atomic<bool> s_ota_validated{false};
+} // anonymous namespace
+
+
+void System_Restart(const char *reason) {
+  g_ota_in_progress.store(true, std::memory_order_release);
+  if (g_system_event_group) {
+    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+  vTaskDelay(pdMS_TO_TICKS(300));
+
+  if (reason && strlen(reason) > 0) {
+    LogManager::writeRebootLog(reason);
+  }
+  size_t count = s_shutdown_hook_count.load(std::memory_order_acquire);
+  if (count > MAX_SHUTDOWN_HOOKS) {
+    count = MAX_SHUTDOWN_HOOKS;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (s_shutdown_hooks[i]) {
+      s_shutdown_hooks[i]();
+    }
+  }
+
+  uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(50));
+  uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));
+  uart_wait_tx_done(UART_NUM_2, pdMS_TO_TICKS(50));
+
+  rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
+  vTaskDelay(pdMS_TO_TICKS(150));
+  esp_restart();
+}
+
+// ── Sealed System State (L1-owned; exposed via System_* contracts) ──
+static RTC_NOINIT_ATTR volatile uint32_t s_stage_marker = 0;
+static std::atomic<bool> s_rescue_mode{false};
+static std::atomic<bool> s_rollback_detected{false};
+
+void System_MarkStage(uint32_t stage) noexcept { s_stage_marker = stage; }
+bool System_IsRescueMode() noexcept {
+  return s_rescue_mode.load(std::memory_order_relaxed);
+}
+void System_SetRollbackDetected() noexcept {
+  s_rollback_detected.store(true, std::memory_order_release);
+}
+bool System_IsRollbackDetected() noexcept {
+  return s_rollback_detected.load(std::memory_order_acquire);
+}
+
+void Diag_DiagnoseStuck() {
+  uint32_t saved_telnet_stage = s_stage_marker;
+  s_stage_marker = 0;
+
+  static const char *const TASK_NAMES[Config::Task::TASK_COUNT] = {
+      "CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
+      "CH#4_WP#3", "Network",   "Telnet_CLI"};
+  static_assert(Config::Task::TASK_COUNT == 6, "Mismatch in TASK_COUNT");
+  static_assert(Config::Task::WDT_ID_TELNET < Config::Task::TASK_COUNT,
+                "WDT_ID_TELNET out of bounds");
+
+  esp_reset_reason_t reason = esp_reset_reason();
+  if (rtc_magic != RTC_MAGIC_WDT || reason == ESP_RST_POWERON) {
+    rtc_magic = RTC_MAGIC_WDT;
+    memset(rtc_last_alive_ms, 0, sizeof(rtc_last_alive_ms));
+    return;
+  }
+
+  uint32_t max_val = 0;
+  for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
+    if (rtc_last_alive_ms[i] > max_val)
+      max_val = rtc_last_alive_ms[i];
+  }
+
+  if (max_val == 0)
+    return;
+
+  uint32_t max_gap = 0;
+  int found_idx = -1;
+  for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
+    if (rtc_last_alive_ms[i] > 0) {
+      uint32_t gap = (max_val >= rtc_last_alive_ms[i])
+                         ? (max_val - rtc_last_alive_ms[i])
+                         : 0;
+      if (gap >= 2000 && gap > max_gap) {
+        max_gap = gap;
+        found_idx = static_cast<int>(i);
+      }
+    }
+  }
+
+  s_stuck_diag.found = true;
+  if (found_idx >= 0 &&
+      found_idx < static_cast<int>(Config::Task::TASK_COUNT)) {
+    if (found_idx == Config::Task::WDT_ID_TELNET &&
+        ((saved_telnet_stage >> 16) == 0xA5A5)) {
+      uint16_t stage = static_cast<uint16_t>(saved_telnet_stage & 0xFFFF);
+      snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
+               "Task WDT: %s (stage=%u, +%.1fs)", TASK_NAMES[found_idx],
+               (unsigned)stage, max_gap / 1000.0f);
+    } else {
+      snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
+               "Task WDT: %s (+%.1fs)", TASK_NAMES[found_idx],
+               max_gap / 1000.0f);
+    }
+  } else {
+    snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
+             "Task WDT: All Tasks Stalled");
+  }
+
+  memset(rtc_last_alive_ms, 0, sizeof(rtc_last_alive_ms));
+}
+
+void Diag_LogResetReason() {
+  esp_reset_reason_t reason = esp_reset_reason();
+
+  if (reason == ESP_RST_SW) {
+    if (rtc_clean_restart_magic == RTC_MAGIC_CLEAN_RESTART) {
+      rtc_clean_restart_magic = 0;
+      return;
+    }
+    s_pending_reboot_reason = "Software Reset (esp_restart)";
+    return;
+  }
+  rtc_clean_restart_magic = 0;
+
+  const char *reason_str = nullptr;
+  switch (reason) {
+  case ESP_RST_POWERON:
+    reason_str = "Power-On Reset";
+    break;
+  case ESP_RST_EXT:
+    reason_str = "Hardware Reset Pin (EXT)";
+    break;
+  case ESP_RST_PANIC:
+    reason_str = "CPU Panic / Crash Exception";
+    break;
+  case ESP_RST_INT_WDT:
+    reason_str = "Interrupt Watchdog Reset";
+    break;
+  case ESP_RST_TASK_WDT:
+    reason_str = s_stuck_diag.found ? s_stuck_diag.msg : "Task Watchdog Reset";
+    break;
+  case ESP_RST_WDT:
+    reason_str = "Other Watchdog Reset";
+    break;
+  case ESP_RST_BROWNOUT:
+    reason_str = "HW: Brownout Reset (Low Voltage)";
+    break;
+  case ESP_RST_SDIO:
+    reason_str = "HW: SDIO Reset";
+    break;
+  default:
+    reason_str = "Unknown Hardware Reset";
+    break;
+  }
+
+  if (reason != ESP_RST_POWERON) {
+    s_pending_reboot_reason = reason_str;
+  }
+}
+
+void Diag_CheckCoreDump() {
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+  esp_core_dump_summary_t s{};
+  if (esp_core_dump_get_summary(&s) == ESP_OK) {
+    g_coredump_info.valid = true;
+    strncpy(g_coredump_info.task_name, s.exc_task,
+            sizeof(g_coredump_info.task_name) - 1);
+    g_coredump_info.exc_pc = s.exc_pc;
+    g_coredump_info.exc_cause = s.ex_info.exc_cause;
+    uint8_t depth = static_cast<uint8_t>(s.exc_bt_info.depth);
+    if (depth > 16)
+      depth = 16;
+    g_coredump_info.bt_depth = depth;
+    g_coredump_info.bt_corrupted = s.exc_bt_info.corrupted;
+    for (uint8_t i = 0; i < depth; i++) {
+      g_coredump_info.bt[i] = s.exc_bt_info.bt[i];
+    }
+  }
+#endif
+}
+
+bool System_IsOtaPendingVerify() {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (!running)
+    return false;
+  esp_ota_img_states_t ota_state;
+  if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+    return (ota_state == ESP_OTA_IMG_PENDING_VERIFY ||
+            ota_state == ESP_OTA_IMG_NEW);
+  }
+  return false;
+}
+
+void Diag_CheckOtaHealth() {
+  if (s_ota_validated.load(std::memory_order_relaxed))
+    return;
+
+  bool wifi_ok = (WiFi.status() == WL_CONNECTED);
+  bool hub_ok = g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed) ||
+                g_pkt_stats.ch5.is_connected.load(std::memory_order_relaxed);
+
+  bool rs485_ok =
+      (millis() - g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) < 15000);
+  bool time_ok = TimeUtils::isElapsed(s_boot_start_ms,
+                                      Config::Timing::OTA_VALIDATION_PERIOD_MS);
+  bool extended_time_ok = TimeUtils::isElapsed(s_boot_start_ms, 60000);
+
+  if (!time_ok || !wifi_ok || (!hub_ok && !extended_time_ok) || !rs485_ok) {
+    return;
+  }
+
+  s_ota_validated.store(true, std::memory_order_release);
+  rtc_crash_counter = 0;
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (running) {
+    esp_ota_img_states_t ota_state;
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+        ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+      esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+      if (err == ESP_OK) {
+        ::Serial.println(
+            F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
+        System_TraceMessage(
+            "[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
+      } else {
+        ::Serial.printf("[OTA] Failed to mark app valid: 0x%x\r\n", err);
+      }
+    }
+  }
+}
+
+// ── L0 Platform Contract Bridge ──
+void System_CheckOtaHealth() {
+  Diag_CheckOtaHealth();
+}
+
+void Diag_StartRescueAp(const RescueHwConfig &cfg) {
+  s_rescue_mode.store(true, std::memory_order_release);
+  ::Serial.println(F("\r\n========================================"));
+  ::Serial.printf("  🚨 RESCUE SAFE MODE ACTIVATED: %s\r\n",
+                  cfg.reason ? cfg.reason : "Unknown");
+  ::Serial.println(F("========================================"));
+
+  WiFi.mode(WIFI_AP_STA);
+  vTaskDelay(pdMS_TO_TICKS(100));
+
+  WiFi.softAPConfig(IPAddress(172, 30, 2, 1), IPAddress(172, 30, 2, 1),
+                    IPAddress(255, 255, 255, 0));
+  bool ap_ok = WiFi.softAP("Sweet_Home_Rescue", EMERGENCY_AP_PASS, 1, 0, 4);
+  WiFi.setSleep(false);
+  esp_wifi_set_max_tx_power(78);
+
+  ::Serial.printf(
+      "[RESCUE] SoftAP 'Sweet_Home_Rescue' started: %s (IP: %s)\r\n",
+      ap_ok ? "SUCCESS" : "FAILED", WiFi.softAPIP().toString().c_str());
+
+  if (cfg.sta_ssid && cfg.sta_ssid[0]) {
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(true);
+    wifi_config_t w_conf;
+    memset(&w_conf, 0, sizeof(w_conf));
+    strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), cfg.sta_ssid,
+            sizeof(w_conf.sta.ssid) - 1);
+    if (cfg.sta_password && cfg.sta_password[0]) {
+      strncpy(reinterpret_cast<char *>(w_conf.sta.password), cfg.sta_password,
+              sizeof(w_conf.sta.password) - 1);
+    }
+    esp_wifi_set_config(WIFI_IF_STA, &w_conf);
+    esp_wifi_connect();
+  }
+
+  if (!g_system_event_group) {
+    g_system_event_group = xEventGroupCreate();
+    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+
+  ArduinoOTA.setHostname("gateway-rescue");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.onStart([]() {
+    g_ota_in_progress.store(true, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+  });
+  ArduinoOTA.onEnd([]() { System_Restart("OTA Firmware Update"); });
+  ArduinoOTA.onError([](ota_error_t) {
+    g_ota_in_progress.store(false, std::memory_order_release);
+    if (g_system_event_group) {
+      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
+    }
+  });
+  ArduinoOTA.begin();
+}
+
+// ── Canonical System Platform Implementations (L0 Platform Facade) ───────────
+
+
+void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept {
+  auto gtag = [](uint16_t b) {
+    return b >= 1000 ? "SAFE" : b >= 500 ? "WARN" : "CRIT";
+  };
+
+  const uint16_t stacks[6] = {st.ch1_stack, st.ch2_stack, st.ch3_stack,
+                              st.ch4_stack, st.net_stack, st.telnet_stack};
+  const char *names[6] = {"CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
+                          "CH#4_WP#3", "Network",   "Telnet_CLI"};
+  const char *scopes[6] = {"IoT Master Comm",    "Wallpad#1 HW Slave",
+                           "Wallpad#2 HW Slave", "Wallpad#3 SW Slave",
+                           "WiFi & TCP Manager", "Telnet CLI Server"};
+
+  out.append(Fmt::DIV80);
+  out.appendFormat("%-11s %-12s %-10s %-12s %-8s %-18s\r\n", "Task Name",
+                   "Min Stack", "Last Feed", "Peak Intvl", "Status",
+                   "Task Scope");
+  out.append(Fmt::DIV80);
+
+  uint32_t now = millis();
+  for (size_t i = 0; i < 6; ++i) {
+    uint32_t last_feed =
+        s_wdt_monitor.tasks[i].last_feed_ms.load(std::memory_order_relaxed);
+    uint32_t elapsed =
+        (last_feed > 0 && now >= last_feed) ? (now - last_feed) : 0;
+    uint32_t peak =
+        s_wdt_monitor.tasks[i].max_interval_ms.load(std::memory_order_relaxed);
+
+    out.appendFormat("%-11s %5u Bytes  %5u ms     %5u ms       %-7s %-18s\r\n",
+                     names[i], stacks[i], static_cast<unsigned>(elapsed),
+                     static_cast<unsigned>(peak), gtag(stacks[i]), scopes[i]);
+  }
+}
+
+
+const char *System_ConsumePendingRebootReason() noexcept {
+  return Diag_ConsumePendingRebootReason();
+}
+
+uint32_t System_GetBootTimeMs() noexcept {
+  return Diag_GetBootTimeMs();
+}
+
+// ── LogManager & Persistent Reboot Log Implementation ────────────────────────
+
+void LogManager::writeRebootLog(const char *reason) {
+  if (!reason || strlen(reason) == 0)
+    return;
+  Preferences p;
+  if (!p.begin("logs", false))
+    return;
+
+  uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
+
+  LogEntry entry = {};
+  entry.timestamp = time(nullptr);
+  strncpy(entry.reason, reason, sizeof(entry.reason) - 1);
+  System_TakeSnapshot(entry.stats_snapshot, entry.hw_snapshot,
+                      entry.stack_snapshot, entry.packet_stats_snapshot);
+
+  static NvsEnvelope<LogEntry> new_env;
+  new_env.payload = entry;
+  new_env.seal();
+
+  char key[16];
+  snprintf(key, sizeof(key), "log_%u", (unsigned)head);
+  p.putBytes(key, &new_env, sizeof(new_env));
+
+  head = (head + 1) % MAX_LOG_ENTRIES;
+  p.putUInt("log_head", head);
+
+  uint32_t count = p.getUInt("count", 0);
+  if (count < MAX_LOG_ENTRIES) {
+    p.putUInt("count", count + 1);
+  }
+  p.end();
+}
+
+size_t LogManager::getLogCount() {
+  Preferences p;
+  if (!p.begin("logs", true))
+    return 0;
+  size_t c = p.getUInt("count", 0);
+  p.end();
+  return c > MAX_LOG_ENTRIES ? MAX_LOG_ENTRIES : c;
+}
+
+[[nodiscard]] std::expected<LogEntry, LogReadError>
+LogManager::getLogEntry(size_t idx) noexcept {
+  if (idx >= MAX_LOG_ENTRIES)
+    return std::unexpected(LogReadError::OutOfBounds);
+  Preferences p;
+  if (!p.begin("logs", true))
+    return std::unexpected(LogReadError::Empty);
+
+  size_t count = p.getUInt("count", 0);
+  if (idx >= count) {
+    p.end();
+    return std::unexpected(LogReadError::OutOfBounds);
+  }
+
+  uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
+  uint32_t slot = (head + MAX_LOG_ENTRIES - 1 - idx) % MAX_LOG_ENTRIES;
+
+  char key[16];
+  snprintf(key, sizeof(key), "log_%u", (unsigned)slot);
+  static NvsEnvelope<LogEntry> env;
+  size_t len = p.getBytesLength(key);
+  if (len == sizeof(env) && p.getBytes(key, &env, sizeof(env)) == sizeof(env)) {
+    p.end();
+    if (env.verify()) {
+      return env.payload;
+    }
+    return std::unexpected(LogReadError::OutOfBounds);
+  }
+  p.end();
+  return std::unexpected(LogReadError::OutOfBounds);
+}
+
+bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) noexcept {
+  auto res = getLogEntry(idx);
+  if (!res.has_value())
+    return false;
+  out_entry = *res;
+  return true;
+}
+
+void LogManager::clearRebootLog() {
+  Preferences p;
+  p.begin("logs", false);
+  p.clear();
+  p.end();
+}
+
+size_t System_GetRebootLogCount() noexcept {
+  return LogManager::getLogCount();
+}
+
+bool System_GetRebootLogEntry(size_t index, LogEntry &out_entry) noexcept {
+  return LogManager::getLogEntry(index, out_entry);
+}
+
+void System_WriteRebootLog(const char *reason) noexcept {
+  LogManager::writeRebootLog(reason);
+}
+
+void System_ClearRebootLog() noexcept {
+  LogManager::clearRebootLog();
+}
+
+// ── SystemMetricsTracker & Telemetry Implementations ─────────────────────────
 
 namespace {
 constexpr uint32_t MIN_SAMPLE_INTERVAL_MS = 100;
@@ -258,131 +736,6 @@ MetricSample SystemMetricsTracker::getCurrent() const noexcept {
   return _current;
 }
 
-// ── TaskWdtMonitor Implementation ──
-
-void TaskWdtMonitor::feed(size_t index) noexcept {
-  if (UNLIKELY(index >= TASK_COUNT))
-    return;
-
-  const uint32_t now = millis();
-  rtc_last_alive_ms[index] = now;
-  const uint32_t prev =
-      tasks[index].last_feed_ms.exchange(now, std::memory_order_relaxed);
-  if (prev > 0) {
-    const uint32_t gap = (now >= prev) ? (now - prev) : 0;
-    uint32_t cur_max =
-        tasks[index].max_interval_ms.load(std::memory_order_relaxed);
-    while (gap > cur_max && !tasks[index].max_interval_ms.compare_exchange_weak(
-                                cur_max, gap, std::memory_order_relaxed,
-                                std::memory_order_relaxed)) {
-    }
-  }
-  tasks[index].feed_count.fetch_add(1, std::memory_order_relaxed);
-  esp_task_wdt_reset();
-}
-
-// ── LogManager Implementation ──
-
-void LogManager::writeRebootLog(const char *reason) {
-  if (!reason || strlen(reason) == 0)
-    return;
-  Preferences p;
-  if (!p.begin("logs", false))
-    return;
-
-  uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
-
-  LogEntry entry = {};
-  entry.timestamp = time(nullptr);
-  strncpy(entry.reason, reason, sizeof(entry.reason) - 1);
-  System_TakeSnapshot(entry.stats_snapshot, entry.hw_snapshot,
-                      entry.stack_snapshot, entry.packet_stats_snapshot);
-
-  static NvsEnvelope<LogEntry> new_env;
-  new_env.payload = entry;
-  new_env.seal();
-
-  char key[16];
-  snprintf(key, sizeof(key), "log_%u", (unsigned)head);
-  p.putBytes(key, &new_env, sizeof(new_env));
-
-  head = (head + 1) % MAX_LOG_ENTRIES;
-  p.putUInt("log_head", head);
-
-  uint32_t count = p.getUInt("count", 0);
-  if (count < MAX_LOG_ENTRIES) {
-    p.putUInt("count", count + 1);
-  }
-  p.end();
-}
-
-size_t LogManager::getLogCount() {
-  Preferences p;
-  if (!p.begin("logs", true))
-    return 0;
-  size_t c = p.getUInt("count", 0);
-  p.end();
-  return c > MAX_LOG_ENTRIES ? MAX_LOG_ENTRIES : c;
-}
-
-[[nodiscard]] std::expected<LogEntry, LogReadError>
-LogManager::getLogEntry(size_t idx) noexcept {
-  if (idx >= MAX_LOG_ENTRIES)
-    return std::unexpected(LogReadError::OutOfBounds);
-  Preferences p;
-  if (!p.begin("logs", true))
-    return std::unexpected(LogReadError::Empty);
-
-  size_t count = p.getUInt("count", 0);
-  if (idx >= count) {
-    p.end();
-    return std::unexpected(LogReadError::OutOfBounds);
-  }
-
-  uint32_t head = p.getUInt("log_head", 0) % MAX_LOG_ENTRIES;
-  uint32_t slot = (head + MAX_LOG_ENTRIES - 1 - idx) % MAX_LOG_ENTRIES;
-
-  char key[16];
-  snprintf(key, sizeof(key), "log_%u", (unsigned)slot);
-  static NvsEnvelope<LogEntry> env;
-  size_t len = p.getBytesLength(key);
-  if (len == sizeof(env) && p.getBytes(key, &env, sizeof(env)) == sizeof(env)) {
-    p.end();
-    if (env.verify()) {
-      return env.payload;
-    }
-    return std::unexpected(LogReadError::OutOfBounds);
-  }
-  p.end();
-  return std::unexpected(LogReadError::OutOfBounds);
-}
-
-bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) noexcept {
-  auto res = getLogEntry(idx);
-  if (!res.has_value())
-    return false;
-  out_entry = *res;
-  return true;
-}
-
-void LogManager::clearRebootLog() {
-  Preferences p;
-  p.begin("logs", false);
-  p.clear();
-  p.end();
-}
-
-// ── Diagnostics Functions Implementation ──
-
-namespace {
-struct StuckTaskDiag {
-  bool found{false};
-  char msg[36]{0};
-};
-static StuckTaskDiag s_stuck_diag;
-static std::atomic<bool> s_ota_validated{false};
-} // anonymous namespace
-
 int8_t System_ReadTempC() { return static_cast<int8_t>(temperatureRead()); }
 
 void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) {
@@ -492,7 +845,7 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   hw.temp_24h_peak = s24.count ? s24.temp_peak : hw.temp_cur;
 
   auto get_stack = [](SystemTaskId id) -> uint16_t {
-    TaskHandle_t h = s_task_handles[static_cast<size_t>(id)];
+    TaskHandle_t h = System_GetTaskHandle(id);
     return h ? static_cast<uint16_t>(uxTaskGetStackHighWaterMark(h)) : 0;
   };
 
@@ -510,274 +863,6 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   pkt.ch5 = TcpSocketToSnapshot(g_pkt_stats.ch5);
   pkt.ch6 = TcpSocketToSnapshot(g_pkt_stats.ch6);
 }
-
-void System_Restart(const char *reason) {
-  g_ota_in_progress.store(true, std::memory_order_release);
-  if (g_system_event_group) {
-    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-  }
-  vTaskDelay(pdMS_TO_TICKS(300));
-
-  if (reason && strlen(reason) > 0) {
-    LogManager::writeRebootLog(reason);
-  }
-  size_t count = s_shutdown_hook_count.load(std::memory_order_acquire);
-  if (count > MAX_SHUTDOWN_HOOKS) {
-    count = MAX_SHUTDOWN_HOOKS;
-  }
-  for (size_t i = 0; i < count; ++i) {
-    if (s_shutdown_hooks[i]) {
-      s_shutdown_hooks[i]();
-    }
-  }
-
-  uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(50));
-  uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));
-  uart_wait_tx_done(UART_NUM_2, pdMS_TO_TICKS(50));
-
-  rtc_clean_restart_magic = RTC_MAGIC_CLEAN_RESTART;
-  vTaskDelay(pdMS_TO_TICKS(150));
-  esp_restart();
-}
-
-void System_DiagnoseStuck() {
-  uint32_t saved_telnet_stage = g_telnet_stage;
-  g_telnet_stage = 0;
-
-  static const char *const TASK_NAMES[Config::Task::TASK_COUNT] = {
-      "CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
-      "CH#4_WP#3", "Network",   "Telnet_CLI"};
-  static_assert(Config::Task::TASK_COUNT == 6, "Mismatch in TASK_COUNT");
-  static_assert(Config::Task::WDT_ID_TELNET < Config::Task::TASK_COUNT,
-                "WDT_ID_TELNET out of bounds");
-
-  esp_reset_reason_t reason = esp_reset_reason();
-  if (rtc_magic != RTC_MAGIC_WDT || reason == ESP_RST_POWERON) {
-    rtc_magic = RTC_MAGIC_WDT;
-    memset(rtc_last_alive_ms, 0, sizeof(rtc_last_alive_ms));
-    return;
-  }
-
-  uint32_t max_val = 0;
-  for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
-    if (rtc_last_alive_ms[i] > max_val)
-      max_val = rtc_last_alive_ms[i];
-  }
-
-  if (max_val == 0)
-    return;
-
-  uint32_t max_gap = 0;
-  int found_idx = -1;
-  for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
-    if (rtc_last_alive_ms[i] > 0) {
-      uint32_t gap = (max_val >= rtc_last_alive_ms[i])
-                         ? (max_val - rtc_last_alive_ms[i])
-                         : 0;
-      if (gap >= 2000 && gap > max_gap) {
-        max_gap = gap;
-        found_idx = static_cast<int>(i);
-      }
-    }
-  }
-
-  s_stuck_diag.found = true;
-  if (found_idx >= 0 &&
-      found_idx < static_cast<int>(Config::Task::TASK_COUNT)) {
-    if (found_idx == Config::Task::WDT_ID_TELNET &&
-        ((saved_telnet_stage >> 16) == 0xA5A5)) {
-      uint16_t stage = static_cast<uint16_t>(saved_telnet_stage & 0xFFFF);
-      snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
-               "Task WDT: %s (stage=%u, +%.1fs)", TASK_NAMES[found_idx],
-               (unsigned)stage, max_gap / 1000.0f);
-    } else {
-      snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
-               "Task WDT: %s (+%.1fs)", TASK_NAMES[found_idx],
-               max_gap / 1000.0f);
-    }
-  } else {
-    snprintf(s_stuck_diag.msg, sizeof(s_stuck_diag.msg),
-             "Task WDT: All Tasks Stalled");
-  }
-
-  memset(rtc_last_alive_ms, 0, sizeof(rtc_last_alive_ms));
-}
-
-void System_LogResetReason() {
-  esp_reset_reason_t reason = esp_reset_reason();
-
-  if (reason == ESP_RST_SW) {
-    if (rtc_clean_restart_magic == RTC_MAGIC_CLEAN_RESTART) {
-      rtc_clean_restart_magic = 0;
-      return;
-    }
-    s_pending_reboot_reason = "Software Reset (esp_restart)";
-    return;
-  }
-  rtc_clean_restart_magic = 0;
-
-  const char *reason_str = nullptr;
-  switch (reason) {
-  case ESP_RST_POWERON:
-    reason_str = "Power-On Reset";
-    break;
-  case ESP_RST_EXT:
-    reason_str = "Hardware Reset Pin (EXT)";
-    break;
-  case ESP_RST_PANIC:
-    reason_str = "CPU Panic / Crash Exception";
-    break;
-  case ESP_RST_INT_WDT:
-    reason_str = "Interrupt Watchdog Reset";
-    break;
-  case ESP_RST_TASK_WDT:
-    reason_str = s_stuck_diag.found ? s_stuck_diag.msg : "Task Watchdog Reset";
-    break;
-  case ESP_RST_WDT:
-    reason_str = "Other Watchdog Reset";
-    break;
-  case ESP_RST_BROWNOUT:
-    reason_str = "HW: Brownout Reset (Low Voltage)";
-    break;
-  case ESP_RST_SDIO:
-    reason_str = "HW: SDIO Reset";
-    break;
-  default:
-    reason_str = "Unknown Hardware Reset";
-    break;
-  }
-
-  if (reason != ESP_RST_POWERON) {
-    s_pending_reboot_reason = reason_str;
-  }
-}
-
-void System_CheckCoreDump() {
-#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
-  esp_core_dump_summary_t s{};
-  if (esp_core_dump_get_summary(&s) == ESP_OK) {
-    g_coredump_info.valid = true;
-    strncpy(g_coredump_info.task_name, s.exc_task,
-            sizeof(g_coredump_info.task_name) - 1);
-    g_coredump_info.exc_pc = s.exc_pc;
-    g_coredump_info.exc_cause = s.ex_info.exc_cause;
-    uint8_t depth = static_cast<uint8_t>(s.exc_bt_info.depth);
-    if (depth > 16)
-      depth = 16;
-    g_coredump_info.bt_depth = depth;
-    g_coredump_info.bt_corrupted = s.exc_bt_info.corrupted;
-    for (uint8_t i = 0; i < depth; i++) {
-      g_coredump_info.bt[i] = s.exc_bt_info.bt[i];
-    }
-  }
-#endif
-}
-
-bool System_IsOtaPendingVerify() {
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  if (!running)
-    return false;
-  esp_ota_img_states_t ota_state;
-  if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
-    return (ota_state == ESP_OTA_IMG_PENDING_VERIFY ||
-            ota_state == ESP_OTA_IMG_NEW);
-  }
-  return false;
-}
-
-void System_CheckOtaHealth() {
-  if (s_ota_validated.load(std::memory_order_relaxed))
-    return;
-
-  bool wifi_ok = (WiFi.status() == WL_CONNECTED);
-  bool hub_ok = g_pkt_stats.ch6.is_connected.load(std::memory_order_relaxed) ||
-                g_pkt_stats.ch5.is_connected.load(std::memory_order_relaxed);
-
-  bool rs485_ok =
-      (millis() - g_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) < 15000);
-  bool time_ok = TimeUtils::isElapsed(s_boot_start_ms,
-                                      Config::Timing::OTA_VALIDATION_PERIOD_MS);
-  bool extended_time_ok = TimeUtils::isElapsed(s_boot_start_ms, 60000);
-
-  if (!time_ok || !wifi_ok || (!hub_ok && !extended_time_ok) || !rs485_ok) {
-    return;
-  }
-
-  s_ota_validated.store(true, std::memory_order_release);
-  rtc_crash_counter = 0;
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  if (running) {
-    esp_ota_img_states_t ota_state;
-    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
-        ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-      esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-      if (err == ESP_OK) {
-        ::Serial.println(
-            F("[OTA] ★ Firmware Health Verified! Auto-rollback cancelled."));
-        System_TraceMessage(
-            "[OTA] ★ Firmware Health Verified! Auto-rollback cancelled.\r\n");
-      } else {
-        ::Serial.printf("[OTA] Failed to mark app valid: 0x%x\r\n", err);
-      }
-    }
-  }
-}
-
-void System_EnterRescueMode(const char *reason) {
-  g_rescue_mode.store(true, std::memory_order_release);
-  ::Serial.println(F("\r\n========================================"));
-  ::Serial.printf("  🚨 RESCUE SAFE MODE ACTIVATED: %s\r\n",
-                  reason ? reason : "Unknown");
-  ::Serial.println(F("========================================"));
-
-  WiFi.mode(WIFI_AP_STA);
-  vTaskDelay(pdMS_TO_TICKS(100));
-
-  WiFi.softAPConfig(IPAddress(172, 30, 2, 1), IPAddress(172, 30, 2, 1),
-                    IPAddress(255, 255, 255, 0));
-  bool ap_ok = WiFi.softAP("Sweet_Home_Rescue", EMERGENCY_AP_PASS, 1, 0, 4);
-  WiFi.setSleep(false);
-  esp_wifi_set_max_tx_power(78);
-
-  ::Serial.printf(
-      "[RESCUE] SoftAP 'Sweet_Home_Rescue' started: %s (IP: %s)\r\n",
-      ap_ok ? "SUCCESS" : "FAILED", WiFi.softAPIP().toString().c_str());
-
-  WiFi.persistent(false);
-  WiFi.setAutoReconnect(true);
-  wifi_config_t w_conf;
-  memset(&w_conf, 0, sizeof(w_conf));
-  strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), g_config.wifi_ssid,
-          sizeof(w_conf.sta.ssid) - 1);
-  strncpy(reinterpret_cast<char *>(w_conf.sta.password), g_config.wifi_password,
-          sizeof(w_conf.sta.password) - 1);
-  esp_wifi_set_config(WIFI_IF_STA, &w_conf);
-  esp_wifi_connect();
-
-  if (!g_system_event_group) {
-    g_system_event_group = xEventGroupCreate();
-    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-  }
-
-  ArduinoOTA.setHostname("gateway-rescue");
-  ArduinoOTA.setPassword(OTA_PASSWORD);
-  ArduinoOTA.onStart([]() {
-    g_ota_in_progress.store(true, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
-  });
-  ArduinoOTA.onEnd([]() { System_Restart("OTA Firmware Update"); });
-  ArduinoOTA.onError([](ota_error_t) {
-    g_ota_in_progress.store(false, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
-  });
-  ArduinoOTA.begin();
-}
-
-// ── Canonical System Platform Implementations (L0 Platform Facade) ───────────
 
 void System_GetCpuAndTemp(uint8_t &cpu0, uint8_t &cpu1, int8_t &temp_c) noexcept {
   System_ReadCpuPct(cpu0, cpu1);
@@ -846,64 +931,6 @@ void System_SetCh6Connected(bool conn) noexcept {
 void System_RecordCh6Connection() noexcept {
   g_pkt_stats.ch6.is_connected.store(true, std::memory_order_relaxed);
   g_pkt_stats.ch6.connection_count.fetch_add(1, std::memory_order_relaxed);
-}
-
-void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept {
-  auto gtag = [](uint16_t b) {
-    return b >= 1000 ? "SAFE" : b >= 500 ? "WARN" : "CRIT";
-  };
-
-  const uint16_t stacks[6] = {st.ch1_stack, st.ch2_stack, st.ch3_stack,
-                              st.ch4_stack, st.net_stack, st.telnet_stack};
-  const char *names[6] = {"CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
-                          "CH#4_WP#3", "Network",   "Telnet_CLI"};
-  const char *scopes[6] = {"IoT Master Comm",    "Wallpad#1 HW Slave",
-                           "Wallpad#2 HW Slave", "Wallpad#3 SW Slave",
-                           "WiFi & TCP Manager", "Telnet CLI Server"};
-
-  out.append(Fmt::DIV80);
-  out.appendFormat("%-11s %-12s %-10s %-12s %-8s %-18s\r\n", "Task Name",
-                   "Min Stack", "Last Feed", "Peak Intvl", "Status",
-                   "Task Scope");
-  out.append(Fmt::DIV80);
-
-  uint32_t now = millis();
-  for (size_t i = 0; i < 6; ++i) {
-    uint32_t last_feed =
-        s_wdt_monitor.tasks[i].last_feed_ms.load(std::memory_order_relaxed);
-    uint32_t elapsed =
-        (last_feed > 0 && now >= last_feed) ? (now - last_feed) : 0;
-    uint32_t peak =
-        s_wdt_monitor.tasks[i].max_interval_ms.load(std::memory_order_relaxed);
-
-    out.appendFormat("%-11s %5u Bytes  %5u ms     %5u ms       %-7s %-18s\r\n",
-                     names[i], stacks[i], static_cast<unsigned>(elapsed),
-                     static_cast<unsigned>(peak), gtag(stacks[i]), scopes[i]);
-  }
-}
-
-size_t System_GetRebootLogCount() noexcept {
-  return LogManager::getLogCount();
-}
-
-bool System_GetRebootLogEntry(size_t index, LogEntry &out_entry) noexcept {
-  return LogManager::getLogEntry(index, out_entry);
-}
-
-void System_WriteRebootLog(const char *reason) noexcept {
-  LogManager::writeRebootLog(reason);
-}
-
-void System_ClearRebootLog() noexcept {
-  LogManager::clearRebootLog();
-}
-
-const char *System_ConsumePendingRebootReason() noexcept {
-  return Diag_ConsumePendingRebootReason();
-}
-
-uint32_t System_GetBootTimeMs() noexcept {
-  return Diag_GetBootTimeMs();
 }
 
 

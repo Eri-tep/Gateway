@@ -83,6 +83,7 @@ struct SingleChannelStats {
   std::atomic<uint32_t> crc_errors{0};
   std::atomic<uint32_t> invalid_frames{0};
   std::atomic<uint32_t> timeouts{0};
+  std::atomic<uint32_t> lock_timeouts{0};
   std::atomic<uint32_t> uncached_pkts{0};
   std::atomic<uint32_t> last_activity_ms{0};
 
@@ -92,6 +93,7 @@ struct SingleChannelStats {
     crc_errors.store(0, std::memory_order_relaxed);
     invalid_frames.store(0, std::memory_order_relaxed);
     timeouts.store(0, std::memory_order_relaxed);
+    lock_timeouts.store(0, std::memory_order_relaxed);
     uncached_pkts.store(0, std::memory_order_relaxed);
     last_activity_ms.store(0, std::memory_order_relaxed);
   }
@@ -139,6 +141,7 @@ inline ChanStats SingleChannelToSnapshot(const SingleChannelStats &s) noexcept {
   out.crc_errors = s.crc_errors.load(std::memory_order_relaxed);
   out.invalid_frames = s.invalid_frames.load(std::memory_order_relaxed);
   out.timeouts = s.timeouts.load(std::memory_order_relaxed);
+  out.lock_timeouts = s.lock_timeouts.load(std::memory_order_relaxed);
   out.uncached_pkts = s.uncached_pkts.load(std::memory_order_relaxed);
   out.last_activity_ms = s.last_activity_ms.load(std::memory_order_relaxed);
   return out;
@@ -189,18 +192,19 @@ public:
   static void clearRebootLog();
 };
 
-// ── Diagnostics Functions ──
+// ── Hardware Diagnostics Functions & Rescue HAL ──
 
-void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
-                         PktSnapshot &pkt);
-void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out);
-int8_t System_ReadTempC();
-void System_EnterRescueMode(const char *reason);
-void System_CheckOtaHealth();
-void System_LogResetReason();
-void System_DiagnoseStuck();
-void System_CheckCoreDump();
-[[nodiscard]] bool System_IsOtaPendingVerify();
+struct RescueHwConfig {
+  const char *reason{nullptr};
+  const char *sta_ssid{nullptr};
+  const char *sta_password{nullptr};
+};
+
+void Diag_StartRescueAp(const RescueHwConfig &cfg);
+void Diag_CheckOtaHealth();
+void Diag_LogResetReason();
+void Diag_DiagnoseStuck();
+void Diag_CheckCoreDump();
 
 const char *Diag_GetPendingRebootReason() noexcept;
 const char *Diag_ConsumePendingRebootReason() noexcept;
