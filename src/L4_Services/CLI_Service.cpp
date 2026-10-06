@@ -6,7 +6,7 @@
 #include "L4_Services/CLI_Service.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Diagnostics.h"
-#include "L4_Services/Console/Console_Commands.h"
+#include "L4_Services/Cli/Cli_Commands.h"
 
 #include <WiFi.h>
 #include <algorithm>

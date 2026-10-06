@@ -189,6 +189,7 @@ inline bool System_IsNetworkReady() noexcept {
 }
 
 void System_Restart(const char *reason);
+void System_CheckOtaHealth();
 
 enum class TraceType : uint8_t;
 
@@ -246,6 +247,8 @@ void System_SetCh6Connected(bool conn) noexcept;
 void System_RecordCh6Connection() noexcept;
 
 // ── Watchdog & Task Health ───────────────────────────────────────────────────
+using WdtFeedHook = void (*)(size_t) noexcept;
+void System_RegisterWdtHook(WdtFeedHook hook) noexcept;
 void System_FeedWdt(size_t index) noexcept;
 void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept;
 
@@ -262,8 +265,24 @@ void System_StartHttpOta(const char *url) noexcept;
 void System_GetHttpOtaSnapshot(HttpOtaSnapshot &out) noexcept;
 bool System_IsHttpOtaInProgress() noexcept;
 
+// ── Network & Wi-Fi Platform Services (L0 Universal Contract) ────────────────
+constexpr EventBits_t WIFI_BIT_CONNECTED = BIT0;
+constexpr EventBits_t WIFI_BIT_DISCONNECTED = BIT1;
+constexpr EventBits_t WIFI_BIT_GOT_IP = BIT2;
+
+void System_WifiInit() noexcept;
+bool System_WifiIsConnected() noexcept;
+IPAddress System_WifiGetIp() noexcept;
+int8_t System_WifiGetRssi() noexcept;
+void System_WifiReconnect() noexcept;
+
+// ── Bridge Transport Channel Slot Snapshot Contract ──────────────────────────
+struct HubClientSlotSnapshot;
+bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;
+
 // ── IP Subnet & Management Whitelist Filters (Global Security Policy) ────────
 #include <IPAddress.h>
 
 [[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip);
 [[nodiscard]] bool Telnet_IsAllowedIP(IPAddress ip);
+

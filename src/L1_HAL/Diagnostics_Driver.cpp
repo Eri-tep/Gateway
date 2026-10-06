@@ -84,9 +84,25 @@ TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept {
 // ── Global Diagnostics Instances ──
 
 SystemMetricsTracker g_metrics;
-TaskWdtMonitor g_wdt_monitor;
+static TaskWdtMonitor s_wdt_monitor;
 PacketStatistics g_pkt_stats;
 Ch1StateMetrics g_ch1_state_metrics;
+
+static void Diagnostics_FeedWdtImpl(size_t index) noexcept {
+  s_wdt_monitor.feed(index);
+}
+
+void Diagnostics_Init() noexcept {
+  System_RegisterWdtHook(Diagnostics_FeedWdtImpl);
+}
+
+namespace {
+struct AutoRegisterWdtHook {
+  AutoRegisterWdtHook() {
+    System_RegisterWdtHook(Diagnostics_FeedWdtImpl);
+  }
+} s_auto_wdt_hook;
+}
 
 
 
@@ -832,10 +848,6 @@ void System_RecordCh6Connection() noexcept {
   g_pkt_stats.ch6.connection_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-void System_FeedWdt(size_t index) noexcept {
-  g_wdt_monitor.feed(index);
-}
-
 void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept {
   auto gtag = [](uint16_t b) {
     return b >= 1000 ? "SAFE" : b >= 500 ? "WARN" : "CRIT";
@@ -858,11 +870,11 @@ void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept {
   uint32_t now = millis();
   for (size_t i = 0; i < 6; ++i) {
     uint32_t last_feed =
-        g_wdt_monitor.tasks[i].last_feed_ms.load(std::memory_order_relaxed);
+        s_wdt_monitor.tasks[i].last_feed_ms.load(std::memory_order_relaxed);
     uint32_t elapsed =
         (last_feed > 0 && now >= last_feed) ? (now - last_feed) : 0;
     uint32_t peak =
-        g_wdt_monitor.tasks[i].max_interval_ms.load(std::memory_order_relaxed);
+        s_wdt_monitor.tasks[i].max_interval_ms.load(std::memory_order_relaxed);
 
     out.appendFormat("%-11s %5u Bytes  %5u ms     %5u ms       %-7s %-18s\r\n",
                      names[i], stacks[i], static_cast<unsigned>(elapsed),

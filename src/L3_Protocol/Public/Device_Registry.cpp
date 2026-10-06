@@ -4,6 +4,8 @@
 // ============================================================================
 
 #include "L3_Protocol/Public/Device_Registry.h"
+#include "L3_Protocol/Private/Fcu_Protocol.h"
+#include "L2_Transport/Bridge_CH.h"
 
 #include <Arduino.h>
 #include <algorithm>
@@ -553,6 +555,9 @@ size_t DeviceRepository::getOnlineCount() const noexcept {
 
 void Device_Init() noexcept {
   s_device_repo.initDevices();
+  Fcu_Init();
+  Bridge_RegisterFcuRxCallback(Fcu_HandleRx);
+  Bridge_RegisterFcuTickCallback(Fcu_PollTick);
 }
 
 void Device_Clear() noexcept {
@@ -639,6 +644,7 @@ bool Device_CopyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 namespace {
 DeviceStateListener s_dev_listener = nullptr;
 DoorphoneEventListener s_doorphone_listener = nullptr;
+ElevatorEventListener s_elevator_listener = nullptr;
 } // namespace
 
 void Device_RegisterStateListener(DeviceStateListener listener) noexcept {
@@ -647,6 +653,18 @@ void Device_RegisterStateListener(DeviceStateListener listener) noexcept {
 
 void Device_RegisterDoorphoneListener(DoorphoneEventListener listener) noexcept {
   s_doorphone_listener = listener;
+}
+
+void Device_RegisterElevatorListener(ElevatorEventListener listener) noexcept {
+  s_elevator_listener = listener;
+}
+
+void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
+                                uint8_t ho, uint8_t power,
+                                bool is_arrival) noexcept {
+  if (s_elevator_listener) {
+    s_elevator_listener(sub1, sub2, floor, ho, power, is_arrival);
+  }
 }
 
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept {
@@ -702,6 +720,50 @@ bool Device_DecodeState(uint8_t dev_id,
                         DecodedDeviceState &out) noexcept {
   return s_state_decoder ? s_state_decoder(dev_id, ack, dev, out) : false;
 }
+
+// ── FCU (Air Conditioner) Domain Public Implementation ────────────────────────
+bool Device_GetFcuSnapshot(uint8_t slot_idx, FcuDeviceSnapshot &out) noexcept {
+  Fcu::SlotRuntime rt{};
+  if (!Fcu_GetSlotRuntime(slot_idx, rt)) {
+    return false;
+  }
+  out.power = rt.snap.power;
+  out.mode = static_cast<uint16_t>(rt.snap.mode);
+  out.fan_speed = static_cast<uint16_t>(rt.snap.fan_speed);
+  out.swing = static_cast<uint16_t>(rt.snap.swing);
+  out.target_temp = rt.snap.target_temp;
+  out.room_temp = rt.snap.room_temp;
+  out.is_online = rt.is_online;
+  return true;
+}
+
+bool Device_ControlFcu(uint8_t slot_idx, const char *action, int value,
+                       uint16_t mode, uint16_t fan, uint16_t swing,
+                       uint8_t temp) noexcept {
+  if (!action) return false;
+  std::string_view sv{action};
+
+  if (sv == "power_restore") {
+    return Fcu_RestorePower(slot_idx, mode, fan, swing, temp);
+  }
+  if (sv == "power" || sv == "pwr") {
+    return Fcu_SetPower(slot_idx, value == 1);
+  }
+  if (sv == "mode" || sv == "ac_mode") {
+    return Fcu_SetMode(slot_idx, static_cast<Fcu::Mode>(value));
+  }
+  if (sv == "fan_speed" || sv == "spd") {
+    return Fcu_SetFanSpeed(slot_idx, static_cast<Fcu::FanSpeed>(value));
+  }
+  if (sv == "swing") {
+    return Fcu_SetSwing(slot_idx, static_cast<Fcu::Swing>(value));
+  }
+  if (sv == "set_temp" || sv == "temp") {
+    return Fcu_SetTargetTemp(slot_idx, static_cast<uint8_t>(value));
+  }
+  return false;
+}
+
 
 
 

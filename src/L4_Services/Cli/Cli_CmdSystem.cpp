@@ -1,7 +1,7 @@
-#include "L4_Services/Console/Console_Fmt.h"
+#include "L4_Services/Cli/Cli_Fmt.h"
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/Console/Console_Commands.h"
-#include "L4_Services/EW11_Service.h"
+#include "L4_Services/Cli/Cli_Commands.h"
+#include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Diagnostics.h"
 #include <WiFi.h>
 #include <esp_core_dump.h>
@@ -815,7 +815,7 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   FixedBuf<24> drp_str;
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
     HubClientSlotSnapshot slot;
-    Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
+    System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
     if (!slot.enabled && strlen(slot.target_ip) == 0 && slot.target_port == 0)
       continue;
 

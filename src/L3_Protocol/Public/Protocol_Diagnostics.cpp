@@ -6,9 +6,12 @@
 #include "L3_Protocol/Public/Packet_Router.h"
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/TCP_CH.h"
+#include "L2_Transport/Bridge_CH.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L3_Protocol/Private/Control_Registry.h"
+#include "esp_log.h"
 #include <algorithm>
+#include <atomic>
 #include <span>
 
 void ProtocolDiag_WarmCacheSaveToNvs() noexcept {
@@ -536,7 +539,47 @@ void Protocol_WarmCacheRestoreOnBoot() noexcept {
   WarmCache_RestoreOnBoot();
 }
 
+static void Protocol_OnBridgePacketReceived(uint8_t slot_idx, const StaticPacket &pkt) noexcept {
+  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+  uint8_t stx = Wallpad_GetStx();
+  uint8_t etx = PKT_ETX;
+  if (ProtocolDiag_ExtractDeviceKey(pkt.data.data(), pkt.length, dev_id, sub1, sub2) &&
+      dev_id != 0 && dev_id != stx && dev_id != etx && dev_id != 0xFF) {
+    Router_RecordRoute(5, static_cast<int8_t>(slot_idx), dev_id, sub1, sub2);
+    if (dev_id == 0x34) {
+      if (pkt.length == 11 && pkt.data[4] == 0x04) {
+        static std::atomic<uint8_t> s_last_elev_pwr{0xFF};
+        uint8_t new_pwr = (pkt.data[8] == 0x06) ? 1 : 0;
+        uint8_t prev = s_last_elev_pwr.exchange(new_pwr, std::memory_order_acq_rel);
+        if (prev != new_pwr) {
+          ESP_LOGI("ProtocolDiag", "[CH5] Elevator State Changed -> Power: %u", new_pwr);
+          Device_NotifyElevatorEvent(sub1, sub2, 15, 0, new_pwr, false);
+        }
+      } else if (pkt.length == 13 && pkt.data[4] == 0x01 && pkt.data[8] == 0x01) {
+        uint8_t floor = pkt.data[9];
+        uint8_t ho = pkt.data[10];
+        ESP_LOGI("ProtocolDiag", "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor, ho);
+        Device_NotifyElevatorEvent(sub1, sub2, floor, ho, 0, true);
+      }
+    } else if (dev_id != 0x2A) {
+      bool is_query = Wallpad_IsQueryPacket(std::span<const uint8_t>(pkt.data.data(), pkt.length));
+      bool is_ack = (pkt.length >= 5 && pkt.data[4] == 0x04);
+      if (is_query) {
+        ProtocolDiag_PollingRegisterOrTouch(5, dev_id, sub1, sub2, pkt.data.data(), pkt.length);
+      }
+      if (is_ack) {
+        Device_ProcessBusPacket(const_cast<StaticPacket &>(pkt));
+      }
+    }
+  }
+}
 
+void Protocol_BindBridgeDispatcher(Bridge_PacketDispatcher &dispatcher) noexcept {
+  dispatcher.onGetStx = Wallpad_GetStx;
+  dispatcher.onExtractLength = ProtocolDiag_ExtractPacketLength;
+  dispatcher.onValidatePacket = ProtocolDiag_ValidatePacket;
+  dispatcher.onPacketReceived = Protocol_OnBridgePacketReceived;
+}
 
 bool ProtocolDiag_RegisterTcpParticipant(const ProtocolTcpParticipant &p) noexcept {
   Transport::ReactorParticipant rp;

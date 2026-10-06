@@ -1,5 +1,4 @@
 #include "L1_HAL/OTA_Driver.h"
-#include "L1_HAL/Diagnostics_Driver.h"
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
@@ -773,7 +772,7 @@ void SystemOta_InitArduinoOta(const char *hostname, const char *password) {
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     esp_task_wdt_reset();
-    g_wdt_monitor.feed(4);
+    System_FeedWdt(Config::Task::WDT_ID_NET);
   });
   ArduinoOTA.onEnd([]() {
     ::Serial.println(F("[ArduinoOTA] Finished successfully!"));

@@ -7,10 +7,12 @@
 #include "L1_HAL/Uart_Driver.h"
 #include "L1_HAL/Diagnostics_Driver.h"
 #include "L1_HAL/OTA_Driver.h"
+#include "L1_HAL/Wifi_Driver.h"
 
 // ── L2 Transport Channels ──
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/TCP_CH.h"
+#include "L2_Transport/Bridge_CH.h"
 
 // ── L3 Protocol Routing ──
 #include "L3_Protocol/Public/Device_Registry.h"
@@ -20,7 +22,6 @@
 // ── L4 Network Services ──
 #include "L4_Services/Mgmt_Service.h"
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/EW11_Service.h"
 
 #include "esp_attr.h"
 #include "esp_idf_version.h"
@@ -75,6 +76,7 @@ static void Boot_CheckCrashLoop() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
   Diag_SetBootTimeMs(millis());
+  Diagnostics_Init();
   System_DiagnoseStuck();
   System_CheckCoreDump();
   System_LogResetReason();
@@ -210,8 +212,7 @@ static void Boot_InitSubsystems() {
   Device_RegisterDoorphoneListener(Mgmt_BroadcastDoorphoneEvent);
   Router_RegisterCh5ForwardHandler(Bridge_ForwardPacket);
 
-  Bridge_RegisterDeviceStateListener(Mgmt_BroadcastDeviceResult);
-  Bridge_RegisterElevatorListener(Mgmt_BroadcastElevatorEvent);
+  Device_RegisterElevatorListener(Mgmt_BroadcastElevatorEvent);
 
   Remote_RegisterControlHandler(HandleRemoteControl);
 
@@ -220,9 +221,23 @@ static void Boot_InitSubsystems() {
   Protocol_BindDispatcher(rs485_dispatcher);
   RS485_RegisterDispatcher(rs485_dispatcher);
 
+  // ── Register L3 Protocol Dispatcher SPI into L2 EW11 Bridge ──
+  Bridge_PacketDispatcher bridge_dispatcher{};
+  Protocol_BindBridgeDispatcher(bridge_dispatcher);
+  Bridge_RegisterDispatcher(bridge_dispatcher);
+
   Protocol_DoorphoneInit();
   Remote_Init();
   Bridge_Init();
+
+  // ── Register L2 Bridge Reactor Participant into L2 TCP Reactor ──
+  Transport::ReactorParticipant bridge_part{};
+  bridge_part.name = "BridgeService";
+  bridge_part.populateFds = Bridge_PopulateFds;
+  bridge_part.processEvents = Bridge_ProcessEvents;
+  bridge_part.tick = Bridge_Tick;
+  Transport::TcpReactor::registerParticipant(bridge_part);
+
   Mgmt_Init();
   System_RegisterShutdownHook(Bridge_ShutdownSockets);
   SystemOta_RegisterPreOtaHook(Bridge_ShutdownSockets);
@@ -260,7 +275,7 @@ static void Boot_InitHardwareAndDevices() {
 // ============================================================================
 static void Boot_InitWifiAndOta() {
   if (!g_rescue_mode.load(std::memory_order_relaxed)) {
-    Wifi_Init();
+    Wifi_Driver_Init();
     SystemOta_InitArduinoOta("gateway-bridge", OTA_PASSWORD);
   }
 }

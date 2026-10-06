@@ -94,4 +94,12 @@ bool Router_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
 /// Dispatches a control or query request: handles virtual ACK, routing to CH5, or enqueuing to local bus.
 [[nodiscard]] bool Router_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept;
 
+// ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
+bool Router_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept;
+bool Router_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
+                                uint16_t port, const char *name) noexcept;
+bool Router_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept;
+bool Router_ResetBridgeFraming(uint8_t slot_idx) noexcept;
+
+
 

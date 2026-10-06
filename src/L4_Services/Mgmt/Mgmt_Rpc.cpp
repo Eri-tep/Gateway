@@ -4,7 +4,7 @@
 
 #include "L4_Services/Mgmt/Mgmt_Internal.h"
 static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
-#include "L4_Services/EW11_Service.h"
+#include "L3_Protocol/Public/Packet_Router.h"
 #include "L4_Services/Mgmt_Service.h"
 #include "L3_Protocol/Public/Device_Registry.h"
 #include "L3_Protocol/Public/Protocol_Diagnostics.h"
@@ -490,7 +490,7 @@ static void HandleRpc_SetEw11(int sock, long req_id, const char *json_str,
   if (slot >= 0 && slot < Config::TCP::MAX_EW11_SLOTS) {
     uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[slot];
     HubClientSlotSnapshot slot_snap;
-    Bridge_GetSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
+    System_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
     uint16_t target_port =
         (port > 0 && port <= 65535)
             ? static_cast<uint16_t>(port)
@@ -498,8 +498,8 @@ static void HandleRpc_SetEw11(int sock, long req_id, const char *json_str,
                                          : def_slot_port);
     if (target_port == 8899)
       target_port = def_slot_port; // 구버전 8899 기본값 보정
-    if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr,
-                    target_port, name[0] ? name : nullptr)) {
+    if (Router_SetBridgeSlotConfig(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr,
+                                   target_port, name[0] ? name : nullptr)) {
       const char *ok_msg = "{\"res\":\"ok\"}\n";
       send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);
       return;
@@ -560,62 +560,16 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
       return;
     }
 
-    std::string_view sv{act_str};
-    if (sv == "power_restore") {
-      long m = findJsonIntValue(json_str, "mode", 1);
-      long f = findJsonIntValue(json_str, "fan", 4);
-      long s = findJsonIntValue(json_str, "swing", 0);
-      long t = findJsonIntValue(json_str, "temp", 24);
-      if (Fcu::RestorePower(slot_idx, static_cast<uint16_t>(m),
-                            static_cast<uint16_t>(f), static_cast<uint16_t>(s),
-                            static_cast<uint8_t>(t))) {
-        sendRpcResponse(sock, req_id, "ok");
-      } else {
-        sendRpcResponse(sock, req_id, "error",
-                        "Failed to send FCU restore packet");
-      }
-      return;
-    }
+    uint16_t m = static_cast<uint16_t>(findJsonIntValue(json_str, "mode", 1));
+    uint16_t f = static_cast<uint16_t>(findJsonIntValue(json_str, "fan", 4));
+    uint16_t s = static_cast<uint16_t>(findJsonIntValue(json_str, "swing", 0));
+    uint8_t t = static_cast<uint8_t>(findJsonIntValue(json_str, "temp", 24));
 
-    using CmdFn = bool (*)(uint8_t, int);
-    struct CmdEntry {
-      std::string_view key;
-      CmdFn fn;
-    };
-    static constexpr CmdEntry kFcuCmds[] = {
-        {"power", [](uint8_t s, int v) { return Fcu::SetPower(s, v == 1); }},
-        {"mode",
-         [](uint8_t s, int v) {
-           return Fcu::SetMode(s, static_cast<Fcu::Mode>(v));
-         }},
-        {"fan_speed",
-         [](uint8_t s, int v) {
-           return Fcu::SetFanSpeed(s, static_cast<Fcu::FanSpeed>(v));
-         }},
-        {"swing",
-         [](uint8_t s, int v) {
-           return Fcu::SetSwing(s, static_cast<Fcu::Swing>(v));
-         }},
-        {"set_temp",
-         [](uint8_t s, int v) {
-           return Fcu::SetTargetTemp(s, static_cast<uint8_t>(v));
-         }},
-    };
-
-    for (const auto &e : kFcuCmds) {
-      if (e.key == sv) {
-        if (e.fn(slot_idx, val)) {
-          sendRpcResponse(sock, req_id, "ok");
-        } else {
-          sendRpcResponse(sock, req_id, "error",
-                          "Failed to send FCU Modbus packet to socket");
-        }
-        return;
-      }
+    if (Device_ControlFcu(slot_idx, act_str, static_cast<int>(val), m, f, s, t)) {
+      sendRpcResponse(sock, req_id, "ok");
+    } else {
+      sendRpcResponse(sock, req_id, "error", "Failed to execute FCU action");
     }
-    sendRpcResponse(sock, req_id, "error",
-                    "Unknown FCU action "
-                    "(power_restore/power/mode/fan_speed/swing/set_temp)");
     return;
   }
 

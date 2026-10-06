@@ -3,8 +3,8 @@
 // ============================================================================
 
 #include "L2_Transport/TCP_CH.h"
+#include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L1_HAL/Diagnostics_Driver.h"
 
 #include <ArduinoOTA.h>
 #include <WiFi.h>
@@ -33,7 +33,7 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
 
   for (;;) {
     esp_task_wdt_reset();
-    g_wdt_monitor.feed(4);
+    System_FeedWdt(Config::Task::WDT_ID_NET);
     ArduinoOTA.handle();
 
     const bool ota_now = g_ota_in_progress.load(std::memory_order_relaxed);
@@ -64,7 +64,7 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
     }
 
     esp_task_wdt_reset();
-    g_wdt_monitor.feed(4);
+    System_FeedWdt(Config::Task::WDT_ID_NET);
 
     if (act > 0) {
       for (size_t i = 0; i < s_participant_count; ++i) {

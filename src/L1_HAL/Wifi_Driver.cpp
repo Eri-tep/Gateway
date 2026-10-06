@@ -1,6 +1,11 @@
-#include "L4_Services/Mgmt/Mgmt_Internal.h"
-#include "L4_Services/Mgmt_Service.h"
+// ============================================================================
+// Wifi_Driver.cpp — Level 1 Physical HAL Wi-Fi Driver Implementation
+// Encapsulated ESP32 RF/PHY Hardware Driver & Lifecycle Manager
+// ============================================================================
+
+#include "L1_HAL/Wifi_Driver.h"
 #include "L0_Foundation/System_Config.h"
+#include "L0_Foundation/System_Platform.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_wifi.h"
@@ -90,7 +95,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   }
 }
 
-void Wifi_Init() {
+void Wifi_Driver_Init() {
   if (!g_wifi_event_group) {
     g_wifi_event_group = xEventGroupCreateStatic(&s_wifi_event_group_buf);
   }
@@ -156,3 +161,42 @@ void Wifi_Init() {
   }
 }
 
+bool Wifi_Driver_IsConnected() noexcept {
+  return (WiFi.status() == WL_CONNECTED);
+}
+
+IPAddress Wifi_Driver_GetIp() noexcept {
+  if (WiFi.status() == WL_CONNECTED) {
+    return WiFi.localIP();
+  }
+  return WiFi.softAPIP();
+}
+
+int8_t Wifi_Driver_GetRssi() noexcept {
+  return static_cast<int8_t>(WiFi.RSSI());
+}
+
+void Wifi_Driver_Reconnect() noexcept {
+  esp_wifi_connect();
+}
+
+// ── L0 Foundation Universal Contract Implementations ──
+void System_WifiInit() noexcept {
+  Wifi_Driver_Init();
+}
+
+bool System_WifiIsConnected() noexcept {
+  return Wifi_Driver_IsConnected();
+}
+
+IPAddress System_WifiGetIp() noexcept {
+  return Wifi_Driver_GetIp();
+}
+
+int8_t System_WifiGetRssi() noexcept {
+  return Wifi_Driver_GetRssi();
+}
+
+void System_WifiReconnect() noexcept {
+  Wifi_Driver_Reconnect();
+}

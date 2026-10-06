@@ -18,6 +18,7 @@
 #include "L3_Protocol/Public/Packet_Router.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L2_Transport/RS485_CH.h"
+#include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Config.h"
 
 #include <Arduino.h>
@@ -221,5 +222,23 @@ bool Router_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
                               StaticPacket &virtual_ack_out) noexcept {
   return Wallpad_HandleSubBusQuery(channel_id, req, virtual_ack_out);
 }
+
+bool Router_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept {
+  return Bridge_SetSlotEnabled(slot_idx, enabled);
+}
+
+bool Router_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
+                                uint16_t port, const char *name) noexcept {
+  return Hub_SetSlot(slot_idx, enabled, ip, port, name);
+}
+
+bool Router_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept {
+  return Bridge_SetFramingLock(slot_idx, stx, etx, len);
+}
+
+bool Router_ResetBridgeFraming(uint8_t slot_idx) noexcept {
+  return Bridge_ResetFramingTracker(slot_idx);
+}
+
 
 

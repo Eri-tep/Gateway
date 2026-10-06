@@ -7,7 +7,6 @@ constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <esp_wifi.h>
 #include <fcntl.h>
 #include <lwip/sockets.h>
 #include <unistd.h>
@@ -303,7 +302,7 @@ void handleFsmDisconnected(uint32_t now, EventBits_t bits) noexcept {
     s_last_sta_retry_ms = now;
     Serial.printf("[WIFI] Reconnection attempt (interval: %u ms)...\r\n",
                   static_cast<unsigned>(s_sta_retry_interval_ms));
-    esp_wifi_connect();
+    System_WifiReconnect();
     s_sta_retry_interval_ms =
         std::min(s_sta_retry_interval_ms * 2, kMaxStaRetryIntervalMs);
   }

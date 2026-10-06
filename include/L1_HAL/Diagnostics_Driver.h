@@ -210,7 +210,7 @@ uint32_t Diag_GetBootTimeMs() noexcept;
 void Diag_SetBootTimeMs(uint32_t ms) noexcept;
 
 extern SystemMetricsTracker g_metrics;
-extern TaskWdtMonitor g_wdt_monitor;
+void Diagnostics_Init() noexcept;
 extern PacketStatistics g_pkt_stats;
 
 struct Ch1StateMetrics {

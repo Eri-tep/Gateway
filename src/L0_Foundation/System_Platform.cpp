@@ -64,4 +64,31 @@ bool Telnet_IsAllowedIP(IPAddress ip) {
   return Tcp_IsAllowedIP(ip);
 }
 
+// ── Watchdog Feeding Hook Bridge ──────────────────────────────────────────────
+static WdtFeedHook s_wdt_feed_hook = nullptr;
+
+void System_RegisterWdtHook(WdtFeedHook hook) noexcept {
+  s_wdt_feed_hook = hook;
+}
+
+void System_FeedWdt(size_t index) noexcept {
+  if (s_wdt_feed_hook) {
+    s_wdt_feed_hook(index);
+  }
+}
+
+// ── Socket Keepalive Utility ─────────────────────────────────────────────────
+#include <lwip/sockets.h>
+
+void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
+  if (sock < 0)
+    return;
+  int keepalive = 1;
+  setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+  setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+  setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+  setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+}
+
+
 

@@ -556,7 +556,7 @@ void Task_Ch1(void *pvParameters) {
   uint32_t next_poll_due_ms = millis();
 
   for (;;) {
-    g_wdt_monitor.feed(0);
+    System_FeedWdt(Config::Task::WDT_ID_CH1);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       Ch1_SetState(current_state, Ch1State::IDLE);
       if (g_system_event_group) {
@@ -717,7 +717,7 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
   TaskAckPollContext poll_ctx{&ack_queue, cfg, stats};
 
   for (;;) {
-    g_wdt_monitor.feed(task_idx);
+    System_FeedWdt(task_idx);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       if (g_system_event_group) {
         xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
@@ -842,7 +842,7 @@ void Task_Ch4(void *pvParameters) {
     while (!s_initial_caching_complete.load(std::memory_order_acquire) &&
            (millis() - wait_start <
             Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS)) {
-      g_wdt_monitor.feed(3);
+      System_FeedWdt(Config::Task::WDT_ID_CH4);
       if (g_system_event_group) {
         EventBits_t bits = xEventGroupWaitBits(
             g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
@@ -854,11 +854,11 @@ void Task_Ch4(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(200));
       }
     }
-    g_wdt_monitor.feed(3);
+    System_FeedWdt(Config::Task::WDT_ID_CH4);
   }
 
   for (;;) {
-    g_wdt_monitor.feed(3);
+    System_FeedWdt(Config::Task::WDT_ID_CH4);
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       if (g_system_event_group) {
         xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,

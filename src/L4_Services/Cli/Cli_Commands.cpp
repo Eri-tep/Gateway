@@ -1,5 +1,5 @@
-#include "L4_Services/Console/Console_Commands.h"
-#include "L4_Services/Console/Console_Fmt.h"
+#include "L4_Services/Cli/Cli_Commands.h"
+#include "L4_Services/Cli/Cli_Fmt.h"
 #include "L4_Services/CLI_Service.h"
 
 // ============================================================================

@@ -1,8 +1,9 @@
-#include "L4_Services/Console/Console_Fmt.h"
+#include "L4_Services/Cli/Cli_Fmt.h"
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/Console/Console_Commands.h"
+#include "L4_Services/Cli/Cli_Commands.h"
 #include "L3_Protocol/Public/Packet_Router.h"
-#include "L4_Services/EW11_Service.h"
+#include "L0_Foundation/System_Platform.h"
+#include "L3_Protocol/Public/Device_Registry.h"
 #include <WiFi.h>
 
 namespace ConfigCli {
@@ -449,7 +450,7 @@ static bool ew11ParseSlot(int sock, const char *arg, int &slot,
 }
 
 static void ew11SetEnable(int sock, int slot, bool enabled) {
-  Bridge_SetSlotEnabled(static_cast<uint8_t>(slot), enabled);
+  Router_SetBridgeSlotEnabled(static_cast<uint8_t>(slot), enabled);
   sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n",
                  slot, enabled ? "ENABLED" : "DISABLED");
 }
@@ -478,7 +479,7 @@ void cmdEw11(CliContext &ctx) {
         FixedBuf<24> pkt_buf;
         for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
           HubClientSlotSnapshot slot;
-          Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
+          System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
           const char *status_str = !slot.enabled         ? "Disabled"
                                    : !slot.is_connected  ? "Listening"
                                    : (slot.rx_pkts == 0) ? "Idle"
@@ -523,26 +524,26 @@ void cmdEw11(CliContext &ctx) {
       {
         for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
           HubClientSlotSnapshot slot;
-          Bridge_GetSlotSnapshot(s, slot);
-          Fcu::SlotRuntime rt;
-          Fcu::GetSlotRuntime(s, rt);
+          System_GetBridgeSlotSnapshot(s, slot);
+          FcuDeviceSnapshot snap;
+          Device_GetFcuSnapshot(s, snap);
 
           static constexpr const char *kModes[] = {"-", "Cool", "Heat", "Fan"};
           static constexpr const char *kFans[] = {"OFF", "Low", "Mid", "High",
                                                   "Auto"};
-          uint16_t m_idx = static_cast<uint16_t>(rt.snap.mode);
-          uint16_t f_idx = static_cast<uint16_t>(rt.snap.fan_speed);
-          const char *pwr_str = rt.snap.power ? "ON" : "OFF";
+          uint16_t m_idx = snap.mode;
+          uint16_t f_idx = snap.fan_speed;
+          const char *pwr_str = snap.power ? "ON" : "OFF";
           const char *mode_str =
               (m_idx >= 1 && m_idx <= 3) ? kModes[m_idx] : "-";
           const char *fan_str = (f_idx <= 4) ? kFans[f_idx] : "-";
           const char *swng_str =
-              (rt.snap.swing == Fcu::Swing::On) ? "ON" : "OFF";
+              (snap.swing == 2) ? "ON" : "OFF";
 
           char tgt_str[8] = "-", room_str[8] = "-";
-          if (rt.is_online) {
-            AppendBuf{tgt_str, sizeof(tgt_str)}.appendFormat("%uC", rt.snap.target_temp);
-            AppendBuf{room_str, sizeof(room_str)}.appendFormat("%uC", rt.snap.room_temp);
+          if (snap.is_online) {
+            AppendBuf{tgt_str, sizeof(tgt_str)}.appendFormat("%uC", snap.target_temp);
+            AppendBuf{room_str, sizeof(room_str)}.appendFormat("%uC", snap.room_temp);
           }
           const char *ip_str =
               (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
@@ -574,7 +575,7 @@ void cmdEw11(CliContext &ctx) {
          if (!ew11ParseSlot(sock, args.get(2), slot, "set"))
            return;
          HubClientSlotSnapshot slot_snap;
-         Bridge_GetSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
+         System_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
          uint16_t default_port = Config::TCP::EW11_SLOT_PORTS[slot];
          uint16_t port =
              slot_snap.target_port > 0 ? slot_snap.target_port : default_port;
@@ -599,9 +600,9 @@ void cmdEw11(CliContext &ctx) {
              enabled = (v != 0);
            }
          }
-         if (Hub_SetSlot(static_cast<uint8_t>(slot), enabled, ip_str, port,
-                         name_str)) {
-           Bridge_GetSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
+         if (Router_SetBridgeSlotConfig(static_cast<uint8_t>(slot), enabled, ip_str, port,
+                                        name_str)) {
+           System_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
            sendTelnetMsgf(
                sock,
                "[OK] EW11 Slot #%d configured (Name: %s, Listen Port: %u, "
@@ -632,7 +633,7 @@ void cmdEw11(CliContext &ctx) {
            if (CliFmt::ParseInt(args.get(5), parsed_len, 0, 255))
              len = static_cast<uint8_t>(parsed_len);
          }
-         Bridge_SetFramingLock(static_cast<uint8_t>(slot), stx, etx, len);
+         Router_SetBridgeFramingLock(static_cast<uint8_t>(slot), stx, etx, len);
          sendTelnetMsgf(sock,
                         "[OK] EW11 Slot #%d framing permanently fixed to STX "
                         "0x%02X, ETX 0x%02X, Len %u.\r\n",
@@ -643,7 +644,7 @@ void cmdEw11(CliContext &ctx) {
          int slot = -1;
          if (!ew11ParseSlot(sock, args.get(2), slot, "reset"))
            return;
-         Bridge_ResetFramingTracker(static_cast<uint8_t>(slot));
+         Router_ResetBridgeFraming(static_cast<uint8_t>(slot));
          sendTelnetMsgf(sock,
                         "[OK] EW11 Slot #%d framing tracker reset to "
                         "autonomous auto-probing.\r\n",

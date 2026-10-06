@@ -3,7 +3,7 @@
 // ============================================================================
 
 #include "L4_Services/Mgmt/Mgmt_Internal.h"
-#include "L4_Services/EW11_Service.h"
+#include "L0_Foundation/System_Platform.h"
 #include "L4_Services/Mgmt_Service.h"
 #include "L3_Protocol/Public/Packet_Router.h"
 #include "L3_Protocol/Public/Device_Registry.h"
@@ -383,14 +383,14 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
   {
     for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
       HubClientSlotSnapshot slot;
-      Bridge_GetSlotSnapshot(s, slot);
+      System_GetBridgeSlotSnapshot(s, slot);
       const DeviceStateEntry *fcu_dev =
           Device_Find(Config::FCU::DEV_ID, s, 0);
 
       // 소켓 설정이 활성화되어 있거나 수신 이력이 있는 경우 노출
-      Fcu::SlotRuntime fcu_rt{};
-      bool has_fcu_rt = Fcu::GetSlotRuntime(static_cast<uint8_t>(s), fcu_rt);
-      if (slot.enabled || (has_fcu_rt && fcu_rt.is_online) ||
+      FcuDeviceSnapshot fcu_snap{};
+      bool has_fcu_snap = Device_GetFcuSnapshot(s, fcu_snap);
+      if (slot.enabled || (has_fcu_snap && fcu_snap.is_online) ||
           (fcu_dev && fcu_dev->last_ack_len > 0)) {
         if (locked_count > 0)
           out.append(",");
@@ -398,22 +398,22 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
         snprintf(name_buf, sizeof(name_buf), "%s",
                  slot.name[0] ? slot.name : "Air Conditioner");
 
-        int pwr = fcu_rt.snap.power ? 1 : 0;
-        int mode = static_cast<int>(fcu_rt.snap.mode);
-        int fan = static_cast<int>(fcu_rt.snap.fan_speed);
-        int swg = static_cast<int>(fcu_rt.snap.swing);
-        int tgt = (fcu_rt.snap.target_temp > 0)
-                      ? fcu_rt.snap.target_temp
+        int pwr = fcu_snap.power ? 1 : 0;
+        int mode = static_cast<int>(fcu_snap.mode);
+        int fan = static_cast<int>(fcu_snap.fan_speed);
+        int swg = static_cast<int>(fcu_snap.swing);
+        int tgt = (fcu_snap.target_temp > 0)
+                      ? fcu_snap.target_temp
                       : ((fcu_dev && fcu_dev->last_target_temp > 0)
                              ? fcu_dev->last_target_temp
                              : 24);
-        int cur = (fcu_rt.snap.room_temp > 0)
-                      ? fcu_rt.snap.room_temp
+        int cur = (fcu_snap.room_temp > 0)
+                      ? fcu_snap.room_temp
                       : ((fcu_dev && fcu_dev->last_current_temp > 0)
                              ? fcu_dev->last_current_temp
                              : tgt);
 
-        int err_code = static_cast<int>(fcu_rt.snap.error_code);
+        int err_code = 0;
 
         out.appendFormat(
             "{\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,\"class\":\"fcu\",\"name\":"

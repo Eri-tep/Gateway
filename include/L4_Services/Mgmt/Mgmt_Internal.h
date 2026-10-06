@@ -6,10 +6,7 @@
 #include <freertos/semphr.h>
 #include <atomic>
 
-// WiFi event bits
-constexpr EventBits_t WIFI_BIT_CONNECTED = BIT0;
-constexpr EventBits_t WIFI_BIT_DISCONNECTED = BIT1;
-constexpr EventBits_t WIFI_BIT_GOT_IP = BIT2;
+// WiFi event bits are canonically defined in L0 System_Platform.h
 
 // 15-second Fallback Guard for remote Wi-Fi setting
 struct WifiFallbackGuard {

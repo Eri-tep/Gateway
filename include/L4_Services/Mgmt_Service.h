@@ -50,7 +50,6 @@ void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
 
 // ── Network Subsystem Entry Points & Lifecycle ──
-void Wifi_Init();
 void Remote_Init();
 void Remote_StartServer() noexcept;
 void Remote_StopServer() noexcept;

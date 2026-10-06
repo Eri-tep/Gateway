@@ -236,15 +236,24 @@ bool Device_SetTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 // ── L4 State Change Listener Subscription API ────────────────────────────────
 using DeviceStateListener    = void (*)(const DeviceUpdateResult &res) noexcept;
 using DoorphoneEventListener = void (*)(bool front_bell, bool lobby_bell) noexcept;
+using ElevatorEventListener  = void (*)(uint8_t sub1, uint8_t sub2, uint8_t floor,
+                                       uint8_t ho, uint8_t power,
+                                       bool is_arrival) noexcept;
 
 void Device_RegisterStateListener(DeviceStateListener listener) noexcept;
 void Device_RegisterDoorphoneListener(DoorphoneEventListener listener) noexcept;
+void Device_RegisterElevatorListener(ElevatorEventListener listener) noexcept;
 
 /// Process incoming bus ACK packet: updates SSOT cache and dispatches to registered listener.
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept;
 
 /// Dispatch doorphone bell state change to registered listener.
 void Device_NotifyDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept;
+
+/// Dispatch elevator state or arrival event to registered listener.
+void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
+                                uint8_t ho, uint8_t power,
+                                bool is_arrival) noexcept;
 
 // ── L3 Decoupled Protocol Parser & Decoder Registration API ──────────────────
 using DeviceAckPacketCheckFn = bool (*)(std::span<const uint8_t> frame) noexcept;
@@ -263,3 +272,18 @@ void Device_RegisterDoorphoneOpenHandler(DoorphoneOpenHandler handler) noexcept;
 void Device_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
                               uint32_t &out_last_bell_ms) noexcept;
 
+// ── FCU (Air Conditioner) Domain Public Interface ────────────────────────────
+struct FcuDeviceSnapshot {
+  bool power{false};
+  uint16_t mode{1};
+  uint16_t fan_speed{0};
+  uint16_t swing{0};
+  uint8_t target_temp{24};
+  uint8_t room_temp{0};
+  bool is_online{false};
+};
+
+bool Device_GetFcuSnapshot(uint8_t slot_idx, FcuDeviceSnapshot &out) noexcept;
+bool Device_ControlFcu(uint8_t slot_idx, const char *action, int value,
+                       uint16_t mode = 1, uint16_t fan = 4, uint16_t swing = 0,
+                       uint8_t temp = 24) noexcept;

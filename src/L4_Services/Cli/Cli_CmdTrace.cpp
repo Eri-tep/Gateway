@@ -1,9 +1,9 @@
-#include "L4_Services/Console/Console_Fmt.h"
+#include "L4_Services/Cli/Cli_Fmt.h"
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/Console/Console_Commands.h"
+#include "L4_Services/Cli/Cli_Commands.h"
 #include "L3_Protocol/Public/Protocol_Diagnostics.h"
 #include "L3_Protocol/Public/Device_Registry.h"
-#include "L4_Services/EW11_Service.h"
+#include "L0_Foundation/System_Platform.h"
 #include <WiFi.h>
 
 namespace WallpadCli {
@@ -293,7 +293,7 @@ void wallpadPrintStatus(AppendBuf &out) {
     FixedBuf<32> val_buf;
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
       HubClientSlotSnapshot slot;
-      Bridge_GetSlotSnapshot(static_cast<uint8_t>(s), slot);
+      System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
       p_buf.reset();
       val_buf.reset();
       p_buf.appendFormat("%u",
