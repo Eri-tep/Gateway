@@ -60,6 +60,8 @@ void AppendBuf::appendFormatV(const char *fmt, va_list a) {
   const int n = vsnprintf(buf + offset, cap - offset, fmt, a);
   if (n > 0) {
     offset = std::min(offset + static_cast<size_t>(n), cap - 1);
+  } else if (n < 0) {
+    buf[offset] = '\0';
   }
 }
 
@@ -77,8 +79,8 @@ void AppendBuf::append(std::string_view sv) noexcept {
   if (copy_len > 0) {
     memcpy(buf + offset, sv.data(), copy_len);
     offset += copy_len;
-    buf[offset] = '\0';
   }
+  buf[offset] = '\0';
 }
 
 void AppendBuf::append(const char *str) noexcept {
@@ -89,6 +91,6 @@ void AppendBuf::append(const char *str) noexcept {
   if (copy_len > 0) {
     memcpy(buf + offset, str, copy_len);
     offset += copy_len;
-    buf[offset] = '\0';
   }
+  buf[offset] = '\0';
 }

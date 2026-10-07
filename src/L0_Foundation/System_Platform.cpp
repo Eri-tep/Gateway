@@ -6,27 +6,29 @@ EventGroupHandle_t g_system_event_group = nullptr;
 std::atomic<bool> g_ota_in_progress{false};
 
 // ── Global Decoupled Diagnostic Trace Message Sink ──
-static SystemTraceMessageFn s_trace_msg_sink = nullptr;
-static SystemTracePacketFn s_trace_pkt_sink = nullptr;
+static std::atomic<SystemTraceMessageFn> s_trace_msg_sink{nullptr};
+static std::atomic<SystemTracePacketFn> s_trace_pkt_sink{nullptr};
 
 void System_RegisterTraceMessageSink(SystemTraceMessageFn fn) noexcept {
-  s_trace_msg_sink = fn;
+  s_trace_msg_sink.store(fn, std::memory_order_release);
 }
 
 void System_RegisterTracePacketSink(SystemTracePacketFn fn) noexcept {
-  s_trace_pkt_sink = fn;
+  s_trace_pkt_sink.store(fn, std::memory_order_release);
 }
 
 void System_TraceMessage(const char *msg) noexcept {
-  if (s_trace_msg_sink && msg) {
-    s_trace_msg_sink(msg);
+  auto sink = s_trace_msg_sink.load(std::memory_order_acquire);
+  if (sink && msg) {
+    sink(msg);
   }
 }
 
 void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
                         const StaticPacket &pkt) noexcept {
-  if (s_trace_pkt_sink) {
-    s_trace_pkt_sink(channel, is_tx, type, pkt);
+  auto sink = s_trace_pkt_sink.load(std::memory_order_acquire);
+  if (sink) {
+    sink(channel, is_tx, type, pkt);
   }
 }
 
@@ -63,15 +65,16 @@ bool Telnet_IsAllowedIP(IPAddress ip) {
 }
 
 // ── Watchdog Feeding Hook Bridge ──────────────────────────────────────────────
-static WdtFeedHook s_wdt_feed_hook = nullptr;
+static std::atomic<WdtFeedHook> s_wdt_feed_hook{nullptr};
 
 void System_RegisterWdtHook(WdtFeedHook hook) noexcept {
-  s_wdt_feed_hook = hook;
+  s_wdt_feed_hook.store(hook, std::memory_order_release);
 }
 
 void System_FeedWdt(size_t index) noexcept {
-  if (s_wdt_feed_hook) {
-    s_wdt_feed_hook(index);
+  auto hook = s_wdt_feed_hook.load(std::memory_order_acquire);
+  if (hook) {
+    hook(index);
   }
 }
 

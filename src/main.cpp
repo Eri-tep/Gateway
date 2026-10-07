@@ -17,6 +17,7 @@
 
 #include "esp_idf_version.h"
 #include "esp_ota_ops.h"
+#include "nvs_flash.h"
 
 // ============================================================================
 // FreeRTOS Task Priorities & Deployment Descriptors
@@ -66,6 +67,14 @@ static void Boot_CheckCrashLoop() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
   Diag_SetBootTimeMs(millis());
+
+  esp_err_t nvs_err = nvs_flash_init();
+  if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    Serial.println(F("[BOOT] NVS truncated or corrupt. Auto-healing via nvs_flash_erase..."));
+    nvs_flash_erase();
+    nvs_flash_init();
+  }
+
   Diagnostics_Init();
   Diag_DiagnoseStuck();
   Diag_CheckCoreDump();
@@ -376,6 +385,7 @@ static void Boot_StartTasks() {
     } else {
       Serial.printf("[FATAL] Failed to create static task '%s' on core %d!\r\n",
                     desc.name, static_cast<int>(desc.core_id));
+      System_Restart("Fatal: Task Create Failed");
     }
   }
 }

@@ -1,4 +1,5 @@
 #include "L0_Foundation/System_Config.h"
+#include "L0_Foundation/System_Buffer.h"
 #include <Arduino.h>
 #include <Preferences.h>
 #include <cstring>
@@ -98,64 +99,70 @@ void System_Sha256ToHex(const char *input, char *output) {
   mbedtls_sha256_free(&ctx);
 
   for (size_t i = 0; i < 32; i++) {
-    sprintf(output + (i * 2), "%02x", hash[i]);
+    const auto &hex_chars = HexLUT::LUT[hash[i]];
+    output[i * 2] = hex_chars[0];
+    output[i * 2 + 1] = hex_chars[1];
   }
   output[64] = '\0';
 }
 
 void Config_Load() {
   Preferences p;
-  p.begin("runtime-config", true);
+  const bool p_opened = p.begin("runtime-config", true);
   std::unique_lock lock(s_config_rw);
   auto &c = s_config;
 
-  c.uart_baud_rate = p.getULong("uart_baud", 9600);
-  c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
-  c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
-  c.doorphone_baud_rate =
-      p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
+  if (p_opened) {
+    c.uart_baud_rate = p.getULong("uart_baud", 9600);
+    c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
+    c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
+    c.doorphone_baud_rate =
+        p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
 
-  c.wifi_ssid[0] = '\0';
-  p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
-  c.wifi_password[0] = '\0';
-  p.getString("wifi_pass", c.wifi_password, sizeof(c.wifi_password));
-  c.ap_ssid[0] = '\0';
-  p.getString("ap_ssid", c.ap_ssid, sizeof(c.ap_ssid));
-  c.ap_password[0] = '\0';
-  p.getString("ap_pass", c.ap_password, sizeof(c.ap_password));
-  c.telnet_pass_hash[0] = '\0';
-  p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
+    c.wifi_ssid[0] = '\0';
+    p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
+    c.wifi_password[0] = '\0';
+    p.getString("wifi_pass", c.wifi_password, sizeof(c.wifi_password));
+    c.ap_ssid[0] = '\0';
+    p.getString("ap_ssid", c.ap_ssid, sizeof(c.ap_ssid));
+    c.ap_password[0] = '\0';
+    p.getString("ap_pass", c.ap_password, sizeof(c.ap_password));
+    c.telnet_pass_hash[0] = '\0';
+    p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
 
-  c.uart_parity = p.getUChar("u_parity", 0);
-  c.uart_stop_bits = p.getUChar("u_sbits", 1);
-  c.uart_data_bits = p.getUChar("u_dbits", 8);
-  c.ch2_parity = p.getUChar("ch2_parity", 0);
-  c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
-  c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
-  c.ch3_parity = p.getUChar("ch3_parity", 0);
-  c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
-  c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
-  c.doorphone_data_bits =
-      p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
-  c.doorphone_parity =
-      p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
-  c.doorphone_stop_bits =
-      p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
-  c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
-  auto raw_prof = nvsReadPrimitive<uint8_t>(p, "w_prof");
-  if (!raw_prof && raw_prof.error() != ESP_ERR_NVS_NOT_FOUND) {
-    ESP_LOGW("CONFIG", "w_prof: %s, using default ADAPTIVE", esp_err_to_name(raw_prof.error()));
+    c.uart_parity = p.getUChar("u_parity", 0);
+    c.uart_stop_bits = p.getUChar("u_sbits", 1);
+    c.uart_data_bits = p.getUChar("u_dbits", 8);
+    c.ch2_parity = p.getUChar("ch2_parity", 0);
+    c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
+    c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
+    c.ch3_parity = p.getUChar("ch3_parity", 0);
+    c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
+    c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
+    c.doorphone_data_bits =
+        p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
+    c.doorphone_parity =
+        p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
+    c.doorphone_stop_bits =
+        p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
+    c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
+    auto raw_prof = nvsReadPrimitive<uint8_t>(p, "w_prof");
+    if (!raw_prof && raw_prof.error() != ESP_ERR_NVS_NOT_FOUND) {
+      ESP_LOGW("CONFIG", "w_prof: %s, using default ADAPTIVE", esp_err_to_name(raw_prof.error()));
+    }
+    const auto prof = toEnum(raw_prof.value_or(0),
+                             WallpadProfileIndex::ADAPTIVE,
+                             WallpadProfileIndex::CUSTOM3);
+    if (raw_prof && !prof) {
+      ESP_LOGW("CONFIG", "w_prof out of range (%u), using default ADAPTIVE",
+               static_cast<unsigned>(*raw_prof));
+    }
+    c.wallpad_profile = std::to_underlying(prof.value_or(WallpadProfileIndex::ADAPTIVE));
+    s_active_wallpad_profile.store(c.wallpad_profile, std::memory_order_relaxed);
+    p.end();
+  } else {
+    ESP_LOGW("CONFIG", "Failed to open NVS runtime-config (read-only); using defaults");
   }
-  const auto prof = toEnum(raw_prof.value_or(0),
-                           WallpadProfileIndex::ADAPTIVE,
-                           WallpadProfileIndex::CUSTOM3);
-  if (raw_prof && !prof) {
-    ESP_LOGW("CONFIG", "w_prof out of range (%u), using default ADAPTIVE",
-             static_cast<unsigned>(*raw_prof));
-  }
-  c.wallpad_profile = std::to_underlying(prof.value_or(WallpadProfileIndex::ADAPTIVE));
-  s_active_wallpad_profile.store(c.wallpad_profile, std::memory_order_relaxed);
-  p.end();
 
   uint16_t mac_suffix = static_cast<uint16_t>(ESP.getEfuseMac() >> 32);
 
@@ -208,7 +215,11 @@ void Config_Save() {
   }
 
   Preferences p;
-  p.begin("runtime-config", false);
+  if (!p.begin("runtime-config", false)) {
+    ESP_LOGE("CONFIG", "Failed to open NVS runtime-config for write; restoring dirty flag");
+    s_config_dirty.store(true, std::memory_order_release);
+    return;
+  }
 
   p.putULong("uart_baud", snapshot.uart_baud_rate);
   p.putULong("ch2_baud", snapshot.ch2_baud_rate);
