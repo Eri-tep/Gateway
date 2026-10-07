@@ -1,10 +1,4 @@
-// ── L0 Foundation ──
-#include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
-#include "L0_Foundation/System_Platform.h"
-
 // ── L1 HAL Drivers ──
-#include "L1_HAL/Uart_Driver.h"
 #include "L1_HAL/Diagnostics_Driver.h"
 #include "L1_HAL/OTA_Driver.h"
 #include "L1_HAL/Wifi_Driver.h"
@@ -15,7 +9,6 @@
 #include "L2_Transport/Bridge_CH.h"
 
 // ── L3 Protocol Routing ──
-#include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 
 // ── L4 Network Services ──
@@ -24,7 +17,6 @@
 
 #include "esp_idf_version.h"
 #include "esp_ota_ops.h"
-#include "esp_task_wdt.h"
 
 // ============================================================================
 // FreeRTOS Task Priorities & Deployment Descriptors

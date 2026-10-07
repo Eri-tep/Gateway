@@ -17,7 +17,6 @@
 #include <esp_wifi.h>
 #include <lwip/sockets.h>
 #include <span>
-#include <utility>
 
 // ── JSON-RPC & TCP Management Server (formerly Service.cpp) ──
 // ============================================================================

@@ -23,7 +23,6 @@
 #include <lwip/sockets.h>
 #include <span>
 #include <string_view>
-#include <utility>
 
 // ============================================================================
 // From src/Telnet/Telnet.cpp

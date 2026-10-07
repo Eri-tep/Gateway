@@ -8,6 +8,7 @@
 #include "L0_Foundation/System_Config.h"
 #include <lwip/sockets.h>
 #include <span>
+#include <sys/time.h>
 #include <utility>
 
 // ============================================================================
@@ -246,7 +247,6 @@ public:
 
 // ============================================================================
 // SECTION 3: TELNET TRACER CLASS DEFINITION
-#include <sys/time.h>
 
 struct TracePacketEntry {
   struct timeval tv;

@@ -8,6 +8,9 @@
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
+#include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <span>
 #include <sys/select.h>
 
@@ -56,10 +59,6 @@ void Remote_StopServer() noexcept;
 void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
 void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
 void Remote_Tick(bool ota_now, uint32_t now_ms) noexcept;
-
-#include <WiFi.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 
 // ── Remote Control Handler Registration ──
 using DeviceControlHandler = bool (*)(StaticPacket &req,

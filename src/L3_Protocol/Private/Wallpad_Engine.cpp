@@ -8,7 +8,6 @@
 #include "L3_Protocol/Private/Routing_Engine.h"
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L3_Protocol/Public/Protocol_Facade.h"
 
 #include <span>
 #include <Arduino.h>

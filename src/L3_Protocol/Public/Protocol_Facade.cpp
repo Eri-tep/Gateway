@@ -8,9 +8,7 @@
 #include "L2_Transport/TCP_CH.h"
 #include "L2_Transport/Bridge_CH.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
-#include "L3_Protocol/Private/Wallpad_Learning.h"
 #include "L3_Protocol/Private/Fcu_Engine.h"
-#include "esp_log.h"
 #include <algorithm>
 #include <atomic>
 #include <span>
