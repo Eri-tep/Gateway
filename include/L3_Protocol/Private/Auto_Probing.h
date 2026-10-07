@@ -110,4 +110,4 @@ public:
                              UpdateFromBusFn update_fn);
 };
 
-extern AutoProbingEngine g_auto_probing_engine;
+AutoProbingEngine &AutoProbe_GetEngine() noexcept;

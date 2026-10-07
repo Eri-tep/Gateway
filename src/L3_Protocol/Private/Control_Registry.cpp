@@ -15,7 +15,12 @@ using namespace ControlTemplateUtils;
 // Control: ControlTemplateRegistry
 // ============================================================================
 
-ControlTemplateRegistry g_control_registry;
+static ControlTemplateRegistry s_control_registry;
+
+ControlTemplateRegistry &Control_GetRegistry() noexcept {
+  return s_control_registry;
+}
+
 static GroupControlTemplate
     s_nvs_transfer_buf[ControlTemplateRegistry::MAX_GROUPS];
 
@@ -125,7 +130,7 @@ ControlTemplateRegistry::ControlTemplateRegistry() {
 
 void ControlTemplateRegistry::init() {
   ProfileRepository::setProfileChangeListener([](uint8_t old_idx, uint8_t new_idx) {
-    g_control_registry.onProfileChanged(old_idx, new_idx);
+    s_control_registry.onProfileChanged(old_idx, new_idx);
   });
   loadFromNvs();
 }
@@ -454,7 +459,7 @@ void ControlTemplateRegistry::applyProfile(const WallpadProfile *profile) {
 void ControlTemplateRegistry::matchAndInject(const AutoProbeDescriptor &ad) {
   if (const WallpadProfile *profile = ProfileMatcher::matchProfile(ad)) {
     applyProfile(profile);
-    g_auto_probing_engine.injectControlSpec(0x02, 11);
+    AutoProbe_GetEngine().injectControlSpec(0x02, 11);
   } else {
     ESP_LOGW("ControlTemplate",
              "No matching wallpad profile found. Fallback to default framing.");
@@ -462,15 +467,15 @@ void ControlTemplateRegistry::matchAndInject(const AutoProbeDescriptor &ad) {
 }
 
 void ControlTemplateRegistry::synthesizeFromConvergedCache() {
-  const auto ad = g_auto_probing_engine.getDescriptor();
+  const auto ad = AutoProbe_GetEngine().getDescriptor();
   if (!ad.offsets_locked)
     return;
 
   const uint8_t ctrl_opcode = ad.control_opcode ? ad.control_opcode : 0x02;
-  const size_t total = g_polling_targets.totalCount();
+  const size_t total = Polling_GetRegistry().totalCount();
   for (size_t i = 0; i < total; ++i) {
     PollingTargetEntry entry{};
-    if (!g_polling_targets.getEntry(i, entry) || !entry.is_active ||
+    if (!Polling_GetRegistry().getEntry(i, entry) || !entry.is_active ||
         entry.raw_query_len < 5)
       continue;
 
@@ -988,7 +993,7 @@ bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
                                    const DeviceStateEntry *dev,
                                    DecodedDeviceState &out) noexcept {
   GroupControlTemplate grp{};
-  bool has_grp = g_control_registry.findGroup(dev_id, grp);
+  bool has_grp = s_control_registry.findGroup(dev_id, grp);
   if (!has_grp && dev_id == 0x34) {
     grp.dev_id = 0x34;
     grp.coverage.dev_class = DeviceClass::MOMENTARY;
@@ -1003,7 +1008,7 @@ bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
 
 uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
   GroupControlTemplate grp{};
-  if (g_control_registry.findGroup(dev_id, grp)) {
+  if (s_control_registry.findGroup(dev_id, grp)) {
     if (grp.power_slot.category_val != 0 &&
         grp.power_slot.category_val != 0xFF) {
       if (sub1 == grp.temp_slot.category_val ||

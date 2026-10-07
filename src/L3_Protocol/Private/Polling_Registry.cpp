@@ -20,11 +20,21 @@ template <class F> static inline size_t countIf(const PollingTargetEntry *e, siz
 
 RTC_NOINIT_ATTR RtcWarmCache rtc_warm_cache;
 
-bool g_warm_cache_loaded = false;
-uint8_t g_warm_cache_source = 0; // 0: None/Cold, 1: RTC SRAM, 2: NVS Flash
-uint8_t g_warm_cache_restored_count = 0;
-std::atomic<bool> g_warm_cache_dirty{false};
-std::atomic<uint32_t> g_warm_cache_dirty_ms{0};
+static bool s_warm_cache_loaded = false;
+static uint8_t s_warm_cache_source = 0; // 0: None/Cold, 1: RTC SRAM, 2: NVS Flash
+static uint8_t s_warm_cache_restored_count = 0;
+static std::atomic<bool> s_warm_cache_dirty{false};
+static std::atomic<uint32_t> s_warm_cache_dirty_ms{0};
+
+WarmCacheStatus WarmCache_GetStatus() noexcept {
+  return WarmCacheStatus{
+      .loaded = s_warm_cache_loaded,
+      .source = s_warm_cache_source,
+      .restored_count = s_warm_cache_restored_count,
+      .dirty = s_warm_cache_dirty.load(std::memory_order_relaxed),
+      .dirty_ms = s_warm_cache_dirty_ms.load(std::memory_order_relaxed),
+  };
+}
 
 namespace {
 static NvsEnvelope<RtcWarmCache> s_warm_cache_env;
@@ -34,7 +44,7 @@ void WarmCache_SaveToRtc() {
   memset(&rtc_warm_cache, 0, sizeof(rtc_warm_cache));
   rtc_warm_cache.magic = RTC_MAGIC_WARM_CACHE;
   rtc_warm_cache.count = static_cast<uint8_t>(
-      g_polling_targets.getWarmCacheEntries(rtc_warm_cache.entries, PollingTargetRegistry::MAX_TARGETS));
+      Polling_GetRegistry().getWarmCacheEntries(rtc_warm_cache.entries, PollingTargetRegistry::MAX_TARGETS));
   if (rtc_warm_cache.count > 0) {
     rtc_warm_cache.crc32 =
         FastCrc32(reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
@@ -56,7 +66,7 @@ void WarmCache_SaveToNvs() {
           rtc_warm_cache.count);
     }
   }
-  g_warm_cache_dirty.store(false, std::memory_order_release);
+  s_warm_cache_dirty.store(false, std::memory_order_release);
 }
 
 void WarmCache_RestoreOnBoot() {
@@ -72,11 +82,11 @@ void WarmCache_RestoreOnBoot() {
         FastCrc32(reinterpret_cast<const uint8_t *>(rtc_warm_cache.entries),
                   sizeof(RtcWarmCacheEntry) * rtc_warm_cache.count);
     if (computed_crc == rtc_warm_cache.crc32) {
-      g_polling_targets.loadFromWarmCache(rtc_warm_cache.entries,
+      Polling_GetRegistry().loadFromWarmCache(rtc_warm_cache.entries,
                                           rtc_warm_cache.count, now);
-      g_warm_cache_loaded = true;
-      g_warm_cache_source = 1;
-      g_warm_cache_restored_count = rtc_warm_cache.count;
+      s_warm_cache_loaded = true;
+      s_warm_cache_source = 1;
+      s_warm_cache_restored_count = rtc_warm_cache.count;
       ::Serial.printf("[WARM CACHE] Restored %u targets from RTC Fast SRAM "
                       "(0ms delay)!\r\n",
                       rtc_warm_cache.count);
@@ -99,12 +109,12 @@ void WarmCache_RestoreOnBoot() {
                   s_warm_cache_env.payload.entries),
               sizeof(RtcWarmCacheEntry) * s_warm_cache_env.payload.count);
           if (computed_crc == s_warm_cache_env.payload.crc32) {
-            g_polling_targets.loadFromWarmCache(
+            Polling_GetRegistry().loadFromWarmCache(
                 s_warm_cache_env.payload.entries,
                 s_warm_cache_env.payload.count, now);
-            g_warm_cache_loaded = true;
-            g_warm_cache_source = 2;
-            g_warm_cache_restored_count = s_warm_cache_env.payload.count;
+            s_warm_cache_loaded = true;
+            s_warm_cache_source = 2;
+            s_warm_cache_restored_count = s_warm_cache_env.payload.count;
             ::Serial.printf(
                 "[WARM CACHE] Restored %u targets from NVS Flash snapshot!\r\n",
                 s_warm_cache_env.payload.count);
@@ -117,16 +127,16 @@ void WarmCache_RestoreOnBoot() {
     p.end();
   }
 
-  g_warm_cache_loaded = false;
-  g_warm_cache_source = 0;
-  g_warm_cache_restored_count = 0;
+  s_warm_cache_loaded = false;
+  s_warm_cache_source = 0;
+  s_warm_cache_restored_count = 0;
   ::Serial.println(
       F("[WARM CACHE] Cold start initialized (No prior cache found)."));
 }
 
 void WarmCache_CheckNvsDebounce() {
-  if (g_warm_cache_dirty.load(std::memory_order_acquire)) {
-    uint32_t dirty_ms = g_warm_cache_dirty_ms.load(std::memory_order_relaxed);
+  if (s_warm_cache_dirty.load(std::memory_order_acquire)) {
+    uint32_t dirty_ms = s_warm_cache_dirty_ms.load(std::memory_order_relaxed);
     if (dirty_ms > 0 &&
         TimeUtils::isElapsed(dirty_ms,
                              Config::Timing::WARM_CACHE_NVS_DEBOUNCE_MS)) {
@@ -143,7 +153,11 @@ void WarmCache_CheckNvsDebounce() {
 // PollingTargetRegistry
 // ============================================================================
 
-PollingTargetRegistry g_polling_targets;
+static PollingTargetRegistry s_polling_targets;
+
+PollingTargetRegistry &Polling_GetRegistry() noexcept {
+  return s_polling_targets;
+}
 
 namespace {
 bool entryMatches(const PollingTargetEntry &e, uint8_t d, uint8_t s1,
@@ -223,8 +237,8 @@ void PollingTargetRegistry::registerOrTouch(uint8_t ch, uint8_t dev_id,
   }
 
   if (is_new_entry) {
-    g_warm_cache_dirty.store(true, std::memory_order_release);
-    g_warm_cache_dirty_ms.store(now, std::memory_order_release);
+    s_warm_cache_dirty.store(true, std::memory_order_release);
+    s_warm_cache_dirty_ms.store(now, std::memory_order_release);
   }
 }
 

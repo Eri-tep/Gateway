@@ -167,7 +167,7 @@ private:
                                                 const char *name = nullptr);
 };
 
-extern ControlTemplateRegistry g_control_registry;
+ControlTemplateRegistry &Control_GetRegistry() noexcept;
 
 namespace ControlTemplateUtils {
 inline void getControlNamespace(char *out_ns, size_t max_len,

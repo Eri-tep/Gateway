@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <sys/select.h>
 
 // ── Diagnostic Snapshot Structures ──────────────────────────────────────────
 
@@ -223,8 +224,6 @@ void Protocol_WarmCacheRestoreOnBoot() noexcept;
 
 
 // ── L3 TCP Reactor Participant Registration Facade (Rule 17) ─────────────────
-#include <sys/select.h>
-
 using TcpPopulateFdsFn = void (*)(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
 using TcpProcessEventsFn = void (*)(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
 using TcpTickFn = void (*)(bool ota_now, uint32_t now_ms) noexcept;

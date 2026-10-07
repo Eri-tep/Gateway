@@ -101,7 +101,7 @@ public:
   bool isLocked() const {
     VendorProfileDescriptor d = activeProfile();
     if (isAutoProfile(d)) {
-      return g_auto_probing_engine.isLocked();
+      return AutoProbe_GetEngine().isLocked();
     }
     return true;
   }

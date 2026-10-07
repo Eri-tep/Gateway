@@ -72,10 +72,10 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
     Wallpad_CheckConvergence(false);
   }
 
-  g_polling_targets.sweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
+  Polling_GetRegistry().sweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
 
   PollingTargetRegistry::PollingCandidate candidates[PollingTargetRegistry::MAX_TARGETS];
-  size_t active_cnt = g_polling_targets.getActiveCandidates(
+  size_t active_cnt = Polling_GetRegistry().getActiveCandidates(
       candidates, PollingTargetRegistry::MAX_TARGETS);
 
   poll_dev_id = 0;
@@ -111,7 +111,7 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
       poll_sub2 = tgt.sub2;
       poll_raw_len = tgt.raw_query_len;
       if (poll_raw_len > 0) {
-        g_polling_targets.getQueryData(tgt.entry_idx, poll_raw_ptr, poll_raw_len);
+        Polling_GetRegistry().getQueryData(tgt.entry_idx, poll_raw_ptr, poll_raw_len);
       }
       if (chosen_score == 3) {
         Device_SetLastStalePollMs(tgt.dev_id, tgt.sub1, tgt.sub2, now);
@@ -170,9 +170,9 @@ void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
   ack.channel_id = channel_id;
 
   if (matching_query && matching_query->length > 0) {
-    g_polling_targets.updateResponse(matching_query->data.data(), matching_query->length,
+    Polling_GetRegistry().updateResponse(matching_query->data.data(), matching_query->length,
                                      ack.data.data(), ack.length);
-    g_auto_probing_engine.feedOpcodePair(
+    AutoProbe_GetEngine().feedOpcodePair(
         span<const uint8_t>(matching_query->data.data(), matching_query->length),
         span<const uint8_t>(ack.data.data(), ack.length));
   }
@@ -185,7 +185,7 @@ void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
     span<const uint8_t> ack_span(ack.data.data(), ack.length);
     if (parser->extractDeviceKey(ack_span, dev_id, sub1, sub2)) {
       if (channel_id == 1) {
-        g_polling_targets.markVerified(dev_id, sub1, sub2);
+        Polling_GetRegistry().markVerified(dev_id, sub1, sub2);
       }
       Router_RecordRoute(channel_id, -1, dev_id, sub1, sub2);
     }
@@ -221,7 +221,7 @@ ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_a
 
   GroupControlTemplate grp{};
   const bool has_grp =
-      (has_key && dev_id != 0) && g_control_registry.findGroup(dev_id, grp);
+      (has_key && dev_id != 0) && Control_GetRegistry().findGroup(dev_id, grp);
 
   bool is_ctl = parser->isControlPacket(frame);
   if (!is_ctl && has_grp && grp.frame_len > 4 &&
@@ -264,7 +264,7 @@ ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_a
 }
 
 uint32_t Wallpad_GetPollIntervalMs() noexcept {
-  size_t active_tgts = g_polling_targets.activeCount();
+  size_t active_tgts = Polling_GetRegistry().activeCount();
   return (s_convergence_done || active_tgts == 0)
              ? TimingConfig_Get().ch1_poll_interval_ms
              : 20;
@@ -295,7 +295,7 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
     return true;
   }
 
-  size_t active_tgts = g_polling_targets.activeCount();
+  size_t active_tgts = Polling_GetRegistry().activeCount();
   size_t online_devs = Device_GetOnlineCount();
 
   if (active_tgts != s_last_active_tgts) {
@@ -306,8 +306,8 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
   bool is_all_online = (online_devs >= active_tgts);
   auto *parser = WallpadParserFactory::getActiveParser();
   if (parser && parser->isAutoMode() &&
-      !g_auto_probing_engine.isOffsetsLocked()) {
-    is_all_online = (g_polling_targets.verifiedCount() >= active_tgts);
+      !AutoProbe_GetEngine().isOffsetsLocked()) {
+    is_all_online = (Polling_GetRegistry().verifiedCount() >= active_tgts);
   }
 
   if (active_tgts > 0 && is_all_online) {
@@ -320,14 +320,14 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
       }
       if (parser && parser->isAutoMode() &&
-          !g_auto_probing_engine.isOffsetsLocked()) {
-        g_auto_probing_engine.analyzeCacheMatrix();
+          !AutoProbe_GetEngine().isOffsetsLocked()) {
+        AutoProbe_GetEngine().analyzeCacheMatrix();
       }
-      g_polling_targets.resetHits();
+      Polling_GetRegistry().resetHits();
       System_TraceMessage(
           "[SYSTEM MSG]  ★ 2nd-Tier Cache Converged (Zero Offline). "
           "Runtime metrics synchronized.\r\n");
-      g_control_registry.synthesizeFromConvergedCache();
+      Control_GetRegistry().synthesizeFromConvergedCache();
       System_TraceMessage(
           "[CTL] Control template synthesis triggered.\r\n");
       return true;
@@ -353,7 +353,7 @@ bool Wallpad_IsAutoUnlocked() noexcept {
 }
 
 void Wallpad_FeedAutoFrame(span<const uint8_t> frame) noexcept {
-  g_auto_probing_engine.feedFrame(frame);
+  AutoProbe_GetEngine().feedFrame(frame);
 }
 
 int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
@@ -376,14 +376,14 @@ bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
   }
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
   parser->extractDeviceKey(frame, dev_id, sub1, sub2);
-  g_polling_targets.registerOrTouch(channel_id, dev_id, sub1, sub2,
+  Polling_GetRegistry().registerOrTouch(channel_id, dev_id, sub1, sub2,
                                     req.data.data(), req.length);
   virtual_ack_out.channel_id = channel_id;
   return Device_CopyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
 }
 
 void Wallpad_FeedControlFrame(span<const uint8_t> frame) noexcept {
-  g_auto_probing_engine.feedControlFrame(frame);
+  AutoProbe_GetEngine().feedControlFrame(frame);
 }
 
 // ── FramingTracker Implementation (L3) ───────────────────────────────────────
@@ -750,7 +750,7 @@ void Wallpad_DoorphoneInit() noexcept {
   Device_RegisterDoorphoneOpenHandler(Wallpad_DoorphoneOpen);
   Wallpad_InitDecoupledHooks();
   ProfileRepository::addProfileChangeListener(Wallpad_DoorphoneOnProfileChanged);
-  g_control_registry.init();
+  Control_GetRegistry().init();
 }
 
 bool Wallpad_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,

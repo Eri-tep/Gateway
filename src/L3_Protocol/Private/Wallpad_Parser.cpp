@@ -64,7 +64,7 @@ EffProfile effectiveProfile() {
                : 11;
 
   if (strcasecmp(d.key, "auto") == 0) {
-    const AutoProbeDescriptor ad = g_auto_probing_engine.getDescriptor();
+    const AutoProbeDescriptor ad = AutoProbe_GetEngine().getDescriptor();
     e.is_auto = true;
     e.stx = ad.stx;
     e.etx = ad.etx;
@@ -268,7 +268,7 @@ size_t UniversalProtocolEngine::getVendorName(char *out, size_t max_len) const {
   if (strcasecmp(desc.key, "auto") != 0)
     return snprintf(out, max_len, "%s", desc.name);
 
-  auto ad = g_auto_probing_engine.getDescriptor();
+  auto ad = AutoProbe_GetEngine().getDescriptor();
   if (!ad.is_locked)
     return snprintf(out, max_len, "%s", "Auto (Learning...)");
   return snprintf(out, max_len, "Auto [STX 0x%02X ETX 0x%02X / %s]", ad.stx,
@@ -294,7 +294,7 @@ static inline bool checkFramingPure(span<const uint8_t> f, uint8_t stx,
     return false;
   if (algo == ChecksumAlgo::NONE)
     return true;
-  return g_auto_probing_engine.calculateChecksum(algo, f.data(), f.size()) ==
+  return AutoProbe_GetEngine().calculateChecksum(algo, f.data(), f.size()) ==
          f[f.size() - 2];
 }
 
@@ -305,7 +305,7 @@ UniversalProtocolEngine::validateFrame(span<const uint8_t> frame) const noexcept
 
   EffProfile e = effectiveProfile();
   if (e.is_auto) {
-    g_auto_probing_engine.feedFrame(frame); // 학습 후 갱신된 값으로 재계산
+    AutoProbe_GetEngine().feedFrame(frame); // 학습 후 갱신된 값으로 재계산
     e = effectiveProfile();
   }
 
@@ -314,7 +314,7 @@ UniversalProtocolEngine::validateFrame(span<const uint8_t> frame) const noexcept
   if (frame[0] != e.stx || frame[frame.size() - 1] != e.etx)
     return std::unexpected(FrameValidationError::HeaderMismatch);
   if (e.algo != ChecksumAlgo::NONE &&
-      g_auto_probing_engine.calculateChecksum(e.algo, frame) != frame[frame.size() - 2])
+      AutoProbe_GetEngine().calculateChecksum(e.algo, frame) != frame[frame.size() - 2])
     return std::unexpected(FrameValidationError::ChecksumMismatch);
 
   return frame;
@@ -388,14 +388,14 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
     out.data[e.sub2_off] = sub2;
   if (n >= 3) {
     out.data[n - 2] =
-        g_auto_probing_engine.calculateChecksum(e.algo, out.data.data(), n);
+        AutoProbe_GetEngine().calculateChecksum(e.algo, out.data.data(), n);
     out.data[n - 1] = e.etx;
   }
   return true;
 }
 
 uint8_t UniversalProtocolEngine::calculateChecksum(span<const uint8_t> data) const noexcept {
-  return g_auto_probing_engine.calculateChecksum(effectiveProfile().algo, data);
+  return AutoProbe_GetEngine().calculateChecksum(effectiveProfile().algo, data);
 }
 
 uint8_t UniversalProtocolEngine::calculateChecksum(const uint8_t *data,
@@ -496,7 +496,7 @@ void ProfileRepository::init() {
     memcpy(s_active_profiles, loaded, sizeof(loaded));
     s_profiles_initialized = true;
   }
-  g_auto_probing_engine.initFromNvs();
+  AutoProbe_GetEngine().initFromNvs();
 }
 
 size_t ProfileRepository::getProfileCount() { return MAX_PROFILES; }
@@ -659,14 +659,14 @@ bool ProfileRepository::saveCurrentAutoAs(const char *name, size_t &saved_idx) {
     return false;
   init();
 
-  const AutoProbeDescriptor ad = g_auto_probing_engine.getDescriptor();
+  const AutoProbeDescriptor ad = AutoProbe_GetEngine().getDescriptor();
 
   // 관측된 월패드 쿼리 길이 범위 (UI 설명용)
   uint8_t obs_min = 255, obs_max = 0;
-  const size_t total = g_polling_targets.totalCount();
+  const size_t total = Polling_GetRegistry().totalCount();
   for (size_t i = 0; i < total; ++i) {
     PollingTargetEntry e;
-    if (g_polling_targets.getEntry(i, e) && e.raw_query_len > 0 &&
+    if (Polling_GetRegistry().getEntry(i, e) && e.raw_query_len > 0 &&
         (e.source_channels & kWallpadChMask)) {
       obs_min = std::min(obs_min, e.raw_query_len);
       obs_max = std::max(obs_max, e.raw_query_len);

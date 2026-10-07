@@ -28,29 +28,30 @@ void ProtocolDiag_WarmCacheCheckNvsDebounce() noexcept {
 
 
 void ProtocolDiag_GetWarmCacheStatus(uint8_t &out_source, uint8_t &out_restored_count) noexcept {
-  out_source = g_warm_cache_source;
-  out_restored_count = g_warm_cache_restored_count;
+  auto st = WarmCache_GetStatus();
+  out_source = st.source;
+  out_restored_count = st.restored_count;
 }
 
 void ProtocolDiag_PollingResetHits() noexcept {
-  g_polling_targets.resetHits();
+  Polling_GetRegistry().resetHits();
 }
 
 void ProtocolDiag_PollingClear() noexcept {
-  g_polling_targets.clear();
+  Polling_GetRegistry().clear();
 }
 
 void ProtocolDiag_PollingSweepExpired(uint32_t threshold_ms) noexcept {
-  g_polling_targets.sweepExpired(threshold_ms);
+  Polling_GetRegistry().sweepExpired(threshold_ms);
 }
 
 size_t ProtocolDiag_GetPollingTargetCount() noexcept {
-  return g_polling_targets.totalCount();
+  return Polling_GetRegistry().totalCount();
 }
 
 bool ProtocolDiag_GetPollingEntry(size_t index, PollingEntrySnapshot &snap) noexcept {
   PollingTargetEntry tgt;
-  if (!g_polling_targets.getEntry(index, tgt))
+  if (!Polling_GetRegistry().getEntry(index, tgt))
     return false;
   snap.dev_id = tgt.dev_id;
   snap.sub1 = tgt.sub1;
@@ -71,7 +72,7 @@ bool ProtocolDiag_GetPollingEntry(size_t index, PollingEntrySnapshot &snap) noex
 size_t ProtocolDiag_GetPollingTargetsSnapshot(PollingEntrySnapshot *out_array, size_t max_count) noexcept {
   if (!out_array || max_count == 0)
     return 0;
-  size_t total = g_polling_targets.totalCount();
+  size_t total = Polling_GetRegistry().totalCount();
   size_t written = 0;
   for (size_t i = 0; i < total && written < max_count; ++i) {
     if (ProtocolDiag_GetPollingEntry(i, out_array[written])) {
@@ -84,21 +85,21 @@ size_t ProtocolDiag_GetPollingTargetsSnapshot(PollingEntrySnapshot *out_array, s
 void ProtocolDiag_PollingRegisterOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1,
                                          uint8_t sub2, const uint8_t *pkt_data,
                                          size_t pkt_len) noexcept {
-  g_polling_targets.registerOrTouch(ch, dev_id, sub1, sub2, pkt_data, pkt_len);
+  Polling_GetRegistry().registerOrTouch(ch, dev_id, sub1, sub2, pkt_data, pkt_len);
 }
 
 void ProtocolDiag_AutoProbingReset() noexcept {
-  g_auto_probing_engine.reset();
+  AutoProbe_GetEngine().reset();
 }
 
 void ProtocolDiag_AutoProbingFeedFrame(const uint8_t *data, size_t len) noexcept {
   if (data && len > 0) {
-    g_auto_probing_engine.feedFrame(std::span<const uint8_t>(data, len));
+    AutoProbe_GetEngine().feedFrame(std::span<const uint8_t>(data, len));
   }
 }
 
 bool ProtocolDiag_GetAutoProbingDescriptor(AutoProbingDescriptorSnapshot &out) noexcept {
-  auto desc = g_auto_probing_engine.getDescriptor();
+  auto desc = AutoProbe_GetEngine().getDescriptor();
   VendorProfileDescriptor active_prof;
   bool is_manual_prof = false;
   if (ProfileRepository::getActiveProfile(active_prof) &&
@@ -153,9 +154,9 @@ bool ProtocolDiag_GetAutoProbingDescriptor(AutoProbingDescriptorSnapshot &out) n
 }
 
 void ProtocolDiag_GetPollingStats(size_t &active, size_t &verified, size_t &total) noexcept {
-  active = g_polling_targets.activeCount();
-  verified = g_polling_targets.verifiedCount();
-  total = g_polling_targets.totalCount();
+  active = Polling_GetRegistry().activeCount();
+  verified = Polling_GetRegistry().verifiedCount();
+  total = Polling_GetRegistry().totalCount();
 }
 
 void ProtocolDiag_GetActiveAddresses(uint8_t *dev_ids, size_t &dev_cnt,
@@ -166,10 +167,10 @@ void ProtocolDiag_GetActiveAddresses(uint8_t *dev_ids, size_t &dev_cnt,
   sub1_cnt = 0;
   sub2_cnt = 0;
   constexpr uint8_t CH23_MASK = (1 << 2) | (1 << 3);
-  size_t total_tgts = g_polling_targets.totalCount();
+  size_t total_tgts = Polling_GetRegistry().totalCount();
   for (size_t i = 0; i < total_tgts; ++i) {
     PollingTargetEntry entry;
-    if (g_polling_targets.getEntry(i, entry)) {
+    if (Polling_GetRegistry().getEntry(i, entry)) {
       if ((entry.source_channels & CH23_MASK) == 0)
         continue;
       if (dev_cnt < max_items && std::find(dev_ids, dev_ids + dev_cnt, entry.dev_id) == dev_ids + dev_cnt) {
@@ -228,7 +229,7 @@ void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
     return;
 
   auto *active = WallpadParserFactory::getActiveParser();
-  auto desc = g_auto_probing_engine.getDescriptor();
+  auto desc = AutoProbe_GetEngine().getDescriptor();
   char vendor_name_buf[64] = "Unknown";
   if (active) {
     active->getVendorName(vendor_name_buf, sizeof(vendor_name_buf));
@@ -330,7 +331,7 @@ void ProtocolDiag_WallpadReset() noexcept {
   char dp_ns[16] = {0};
   ProtocolDiag_GetFramingNamespace(0, wp_ns, sizeof(wp_ns));
   ProtocolDiag_GetFramingNamespace(0, dp_ns, sizeof(dp_ns));
-  g_auto_probing_engine.reset();
+  AutoProbe_GetEngine().reset();
   Wallpad_DoorphoneClearNvs(dp_ns);
 }
 
@@ -380,16 +381,16 @@ bool ProtocolDiag_GetDoorphoneMatch(DoorphoneMatchSnapshot &out) noexcept {
 bool ProtocolDiag_BuildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                      ControlActionType act, int val,
                                      StaticPacket &out_req) noexcept {
-  return g_control_registry.buildControlPacket(dev_id, sub1, sub2, act, val, out_req);
+  return Control_GetRegistry().buildControlPacket(dev_id, sub1, sub2, act, val, out_req);
 }
 
 size_t ProtocolDiag_GetGroupCount() noexcept {
-  return g_control_registry.getGroupCount();
+  return Control_GetRegistry().getGroupCount();
 }
 
 const char *ProtocolDiag_GetGroupName(uint8_t dev_id) noexcept {
   GroupControlTemplate grp{};
-  if (g_control_registry.findGroup(dev_id, grp)) {
+  if (Control_GetRegistry().findGroup(dev_id, grp)) {
     static char s_buf[16];
     snprintf(s_buf, sizeof(s_buf), "%s", grp.group_name);
     return s_buf;
@@ -450,7 +451,7 @@ static void CopyTemplateToSnapshot(const GroupControlTemplate &grp, BlueprintSna
 
 bool ProtocolDiag_GetBlueprintAt(size_t index, BlueprintSnapshot &out) noexcept {
   GroupControlTemplate grp{};
-  if (!g_control_registry.getGroupByIndex(index, grp))
+  if (!Control_GetRegistry().getGroupByIndex(index, grp))
     return false;
   CopyTemplateToSnapshot(grp, out);
   return true;
@@ -459,11 +460,11 @@ bool ProtocolDiag_GetBlueprintAt(size_t index, BlueprintSnapshot &out) noexcept 
 size_t ProtocolDiag_GetBlueprintsSnapshot(BlueprintSnapshot *out_array, size_t max_count) noexcept {
   if (!out_array || max_count == 0)
     return 0;
-  const size_t total = g_control_registry.getGroupCount();
+  const size_t total = Control_GetRegistry().getGroupCount();
   const size_t out_cnt = std::min(total, max_count);
   for (size_t i = 0; i < out_cnt; ++i) {
     GroupControlTemplate grp{};
-    if (g_control_registry.getGroupByIndex(i, grp)) {
+    if (Control_GetRegistry().getGroupByIndex(i, grp)) {
       CopyTemplateToSnapshot(grp, out_array[i]);
     }
   }
@@ -472,22 +473,22 @@ size_t ProtocolDiag_GetBlueprintsSnapshot(BlueprintSnapshot *out_array, size_t m
 
 bool ProtocolDiag_GetBlueprint(uint8_t dev_id, BlueprintSnapshot &out) noexcept {
   GroupControlTemplate grp{};
-  if (!g_control_registry.findGroup(dev_id, grp))
+  if (!Control_GetRegistry().findGroup(dev_id, grp))
     return false;
   CopyTemplateToSnapshot(grp, out);
   return true;
 }
 
 bool ProtocolDiag_SetGroupName(uint8_t dev_id, const char *name) noexcept {
-  return g_control_registry.setGroupName(dev_id, name);
+  return Control_GetRegistry().setGroupName(dev_id, name);
 }
 
 bool ProtocolDiag_SetGroupClass(uint8_t dev_id, DeviceClass cls, const char *name) noexcept {
-  return g_control_registry.setGroupClass(dev_id, cls, name);
+  return Control_GetRegistry().setGroupClass(dev_id, cls, name);
 }
 
 void ProtocolDiag_ResetGroup(uint8_t dev_id, bool all) noexcept {
-  g_control_registry.resetGroup(dev_id, all);
+  Control_GetRegistry().resetGroup(dev_id, all);
 }
 
 uint8_t ProtocolDiag_GetActiveStx() noexcept {

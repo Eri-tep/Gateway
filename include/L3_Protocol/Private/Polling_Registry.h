@@ -52,11 +52,15 @@ struct RtcWarmCache {
 
 constexpr uint32_t RTC_MAGIC_WARM_CACHE = 0x57415243; // 'WARC'
 
-extern bool g_warm_cache_loaded;
-extern uint8_t g_warm_cache_source; // 0: None/Cold, 1: RTC SRAM, 2: NVS Flash
-extern uint8_t g_warm_cache_restored_count;
-extern std::atomic<bool> g_warm_cache_dirty;
-extern std::atomic<uint32_t> g_warm_cache_dirty_ms;
+struct WarmCacheStatus {
+  bool loaded{false};
+  uint8_t source{0}; // 0: None/Cold, 1: RTC SRAM, 2: NVS Flash
+  uint8_t restored_count{0};
+  bool dirty{false};
+  uint32_t dirty_ms{0};
+};
+
+WarmCacheStatus WarmCache_GetStatus() noexcept;
 
 void WarmCache_SaveToRtc();
 void WarmCache_SaveToNvs();
@@ -112,4 +116,4 @@ public:
   size_t verifiedCount() const;
 };
 
-extern PollingTargetRegistry g_polling_targets;
+PollingTargetRegistry &Polling_GetRegistry() noexcept;

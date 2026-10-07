@@ -24,7 +24,11 @@ void AutoProbingEngine::setDeviceHooks(OnlineCountFn count_fn,
   s_update_from_bus_fn = update_fn;
 }
 
-AutoProbingEngine g_auto_probing_engine;
+static AutoProbingEngine s_auto_probing_engine;
+
+AutoProbingEngine &AutoProbe_GetEngine() noexcept {
+  return s_auto_probing_engine;
+}
 
 AutoProbingEngine::AutoProbingEngine() { reset(); }
 
@@ -388,18 +392,18 @@ static int16_t s_work_map[256];
 // ----------------------------------------------------------------------------
 bool AutoProbingEngine::analyzeCacheMatrix() {
   const size_t online_dev_count = s_online_count_fn ? s_online_count_fn() : 0;
-  if (g_polling_targets.ackedCount() < 2 && online_dev_count < 2)
+  if (Polling_GetRegistry().ackedCount() < 2 && online_dev_count < 2)
     return false;
 
   // Re-initialize memory on every entry to guarantee zero residue from previous runs.
   memset(s_matrix_pairs, 0, sizeof(s_matrix_pairs));
   std::fill(std::begin(s_work_map), std::end(s_work_map), int16_t(-1));
   size_t pair_count = 0;
-  const size_t target_count = g_polling_targets.totalCount();
+  const size_t target_count = Polling_GetRegistry().totalCount();
 
   for (size_t i = 0; i < target_count && pair_count < MAX_MATRIX_PAIRS; ++i) {
     PollingTargetEntry t;
-    if (!g_polling_targets.getEntry(i, t) || !t.is_active ||
+    if (!Polling_GetRegistry().getEntry(i, t) || !t.is_active ||
         t.raw_query_len < 4 ||
         !(t.source_channels & kWallpadChMask)) // 월패드(CH2/CH3) 유래만 분석
       continue;
@@ -734,11 +738,11 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
   ProfileRepository::syncAutoProfileToNvs(snap);
 
   if (snap.offsets_locked) {
-    g_polling_targets.reindexWithOffsets(snap.dev_id_offset, snap.sub1_offset,
+    Polling_GetRegistry().reindexWithOffsets(snap.dev_id_offset, snap.sub1_offset,
                                          snap.sub2_offset);
     for (size_t i = 0; i < target_count; ++i) {
       PollingTargetEntry t;
-      if (g_polling_targets.getEntry(i, t) && t.is_active &&
+      if (Polling_GetRegistry().getEntry(i, t) && t.is_active &&
           t.raw_ack_len >= 4) {
         StaticPacket ack_pkt;
         ack_pkt.channel_id = 1;
