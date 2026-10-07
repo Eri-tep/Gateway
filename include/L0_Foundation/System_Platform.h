@@ -398,6 +398,14 @@ struct PktSnapshot {
   TcpChanStats ch6;
 };
 
+struct LatencySnapshot {
+  static constexpr unsigned kBuckets = 20;
+  uint32_t count{0};
+  uint32_t max_cycles{0};
+  uint32_t max_age_ms{0};
+  uint32_t hist[kBuckets]{};
+};
+
 struct LogEntry {
   uint32_t timestamp{0};
   char reason[32]{""};
@@ -412,6 +420,7 @@ struct AppendBuf;
 void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
                          PktSnapshot &pkt) noexcept;
 void System_GetPktSnapshot(PktSnapshot &pkt) noexcept;
+void System_GetCh1Latency(LatencySnapshot &lat) noexcept;
 void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) noexcept;
 int8_t System_ReadTempC() noexcept;
 void System_GetCpuAndTemp(uint8_t &cpu0, uint8_t &cpu1, int8_t &temp_c) noexcept;

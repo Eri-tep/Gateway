@@ -1,8 +1,8 @@
 #include "L4_Services/CLI_Commands.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L1_HAL/Diagnostics_Driver.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include <WiFi.h>
+#include <algorithm>
 #include <esp_core_dump.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
@@ -341,11 +341,9 @@ void printStats(int sock) {
 
   System_FormatTaskStacks(out, stack_snap);
 
-  if (out.offset + 2 < out.cap) {
-    out.append(Fmt::DIV80);
-    size_t lat_len = Diag_FormatCh1Latency(out.buf + out.offset, out.cap - out.offset);
-    out.offset += lat_len;
-  }
+  LatencySnapshot lat_snap;
+  System_GetCh1Latency(lat_snap);
+  Fmt::FormatCh1Latency(out, lat_snap);
 
   out.append("================================================================="
              "===============\r\n\r\n");
@@ -854,6 +852,106 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   }
 }
 
+void FormatCh1Latency(AppendBuf &out, const LatencySnapshot &lat) {
+  out.append(DIV80);
 
+  const uint32_t mhz = std::max<uint32_t>(getCpuFrequencyMhz(), 1);
+  auto us100 = [mhz](uint32_t c) {
+    return static_cast<uint32_t>(static_cast<uint64_t>(c) * 100u / mhz);
+  };
+
+  const uint32_t cnt = lat.count;
+  const uint32_t mx = lat.max_cycles;
+  const uint32_t mxUs = us100(mx);
+
+  // 1. Title Row: 46 chars left + 34 chars right = 80 chars
+  char r_buf[35];
+  if (mx == 0) {
+    snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: 0 us", static_cast<unsigned>(cnt));
+  } else if (mxUs >= 100000) {
+    snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: %u.%02u ms",
+             static_cast<unsigned>(cnt),
+             static_cast<unsigned>(mxUs / 100000),
+             static_cast<unsigned>((mxUs % 100000) / 1000));
+  } else {
+    snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: %u.%01u us",
+             static_cast<unsigned>(cnt),
+             static_cast<unsigned>(mxUs / 100),
+             static_cast<unsigned>((mxUs % 100) / 10));
+  }
+  out.appendFormat("%-46s%34s\r\n", "Hot-Path Real-Time Latency (Core 1 / Task_Ch1)", r_buf);
+
+  // 2. Divider
+  out.append(DIV80);
+
+  // 3. Table Header: 26 + 1 + 18 + 1 + 6 + 1 + 7 + 3 + 17 = 80 chars
+  out.appendFormat("%-26s %-18s %6s %7s   %-17s\r\n",
+                   "Latency Range (Cycles)", "Wall-Clock Time", "Hits", "Ratio", "Distr");
+
+  // 4. Data Rows
+  for (unsigned b = 0; b < LatencySnapshot::kBuckets; ++b) {
+    const uint32_t h = lat.hist[b];
+    if (h == 0) continue;
+
+    char range_buf[27];
+    char time_buf[19];
+
+    if (b == LatencySnapshot::kBuckets - 1) {
+      const uint32_t lo = 1u << (b - 1);
+      const uint32_t u = us100(lo);
+      snprintf(range_buf, sizeof(range_buf), ">= %7u cyc (Spike)", static_cast<unsigned>(lo));
+      snprintf(time_buf, sizeof(time_buf), ">= %5u.%01u us",
+               static_cast<unsigned>(u / 100), static_cast<unsigned>((u % 100) / 10));
+    } else {
+      const uint32_t hi = 1u << b;
+      const uint32_t u = us100(hi);
+      snprintf(range_buf, sizeof(range_buf), "<  %7u cyc", static_cast<unsigned>(hi));
+      snprintf(time_buf, sizeof(time_buf), "<  %5u.%01u us",
+               static_cast<unsigned>(u / 100), static_cast<unsigned>((u % 100) / 10));
+    }
+
+    const uint32_t ratio_x10 = cnt > 0
+        ? static_cast<uint32_t>((static_cast<uint64_t>(h) * 1000u + (cnt / 2)) / cnt)
+        : 0;
+
+    char rat_buf[8];
+    snprintf(rat_buf, sizeof(rat_buf), "%u.%01u%%",
+             static_cast<unsigned>(ratio_x10 / 10), static_cast<unsigned>(ratio_x10 % 10));
+
+    unsigned hashes = std::min<unsigned>(10u, (ratio_x10 + 50) / 100);
+    if (h > 0 && hashes == 0) hashes = 1;
+
+    char bar[13];
+    bar[0] = '[';
+    for (unsigned i = 0; i < 10; ++i) {
+      bar[1 + i] = (i < hashes) ? '#' : ' ';
+    }
+    bar[11] = ']';
+    bar[12] = '\0';
+
+    out.appendFormat("%-26s %-18s %6u %7s   %-17s\r\n",
+                     range_buf, time_buf, static_cast<unsigned>(h), rat_buf, bar);
+  }
+
+  // 5. Divider
+  out.append(DIV80);
+
+  // 6. Peak WCET Row (Option A): Exactly aligned to 80 chars
+  char peak_cyc[27];
+  char peak_us[19];
+  char peak_ago[18];
+
+  snprintf(peak_cyc, sizeof(peak_cyc), "Peak: %u cyc", static_cast<unsigned>(mx));
+  snprintf(peak_us, sizeof(peak_us), "%u.%02u us",
+           static_cast<unsigned>(mxUs / 100), static_cast<unsigned>(mxUs % 100));
+  if (mx > 0) {
+    snprintf(peak_ago, sizeof(peak_ago), "Last: %u ms ago", static_cast<unsigned>(lat.max_age_ms));
+  } else {
+    peak_ago[0] = '\0';
+  }
+
+  out.appendFormat("%-26s %-18s                 %-17s\r\n",
+                   peak_cyc, peak_us, peak_ago);
+}
 
 } // namespace Fmt

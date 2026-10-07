@@ -1050,63 +1050,8 @@ void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_
   s_ch1_state_metrics.last_transition_ms.store(now_ms, std::memory_order_relaxed);
 }
 
-namespace {
-void latency_appendf(char *&p, size_t &left, const char *fmt, ...) noexcept
-    __attribute__((format(printf, 3, 4)));
-
-void latency_appendf(char *&p, size_t &left, const char *fmt, ...) noexcept {
-  if (left <= 1) return;
-  va_list ap;
-  va_start(ap, fmt);
-  const int n = vsnprintf(p, left, fmt, ap);
-  va_end(ap);
-  if (n < 0) return;
-  const size_t w = std::min(static_cast<size_t>(n), left - 1);
-  p += w;
-  left -= w;
-}
-} // namespace
-
-size_t LatencyStat::format(char *out, size_t cap, const char *title) const noexcept {
-  if (out == nullptr || cap == 0) return 0;
-  out[0] = '\0';
-  constexpr auto rx = std::memory_order_relaxed;
-
-  char *p = out;
-  size_t left = cap;
-  const uint32_t mhz = std::max<uint32_t>(getCpuFrequencyMhz(), 1);
-  auto us100 = [mhz](uint32_t c) {
-    return static_cast<uint32_t>(static_cast<uint64_t>(c) * 100u / mhz);
-  };
-
-  const uint32_t cnt = _count.load(rx);
-  const uint32_t mx = _max.load(rx);
-  const uint32_t ageMs = (xTaskGetTickCount() - _maxTick.load(rx)) * portTICK_PERIOD_MS;
-  const uint32_t mxUs = us100(mx);
-
-  latency_appendf(p, left, "[%s] count=%" PRIu32 " max=%" PRIu32 " cyc (%" PRIu32 ".%02" PRIu32 " us)",
-                  title, cnt, mx, mxUs / 100, mxUs % 100);
-  if (mx > 0) {
-    latency_appendf(p, left, ", last max %" PRIu32 " ms ago", ageMs);
-  }
-  latency_appendf(p, left, "\r\n");
-
-  for (unsigned b = 0; b < kBuckets; ++b) {
-    const uint32_t h = _hist[b].load(rx);
-    if (h == 0) continue;
-    if (b == kBuckets - 1) {
-      const uint32_t lo = 1u << (b - 1);
-      const uint32_t u = us100(lo);
-      latency_appendf(p, left, "  >= %7" PRIu32 " cyc (%5" PRIu32 ".%02" PRIu32 " us): %" PRIu32 "\r\n",
-                      lo, u / 100, u % 100, h);
-    } else {
-      const uint32_t hi = 1u << b;
-      const uint32_t u = us100(hi);
-      latency_appendf(p, left, "  <  %7" PRIu32 " cyc (%5" PRIu32 ".%02" PRIu32 " us): %" PRIu32 "\r\n",
-                      hi, u / 100, u % 100, h);
-    }
-  }
-  return static_cast<size_t>(p - out);
+void System_GetCh1Latency(LatencySnapshot &lat) noexcept {
+  s_ch1_proc_latency.takeSnapshot(lat);
 }
 
 void Diag_RecordCh1Latency(uint32_t cycles) noexcept {
@@ -1115,10 +1060,6 @@ void Diag_RecordCh1Latency(uint32_t cycles) noexcept {
 
 void Diag_ResetCh1Latency() noexcept {
   s_ch1_proc_latency.reset();
-}
-
-size_t Diag_FormatCh1Latency(char *out, size_t cap, const char *title) noexcept {
-  return s_ch1_proc_latency.format(out, cap, title);
 }
 
 

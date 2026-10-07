@@ -168,7 +168,16 @@ public:
     }
   }
 
-  size_t format(char *out, size_t cap, const char *title) const noexcept;
+  void takeSnapshot(LatencySnapshot &snap) const noexcept {
+    constexpr auto rx = std::memory_order_relaxed;
+    snap.count = _count.load(rx);
+    snap.max_cycles = _max.load(rx);
+    const uint32_t mt = _maxTick.load(rx);
+    snap.max_age_ms = mt > 0 ? (xTaskGetTickCount() - mt) * portTICK_PERIOD_MS : 0;
+    for (unsigned b = 0; b < kBuckets; ++b) {
+      snap.hist[b] = _hist[b].load(rx);
+    }
+  }
 
 private:
   std::atomic<uint32_t> _count{0};
@@ -290,7 +299,6 @@ void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_
 
 void Diag_RecordCh1Latency(uint32_t cycles) noexcept;
 void Diag_ResetCh1Latency() noexcept;
-size_t Diag_FormatCh1Latency(char *out, size_t cap, const char *title = "Task_Ch1 Processing Latency (Core 1)") noexcept;
 
 class Diag_ScopedCh1Latency {
 public:

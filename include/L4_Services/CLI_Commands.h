@@ -153,10 +153,15 @@ inline bool DispatchSubCmd(const char *sub, int sock, int argc,
 
 } // namespace CliFmt
 
+struct HwSnapshot;
+struct PktSnapshot;
+struct LatencySnapshot;
+
 namespace Fmt {
 void FormatHwMetrics(AppendBuf &out, const HwSnapshot &hw);
 void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt);
 void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt);
+void FormatCh1Latency(AppendBuf &out, const LatencySnapshot &lat);
 } // namespace Fmt
 
 // ── CLI Subsystem Command Interfaces ────────────────────────────────────────
