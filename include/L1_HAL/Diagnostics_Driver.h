@@ -4,11 +4,16 @@
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 #include <Arduino.h>
+#include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <esp_cpu.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // ── Metrics Data Structures ──
 
@@ -133,6 +138,51 @@ struct PacketStatistics {
   }
 };
 
+// ── Operational Latency & Log2 Histogram Tracker ──
+
+class LatencyStat {
+public:
+  // Bucket b: Cycle bit-width b in range [2^(b-1), 2^b). Last bucket is saturated (>= 2^19 = ~2.18ms @ 240MHz)
+  static constexpr unsigned kBuckets = 20;
+
+  void record(uint32_t cycles) noexcept {
+    constexpr auto rx = std::memory_order_relaxed;
+    _count.store(_count.load(rx) + 1, rx);
+
+    if (cycles > _max.load(rx)) {
+      _max.store(cycles, rx);
+      _maxTick.store(xTaskGetTickCount(), rx);
+    }
+
+    const unsigned b = std::min<unsigned>(static_cast<unsigned>(std::bit_width(cycles)), kBuckets - 1);
+    _hist[b].store(_hist[b].load(rx) + 1, rx);
+  }
+
+  void reset() noexcept {
+    constexpr auto rx = std::memory_order_relaxed;
+    _count.store(0, rx);
+    _max.store(0, rx);
+    _maxTick.store(0, rx);
+    for (auto &h : _hist) {
+      h.store(0, rx);
+    }
+  }
+
+  size_t format(char *out, size_t cap, const char *title) const noexcept;
+
+private:
+  std::atomic<uint32_t> _count{0};
+  std::atomic<uint32_t> _max{0};
+  std::atomic<uint32_t> _maxTick{0};
+  std::atomic<uint32_t> _hist[kBuckets]{};
+};
+
+#if ATOMIC_INT_LOCK_FREE == 2
+static_assert(std::atomic<uint32_t>::is_always_lock_free, "lock-free atomic required");
+#else
+static_assert(ATOMIC_INT_LOCK_FREE >= 1, "atomic operations supported");
+#endif
+
 // ── Snapshot Conversion Helpers ──
 inline ChanStats SingleChannelToSnapshot(const SingleChannelStats &s) noexcept {
   ChanStats out{};
@@ -237,6 +287,23 @@ void Diag_RecordChannelActivity(uint8_t ch, uint32_t now_ms) noexcept;
 [[nodiscard]] uint32_t Diag_GetChannelLastActivityMs(uint8_t ch) noexcept;
 
 void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_t now_ms) noexcept;
+
+void Diag_RecordCh1Latency(uint32_t cycles) noexcept;
+void Diag_ResetCh1Latency() noexcept;
+size_t Diag_FormatCh1Latency(char *out, size_t cap, const char *title = "Task_Ch1 Processing Latency (Core 1)") noexcept;
+
+class Diag_ScopedCh1Latency {
+public:
+  Diag_ScopedCh1Latency() noexcept : _t0(esp_cpu_get_cycle_count()) {}
+  ~Diag_ScopedCh1Latency() {
+    Diag_RecordCh1Latency(static_cast<uint32_t>(esp_cpu_get_cycle_count() - _t0));
+  }
+  Diag_ScopedCh1Latency(const Diag_ScopedCh1Latency &) = delete;
+  Diag_ScopedCh1Latency &operator=(const Diag_ScopedCh1Latency &) = delete;
+
+private:
+  uint32_t _t0;
+};
 
 // ── Unified System Trace Sink & Shutdown Hooks are canonically in System_Platform.h ──
 

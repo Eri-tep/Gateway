@@ -28,6 +28,12 @@
 
 
 
+static std::atomic<bool> s_eff_profile_dirty{true};
+
+void Wallpad_InvalidateProfileCache() noexcept {
+  s_eff_profile_dirty.store(true, std::memory_order_release);
+}
+
 namespace {
 
  // CH2, CH3 (월패드 유래)
@@ -56,7 +62,10 @@ struct EffProfile {
   uint8_t qlen = 11;
 };
 
-EffProfile effectiveProfile() {
+static EffProfile s_cached_eff_profile;
+static portMUX_TYPE s_eff_mux = portMUX_INITIALIZER_UNLOCKED;
+
+EffProfile computeEffectiveProfile() {
   VendorProfileDescriptor d;
   ProfileRepository::getActiveProfile(d);
 
@@ -110,6 +119,17 @@ EffProfile effectiveProfile() {
     }
   }
   return e;
+}
+
+inline const EffProfile &effectiveProfile() noexcept {
+  if (__builtin_expect(s_eff_profile_dirty.load(std::memory_order_relaxed), 0)) {
+    CriticalSectionLocker lock(&s_eff_mux);
+    if (s_eff_profile_dirty.load(std::memory_order_relaxed)) {
+      s_cached_eff_profile = computeEffectiveProfile();
+      s_eff_profile_dirty.store(false, std::memory_order_release);
+    }
+  }
+  return s_cached_eff_profile;
 }
 
 inline int opOf(std::span<const uint8_t> f, const EffProfile &e) {
@@ -322,10 +342,10 @@ UniversalProtocolEngine::validateFrame(std::span<const uint8_t> frame) const noe
   if (frame.size() < 3 || frame.size() > 64)
     return std::unexpected(FrameValidationError::InvalidLength);
 
-  EffProfile e = effectiveProfile();
-  if (e.is_auto) {
+  const EffProfile &e = effectiveProfile();
+  if (e.is_auto && !AutoProbe_GetEngine().isLocked()) {
     AutoProbe_GetEngine().feedFrame(frame); // 학습 후 갱신된 값으로 재계산
-    e = effectiveProfile();
+    Wallpad_InvalidateProfileCache();
   }
 
   if (frame.size() < e.min_len || frame.size() > e.max_len)
@@ -344,12 +364,12 @@ bool UniversalProtocolEngine::validatePacket(std::span<const uint8_t> frame) con
 }
 
 bool UniversalProtocolEngine::isQueryPacket(std::span<const uint8_t> frame) const {
-  const EffProfile e = effectiveProfile();
+  const EffProfile &e = effectiveProfile();
   return opOf(frame, e) == e.q_op;
 }
 
 bool UniversalProtocolEngine::isControlPacket(std::span<const uint8_t> frame) const {
-  const EffProfile e = effectiveProfile();
+  const EffProfile &e = effectiveProfile();
   const int op = opOf(frame, e);
   if (op < 0)
     return false;
@@ -357,7 +377,7 @@ bool UniversalProtocolEngine::isControlPacket(std::span<const uint8_t> frame) co
 }
 
 bool UniversalProtocolEngine::isAckPacket(std::span<const uint8_t> frame) const {
-  const EffProfile e = effectiveProfile();
+  const EffProfile &e = effectiveProfile();
   const int op = opOf(frame, e);
   return op == e.a_op || op == e.q_op;
 }
@@ -365,7 +385,7 @@ bool UniversalProtocolEngine::isAckPacket(std::span<const uint8_t> frame) const 
 bool UniversalProtocolEngine::extractDeviceKey(std::span<const uint8_t> frame,
                                                uint8_t &dev_id, uint8_t &sub1,
                                                uint8_t &sub2) const {
-  const EffProfile e = effectiveProfile();
+  const EffProfile &e = effectiveProfile();
   if (frame.size() <= e.dev_off)
     return false;
 
@@ -386,7 +406,7 @@ bool UniversalProtocolEngine::extractDeviceKey(std::span<const uint8_t> frame,
 bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
                                                uint8_t sub2,
                                                StaticPacket &out) const {
-  const EffProfile e = effectiveProfile();
+  const EffProfile &e = effectiveProfile();
   const size_t n = std::min<size_t>(e.qlen, out.data.size());
 
   out.channel_id = 1;
@@ -441,7 +461,7 @@ int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
                                                  size_t stx_idx) const {
   if (stx_idx >= stream_len)
     return -1;
-  const EffProfile e = effectiveProfile();
+  const EffProfile &e = effectiveProfile();
   if (stream[stx_idx] != e.stx)
     return -1;
 
@@ -459,6 +479,15 @@ int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
     }
   }
   return (stx_idx + safe_max <= stream_len) ? -1 : 0;
+}
+
+bool UniversalProtocolEngine::isLocked() const noexcept {
+  const auto &e = effectiveProfile();
+  return !e.is_auto || AutoProbe_GetEngine().isLocked();
+}
+
+bool UniversalProtocolEngine::isAutoMode() const noexcept {
+  return effectiveProfile().is_auto;
 }
 
 void WallpadParserFactory::init() { ProfileRepository::init(); }
@@ -516,6 +545,7 @@ void ProfileRepository::init() {
     s_profiles_initialized = true;
   }
   AutoProbe_GetEngine().initFromNvs();
+  Wallpad_InvalidateProfileCache();
 }
 
 size_t ProfileRepository::getProfileCount() { return MAX_PROFILES; }
@@ -581,6 +611,7 @@ bool ProfileRepository::setActiveProfileIndex(size_t index) {
   const uint8_t new_idx = static_cast<uint8_t>(index);
   Config_SetWallpadProfile(new_idx);
   Config_SaveWallpadProfile();
+  Wallpad_InvalidateProfileCache();
 
   if (old_idx != new_idx) {
     for (size_t i = 0; i < s_profile_change_cb_count; ++i) {
@@ -609,6 +640,7 @@ bool ProfileRepository::saveCustomProfile(
     CriticalSectionLocker lock(&s_prof_mux);
     s_active_profiles[index] = profile;
   }
+  Wallpad_InvalidateProfileCache();
   char k[16];
   profileKey(index, k);
   nvsPutEnvNs("wp_profiles", k, profile);
@@ -794,6 +826,7 @@ void ProfileRepository::syncAutoProfileToNvs(const AutoProbeDescriptor &a) {
     }
     s_active_profiles[0] = d;
   }
+  Wallpad_InvalidateProfileCache();
   // Decoupled: Signal pending NVS commit to background task.
   // Task_Ch1 must NEVER execute flash NVS writes directly to prevent stack overflow
   // and UART/SoftwareSerial interrupt latency degradation.
@@ -827,6 +860,7 @@ void ProfileRepository::resetAllToDefaults() {
     CriticalSectionLocker lock(&s_prof_mux);
     memcpy(s_active_profiles, s_default_profiles, sizeof(s_default_profiles));
   }
+  Wallpad_InvalidateProfileCache();
   Preferences prefs;
   if (prefs.begin("wp_profiles", false)) {
     prefs.clear();

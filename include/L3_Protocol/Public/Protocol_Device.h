@@ -361,3 +361,13 @@ bool Device_GetFcuSnapshot(uint8_t slot_idx, FcuDeviceSnapshot &out) noexcept;
 bool Device_ControlFcu(uint8_t slot_idx, std::string_view action, int value,
                        uint16_t mode = 1, uint16_t fan = 4, uint16_t swing = 0,
                        uint8_t temp = 24) noexcept;
+
+#if defined(BENCHMARK_BUILD)
+namespace DeviceBenchmark {
+bool findCopyDirect(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                    DeviceStateEntry &out_copy) noexcept;
+bool probeDirectExists(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept;
+portMUX_TYPE *getMuxHandle() noexcept;
+void registerMockDevice(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept;
+} // namespace DeviceBenchmark
+#endif

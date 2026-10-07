@@ -1,5 +1,6 @@
 #include "L4_Services/CLI_Commands.h"
 #include "L0_Foundation/System_Platform.h"
+#include "L1_HAL/Diagnostics_Driver.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include <WiFi.h>
 #include <esp_core_dump.h>
@@ -339,6 +340,13 @@ void printStats(int sock) {
       static_cast<unsigned>(ProtocolDiag_GetStalePollCount()));
 
   System_FormatTaskStacks(out, stack_snap);
+
+  if (out.offset + 2 < out.cap) {
+    out.append(Fmt::DIV80);
+    size_t lat_len = Diag_FormatCh1Latency(out.buf + out.offset, out.cap - out.offset);
+    out.offset += lat_len;
+  }
+
   out.append("================================================================="
              "===============\r\n\r\n");
 

@@ -446,6 +446,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     Diag_RecordChannelRx(1);
     ack.channel_id = 1;
     if (s_dispatcher.onBusPacket) {
+      Diag_ScopedCh1Latency sc;
       s_dispatcher.onBusPacket(1, ack, &ctrlPacket);
     }
     ack.channel_id = ctrlPacket.channel_id;
@@ -564,6 +565,7 @@ void Ch1_PollNext(size_t &current_dev_idx) {
     Diag_RecordChannelRx(1);
     ack.channel_id = 1;
     if (s_dispatcher.onBusPacket) {
+      Diag_ScopedCh1Latency sc;
       s_dispatcher.onBusPacket(1, ack, &q_pkt);
     }
   } else {

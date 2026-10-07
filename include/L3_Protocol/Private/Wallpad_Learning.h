@@ -329,6 +329,7 @@ public:
     if (!grp)
       return false;
     mutator(*grp);
+    rebuildNormSub1LutLocked();
     return true;
   }
 
@@ -356,6 +357,7 @@ private:
   mutable StaticSemaphore_t _nvs_mutex_storage{};
   mutable SemaphoreHandle_t _nvs_mutex{nullptr};
 
+  void rebuildNormSub1LutLocked() noexcept;
   void autoAssignGroupName(GroupControlTemplate &group);
   GroupControlTemplate *registerOrTouchUnlocked(uint8_t dev_id,
                                                 const char *name = nullptr);

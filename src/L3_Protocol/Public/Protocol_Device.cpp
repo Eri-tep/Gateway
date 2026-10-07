@@ -28,13 +28,11 @@ static std::atomic<uint32_t> s_cache_lock_timeouts{0};
 class DeviceRepository {
 private:
   static constexpr size_t MAX_DEVICES = 48;
-  static constexpr TickType_t kCacheLockTimeout = pdMS_TO_TICKS(10);
   DeviceStateEntry cache[MAX_DEVICES]{};
   int8_t dev_lookup_map[256]{};
   size_t device_count = 0;
   std::atomic<size_t> _online_count{0};
-  mutable StaticSemaphore_t _cache_mutex_buf{};
-  mutable SemaphoreHandle_t _cache_mutex = nullptr;
+  mutable portMUX_TYPE _cache_mux = portMUX_INITIALIZER_UNLOCKED;
 
   const DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
                                        uint8_t sub2) const noexcept;
@@ -42,15 +40,6 @@ private:
                                  uint8_t sub2) noexcept;
 
 public:
-  [[nodiscard]] const DeviceStateEntry *
-  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) const noexcept {
-    return findInternal(dev_id, sub1, sub2);
-  }
-  [[nodiscard]] DeviceStateEntry *
-  findEntry(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
-    return findInternal(dev_id, sub1, sub2);
-  }
-
   DeviceStateEntry *findMutable(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                 bool auto_create = false) noexcept;
   void initDevices();
@@ -70,12 +59,14 @@ public:
   bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                      uint8_t temp) noexcept;
   DeviceUpdateResult updateFromBus(StaticPacket &ack);
-  void handlePollingTimeout(const DeviceStateEntry *dev);
   void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);
   [[nodiscard]] bool copyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                     StaticPacket &out) noexcept;
   void syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8_t room_temp,
                     bool is_online, const uint8_t *raw_pkt, size_t raw_len) noexcept;
+#if defined(BENCHMARK_BUILD)
+  [[nodiscard]] portMUX_TYPE *getMux() const noexcept { return &_cache_mux; }
+#endif
 };
 
 // ── Static Sealed Repository Instance (Rule 17) ──
@@ -150,8 +141,21 @@ DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
                                uint8_t sub2) const noexcept {
   sub1 = Device_NormSub1(dev_id, sub1);
   uint8_t h = Device_Hash(dev_id, sub1, sub2);
-  size_t attempts = 0;
 
+  // Fast-Path: Direct attempt 0 hit (O(1))
+  int8_t direct_idx = dev_lookup_map[h];
+  if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < device_count &&
+      cache[direct_idx].dev_id == dev_id && cache[direct_idx].sub1 == sub1 &&
+      cache[direct_idx].sub2 == sub2) {
+    return &cache[direct_idx];
+  }
+  if (direct_idx == -1) {
+    return nullptr;
+  }
+
+  // Fallback: Collision open addressing loop
+  size_t attempts = 1;
+  h = (h + 1) & 0xFF;
   while (attempts < MAX_DEVICES) {
     int8_t idx = dev_lookup_map[h];
     if (idx == -1)
@@ -174,9 +178,7 @@ DeviceStateEntry *DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
 
 bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                 DeviceStateEntry &out_copy) const noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked())
-    return false;
+  CriticalSectionLocker lock(&_cache_mux);
   const DeviceStateEntry *e = findInternal(dev_id, sub1, sub2);
   if (!e)
     return false;
@@ -186,8 +188,8 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 
 bool DeviceRepository::getSnapshot(size_t index,
                                    DeviceStateEntry &out_copy) const noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked() || index >= device_count)
+  CriticalSectionLocker lock(&_cache_mux);
+  if (index >= device_count)
     return false;
   out_copy = cache[index];
   return true;
@@ -198,8 +200,8 @@ size_t DeviceRepository::getSnapshotChunk(size_t start_idx,
                                           size_t max_count) const noexcept {
   if (!out_buf || max_count == 0)
     return 0;
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked() || start_idx >= device_count)
+  CriticalSectionLocker lock(&_cache_mux);
+  if (start_idx >= device_count)
     return 0;
   size_t to_copy = std::min(max_count, device_count - start_idx);
   for (size_t i = 0; i < to_copy; ++i) {
@@ -210,11 +212,7 @@ size_t DeviceRepository::getSnapshotChunk(size_t start_idx,
 
 bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                      uint8_t temp) noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked()) {
-    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-    return false;
-  }
+  CriticalSectionLocker lock(&_cache_mux);
   auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev) {
     dev->last_target_temp = temp;
@@ -226,9 +224,7 @@ bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
                                       uint8_t sub2,
                                       StaticPacket &out) noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked())
-    return false;
+  CriticalSectionLocker lock(&_cache_mux);
   const auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev && dev->last_ack_len > 0) {
     out.length = dev->last_ack_len;
@@ -240,11 +236,7 @@ bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
 
 void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8_t room_temp,
                                     bool is_online, const uint8_t *raw_pkt, size_t raw_len) noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked()) {
-    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
+  CriticalSectionLocker lock(&_cache_mux);
   DeviceStateEntry *dev = findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
   if (!dev) return;
 
@@ -266,11 +258,7 @@ void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8
 
 void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
                                           uint8_t sub2, uint32_t ms) noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked()) {
-    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
+  CriticalSectionLocker lock(&_cache_mux);
   auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev) {
     dev->last_stale_poll_ms = ms;
@@ -279,37 +267,21 @@ void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
 
 void DeviceRepository::setLastStalePollMsByIndex(size_t index,
                                                  uint32_t ms) noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked()) {
-    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
+  CriticalSectionLocker lock(&_cache_mux);
   if (index < device_count) {
     cache[index].last_stale_poll_ms = ms;
   }
 }
 
 void DeviceRepository::initDevices() {
-  if (!_cache_mutex)
-    _cache_mutex = xSemaphoreCreateMutexStatic(&_cache_mutex_buf);
-  {
-    MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-    if (!lock.isLocked()) {
-      s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-    memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
-    device_count = 0;
-    _online_count.store(0, std::memory_order_relaxed);
-  }
+  CriticalSectionLocker lock(&_cache_mux);
+  memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
+  device_count = 0;
+  _online_count.store(0, std::memory_order_relaxed);
 }
 
 void DeviceRepository::clear() {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked()) {
-    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
+  CriticalSectionLocker lock(&_cache_mux);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   device_count = 0;
   _online_count.store(0, std::memory_order_relaxed);
@@ -318,7 +290,7 @@ void DeviceRepository::clear() {
 namespace {
 static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
                                             const StaticPacket &ack,
-                                            SemaphoreHandle_t mutex,
+                                            portMUX_TYPE &mux,
                                             DeviceUpdateResult &out_res) {
   if (ack.length != 34 || ack.data[3] != 0x18 || ack.data[4] != 0x04)
     return false;
@@ -339,11 +311,7 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
     uint8_t r_sub1 = 0x10 + r;
     int r_pwr = (r_state == 0x01) ? 1 : ((r_state == 0x07) ? 2 : 0);
     {
-      MutexLocker lock(mutex, pdMS_TO_TICKS(10));
-      if (!lock.isLocked()) {
-        s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
+      CriticalSectionLocker lock(mux);
       DeviceStateEntry *r_dev = repo.findMutable(0x18, r_sub1, 0, true);
       if (r_dev) {
         r_dev->last_updated_ms = millis();
@@ -409,7 +377,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
 
   // 구형(Legacy) 34B 난방 브로드캐스트 처리 (Packet[1]==0x22 && Dev==0x18 &&
   // Opcode==0x04)
-  if (handleLegacyThermostatBroadcast(*this, ack, _cache_mutex, res)) {
+  if (handleLegacyThermostatBroadcast(*this, ack, _cache_mux, res)) {
     return res;
   }
 
@@ -444,11 +412,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
   uint8_t prev_ho = 0;
 
   {
-    MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-    if (!lock.isLocked()) {
-      s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-      return res;
-    }
+    CriticalSectionLocker lock(&_cache_mux);
     DeviceStateEntry *dev = findMutable(dev_id, sub1, sub2, true);
     if (UNLIKELY(!dev)) {
       return res;
@@ -488,7 +452,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     if (ack_changed) {
       dev_snap = *dev;
     }
-  } // _cache_mutex unlocked (최소 락 윈도우 보장)
+  } // _cache_mux unlocked (최소 락 윈도우 보장)
 
   res.updated = true;
 
@@ -500,17 +464,13 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
                                 (st.direction != prev_dir) || (st.ho != prev_ho);
         if (ev_state_changed) {
           st.should_broadcast = true;
-          MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-          if (lock.isLocked()) {
-            auto *mdev = findMutable(dev_id, sub1, sub2, false);
-            if (mdev) {
-              mdev->last_current_temp = static_cast<uint8_t>(st.floor);
-              mdev->last_target_temp = static_cast<uint8_t>(st.direction);
-              mdev->last_ack_data[0] = static_cast<uint8_t>(st.power);
-              mdev->last_ack_data[1] = static_cast<uint8_t>(st.ho);
-            }
-          } else {
-            s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+          CriticalSectionLocker lock(&_cache_mux);
+          auto *mdev = findMutable(dev_id, sub1, sub2, false);
+          if (mdev) {
+            mdev->last_current_temp = static_cast<uint8_t>(st.floor);
+            mdev->last_target_temp = static_cast<uint8_t>(st.direction);
+            mdev->last_ack_data[0] = static_cast<uint8_t>(st.power);
+            mdev->last_ack_data[1] = static_cast<uint8_t>(st.ho);
           }
         }
       } else {
@@ -529,30 +489,9 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
   return res;
 }
 
-void DeviceRepository::handlePollingTimeout(const DeviceStateEntry *dev) {
-  if (!dev)
-    return;
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked()) {
-    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-  auto *mdev = const_cast<DeviceStateEntry *>(dev);
-  if (mdev->is_online && ++mdev->timeout_count >= 3) {
-    mdev->is_online = false;
-    if (_online_count.load(std::memory_order_relaxed) > 0) {
-      _online_count.fetch_sub(1, std::memory_order_relaxed);
-    }
-  }
-}
-
 void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
                                             uint8_t sub2) {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  if (!lock.isLocked()) {
-    s_cache_lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
+  CriticalSectionLocker lock(&_cache_mux);
   auto *mdev = findMutable(dev_id, sub1, sub2, true);
   if (mdev && mdev->is_online && ++mdev->timeout_count >= 3) {
     mdev->is_online = false;
@@ -563,8 +502,8 @@ void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
 }
 
 size_t DeviceRepository::count() const noexcept {
-  MutexLocker lock(_cache_mutex, kCacheLockTimeout);
-  return lock.isLocked() ? device_count : 0;
+  CriticalSectionLocker lock(&_cache_mux);
+  return device_count;
 }
 
 size_t DeviceRepository::getOnlineCount() const noexcept {
@@ -831,6 +770,36 @@ bool Device_ControlFcu(uint8_t slot_idx, std::string_view action, int value,
   }
   return false;
 }
+
+#if defined(BENCHMARK_BUILD)
+namespace DeviceBenchmark {
+
+bool findCopyDirect(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                    DeviceStateEntry &out_copy) noexcept {
+  return s_device_repo.findCopy(dev_id, sub1, sub2, out_copy);
+}
+
+bool probeDirectExists(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+  DeviceStateEntry snap;
+  return s_device_repo.findCopy(dev_id, sub1, sub2, snap);
+}
+
+portMUX_TYPE *getMuxHandle() noexcept {
+  return s_device_repo.getMux();
+}
+
+void registerMockDevice(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+  CriticalSectionLocker lock(s_device_repo.getMux());
+  DeviceStateEntry *dev = s_device_repo.findMutable(dev_id, sub1, sub2, true);
+  if (dev) {
+    dev->is_online = true;
+    dev->last_updated_ms = millis();
+    dev->last_ack_len = 11;
+  }
+}
+
+} // namespace DeviceBenchmark
+#endif
 
 
 

@@ -79,21 +79,13 @@ public:
   static void inferVendorDescription(const AutoProbeDescriptor &ad, char *out_desc, size_t max_len);
 };
 
+void Wallpad_InvalidateProfileCache() noexcept;
+
 // ============================================================================
 // 3. UNIVERSAL PROTOCOL ENGINE
 // ============================================================================
 
 class UniversalProtocolEngine {
-private:
-  inline VendorProfileDescriptor activeProfile() const {
-    VendorProfileDescriptor d;
-    ProfileRepository::getActiveProfile(d);
-    return d;
-  }
-  inline bool isAutoProfile(const VendorProfileDescriptor &desc) const {
-    return strcasecmp(desc.key, "auto") == 0;
-  }
-
 public:
   static constexpr size_t kVendorNameMaxLen = 64;
   static constexpr size_t kProfileKeyMaxLen = 16;
@@ -101,17 +93,8 @@ public:
   size_t getVendorName(char *out, size_t max_len) const;
   size_t getActiveProfileKey(char *out, size_t max_len) const;
 
-  bool isLocked() const {
-    VendorProfileDescriptor d = activeProfile();
-    if (isAutoProfile(d)) {
-      return AutoProbe_GetEngine().isLocked();
-    }
-    return true;
-  }
-  bool isAutoMode() const {
-    VendorProfileDescriptor d = activeProfile();
-    return isAutoProfile(d);
-  }
+  bool isLocked() const noexcept;
+  bool isAutoMode() const noexcept;
 
   enum class FrameValidationError : uint8_t {
     InvalidLength,

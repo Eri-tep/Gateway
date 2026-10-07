@@ -806,6 +806,7 @@ void AutoProbingEngine::reset() {
   _candidate_algo = ChecksumAlgo::UNKNOWN;
   _control_matches = 0;
   _candidate_ctrl_op = 0;
+  Wallpad_InvalidateProfileCache();
 }
 
 // ============================================================================
@@ -1401,12 +1402,51 @@ void ControlTemplateRegistry::init() {
   loadFromNvs();
 }
 
+namespace {
+struct NormSub1Rule {
+  uint8_t dev_id{0};
+  uint8_t temp_sub1{0};
+  uint8_t speed_sub1{0};
+  uint8_t power_sub1{0};
+};
+
+static NormSub1Rule s_norm_rules[ControlTemplateRegistry::MAX_GROUPS]{};
+static size_t s_norm_rule_count{0};
+static portMUX_TYPE s_norm_rules_mux = portMUX_INITIALIZER_UNLOCKED;
+} // namespace
+
+void ControlTemplateRegistry::rebuildNormSub1LutLocked() noexcept {
+  NormSub1Rule next_rules[MAX_GROUPS]{};
+  size_t next_count = 0;
+  for (size_t i = 0; i < _group_count && next_count < MAX_GROUPS; ++i) {
+    const auto &grp = _groups[i];
+    if (grp.power_slot.category_val != 0 && grp.power_slot.category_val != 0xFF) {
+      if ((grp.temp_slot.category_val != 0 && grp.temp_slot.category_val != 0xFF) ||
+          (grp.speed_slot.category_val != 0 && grp.speed_slot.category_val != 0xFF)) {
+        next_rules[next_count++] = NormSub1Rule{
+            .dev_id = grp.dev_id,
+            .temp_sub1 = grp.temp_slot.category_val,
+            .speed_sub1 = grp.speed_slot.category_val,
+            .power_sub1 = grp.power_slot.category_val,
+        };
+      }
+    }
+  }
+  taskENTER_CRITICAL(&s_norm_rules_mux);
+  for (size_t i = 0; i < next_count; ++i) {
+    s_norm_rules[i] = next_rules[i];
+  }
+  s_norm_rule_count = next_count;
+  taskEXIT_CRITICAL(&s_norm_rules_mux);
+}
+
 void ControlTemplateRegistry::clear() {
   MutexLocker lock(_mutex, kManageLockTimeout);
   if (!lock.isLocked())
     return;
   std::fill(std::begin(_groups), std::end(_groups), GroupControlTemplate{});
   _group_count = 0;
+  rebuildNormSub1LutLocked();
 }
 
 void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
@@ -1582,6 +1622,9 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
         if (dev_id != 0)
           break;
       }
+    }
+    if (modified) {
+      rebuildNormSub1LutLocked();
     }
   }
   if (!modified)
@@ -1919,6 +1962,7 @@ void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
   _group_count = 0;
   for (size_t i = 0; i < valid; ++i)
     insertSorted(&_groups[0], _group_count, MAX_GROUPS, s_nvs_transfer_buf[i]);
+  rebuildNormSub1LutLocked();
 }
 
 void ControlTemplateRegistry::onProfileChanged(uint8_t old_prof_idx,
@@ -2275,14 +2319,15 @@ bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
 }
 
 uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  GroupControlTemplate grp{};
-  if (s_control_registry.findGroup(dev_id, grp)) {
-    if (grp.power_slot.category_val != 0 &&
-        grp.power_slot.category_val != 0xFF) {
-      if (sub1 == grp.temp_slot.category_val ||
-          sub1 == grp.speed_slot.category_val) {
-        return grp.power_slot.category_val;
+  // Read-mostly derived cache (0-Lock, 0-Copy, O(1) integer comparison)
+  // Max 8 elements (typically 1~2 active rules for HVAC). Rebuilt exclusively in cold path.
+  const size_t count = s_norm_rule_count;
+  for (size_t i = 0; i < count; ++i) {
+    if (s_norm_rules[i].dev_id == dev_id) {
+      if (sub1 == s_norm_rules[i].temp_sub1 || sub1 == s_norm_rules[i].speed_sub1) {
+        return s_norm_rules[i].power_sub1;
       }
+      return sub1;
     }
   }
   return sub1;
