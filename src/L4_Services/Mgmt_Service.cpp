@@ -141,6 +141,11 @@ int Tcp_AcceptAndAssignSlot(int server_fd, SessionType (&sessions)[N],
   if (new_sock < 0)
     return -1;
 
+  if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < 32768) {
+    close(new_sock);
+    return -1;
+  }
+
   const uint8_t *b = reinterpret_cast<const uint8_t *>(&caddr.sin_addr.s_addr);
   IPAddress remote_ip(b[0], b[1], b[2], b[3]);
   if (!Tcp_IsAllowedIP(remote_ip)) {

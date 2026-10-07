@@ -71,7 +71,8 @@ static void write(int sock, const char *data, size_t len) noexcept {
     size_t sent = 0;
     uint8_t retries = 0;
     while (sent < len && retries < 10) {
-      const int r = send(sock, data + sent, len - sent, MSG_DONTWAIT);
+      const size_t to_send = std::min<size_t>(len - sent, 512);
+      const int r = send(sock, data + sent, to_send, MSG_DONTWAIT);
       if (r > 0) {
         sent += static_cast<size_t>(r);
         retries = 0;
@@ -1028,7 +1029,11 @@ void TelnetManager::tick() {
     int new_sock =
         accept(_server_fd, (struct sockaddr *)&client_addr, &client_len);
     if (new_sock >= 0) {
-      onClientConnect(new_sock, client_addr, now);
+      if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < 32768) {
+        close(new_sock);
+      } else {
+        onClientConnect(new_sock, client_addr, now);
+      }
     }
   }
 

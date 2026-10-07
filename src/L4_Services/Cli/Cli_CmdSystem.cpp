@@ -211,7 +211,7 @@ void cmdWifi(CliContext &ctx) {
 
 namespace SystemCli {
 
-void printSystemOverview(AppendBuf &out) {
+void printSystemOverview(AppendBuf &out, const SysSnapshot &sys) {
   uint32_t ts = millis() / 1000;
   time_t now = time(nullptr);
   struct tm timeinfo;
@@ -239,10 +239,9 @@ void printSystemOverview(AppendBuf &out) {
     b[13] = '\0';
   };
 
-  uint32_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024;
-  uint32_t min_free_heap =
-      heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) / 1024;
-  uint32_t total_heap = heap_caps_get_total_size(MALLOC_CAP_8BIT) / 1024;
+  uint32_t free_heap = sys.free_heap / 1024;
+  uint32_t min_free_heap = sys.min_free_heap / 1024;
+  uint32_t total_heap = sys.total_heap / 1024;
   uint32_t heap_free_pct =
       (total_heap > 0) ? (free_heap * 100 / total_heap) : 0;
 
@@ -257,8 +256,8 @@ void printSystemOverview(AppendBuf &out) {
   make_ascii_bar(heap_bar, sizeof(heap_bar), heap_free_pct);
   make_ascii_bar(flash_bar, sizeof(flash_bar), app_used_pct);
 
-  bool wifi_conn = WiFi.isConnected();
-  int wifi_rssi = WiFi.RSSI();
+  bool wifi_conn = sys.wifi_connected;
+  int wifi_rssi = sys.wifi_rssi;
   const char *wifi_qual = !wifi_conn           ? "[DISCONNECTED]"
                           : (wifi_rssi >= -65) ? "[EXCELLENT]"
                           : (wifi_rssi >= -75) ? "[GOOD]"
@@ -287,7 +286,7 @@ void printSystemOverview(AppendBuf &out) {
       Config::FIRMWARE_VERSION, wp_status_buf.c_str(), time_str.c_str(), time_src, ts / 86400,
       (ts % 86400) / 3600, (ts % 3600) / 60, ts % 60,
       wifi_conn ? "Connected" : "Disconnected", wifi_rssi,
-      WiFi.localIP().toString().c_str(), wifi_qual, heap_bar, heap_free_pct,
+      sys.wifi_ip, wifi_qual, heap_bar, heap_free_pct,
       free_heap, total_heap, min_free_heap, flash_bar, app_used_pct,
       sketch_size, app_slot_size, flash_chip_mb);
 }
@@ -299,19 +298,19 @@ void printStats(int sock) {
     return;
   }
 
-  char *scratch = Cli_GetScratchBuffer();
-  size_t scratch_sz = Cli_GetScratchBufferSize();
-  scratch[0] = '\0';
-  AppendBuf out{scratch, scratch_sz};
-
-  printSystemOverview(out);
-
   System_FeedWdt(5);
   SysSnapshot sys_snap;
   HwSnapshot hw_snap;
   StackSnapshot stack_snap;
   PktSnapshot pkt_snap;
   System_TakeSnapshot(sys_snap, hw_snap, stack_snap, pkt_snap);
+
+  char *scratch = Cli_GetScratchBuffer();
+  size_t scratch_sz = Cli_GetScratchBufferSize();
+  scratch[0] = '\0';
+  AppendBuf out{scratch, scratch_sz};
+
+  printSystemOverview(out, sys_snap);
 
   Fmt::FormatHwMetrics(out, hw_snap);
   Fmt::FormatNetworkStats(out, pkt_snap);
