@@ -864,8 +864,8 @@ void FormatCh1Latency(AppendBuf &out, const LatencySnapshot &lat) {
   const uint32_t mx = lat.max_cycles;
   const uint32_t mxUs = us100(mx);
 
-  // 1. Title Row: 46 chars left + 34 chars right = 80 chars
-  char r_buf[35];
+  // 1. Title Row: 47 chars left + 33 chars right = 80 chars
+  char r_buf[34];
   if (mx == 0) {
     snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: 0 us", static_cast<unsigned>(cnt));
   } else if (mxUs >= 100000) {
@@ -879,22 +879,22 @@ void FormatCh1Latency(AppendBuf &out, const LatencySnapshot &lat) {
              static_cast<unsigned>(mxUs / 100),
              static_cast<unsigned>((mxUs % 100) / 10));
   }
-  out.appendFormat("%-46s%34s\r\n", "Hot-Path Real-Time Latency (Core 1 / Task_Ch1)", r_buf);
+  out.appendFormat("%-47s%33s\r\n", "Hot-Path Real-Time Latency (Core 1 / Task_Ch1)", r_buf);
 
   // 2. Divider
   out.append(DIV80);
 
-  // 3. Table Header: 26 + 1 + 18 + 1 + 6 + 1 + 7 + 3 + 17 = 80 chars
-  out.appendFormat("%-26s %-18s %6s %7s   %-17s\r\n",
-                   "Latency Range (Cycles)", "Wall-Clock Time", "Hits", "Ratio", "Distr");
+  // 3. Table Header: 24 + 1 + 17 + 1 + 10 + 1 + 10 + 2 + 14 = 80 chars
+  out.appendFormat("%-24s %-17s %10s %10s  %-14s\r\n",
+                   "Latency Range (Cycles)", "Wall-Clock Time", "Hits", "Ratio", "  Distribution");
 
-  // 4. Data Rows
+  // 4. Data Rows: 24 + 1 + 17 + 1 + 10 + 1 + 10 + 2 + 14 = 80 chars
   for (unsigned b = 0; b < LatencySnapshot::kBuckets; ++b) {
     const uint32_t h = lat.hist[b];
     if (h == 0) continue;
 
-    char range_buf[27];
-    char time_buf[19];
+    char range_buf[25];
+    char time_buf[18];
 
     if (b == LatencySnapshot::kBuckets - 1) {
       const uint32_t lo = 1u << (b - 1);
@@ -914,44 +914,49 @@ void FormatCh1Latency(AppendBuf &out, const LatencySnapshot &lat) {
         ? static_cast<uint32_t>((static_cast<uint64_t>(h) * 1000u + (cnt / 2)) / cnt)
         : 0;
 
-    char rat_buf[8];
+    char rat_buf[11];
     snprintf(rat_buf, sizeof(rat_buf), "%u.%01u%%",
              static_cast<unsigned>(ratio_x10 / 10), static_cast<unsigned>(ratio_x10 % 10));
 
     unsigned hashes = std::min<unsigned>(10u, (ratio_x10 + 50) / 100);
     if (h > 0 && hashes == 0) hashes = 1;
 
-    char bar[13];
-    bar[0] = '[';
+    char bar[15];
+    bar[0] = ' ';
+    bar[1] = ' ';
+    bar[2] = '[';
     for (unsigned i = 0; i < 10; ++i) {
-      bar[1 + i] = (i < hashes) ? '#' : ' ';
+      bar[3 + i] = (i < hashes) ? '#' : ' ';
     }
-    bar[11] = ']';
-    bar[12] = '\0';
+    bar[13] = ']';
+    bar[14] = '\0';
 
-    out.appendFormat("%-26s %-18s %6u %7s   %-17s\r\n",
+    out.appendFormat("%-24s %-17s %10u %10s  %-14s\r\n",
                      range_buf, time_buf, static_cast<unsigned>(h), rat_buf, bar);
   }
 
   // 5. Divider
   out.append(DIV80);
 
-  // 6. Peak WCET Row (Option A): Exactly aligned to 80 chars
-  char peak_cyc[27];
-  char peak_us[19];
-  char peak_ago[18];
+  // 6. Peak WCET Summary Row: 45 chars left + 35 chars right = 80 chars
+  char peak_buf[46];
+  char ago_buf[36];
 
-  snprintf(peak_cyc, sizeof(peak_cyc), "Peak: %u cyc", static_cast<unsigned>(mx));
-  snprintf(peak_us, sizeof(peak_us), "%u.%02u us",
-           static_cast<unsigned>(mxUs / 100), static_cast<unsigned>(mxUs % 100));
+  snprintf(peak_buf, sizeof(peak_buf), "Peak WCET: %u cyc (%u.%02u us)",
+           static_cast<unsigned>(mx),
+           static_cast<unsigned>(mxUs / 100),
+           static_cast<unsigned>(mxUs % 100));
+
   if (mx > 0) {
-    snprintf(peak_ago, sizeof(peak_ago), "Last: %u ms ago", static_cast<unsigned>(lat.max_age_ms));
+    const uint32_t ageMs = lat.max_age_ms;
+    snprintf(ago_buf, sizeof(ago_buf), "Last Event: %u.%01us ago",
+             static_cast<unsigned>(ageMs / 1000),
+             static_cast<unsigned>((ageMs % 1000) / 100));
   } else {
-    peak_ago[0] = '\0';
+    ago_buf[0] = '\0';
   }
 
-  out.appendFormat("%-26s %-18s                 %-17s\r\n",
-                   peak_cyc, peak_us, peak_ago);
+  out.appendFormat("%-45s%35s\r\n", peak_buf, ago_buf);
 }
 
 } // namespace Fmt
