@@ -44,6 +44,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
+#include <utility>
 
 // ============================================================================
 // CONTROL ACTION TYPES & SLOTS (Absorbed from ProtocolTypes)
@@ -123,10 +125,48 @@ struct DecodedDeviceState {
   bool should_broadcast{false};
 };
 
-// String conversion helper declarations (implemented in Device_Registry.cpp)
-const char *DeviceClassToName(DeviceClass cls) noexcept;
-const char *DeviceClassToCliString(DeviceClass cls) noexcept;
-const char *DeviceClassToTelemetryString(DeviceClass cls) noexcept;
+// String conversion helpers (optimal switch-case for cache locality & binary size)
+[[nodiscard]] constexpr const char *DeviceClassToName(DeviceClass cls) noexcept {
+  switch (cls) {
+  case DeviceClass::UNKNOWN:    return "Unknown";
+  case DeviceClass::SWITCH:     return "Light";
+  case DeviceClass::OUTLET:     return "Outlet";
+  case DeviceClass::GAS:        return "Gas";
+  case DeviceClass::MOMENTARY:  return "Elevator";
+  case DeviceClass::THERMOSTAT: return "Thermo";
+  case DeviceClass::VENT:       return "Vent";
+  case DeviceClass::AIRCON:     return "Aircon";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] constexpr const char *DeviceClassToCliString(DeviceClass cls) noexcept {
+  switch (cls) {
+  case DeviceClass::UNKNOWN:    return "UNKNOWN";
+  case DeviceClass::SWITCH:     return "SWITCH";
+  case DeviceClass::OUTLET:     return "OUTLET";
+  case DeviceClass::GAS:        return "GAS";
+  case DeviceClass::MOMENTARY:  return "MOMENT";
+  case DeviceClass::THERMOSTAT: return "THERMO";
+  case DeviceClass::VENT:       return "VENT";
+  case DeviceClass::AIRCON:     return "AIRCON";
+  }
+  return "UNKNOWN";
+}
+
+[[nodiscard]] constexpr const char *DeviceClassToTelemetryString(DeviceClass cls) noexcept {
+  switch (cls) {
+  case DeviceClass::UNKNOWN:    return "unknown";
+  case DeviceClass::SWITCH:     return "switch";
+  case DeviceClass::OUTLET:     return "outlet";
+  case DeviceClass::GAS:        return "gas";
+  case DeviceClass::MOMENTARY:  return "momentary";
+  case DeviceClass::THERMOSTAT: return "thermostat";
+  case DeviceClass::VENT:       return "vent";
+  case DeviceClass::AIRCON:     return "aircon";
+  }
+  return "unknown";
+}
 
 // ============================================================================
 // DEVICE KEY IDENTIFICATION
@@ -318,6 +358,6 @@ struct FcuDeviceSnapshot {
 };
 
 bool Device_GetFcuSnapshot(uint8_t slot_idx, FcuDeviceSnapshot &out) noexcept;
-bool Device_ControlFcu(uint8_t slot_idx, const char *action, int value,
+bool Device_ControlFcu(uint8_t slot_idx, std::string_view action, int value,
                        uint16_t mode = 1, uint16_t fan = 4, uint16_t swing = 0,
                        uint8_t temp = 24) noexcept;

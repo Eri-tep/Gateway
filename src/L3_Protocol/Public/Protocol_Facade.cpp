@@ -201,16 +201,24 @@ void ProtocolDiag_GetFramingNamespace(uint8_t profile_idx, char *out_buf,
   }
 }
 
-bool ProtocolDiag_ExtractDeviceKey(const uint8_t *data, size_t len,
+bool ProtocolDiag_ExtractDeviceKey(std::span<const uint8_t> frame,
                                    uint8_t &out_dev_id, uint8_t &out_sub1,
                                    uint8_t &out_sub2) noexcept {
-  if (!data || len < 5)
+  if (frame.size() < 5)
     return false;
   auto *parser = WallpadParserFactory::getActiveParser();
   if (!parser)
     return false;
-  std::span<const uint8_t> frame(data, len);
   return parser->extractDeviceKey(frame, out_dev_id, out_sub1, out_sub2);
+}
+
+bool ProtocolDiag_ExtractDeviceKey(const uint8_t *data, size_t len,
+                                   uint8_t &out_dev_id, uint8_t &out_sub1,
+                                   uint8_t &out_sub2) noexcept {
+  if (!data)
+    return false;
+  return ProtocolDiag_ExtractDeviceKey(std::span<const uint8_t>(data, len),
+                                       out_dev_id, out_sub1, out_sub2);
 }
 
 void ProtocolDiag_GetActiveVendorName(char *out_buf, size_t max_len) noexcept {
@@ -506,18 +514,30 @@ int ProtocolDiag_ExtractPacketLength(const uint8_t *buf, size_t len, size_t offs
   return parser ? parser->extractPacketLength(buf, len, offset) : -1;
 }
 
-bool ProtocolDiag_ValidatePacket(const uint8_t *buf, size_t len) noexcept {
-  if (!buf || len == 0)
+bool ProtocolDiag_ValidatePacket(std::span<const uint8_t> frame) noexcept {
+  if (frame.empty())
     return false;
   auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->validatePacket(std::span<const uint8_t>(buf, len)) : false;
+  return parser ? parser->validatePacket(frame) : false;
+}
+
+bool ProtocolDiag_ValidatePacket(const uint8_t *buf, size_t len) noexcept {
+  if (!buf)
+    return false;
+  return ProtocolDiag_ValidatePacket(std::span<const uint8_t>(buf, len));
+}
+
+bool ProtocolDiag_IsQueryPacket(std::span<const uint8_t> frame) noexcept {
+  if (frame.empty())
+    return false;
+  auto *parser = WallpadParserFactory::getActiveParser();
+  return parser ? parser->isQueryPacket(frame) : false;
 }
 
 bool ProtocolDiag_IsQueryPacket(const uint8_t *buf, size_t len) noexcept {
-  if (!buf || len == 0)
+  if (!buf)
     return false;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->isQueryPacket(std::span<const uint8_t>(buf, len)) : false;
+  return ProtocolDiag_IsQueryPacket(std::span<const uint8_t>(buf, len));
 }
 
 uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept {

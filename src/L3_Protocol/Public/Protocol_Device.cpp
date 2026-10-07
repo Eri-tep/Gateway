@@ -12,36 +12,6 @@
 #include <cstdio>
 #include <cstring>
 
-// ============================================================================
-// DeviceClass String Conversion Implementations (Absorbed from ProtocolTypes)
-// ============================================================================
-
-const char *DeviceClassToName(DeviceClass cls) noexcept {
-  static constexpr const char *kNames[] = {"Unknown", "Light",    "Outlet",
-                                           "Gas",     "Elevator", "Thermo",
-                                           "Vent",    "Aircon"};
-  const size_t idx = static_cast<size_t>(cls);
-  return (idx < sizeof(kNames) / sizeof(kNames[0])) ? kNames[idx] : "Unknown";
-}
-
-const char *DeviceClassToCliString(DeviceClass cls) noexcept {
-  static constexpr const char *kCliNames[] = {"UNKNOWN", "SWITCH", "OUTLET",
-                                              "GAS",     "MOMENT", "THERMO",
-                                              "VENT",    "AIRCON"};
-  const size_t idx = static_cast<size_t>(cls);
-  return (idx < sizeof(kCliNames) / sizeof(kCliNames[0])) ? kCliNames[idx]
-                                                          : "UNKNOWN";
-}
-
-const char *DeviceClassToTelemetryString(DeviceClass cls) noexcept {
-  static constexpr const char *kTeleNames[] = {
-      "unknown",   "switch",     "outlet", "gas",
-      "momentary", "thermostat", "vent",   "aircon"};
-  const size_t idx = static_cast<size_t>(cls);
-  return (idx < sizeof(kTeleNames) / sizeof(kTeleNames[0])) ? kTeleNames[idx]
-                                                            : "unknown";
-}
-
 namespace {
 
 DeviceAckPacketCheckFn s_ack_packet_check = nullptr;
@@ -784,37 +754,79 @@ bool Device_GetFcuSnapshot(uint8_t slot_idx, FcuDeviceSnapshot &out) noexcept {
     return false;
   }
   out.power = rt.snap.power;
-  out.mode = static_cast<uint16_t>(rt.snap.mode);
-  out.fan_speed = static_cast<uint16_t>(rt.snap.fan_speed);
-  out.swing = static_cast<uint16_t>(rt.snap.swing);
+  out.mode = std::to_underlying(rt.snap.mode);
+  out.fan_speed = std::to_underlying(rt.snap.fan_speed);
+  out.swing = std::to_underlying(rt.snap.swing);
   out.target_temp = rt.snap.target_temp;
   out.room_temp = rt.snap.room_temp;
   out.is_online = rt.is_online;
   return true;
 }
 
-bool Device_ControlFcu(uint8_t slot_idx, const char *action, int value,
+namespace {
+
+struct FcuActionHandler {
+  std::string_view action;
+  enum class ActionType : uint8_t {
+    PowerRestore,
+    Power,
+    Mode,
+    FanSpeed,
+    Swing,
+    TargetTemp
+  } type;
+};
+
+// Sorted alphabetically by action name for O(log N) std::lower_bound lookup
+constexpr FcuActionHandler kFcuActions[] = {
+    {"ac_mode",       FcuActionHandler::ActionType::Mode},
+    {"fan_speed",     FcuActionHandler::ActionType::FanSpeed},
+    {"mode",          FcuActionHandler::ActionType::Mode},
+    {"power",         FcuActionHandler::ActionType::Power},
+    {"power_restore", FcuActionHandler::ActionType::PowerRestore},
+    {"pwr",           FcuActionHandler::ActionType::Power},
+    {"set_temp",      FcuActionHandler::ActionType::TargetTemp},
+    {"spd",           FcuActionHandler::ActionType::FanSpeed},
+    {"swing",         FcuActionHandler::ActionType::Swing},
+    {"temp",          FcuActionHandler::ActionType::TargetTemp},
+};
+
+static_assert([] {
+  for (size_t i = 1; i < sizeof(kFcuActions) / sizeof(kFcuActions[0]); ++i) {
+    if (kFcuActions[i - 1].action >= kFcuActions[i].action) return false;
+  }
+  return true;
+}(), "kFcuActions must be strictly sorted alphabetically for binary search");
+
+} // namespace
+
+bool Device_ControlFcu(uint8_t slot_idx, std::string_view action, int value,
                        uint16_t mode, uint16_t fan, uint16_t swing,
                        uint8_t temp) noexcept {
-  if (!action) return false;
-  std::string_view sv{action};
+  if (action.empty()) return false;
 
-  if (sv == "power_restore") {
+  auto it = std::lower_bound(
+      std::begin(kFcuActions), std::end(kFcuActions), action,
+      [](const FcuActionHandler &entry, std::string_view key) noexcept {
+        return entry.action < key;
+      });
+
+  if (it == std::end(kFcuActions) || it->action != action) {
+    return false;
+  }
+
+  switch (it->type) {
+  case FcuActionHandler::ActionType::PowerRestore:
     return Fcu_RestorePower(slot_idx, mode, fan, swing, temp);
-  }
-  if (sv == "power" || sv == "pwr") {
+  case FcuActionHandler::ActionType::Power:
     return Fcu_SetPower(slot_idx, value == 1);
-  }
-  if (sv == "mode" || sv == "ac_mode") {
+  case FcuActionHandler::ActionType::Mode:
     return Fcu_SetMode(slot_idx, static_cast<Fcu::Mode>(value));
-  }
-  if (sv == "fan_speed" || sv == "spd") {
+  case FcuActionHandler::ActionType::FanSpeed:
     return Fcu_SetFanSpeed(slot_idx, static_cast<Fcu::FanSpeed>(value));
-  }
-  if (sv == "swing") {
+  case FcuActionHandler::ActionType::Swing:
     return Fcu_SetSwing(slot_idx, static_cast<Fcu::Swing>(value));
-  }
-  if (sv == "set_temp" || sv == "temp") {
+  case FcuActionHandler::ActionType::TargetTemp:
     return Fcu_SetTargetTemp(slot_idx, static_cast<uint8_t>(value));
   }
   return false;

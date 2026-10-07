@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <sys/select.h>
 
 // ── Diagnostic Snapshot Structures ──────────────────────────────────────────
@@ -165,6 +166,9 @@ uint32_t ProtocolDiag_GetStalePollCount() noexcept;
 // ── Framing & Profile Helpers ────────────────────────────────────────────────
 void ProtocolDiag_GetFramingNamespace(uint8_t profile_idx, char *out_buf,
                                       size_t buf_len) noexcept;
+bool ProtocolDiag_ExtractDeviceKey(std::span<const uint8_t> frame,
+                                   uint8_t &out_dev_id, uint8_t &out_sub1,
+                                   uint8_t &out_sub2) noexcept;
 bool ProtocolDiag_ExtractDeviceKey(const uint8_t *data, size_t len,
                                    uint8_t &out_dev_id, uint8_t &out_sub1,
                                    uint8_t &out_sub2) noexcept;
@@ -208,7 +212,9 @@ void ProtocolDiag_ResetGroup(uint8_t dev_id, bool all) noexcept;
 uint8_t ProtocolDiag_GetActiveStx() noexcept;
 uint8_t ProtocolDiag_GetActiveEtx() noexcept;
 int ProtocolDiag_ExtractPacketLength(const uint8_t *buf, size_t len, size_t offset) noexcept;
+bool ProtocolDiag_ValidatePacket(std::span<const uint8_t> frame) noexcept;
 bool ProtocolDiag_ValidatePacket(const uint8_t *buf, size_t len) noexcept;
+bool ProtocolDiag_IsQueryPacket(std::span<const uint8_t> frame) noexcept;
 bool ProtocolDiag_IsQueryPacket(const uint8_t *buf, size_t len) noexcept;
 uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
 

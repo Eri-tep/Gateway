@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.1.7";
+constexpr const char *FIRMWARE_VERSION = "v2.1.8";
 } // namespace Config
 
 namespace Config::Task {
