@@ -7,6 +7,9 @@
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L4_Services/CLI_Commands.h"
+#if defined(BENCHMARK_BUILD)
+#include "L4_Services/Benchmark_Harness.h"
+#endif
 
 #include <WiFi.h>
 #include <algorithm>
@@ -526,6 +529,10 @@ const CommandDef kConsoleCmds[] = {
     {"q", "Stop active packet tracing (shortcut for 'trace off')",
      WallpadCli::cmdStop},
     {"exit", "Disconnect current Telnet CLI session", TelnetManager::cmdExit},
+#if defined(BENCHMARK_BUILD)
+    {"bench", "ESP32-S3 cycle-accurate benchmark harness [run|health]",
+     BenchmarkCli::cmdBench},
+#endif
     {"help", "Display comprehensive command reference and usage examples",
      SystemCli::cmdHelp}};
 
