@@ -321,38 +321,12 @@ void Diag_LogResetReason() {
     s_pending_reboot_reason = "Software Reset (esp_restart)";
     return;
   }
+
   s_rtc_clean_restart_magic = 0;
 
-  const char *reason_str = nullptr;
-  switch (reason) {
-  case ESP_RST_POWERON:
-    reason_str = "Power-On Reset";
-    break;
-  case ESP_RST_EXT:
-    reason_str = "Hardware Reset Pin (EXT)";
-    break;
-  case ESP_RST_PANIC:
-    reason_str = "CPU Panic / Crash Exception";
-    break;
-  case ESP_RST_INT_WDT:
-    reason_str = "Interrupt Watchdog Reset";
-    break;
-  case ESP_RST_TASK_WDT:
-    reason_str = s_stuck_diag.found ? s_stuck_diag.msg : "Task Watchdog Reset";
-    break;
-  case ESP_RST_WDT:
-    reason_str = "Other Watchdog Reset";
-    break;
-  case ESP_RST_BROWNOUT:
-    reason_str = "HW: Brownout Reset (Low Voltage)";
-    break;
-  case ESP_RST_SDIO:
-    reason_str = "HW: SDIO Reset";
-    break;
-  default:
-    reason_str = "Unknown Hardware Reset";
-    break;
-  }
+  const char *reason_str = (reason == ESP_RST_TASK_WDT && s_stuck_diag.found)
+                               ? s_stuck_diag.msg
+                               : Diag_ResetReasonToString(reason);
 
   if (reason != ESP_RST_POWERON) {
     s_pending_reboot_reason = reason_str;

@@ -261,31 +261,8 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
           ? (static_cast<float>(ch1_crc) * 100.0f / static_cast<float>(ch1_rx))
           : 0.0f;
 
-  const char *rst_reason = "Normal Boot";
   esp_reset_reason_t rr = esp_reset_reason();
-  switch (rr) {
-  case ESP_RST_POWERON:
-    rst_reason = "Power-On Reset";
-    break;
-  case ESP_RST_EXT:
-    rst_reason = "Hardware Reset Pin (EXT)";
-    break;
-  case ESP_RST_PANIC:
-    rst_reason = "CPU Panic / Crash Exception";
-    break;
-  case ESP_RST_TASK_WDT:
-    rst_reason = "Task Watchdog Reset";
-    break;
-  case ESP_RST_BROWNOUT:
-    rst_reason = "HW: Brownout (Low Voltage)";
-    break;
-  case ESP_RST_SW:
-    rst_reason = "Software Restart";
-    break;
-  default:
-    rst_reason = "Other Reset";
-    break;
-  }
+  const char *rst_reason = System_ResetReasonToString(rr);
 
   if (req_id != -1) {
     out.appendFormat("{\"id\":%ld,\"res\":\"ok\",", req_id);
@@ -311,6 +288,44 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
 
   serializeDiagnostics(out, rst_reason);
 }
+
+// ── Table-Driven Property Formatters for Device Classes (Rule 8 Compliance) ──
+using DevicePropFormatter = void (*)(AppendBuf &out, const DecodedDeviceState &st);
+
+struct DevicePropFormatEntry {
+  DeviceClass cls;
+  DevicePropFormatter format;
+};
+
+static void FormatThermostatProps(AppendBuf &out, const DecodedDeviceState &st) {
+  out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d", st.target_temp,
+                   st.current_temp);
+}
+
+static void FormatVentProps(AppendBuf &out, const DecodedDeviceState &st) {
+  out.appendFormat(",\"fan_speed\":%d,\"vent_mode\":%d", st.fan_speed,
+                   st.vent_mode);
+}
+
+static void FormatGasProps(AppendBuf &out, const DecodedDeviceState &st) {
+  out.appendFormat(",\"valve\":\"%s\"", st.valve_state);
+}
+
+static void FormatOutletProps(AppendBuf &out, const DecodedDeviceState &st) {
+  out.appendFormat(",\"power_w\":%.1f", st.power_w);
+}
+
+static void FormatMomentaryProps(AppendBuf &out, const DecodedDeviceState &st) {
+  out.appendFormat(",\"floor\":%d,\"direction\":%d", st.floor, st.direction);
+}
+
+static constexpr DevicePropFormatEntry kPropFormatters[] = {
+    {DeviceClass::THERMOSTAT, FormatThermostatProps},
+    {DeviceClass::VENT,       FormatVentProps},
+    {DeviceClass::GAS,        FormatGasProps},
+    {DeviceClass::OUTLET,     FormatOutletProps},
+    {DeviceClass::MOMENTARY,  FormatMomentaryProps},
+};
 
 void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
   if (req_id != -1) {
@@ -367,19 +382,11 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
                        snap.dev_id, snap.sub1, snap.sub2, cls_str, name_buf, ch,
                        st.power);
 
-      if (dc == DeviceClass::THERMOSTAT) {
-        out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d",
-                         st.target_temp, st.current_temp);
-      } else if (dc == DeviceClass::VENT) {
-        out.appendFormat(",\"fan_speed\":%d,\"vent_mode\":%d", st.fan_speed,
-                         st.vent_mode);
-      } else if (dc == DeviceClass::GAS) {
-        out.appendFormat(",\"valve\":\"%s\"", st.valve_state);
-      } else if (is_outlet) {
-        out.appendFormat(",\"power_w\":%.1f", st.power_w);
-      } else if (dc == DeviceClass::MOMENTARY) {
-        out.appendFormat(",\"floor\":%d,\"direction\":%d", st.floor,
-                         st.direction);
+      for (const auto &fmt : kPropFormatters) {
+        if (fmt.cls == dc || (fmt.cls == DeviceClass::OUTLET && is_outlet)) {
+          fmt.format(out, st);
+          break;
+        }
       }
       out.append("}");
       locked_count++;

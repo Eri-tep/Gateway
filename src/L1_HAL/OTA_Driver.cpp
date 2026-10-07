@@ -135,18 +135,28 @@ bool Ota_IsTrustedUrl(const char *url, OtaUrlContext context) {
     return false;
   }
 
-  if (strcasecmp(host, "raw.githubusercontent.com") == 0 ||
-      strcasecmp(host, "github.com") == 0) {
-    if (Ota_HasUnsafePathSegments(path)) {
-      return false;
+  static constexpr const char *kPrimaryOtaHosts[] = {
+      "raw.githubusercontent.com",
+      "github.com",
+  };
+  for (const char *trusted : kPrimaryOtaHosts) {
+    if (strcasecmp(host, trusted) == 0) {
+      if (Ota_HasUnsafePathSegments(path)) {
+        return false;
+      }
+      return (strncmp(path, OTA_REPO_PREFIX, sizeof(OTA_REPO_PREFIX) - 1) == 0);
     }
-    return (strncmp(path, OTA_REPO_PREFIX, sizeof(OTA_REPO_PREFIX) - 1) == 0);
   }
 
-  if (strcasecmp(host, "objects.githubusercontent.com") == 0 ||
-      strcasecmp(host, "release-assets.githubusercontent.com") == 0 ||
-      strcasecmp(host, "github-releases.githubusercontent.com") == 0) {
-    return (context == OtaUrlContext::Redirect);
+  static constexpr const char *kRedirectOtaHosts[] = {
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com",
+      "github-releases.githubusercontent.com",
+  };
+  for (const char *trusted : kRedirectOtaHosts) {
+    if (strcasecmp(host, trusted) == 0) {
+      return (context == OtaUrlContext::Redirect);
+    }
   }
 
   return false;

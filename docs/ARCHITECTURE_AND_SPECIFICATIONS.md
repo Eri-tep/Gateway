@@ -132,6 +132,7 @@ src/
 - **Underlying SDK / ESP-IDF**: **ESP-IDF v5.3.2** (`ESP_IDF_VERSION_VAL(5, 3, 2)`)
 - **Toolchain**: `xtensa-esp-elf-gcc / g++ 13.2.0 (crosstool-NG esp-13.2.0_20240530)`
 - **C++ Standard**: **C++23** (`-std=gnu++23`)
+- **Exception Model**: **Exceptions Disabled (`-fno-exceptions`)** (Zero runtime exception overhead; `std::terminate()` on unhandled abort)
 
 ---
 
@@ -251,64 +252,238 @@ These principles represent the engineering standard established across the Canon
 
 | Domain | Legacy Anti-Pattern (STRICTLY FORBIDDEN) | Modern Standard (C++23 / GW Canonical Standard) | Rationale & Prevention |
 |---|---|---|---|
-| **Architecture** | **Upward Include ($L_M \rightarrow L_N, M < N$)**: 하위 계층이 상위 헤더 참조 | **Strict Downlink ($L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$)**: L2는 L3/L4를 일체 모름 | 상위 계층 변경 시 하위 계층 리빌드 방지 및 순환 참조 원천 차단 |
-| **Architecture** | **Middle-Man Pass-Through**: L0 Foundation Soil을 L2, L3가 단순 포워딩 래핑 | **Direct Leaf Access**: 모든 계층($L1 \sim L4$)에서 L0 Base 직접 참조 | 무의미한 래퍼 보일러플레이트 제거, 컴파일 최적화 |
-| **Architecture** | **Extern State Leak**: 소켓, 채널 뮤텍스, 큐를 `extern`으로 헤더에 노출 | **100% Information Hiding**: `.cpp` 내부 `static` 봉인 후 Snapshot API 제공 | 스레드 경합(Race Condition) 차단, 불변성 보장 |
-| **Memory / Hot Path** | **Heap in Hot Path**: 패킷 수신/송신 시 `new`, `malloc`, `String` 사용 | **100% Zero-Heap**: `std::array`, `std::span`, 고정 링버퍼, `AppendBuf` | 24/7/365 가동 시 힙 단편화(Fragmentation)에 의한 패닉/크래시 원천 방지 |
-| **Memory / Hot Path** | **Silent Command Drop**: 큐 포화 시 중요 제어 명령을 조용히 누락 | **Deterministic Drop Semantics**: 상태/폴링=Drop-Head, VIP 제어=Drop-Tail + 동기 에러 | 스마트싱스 앱과의 상태 불일치 방지 및 재전송 유도 |
-| **Memory / Hot Path** | **Frequent Flash Write**: 런타임 상태 변경마다 NVS 플래시 직기록 | **RTC SRAM Retention + 30s Debounce**: `RTC_NOINIT_ATTR` 캐시 후 지연 커밋 | SPI 플래시 쓰기 수명(Flash Wear) 보존 |
-| **Control Flow** | **Chained `if-else` / `strcasecmp`**: 선형 순차 문자열 비교 | **One-shot Lowercase + `constexpr` Table Dispatch**: 정렬 테이블 기반 이진 탐색 | $O(N)$ 문자열 비교 오버헤드 제거, $O(\log N)$ 디스패치 |
-| **Control Flow** | **Raw Enum Cast**: `static_cast<uint8_t>(e)` 남발 | **`std::to_underlying(e)` (C++23)** | 가독성 및 타입 변환 안전성 확보 |
-| **Control Flow** | **Manual Byte Shift**: `((b[0]<<8)\|b[1])` 또는 비표준 매크로 | **`std::byteswap()` (C++23)** | 하드웨어 가속 내장 함수를 통한 엔디안 변환 최적화 |
-| **Control Flow** | **Dummy Return in Unreachable**: default 레이블의 무의미한 더미 리턴 | **`std::unreachable()` (C++23)** | 컴파일러에게 분기 미도달 힌트를 제공하여 불필요한 코드 생성 억제 |
-| **Control Flow** | **Ad-hoc Flags & `millis()`**: 분산된 `bool` 플래그와 산발적 시간 비교 | **Explicit FSM**: 명시적 상태 전이 루프로 단일화 | 비결정론적 레이스 컨디션 및 복잡도 제거 |
-| **Concurrency** | **Reentrant Lock Trap**: 락 보유 중 소켓 송신 또는 외부 콜백 직접 호출 | **Pending Buffer Queue**: 락 해제 후 대기 버퍼에 적재하여 메인 루프 순차 처리 | Self-Deadlock(자기 교착 상태) 완전 박멸 |
-| **Concurrency** | **Single Mutex Monopoly**: 다중 태스크 읽기에도 단일 독점 뮤텍스 사용 | **`std::shared_mutex` (C++17/23)**: 빈번한 읽기=`shared_lock`, 쓰기=`unique_lock` | 태스크 간 불필요한 블로킹 제거 및 처리량 극대화 |
-| **Concurrency** | **Infinite Mutex Wait (`portMAX_DELAY`)**: 무제한 락 대기 | **Defensive Timeout**: `MAX_LOCK_HOLD_MS`(최대 50ms) 타임아웃 강제 | 버스 정체 시 시스템 전체 행(Hang) 방지 |
+| **Architecture** | **Upward Include ($L_M \rightarrow L_N, M < N$)**: Lower layers referencing higher-layer headers | **Strict Downlink ($L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$)**: L2 possesses 0% knowledge of L3/L4 | Prevents rebuild cascading when higher layers change; completely eliminates cyclic dependencies. |
+| **Architecture** | **Middle-Man Pass-Through**: L2/L3 forwarding or wrapping L0 Foundation Soil APIs | **Direct Leaf Access**: All layers ($L1 \sim L4$) directly reference L0 Foundation Soil | Eliminates pointless wrapper boilerplate; maximizes compiler inlining and optimization. |
+| **Architecture** | **Extern State Leak**: Sockets, channel mutexes, or queues exposed in headers via `extern` | **100% Information Hiding**: Sealed `static` inside `.cpp`; exposed exclusively via thread-safe read-only Snapshot APIs | Eliminates race conditions; guarantees thread safety and immutability. |
+| **Memory / Hot Path** | **Heap in Hot Path**: Dynamic allocation (`new`, `malloc`, dynamic `String`) during packet RX/TX | **100% Zero-Heap**: `std::array`, `std::span`, static ring buffers, `AppendBuf` | Permanently prevents heap fragmentation, panics, and crashes during 24/7/365 continuous operation. |
+| **Memory / Hot Path** | **Silent Command Drop**: Silently dropping critical control commands when queues saturate | **Deterministic Drop Semantics**: State/Polling=Drop-Head, VIP/Control=Drop-Tail with synchronous error code | Prevents state desynchronization with SmartThings app; prompts immediate upstream retransmission. |
+| **Memory / Hot Path** | **Frequent Flash Write**: Writing directly to NVS Flash upon every runtime state transition | **RTC SRAM Retention + 30s Debounce**: Volatile cache in `RTC_NOINIT_ATTR`, debounced commit on convergence | Preserves SPI Flash endurance and prevents wear-out. |
+| **Memory / Hot Path** | **Runtime Table Init**: Calculating/initializing lookup tables (CRC, etc.) at runtime startup | **`consteval` Flash Lookup Tables (C++20/23)**: Compile-time evaluation; placed directly in Flash `.rodata` | Zero boot latency; zero SRAM consumption. |
+| **Control Flow** | **Chained `if-else` / `strcasecmp`**: Linear sequential string comparisons | **One-shot Lowercase + `constexpr` Table Dispatch**: Binary search (`std::lower_bound`) over sorted `constexpr` table | Eliminates $O(N)$ string comparison overhead; enables $O(\log N)$ dispatch. |
+| **Control Flow** | **Raw Enum Cast**: Excessive `static_cast<uint8_t>(e)` | **`std::to_underlying(e)` (C++23)** | Improves readability and type-safe value conversions. |
+| **Control Flow** | **Manual Byte Shift**: `((b[0]<<8)\|b[1])` or non-standard macros | **`std::byteswap()` (C++23) & `if consteval`** | Hardware-accelerated bit manipulation and compile-time evaluation. |
+| **Control Flow** | **Dummy Return in Unreachable**: Pointless dummy returns in default labels | **`std::unreachable()` (C++23)** | Suppresses dead code generation and optimizes jump tables by hinting unreachable paths. |
+| **Control Flow** | **Ad-hoc Flags & `millis()`**: Scattered `bool` flags and ad-hoc timestamp checks | **Explicit FSM**: Unified explicit state machine transition loops | Eliminates non-deterministic race conditions and state leaks. |
+| **Control Flow** | **Out-Param / `esp_err_t` Error Handling**: Raw error codes and mutable pointer arguments | **`std::expected<T, E>` Monadic (C++23)**: 1-byte enum class error type with monadic chaining | Type-safe value/error propagation without C++ exceptions (`-fno-exceptions`). |
+| **Control Flow** | **Nested `if` Slot Searches**: Deeply nested `if` / null checks during slot lookups | **`std::optional` Monadic (C++23)**: `.and_then()`, `.transform()`, `.value_or()` | Streamlines control flow and dramatically improves readability. |
+| **Concurrency** | **Reentrant Lock Trap**: Invoking socket transmission or external callbacks while holding locks | **Pending Buffer Queue**: Enqueue to pending buffer, release lock, process sequentially in worker loop | Completely eliminates self-deadlocks. |
+| **Concurrency** | **Single Mutex Monopoly**: Exclusive mutex for frequent multi-task reads | **`std::shared_mutex` (C++17/23)**: Frequent reads=`shared_lock`, rare writes=`unique_lock` | Eliminates thread contention and maximizes multi-core throughput. |
+| **Concurrency** | **Infinite Mutex Wait (`portMAX_DELAY`)**: Indefinite lock waits | **Defensive Timeout**: Enforce `MAX_LOCK_HOLD_MS` (max 50ms) lock acquisition timeout | Prevents system-wide hangs during bus traffic congestion. |
+| **Concurrency** | **FreeRTOS Callback Wrapper Struct**: Boilerplate structs/wrappers to pass lambdas | **`static` Lambda / `static operator()` (C++23)**: Zero-overhead stateless lambda conversion to raw function pointers | Direct binding to `TaskFunction_t` without object pointer overhead. |
 
 ---
 
-### 6.2 Decision Matrix: Table-Driven (테이블화) vs `switch-case` 우선순위 가이드라인
+### 6.2 Decision Matrix: Table-Driven vs. `switch-case` Priority Guidelines
 
-게이트웨이 펌웨어에서는 데이터와 동작의 성격에 따라 테이블화와 `switch-case`의 사용 우선순위를 엄격히 구분한다.
+The gateway firmware strictly categorizes branching structures into Table-Driven dispatch vs. `switch-case` based on the nature of the data and control flow.
 
 ```
-                           [분기 설계 선택 기준]
-                                     │
-                 ┌───────────────────┴───────────────────┐
-                 ▼                                       ▼
-       "데이터 매핑인가,                        "순차적 FSM 상태 전이인가,
-    외부 입력(문자열/패킷)의               컴파일 타임 전수 검사(-Wswitch)가
-      핸들러 디스패치인가?"                         핵심인 열거형인가?"
-                 │                                       │
-                 ▼                                       ▼
-    ★ 1순위: Table-Driven (테이블화)             ★ 1순위: switch-case
+                  [Branching Architecture Decision]
+                                  │
+              ┌───────────────────┴───────────────────┐
+              ▼                                       ▼
+    "Is it data mapping or                  "Is it a sequential FSM
+ external input dispatch (string/pkt)?"      transition or exhaustive enum check?"
+              │                                       │
+              ▼                                       ▼
+  ★ Priority 1: Table-Driven               ★ Priority 1: switch-case
 ```
 
-#### 🥇 Table-Driven (테이블화)을 1순위로 사용하는 경우
-1. **문자열 기반 커맨드 매칭 (CLI, JSON-RPC)**:
-   - C++은 문자열 대상 `switch`가 불가능하므로, **`constexpr` 정렬 테이블 + `std::string_view` 이진 탐색(`std::lower_bound`)**을 표준으로 한다.
-   - 예: `ConsoleCommandEntry g_cmd_table[] = { {"clear", ...}, {"info", ...} };`
-2. **패킷 헤더 / 커맨드 바이트별 라우팅 (Packet Dispatcher)**:
-   - 프로토콜 명령 바이트(`0x31`, `0x41`, `0x42` 등)별로 전담 처리 함수를 호출할 때:
-   - 거대 `switch` 대신 **함수 포인터 테이블(`using PacketHandler = void(*)(span<const uint8_t>);`)**을 사용하여, 새 명령 추가 시 기존 코드를 수정하지 않고 테이블에 항목만 추가(개방-폐쇄 원칙 OCP 준수).
-3. **하드웨어 핀 / 다차원 설정 매핑 (Configuration Matrix)**:
-   - 채널별 GPIO, UART 보드 레이트, 타이머 인터벌 등은 코드 분기가 아닌 `constexpr ChannelConfig g_channel_table[NUM_CH]`로 데이터화.
+#### 🥇 When to Choose Table-Driven Dispatch (Priority 1)
+1. **String-based Command Matching (CLI, JSON-RPC)**:
+   - Because C++ does not support `switch` on strings, use **sorted `constexpr` tables + `std::string_view` binary search (`std::lower_bound`)** as the standard.
+   - Example: `ConsoleCommandEntry g_cmd_table[] = { {"clear", ...}, {"info", ...} };`
+2. **Packet Header / Command Byte Routing (Packet Dispatcher)**:
+   - When dispatching protocol command bytes (`0x31`, `0x41`, `0x42`, etc.) to dedicated handler functions:
+   - Replace massive `switch` blocks with **function pointer tables (`using PacketHandler = void(*)(span<const uint8_t>);`)**. Adding new commands requires only adding entries to the table without modifying existing dispatch logic (Open-Closed Principle).
+3. **Hardware Pin / Multi-Dimensional Configuration Mapping (Configuration Matrix)**:
+   - Per-channel GPIOs, UART baud rates, timer intervals, etc. must be defined as data matrices (`constexpr ChannelConfig g_channel_table[NUM_CH]`) rather than branching code.
 
-#### 🥇 `switch-case`를 1순위로 사용하는 경우
-1. **유한 상태 머신 (FSM State Transitions)**:
-   - 통신 프로토콜 프레임 수신 단계(`WAIT_HEADER` $\rightarrow$ `READ_LEN` $\rightarrow$ `READ_PAYLOAD` $\rightarrow$ `VERIFY_CRC`).
-   - Telnet ANSI 이스케이프 시퀀스 파서.
-   - **사유**: 테이블화 시 람다/함수 포인터 간 스택 컨텍스트 전달 비용이 발생하지만, `switch-case`는 함수 내부 지역 변수를 직접 접근하며 컴파일러가 최적의 단일 사이클 점프 테이블(`O(1)`)을 생성함.
-2. **컴파일 타임 전수 검사가 필요한 열거형 (Exhaustive Enum Check)**:
-   - `-Wswitch -Werror=switch` 컴파일러 플래그와 연계하여, 새 열거형 값이 추가되었을 때 미구현 분기를 **컴파일 에러**로 즉시 검출.
-3. **순수 Enum $\leftrightarrow$ Name 변환 함수 (Enum to `std::string_view`)**:
+#### 🥇 When to Choose `switch-case` (Priority 1)
+1. **Finite State Machines (FSM State Transitions)**:
+   - Communication protocol frame reception stages (`WAIT_HEADER` $\rightarrow$ `READ_LEN` $\rightarrow$ `READ_PAYLOAD` $\rightarrow$ `VERIFY_CRC`).
+   - Telnet ANSI escape sequence parser.
+   - **Rationale**: Table dispatch introduces stack context passing overhead between lambdas/function pointers, whereas `switch-case` operates directly on local variables, allowing the compiler to generate an optimal single-cycle jump table (`O(1)`).
+2. **Exhaustive Compile-Time Enum Validation (Exhaustive Enum Check)**:
+   - Enforced via `-Wswitch -Werror=switch` compiler flags to instantly detect unhandled enum cases at **compile time** when new enumerators are added.
+3. **Pure Enum-to-String Conversion (Enum to `std::string_view`)**:
    - `[[nodiscard]] constexpr std::string_view getDeviceTypeName(DeviceType type) noexcept`
-   - 플래시 메모리에 포인터 배열을 유지하는 것보다 `switch-case` + `std::unreachable()`을 인라인하는 것이 캐시 히트율과 바이너리 크기 면에서 최적.
+   - Inlining `switch-case` + `std::unreachable()` is optimal for cache locality and binary size compared to storing string pointer arrays in Flash memory.
 
-> **[골든 룰 (Golden Rule)]**:
-> - **동작(함수)을 외부 입력과 결합하거나 데이터를 정형화할 때는 테이블화(Table-Driven)**를 우선한다.
-> - **순차적 FSM 상태 흐름을 다루거나 Enum의 완전성을 컴파일러로 강제할 때는 `switch-case`**를 우선한다.
-> - **단, `case` 내부에 수십 줄 이상의 복잡한 비즈니스 로직을 인라인하는 "God Switch"는 엄격히 금지**하며, 반드시 개별 핸들러 함수로 분리 후 호출한다.
+> [!NOTE] **[Golden Rule]**:
+> - **When binding operations to external input or structuring static data, prioritize Table-Driven dispatch.**
+> - **When managing sequential FSM flows or enforcing enum exhaustiveness at compile time, prioritize `switch-case`.**
+> - **Inlining complex business logic (tens of lines) inside `case` labels ("God Switch") is strictly forbidden**; always delegate to individual modular handler functions.
+
+---
+
+### 6.3 Modern C++23 Language Features & Implementation Guide (GCC 13.2.0 / ESP-IDF 5.3)
+
+The gateway firmware standardizes on `-std=gnu++23`, `-fno-exceptions`, and `toolchain-xtensa-esp-elf@13.2.0+20240530`.
+The following patterns and constraints are validated for safe operation in real-time embedded communication environments.
+
+#### 6.3.1 `std::expected<T, E>` Monadic Error Handling (Standard Replacement for Protocol Parsers)
+- **Objective**: Replaces ambiguous `bool` return + out-param pointers or non-standard `esp_err_t`, providing type-safe value/error propagation without C++ exceptions (`-fno-exceptions`).
+- **Mandatory Invariants**:
+  1. **Error Type Size Constraint**: The error type `E` must strictly be defined as a 1-byte enum class (e.g. `enum class ParseErr : uint8_t`). Using strings or large structs introduces copy overhead and degrades register allocation.
+  2. **`-fno-exceptions` Safety**: Calling `ev.value()` aborts immediately via `std::terminate()` / `abort()` because `std::bad_expected_access` cannot be thrown under `-fno-exceptions`.
+  3. **Permitted Accessors**: Strictly use `has_value()`, `operator*`, `.error()`, `.value_or()`, and monadic chaining (`.and_then()`, `.transform()`, `.or_else()`).
+
+```cpp
+#include <expected>
+#include <span>
+#include <cstdint>
+#include <cstring>
+#include <bit>
+#include <utility>
+
+enum class ParseErr : uint8_t { TooShort, BadHeader, BadLen, BadChecksum };
+
+struct Frame {
+    uint8_t cmd;
+    std::span<const uint8_t> payload;
+};
+
+constexpr std::expected<Frame, ParseErr> parseFrame(std::span<const uint8_t> raw) noexcept {
+    if (raw.size() < 5) return std::unexpected(ParseErr::TooShort);
+    if (raw[0] != 0xF7) return std::unexpected(ParseErr::BadHeader);
+
+    uint16_t len_be;
+    std::memcpy(&len_be, raw.data() + 2, sizeof(len_be));
+    const uint16_t len = (std::endian::native == std::endian::little)
+                       ? std::byteswap(len_be) : len_be;
+
+    if (raw.size() < 4u + len) return std::unexpected(ParseErr::BadLen);
+    return Frame{ raw[1], raw.subspan(4, len) };
+}
+
+// Monadic chaining pipeline (C++23)
+auto ev = parseFrame(buf)
+            .and_then(validateChecksum) // expected<Frame, ParseErr> -> expected<Frame, ParseErr>
+            .transform(toBusEvent);     // Frame -> BusEvent transformation
+if (!ev) {
+    handleParseError(ev.error());
+    return;
+}
+dispatchBusEvent(*ev);
+```
+
+#### 6.3.2 `consteval` Compile-Time Lookup Tables (Enforced Flash `.rodata` Placement)
+- **Objective**: Evaluates CRC tables (CRC8, Modbus CRC16) and protocol dispatch tables entirely at compile time instead of iterating in loops during boot, placing them directly into Flash `.rodata`.
+- **Benefits**: Zero boot latency; zero runtime SRAM consumption.
+
+```cpp
+#include <array>
+#include <span>
+
+consteval auto make_crc8_table(uint8_t poly = 0x07) {
+    std::array<uint8_t, 256> t{};
+    for (unsigned i = 0; i < 256; ++i) {
+        uint8_t c = static_cast<uint8_t>(i);
+        for (int b = 0; b < 8; ++b) {
+            c = (c & 0x80) ? static_cast<uint8_t>((c << 1) ^ poly) : static_cast<uint8_t>(c << 1);
+        }
+        t[i] = c;
+    }
+    return t;
+}
+inline constexpr auto kCrc8Table = make_crc8_table();
+
+constexpr uint8_t calcCrc8(std::span<const uint8_t> data) noexcept {
+    uint8_t c = 0;
+    for (auto b : data) c = kCrc8Table[c ^ b];
+    return c;
+}
+static_assert(calcCrc8(std::array<uint8_t, 3>{0x01, 0x02, 0x03}) != 0); // Compile-time validation
+```
+
+#### 6.3.3 `std::to_underlying` & `std::unreachable` (Enum Optimization)
+- **`std::to_underlying(e)`**: Provides clean, type-safe integer conversion when copying enum values into wire buffers without ugly casting macros (`#include <utility>`).
+- **`std::unreachable()`**: In exhaustive internal FSM `switch-case` blocks where boundary and header validation is already completed, hints unreachable branches to the compiler (`__builtin_unreachable()`) to generate optimal jump tables.
+  - ⚠️ **Critical Caution (UB Warning)**: Never invoke in raw packet parsing stages where input is unverified. Input parsing failures must strictly return safe error results such as `ParseErr`.
+
+```cpp
+enum class Cmd : uint8_t { Poll = 0x01, Ack = 0x02, Query = 0x10 };
+
+buf[1] = std::to_underlying(Cmd::Poll);
+
+// Exhaustive internal state handling after external validation
+switch (static_cast<Cmd>(buf[1])) {
+    case Cmd::Poll:  handlePoll();  break;
+    case Cmd::Ack:   handleAck();   break;
+    case Cmd::Query: handleQuery(); break;
+    default: std::unreachable();    // Compiler jump table optimization hint
+}
+```
+
+#### 6.3.4 `static` Lambdas & `static operator()` (Zero-Overhead FreeRTOS & Callbacks)
+- **Objective**: Leverages C++23 P1169R4 to declare stateless lambdas with `static`, completely eliminating the hidden `this` pointer argument and directly binding to FreeRTOS task entry signatures (`TaskFunction_t` / `void(*)(void*)`) or hardware interrupt callbacks without intermediate wrapper structs.
+
+```cpp
+// Direct binding to FreeRTOS task creation without wrapper structs
+xTaskCreate([](void* arg) static {
+    for (;;) {
+        // ...
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}, "Ch1_Master", 4096, nullptr, 19, nullptr);
+```
+
+#### 6.3.5 `if consteval` (Dual Compile-Time vs. Hardware-Accelerated Branching)
+- **Objective**: Enables unified functions that operate during compile-time constant evaluation (e.g. table generation) while utilizing hardware-accelerated intrinsics (`std::byteswap`, `std::memcpy`) in runtime hot paths.
+
+```cpp
+constexpr uint16_t load_be16(const uint8_t* p) noexcept {
+    if consteval {
+        return static_cast<uint16_t>((p[0] << 8) | p[1]); // Compile-time constant expression path
+    } else {
+        uint16_t v;
+        std::memcpy(&v, p, sizeof(v));                    // Runtime path (alignment-safe HW accelerated)
+        return std::byteswap(v);
+    }
+}
+```
+
+#### 6.3.6 `std::optional` Monadic Chaining (Streamlined Slot Queries)
+- **Objective**: Composes repository slot lookups, snapshot queries, and state extraction into a clean linear pipeline without deeply nested null checks.
+
+```cpp
+std::optional<uint8_t> find_device_slot(uint8_t device_id) noexcept;
+std::optional<DeviceSnapshot> get_slot_snapshot(uint8_t slot_idx) noexcept;
+
+const bool is_online = find_device_slot(target_id)
+                         .and_then(get_slot_snapshot)
+                         .transform([](const auto& snap) { return snap.online; })
+                         .value_or(false);
+```
+
+#### 6.3.7 `[[assume]]` Attribute (Hot Path Optimization Hints)
+- **Objective**: Uses the C++23 `[[assume(expr)]]` attribute (GCC 13) to communicate 4-byte buffer alignment or length constraints to the compiler, unlocking `-ftree-vectorize` SIMD optimization.
+- ⚠️ **Caution**: Violating the condition results in undefined behavior (UB); apply strictly to 100% physically guaranteed invariants.
+
+```cpp
+void copyAlignedDmaBuffer(uint8_t* dst, const uint8_t* src, size_t len) noexcept {
+    [[assume(len % 4 == 0)]];
+    [[assume(reinterpret_cast<uintptr_t>(dst) % 4 == 0)]];
+    // 32-bit word transfer loop optimized via verified 4-byte alignment
+}
+```
+
+#### 6.3.8 Toolchain Constraints & Strictly Forbidden Patterns (Compiler & Embedded Invariants)
+
+1. **GCC 14+ Exclusives Strictly Forbidden (Current Toolchain: GCC 13.2.0)**:
+   - ❌ `Deducing this` (`this auto&& self` syntax)
+   - ❌ `<print>`, `std::print`, `std::println`
+   - ❌ `std::flat_map`, `std::flat_set`
+   - ❌ `std::mdspan`, `std::generator`, `import std`
+2. **Binary / Flash Memory Bloat Prohibitions**:
+   - ❌ `<iostream>`: Bloats binary by tens of kilobytes. Strictly prohibited.
+   - ❌ `<format>` / `std::format`: Excessive template instantiation bloats Flash. Maintain L0 `AppendBuf` and `snprintf`.
+3. **Hot Path Memory Safety (Pillar 3 Zero-Heap Alignment)**:
+   - ❌ `std::string`: Forbidden in RX/TX hot paths (`Task_Ch1`, `Task_Ch2Ch3`, `RS485_CH`). Strictly use **`std::string_view`** (including `contains`, `starts_with`).
+   - ❌ `std::move_only_function` / `std::function`: May invoke dynamic heap allocation (`new`) when capturing state beyond Small Buffer Optimization (SBO). Strictly use **raw C function pointers (`void(*)(span<const uint8_t>)`)** in hot paths.
+4. **IRAM / ISR Safety**:
+   - When calling `constexpr` functions from inside `IRAM_ATTR` ISR contexts, enforce inline expansion using `[[gnu::always_inline]]` to avoid Flash cache miss panics.
+
 
 

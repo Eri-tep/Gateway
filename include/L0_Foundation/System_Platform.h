@@ -380,6 +380,7 @@ bool System_GetRebootLogEntry(size_t index, LogEntry &out_entry) noexcept;
 void System_WriteRebootLog(const char *reason) noexcept;
 void System_ClearRebootLog() noexcept;
 const char *System_ConsumePendingRebootReason() noexcept;
+const char *System_ResetReasonToString(esp_reset_reason_t rr) noexcept;
 uint32_t System_GetBootTimeMs() noexcept;
 
 // ── HTTP / Cloud Firmware OTA Engine ─────────────────────────────────────────

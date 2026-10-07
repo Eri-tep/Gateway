@@ -203,6 +203,9 @@ struct RescueHwConfig {
 void Diag_StartRescueAp(const RescueHwConfig &cfg);
 void Diag_CheckOtaHealth();
 void Diag_LogResetReason();
+inline const char *Diag_ResetReasonToString(esp_reset_reason_t rr) noexcept {
+  return System_ResetReasonToString(rr);
+}
 void Diag_DiagnoseStuck();
 void Diag_CheckCoreDump();
 uint32_t Diag_EvaluateCrashCounter(esp_reset_reason_t reason) noexcept;

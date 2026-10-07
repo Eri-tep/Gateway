@@ -427,14 +427,22 @@ static void HandleRpc_SetWifiMode(int sock, long req_id, const char *json_str,
                                   const IPAddress & /*client_ip*/) {
   char mode_buf[16] = {0};
   if (findJsonStringValue(json_str, "mode", mode_buf, sizeof(mode_buf))) {
-    std::string_view mode_sv(mode_buf);
+    struct WifiModeMap {
+      const char *name;
+      wifi_mode_t mode;
+    };
+    static constexpr WifiModeMap kWifiModeTable[] = {
+        {"AP", WIFI_AP},
+        {"AP_STA", WIFI_AP_STA},
+        {"AP+STA", WIFI_AP_STA},
+        {"STA", WIFI_STA},
+    };
     wifi_mode_t target_mode = WIFI_STA;
-
-    if (strcasecmp(mode_buf, "AP") == 0) {
-      target_mode = WIFI_AP;
-    } else if (strcasecmp(mode_buf, "AP_STA") == 0 ||
-               strcasecmp(mode_buf, "AP+STA") == 0) {
-      target_mode = WIFI_AP_STA;
+    for (const auto &entry : kWifiModeTable) {
+      if (strcasecmp(mode_buf, entry.name) == 0) {
+        target_mode = entry.mode;
+        break;
+      }
     }
 
     WiFi.mode(target_mode);

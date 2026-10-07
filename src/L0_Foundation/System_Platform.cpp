@@ -86,5 +86,30 @@ void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
   setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
 }
 
+const char *System_ResetReasonToString(esp_reset_reason_t rr) noexcept {
+  struct ResetReasonMap {
+    esp_reset_reason_t reason;
+    const char *desc;
+  };
+  static constexpr ResetReasonMap kResetReasonTable[] = {
+      {ESP_RST_POWERON, "Power-On Reset"},
+      {ESP_RST_EXT, "Hardware Reset Pin (EXT)"},
+      {ESP_RST_SW, "Software Restart"},
+      {ESP_RST_PANIC, "CPU Panic / Crash Exception"},
+      {ESP_RST_INT_WDT, "Interrupt Watchdog Reset"},
+      {ESP_RST_TASK_WDT, "Task Watchdog Reset"},
+      {ESP_RST_WDT, "Other Watchdog Reset"},
+      {ESP_RST_BROWNOUT, "HW: Brownout Reset (Low Voltage)"},
+      {ESP_RST_SDIO, "HW: SDIO Reset"},
+  };
+  for (const auto &entry : kResetReasonTable) {
+    if (entry.reason == rr) {
+      return entry.desc;
+    }
+  }
+  return "Unknown Hardware Reset";
+}
+
+
 
 

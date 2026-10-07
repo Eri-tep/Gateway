@@ -1350,7 +1350,10 @@ void TelnetTracer::flushToClient() {
       }
     };
 
-    if (ch == 2 || ch == 3 || ch == 6) {
+    switch (ch) {
+    case 2:
+    case 3:
+    case 6:
       if (!entry.is_tx) {
         is_new_req = true;
         s_trackers[ch] = {dev_id, entry.tv, (entry.type == TraceType::QRY),
@@ -1370,7 +1373,9 @@ void TelnetTracer::flushToClient() {
           s_trackers[ch].active = false;
         }
       }
-    } else if (ch == 4) {
+      break;
+
+    case 4:
       if (!entry.is_tx) {
         is_new_req = true;
         s_trackers[4] = {dev_id, entry.tv, false, false, true};
@@ -1385,14 +1390,18 @@ void TelnetTracer::flushToClient() {
           delay_ms = -2;
         }
       }
-    } else if (ch == 5) {
+      break;
+
+    case 5:
       if (!entry.is_tx) {
         is_new_req = true;
         s_trackers[5] = {dev_id, entry.tv, false, false, true};
       } else {
         find_wch("INJECT ");
       }
-    } else if (ch == 1) {
+      break;
+
+    case 1:
       if (entry.is_tx) {
         is_new_req = true;
         s_trackers[1] = {dev_id, entry.tv, false,
@@ -1406,6 +1415,10 @@ void TelnetTracer::flushToClient() {
           s_trackers[1].active = false;
         }
       }
+      break;
+
+    default:
+      break;
     }
 
     if (is_new_req && s_last_pkt_tv.tv_sec > 0) {
