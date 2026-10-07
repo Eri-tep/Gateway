@@ -115,8 +115,10 @@ void Wifi_Driver_Init(const WifiHwConfig &cfg) {
   memset(&w_conf, 0, sizeof(w_conf));
   strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), ssid,
           sizeof(w_conf.sta.ssid) - 1);
+  w_conf.sta.ssid[sizeof(w_conf.sta.ssid) - 1] = 0;
   strncpy(reinterpret_cast<char *>(w_conf.sta.password), pass,
           sizeof(w_conf.sta.password) - 1);
+  w_conf.sta.password[sizeof(w_conf.sta.password) - 1] = 0;
   w_conf.sta.scan_method = WIFI_FAST_SCAN;
   w_conf.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
   w_conf.sta.pmf_cfg.capable = true;

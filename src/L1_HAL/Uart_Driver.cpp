@@ -96,22 +96,30 @@ esp_err_t Uart_ReconfigSwSerial(const UartHwConfig &cfg) noexcept {
 // ── Write ─────────────────────────────────────────────────────────────────────
 
 int Uart_WriteHw(uart_port_t port, std::span<const uint8_t> data) noexcept {
+  if (data.empty() || !data.data())
+    return 0;
   return uart_write_bytes(port, reinterpret_cast<const char *>(data.data()),
                           static_cast<int>(data.size()));
 }
 
 void Uart_WriteSwSerial(std::span<const uint8_t> data) noexcept {
+  if (data.empty() || !data.data())
+    return;
   s_doorphone_serial.write(data.data(), data.size());
 }
 
 // ── Read ──────────────────────────────────────────────────────────────────────
 
 size_t Uart_ReadHw(uart_port_t port, std::span<uint8_t> out_buf) noexcept {
+  if (out_buf.empty() || !out_buf.data())
+    return 0u;
   int n = uart_read_bytes(port, out_buf.data(), static_cast<uint32_t>(out_buf.size()), 0);
   return (n > 0) ? static_cast<size_t>(n) : 0u;
 }
 
 size_t Uart_ReadSwSerial(std::span<uint8_t> out_buf) noexcept {
+  if (out_buf.empty() || !out_buf.data())
+    return 0u;
   size_t count = 0;
   while (count < out_buf.size() && s_doorphone_serial.available() > 0) {
     out_buf[count++] = static_cast<uint8_t>(s_doorphone_serial.read());
@@ -123,7 +131,8 @@ size_t Uart_ReadSwSerial(std::span<uint8_t> out_buf) noexcept {
 
 size_t Uart_AvailableHw(uart_port_t port) noexcept {
   size_t avail = 0;
-  uart_get_buffered_data_len(port, &avail);
+  if (uart_get_buffered_data_len(port, &avail) != ESP_OK)
+    return 0u;
   return avail;
 }
 

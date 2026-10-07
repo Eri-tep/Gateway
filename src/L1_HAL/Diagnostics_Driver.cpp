@@ -360,6 +360,7 @@ void Diag_CheckCoreDump() {
     g_coredump_info.valid = true;
     strncpy(g_coredump_info.task_name, s.exc_task,
             sizeof(g_coredump_info.task_name) - 1);
+    g_coredump_info.task_name[sizeof(g_coredump_info.task_name) - 1] = '\0';
     g_coredump_info.exc_pc = s.exc_pc;
     g_coredump_info.exc_cause = s.ex_info.exc_cause;
     uint8_t depth = static_cast<uint8_t>(s.exc_bt_info.depth);
@@ -456,9 +457,11 @@ void Diag_StartRescueAp(const RescueHwConfig &cfg) {
     memset(&w_conf, 0, sizeof(w_conf));
     strncpy(reinterpret_cast<char *>(w_conf.sta.ssid), cfg.sta_ssid,
             sizeof(w_conf.sta.ssid) - 1);
+    w_conf.sta.ssid[sizeof(w_conf.sta.ssid) - 1] = 0;
     if (cfg.sta_password && cfg.sta_password[0]) {
       strncpy(reinterpret_cast<char *>(w_conf.sta.password), cfg.sta_password,
               sizeof(w_conf.sta.password) - 1);
+      w_conf.sta.password[sizeof(w_conf.sta.password) - 1] = 0;
     }
     esp_wifi_set_config(WIFI_IF_STA, &w_conf);
     esp_wifi_connect();
@@ -619,9 +622,10 @@ bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) noexcept {
 
 void LogManager::clearRebootLog() {
   Preferences p;
-  p.begin("logs", false);
-  p.clear();
-  p.end();
+  if (p.begin("logs", false)) {
+    p.clear();
+    p.end();
+  }
 }
 
 size_t System_GetRebootLogCount() noexcept {
@@ -859,8 +863,10 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   if (sys.wifi_connected) {
     strncpy(sys.wifi_ip, WiFi.localIP().toString().c_str(),
             sizeof(sys.wifi_ip) - 1);
+    sys.wifi_ip[sizeof(sys.wifi_ip) - 1] = '\0';
   } else {
-    strncpy(sys.wifi_ip, "0.0.0.0", sizeof(sys.wifi_ip));
+    strncpy(sys.wifi_ip, "0.0.0.0", sizeof(sys.wifi_ip) - 1);
+    sys.wifi_ip[sizeof(sys.wifi_ip) - 1] = '\0';
   }
 
   auto s15 = s_metrics.get15m();
