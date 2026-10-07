@@ -142,11 +142,18 @@ void Config_Load() {
   c.doorphone_stop_bits =
       p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
   c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
-  c.wallpad_profile =
-      p.getUChar("w_prof", static_cast<uint8_t>(WallpadProfileIndex::ADAPTIVE));
-  if (c.wallpad_profile > kWallpadProfileMax) {
-    c.wallpad_profile = 0;
+  auto raw_prof = nvsReadPrimitive<uint8_t>(p, "w_prof");
+  if (!raw_prof && raw_prof.error() != ESP_ERR_NVS_NOT_FOUND) {
+    ESP_LOGW("CONFIG", "w_prof: %s, using default ADAPTIVE", esp_err_to_name(raw_prof.error()));
   }
+  const auto prof = toEnum(raw_prof.value_or(0),
+                           WallpadProfileIndex::ADAPTIVE,
+                           WallpadProfileIndex::CUSTOM3);
+  if (raw_prof && !prof) {
+    ESP_LOGW("CONFIG", "w_prof out of range (%u), using default ADAPTIVE",
+             static_cast<unsigned>(*raw_prof));
+  }
+  c.wallpad_profile = std::to_underlying(prof.value_or(WallpadProfileIndex::ADAPTIVE));
   s_active_wallpad_profile.store(c.wallpad_profile, std::memory_order_relaxed);
   p.end();
 

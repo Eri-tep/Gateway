@@ -7,16 +7,21 @@
 // ── Standard Library Includes ──
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 
 // ── Platform & ESP-IDF Includes ──
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -158,6 +163,60 @@ inline bool nvsPutEnvNs(const char *ns, const char *key, const T &v) {
   bool ok = nvsPutEnv(p, key, v);
   p.end();
   return ok;
+}
+
+template <typename U, bool = std::is_enum_v<U>>
+struct UnderlyingTypeHelper {
+  using type = std::underlying_type_t<U>;
+};
+
+template <typename U>
+struct UnderlyingTypeHelper<U, false> {
+  using type = U;
+};
+
+template <typename T>
+  requires ((std::is_integral_v<T> && sizeof(T) <= 4 && !std::is_same_v<T, bool>) || std::is_enum_v<T>)
+[[nodiscard]] inline std::expected<T, esp_err_t> nvsReadPrimitive(Preferences &p, const char *key) noexcept {
+  if (!p.isKey(key)) {
+    return std::unexpected(ESP_ERR_NVS_NOT_FOUND);
+  }
+  using Underlying = typename UnderlyingTypeHelper<T>::type;
+  PreferenceType expected_type = PT_INVALID;
+  if constexpr (sizeof(Underlying) == 1) {
+    expected_type = std::is_signed_v<Underlying> ? PT_I8 : PT_U8;
+  } else if constexpr (sizeof(Underlying) == 2) {
+    expected_type = std::is_signed_v<Underlying> ? PT_I16 : PT_U16;
+  } else if constexpr (sizeof(Underlying) == 4) {
+    expected_type = std::is_signed_v<Underlying> ? PT_I32 : PT_U32;
+  }
+
+  const PreferenceType actual_type = p.getType(key);
+  if (actual_type != expected_type) {
+    return std::unexpected(ESP_ERR_NVS_TYPE_MISMATCH);
+  }
+
+  Underlying val{};
+  if constexpr (sizeof(Underlying) == 1) {
+    if constexpr (std::is_signed_v<Underlying>) {
+      val = p.getChar(key);
+    } else {
+      val = p.getUChar(key);
+    }
+  } else if constexpr (sizeof(Underlying) == 2) {
+    if constexpr (std::is_signed_v<Underlying>) {
+      val = p.getShort(key);
+    } else {
+      val = p.getUShort(key);
+    }
+  } else if constexpr (sizeof(Underlying) == 4) {
+    if constexpr (std::is_signed_v<Underlying>) {
+      val = p.getLong(key);
+    } else {
+      val = p.getULong(key);
+    }
+  }
+  return static_cast<T>(val);
 }
 
 template <size_t N> inline void setStr(char (&dst)[N], const char *src) {

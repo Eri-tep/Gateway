@@ -14,7 +14,7 @@
 #include <string_view>
 
 namespace HexLUT {
-constexpr auto generateLUT() {
+consteval auto generateLUT() noexcept {
   std::array<std::array<char, 2>, 256> lut{};
   constexpr char hexDigits[] = "0123456789ABCDEF";
   for (size_t i = 0; i < 256; ++i) {
@@ -23,8 +23,44 @@ constexpr auto generateLUT() {
   }
   return lut;
 }
-alignas(16) inline constexpr auto LUT = generateLUT();
+alignas(16) inline constexpr auto kHexLut = generateLUT();
+inline constexpr auto &LUT = kHexLut;
 } // namespace HexLUT
+
+namespace Endian {
+// Note: Pass fixed-extent spans (e.g. raw.subspan<2, 2>() / raw.first<2>()) or pointers/arrays.
+// Dynamic-extent spans do not implicitly convert to fixed-extent span<const uint8_t, N>.
+[[nodiscard]] [[gnu::always_inline]] constexpr uint16_t loadBe16(std::span<const uint8_t, 2> p) noexcept {
+  return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
+}
+[[nodiscard]] [[gnu::always_inline]] constexpr uint16_t loadBe16(const uint8_t *p) noexcept {
+  return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
+}
+[[nodiscard]] [[gnu::always_inline]] constexpr uint32_t loadBe32(std::span<const uint8_t, 4> p) noexcept {
+  return (static_cast<uint32_t>(p[0]) << 24) |
+         (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8)  |
+         static_cast<uint32_t>(p[3]);
+}
+[[nodiscard]] [[gnu::always_inline]] constexpr uint32_t loadBe32(const uint8_t *p) noexcept {
+  return (static_cast<uint32_t>(p[0]) << 24) |
+         (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8)  |
+         static_cast<uint32_t>(p[3]);
+}
+[[nodiscard]] [[gnu::always_inline]] constexpr uint16_t loadLe16(std::span<const uint8_t, 2> p) noexcept {
+  return static_cast<uint16_t>((static_cast<uint16_t>(p[1]) << 8) | p[0]);
+}
+[[nodiscard]] [[gnu::always_inline]] constexpr uint16_t loadLe16(const uint8_t *p) noexcept {
+  return static_cast<uint16_t>((static_cast<uint16_t>(p[1]) << 8) | p[0]);
+}
+} // namespace Endian
+
+static_assert(HexLUT::kHexLut[0x00][0] == '0' && HexLUT::kHexLut[0x00][1] == '0', "HexLUT 0x00 check failed");
+static_assert(HexLUT::kHexLut[0xFF][0] == 'F' && HexLUT::kHexLut[0xFF][1] == 'F', "HexLUT 0xFF check failed");
+static_assert(Endian::loadBe16(std::array<uint8_t, 2>{0x12, 0x34}) == 0x1234, "loadBe16 test failed");
+static_assert(Endian::loadLe16(std::array<uint8_t, 2>{0x34, 0x12}) == 0x1234, "loadLe16 test failed");
+static_assert(Endian::loadBe32(std::array<uint8_t, 4>{0x12, 0x34, 0x56, 0x78}) == 0x12345678, "loadBe32 test failed");
 
 namespace TimeUtils {
 [[nodiscard]] bool isElapsed(uint32_t start_ms, uint32_t duration_ms) noexcept;

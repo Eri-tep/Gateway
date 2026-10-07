@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.1.5";
+constexpr const char *FIRMWARE_VERSION = "v2.1.6";
 } // namespace Config
 
 namespace Config::Task {
@@ -140,8 +140,35 @@ enum class WallpadProfileIndex : uint8_t {
   COUNT = 4
 };
 
+template <typename E>
+[[nodiscard]] constexpr std::optional<E> toEnum(std::underlying_type_t<E> v,
+                                                E first, E last) noexcept {
+  static_assert(std::is_enum_v<E>, "toEnum requires an enum type");
+  if (std::to_underlying(first) > std::to_underlying(last)) {
+    return std::nullopt;
+  }
+  return (v >= std::to_underlying(first) && v <= std::to_underlying(last))
+             ? std::optional<E>{static_cast<E>(v)}
+             : std::nullopt;
+}
+
+static_assert(std::to_underlying(WallpadProfileIndex::CUSTOM3) == 3,
+              "WallpadProfileIndex::CUSTOM3 must be 3");
+static_assert(toEnum(0, WallpadProfileIndex::ADAPTIVE,
+                     WallpadProfileIndex::CUSTOM3)
+                  .has_value(),
+              "toEnum 0 check failed");
+static_assert(toEnum(3, WallpadProfileIndex::ADAPTIVE,
+                     WallpadProfileIndex::CUSTOM3)
+                  .has_value(),
+              "toEnum 3 check failed");
+static_assert(!toEnum(4, WallpadProfileIndex::ADAPTIVE,
+                      WallpadProfileIndex::CUSTOM3)
+                   .has_value(),
+              "toEnum 4 check failed");
+
 constexpr uint8_t kWallpadProfileMax =
-    static_cast<uint8_t>(WallpadProfileIndex::COUNT) - 1;
+    std::to_underlying(WallpadProfileIndex::COUNT) - 1;
 
 struct RuntimeConfig {
   uint32_t uart_baud_rate{9600};
