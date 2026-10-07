@@ -260,6 +260,7 @@ bool Wallpad_CheckConvergence(bool reset) noexcept;
 void Wallpad_RequestRelearn() noexcept;
 bool Wallpad_TakeRelearnRequest() noexcept;
 uint32_t Wallpad_GetStalePollCount() noexcept;
+void Wallpad_ResetStalePollCount() noexcept;
 
 uint8_t Wallpad_GetStx() noexcept;
 bool Wallpad_IsAutoUnlocked() noexcept;

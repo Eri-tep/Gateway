@@ -172,6 +172,7 @@ public:
   TaskWdtMetrics tasks[TASK_COUNT];
 
   void feed(size_t index) noexcept;
+  void reset() noexcept;
 };
 
 // ── Reboot & Crash Log ──

@@ -254,10 +254,14 @@ void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
     const char *p_name = ProfileRepository::getActiveProfile(cur_p)
                              ? (cur_p.name[0] ? cur_p.name : cur_p.key)
                              : nullptr;
-    if (p_name)
+    if (p_name && catalog_vendor && strcmp(catalog_vendor, "Unknown") != 0 &&
+        strcmp(p_name, catalog_vendor) != 0) {
       snprintf(out_buf, max_len, "%s (%s)", p_name, catalog_vendor);
-    else
+    } else if (p_name) {
+      snprintf(out_buf, max_len, "%s", p_name);
+    } else {
       snprintf(out_buf, max_len, "%s", catalog_vendor);
+    }
   }
 }
 
@@ -569,6 +573,7 @@ bool ProtocolDiag_ResetBridgeFraming(uint8_t slot_idx) noexcept {
 void ProtocolDiag_ResetBridgeStats() noexcept {
   Bridge_ResetStats();
   Fcu_ResetStats();
+  Wallpad_ResetStalePollCount();
 }
 
 // ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────

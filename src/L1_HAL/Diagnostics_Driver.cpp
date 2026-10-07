@@ -137,9 +137,14 @@ void TaskWdtMonitor::feed(size_t index) noexcept {
     return;
 
   const uint32_t now = millis();
-  s_rtc_last_alive_ms[index] = now;
   const uint32_t prev =
-      tasks[index].last_feed_ms.exchange(now, std::memory_order_relaxed);
+      tasks[index].last_feed_ms.load(std::memory_order_relaxed);
+  if (prev > 0 && (now - prev < 500)) {
+    return;
+  }
+
+  s_rtc_last_alive_ms[index] = now;
+  tasks[index].last_feed_ms.store(now, std::memory_order_relaxed);
   if (prev > 0) {
     const uint32_t gap = (now >= prev) ? (now - prev) : 0;
     uint32_t cur_max =
@@ -151,6 +156,16 @@ void TaskWdtMonitor::feed(size_t index) noexcept {
   }
   tasks[index].feed_count.fetch_add(1, std::memory_order_relaxed);
   esp_task_wdt_reset();
+}
+
+void TaskWdtMonitor::reset() noexcept {
+  const uint32_t now = millis();
+  for (size_t i = 0; i < TASK_COUNT; ++i) {
+    tasks[i].max_interval_ms.store(0, std::memory_order_relaxed);
+    tasks[i].feed_count.store(0, std::memory_order_relaxed);
+    tasks[i].last_feed_ms.store(now, std::memory_order_relaxed);
+    s_rtc_last_alive_ms[i] = now;
+  }
 }
 
 
@@ -921,6 +936,10 @@ void System_RecordMetricsSample(uint16_t used_ram_kb) noexcept {
 void System_ResetTrafficStats() noexcept {
   s_pkt_stats.resetAll();
   s_metrics.reset();
+  s_ch1_state_metrics.poll_cnt.store(0, std::memory_order_relaxed);
+  s_ch1_state_metrics.vip_cnt.store(0, std::memory_order_relaxed);
+  s_ch1_state_metrics.normal_cnt.store(0, std::memory_order_relaxed);
+  s_wdt_monitor.reset();
 }
 
 void System_RecordCh5Tx() noexcept {

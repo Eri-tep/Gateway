@@ -248,13 +248,23 @@ void printSystemOverview(AppendBuf &out) {
       (total_heap > 0) ? (free_heap * 100 / total_heap) : 0;
 
   uint32_t sketch_size = ESP.getSketchSize() / 1024;
-  uint32_t flash_size = ESP.getFlashChipSize() / 1024;
-  uint32_t flash_used_pct =
-      (flash_size > 0) ? (sketch_size * 100 / flash_size) : 0;
+  uint32_t free_sketch = ESP.getFreeSketchSpace() / 1024;
+  uint32_t app_slot_size = sketch_size + free_sketch;
+  uint32_t flash_chip_mb = (ESP.getFlashChipSize() / 1024) / 1024;
+  uint32_t app_used_pct =
+      (app_slot_size > 0) ? (sketch_size * 100 / app_slot_size) : 0;
 
   char heap_bar[16], flash_bar[16];
   make_ascii_bar(heap_bar, sizeof(heap_bar), heap_free_pct);
-  make_ascii_bar(flash_bar, sizeof(flash_bar), flash_used_pct);
+  make_ascii_bar(flash_bar, sizeof(flash_bar), app_used_pct);
+
+  bool wifi_conn = WiFi.isConnected();
+  int wifi_rssi = WiFi.RSSI();
+  const char *wifi_qual = !wifi_conn           ? "[DISCONNECTED]"
+                          : (wifi_rssi >= -65) ? "[EXCELLENT]"
+                          : (wifi_rssi >= -75) ? "[GOOD]"
+                          : (wifi_rssi >= -85) ? "[FAIR]"
+                                               : "[POOR]";
 
   FixedBuf<80> wp_status_buf;
   char profile_summary_buf[80] = "Unknown";
@@ -272,14 +282,15 @@ void printSystemOverview(AppendBuf &out) {
       "Wallpad Profile : %s\r\n"
       "System Time     : %s (%s)\r\n"
       "Uptime          : %ud %02uh %02um %02us\r\n"
-      "WiFi Connection : %s (%d dBm, IP: %s) [STABLE]\r\n"
-      "Heap Memory     : %s %3u%% Free (Free %uKB / Min %uKB)\r\n"
-      "Flash Storage   : %s %3u%% Used (%uKB / %uMB)\r\n",
+      "WiFi Connection : %s (%d dBm, IP: %s) %s\r\n"
+      "Heap Memory     : %s %3u%% Free (Free %uKB / %uKB, Min %uKB)\r\n"
+      "Flash (OTA App) : %s %3u%% Used (%uKB / %uKB, Chip %uMB)\r\n",
       Config::FIRMWARE_VERSION, wp_status_buf.c_str(), time_str.c_str(), time_src, ts / 86400,
       (ts % 86400) / 3600, (ts % 3600) / 60, ts % 60,
-      WiFi.isConnected() ? "Connected" : "Disconnected", WiFi.RSSI(),
-      WiFi.localIP().toString().c_str(), heap_bar, heap_free_pct, free_heap,
-      min_free_heap, flash_bar, flash_used_pct, sketch_size, flash_size / 1024);
+      wifi_conn ? "Connected" : "Disconnected", wifi_rssi,
+      WiFi.localIP().toString().c_str(), wifi_qual, heap_bar, heap_free_pct,
+      free_heap, total_heap, min_free_heap, flash_bar, app_used_pct,
+      sketch_size, app_slot_size, flash_chip_mb);
 }
 
 void printStats(int sock) {

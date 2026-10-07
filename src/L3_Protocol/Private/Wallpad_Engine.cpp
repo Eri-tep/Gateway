@@ -1137,6 +1137,7 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
       s_convergence_reset_done = true;
       System_ResetTrafficStats();
       ProtocolDiag_ResetBridgeStats();
+      Polling_GetRegistry().resetHits();
       System_TraceMessage(
           "[SYSTEM MSG]  ★ Post-Convergence Settle Period (2s) Ended. "
           "Traffic statistics synchronized to 0 for pure 1:1 runtime tracking.\r\n");
@@ -1191,6 +1192,10 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
 
 uint32_t Wallpad_GetStalePollCount() noexcept {
   return s_stale_poll_cnt.load(std::memory_order_relaxed);
+}
+
+void Wallpad_ResetStalePollCount() noexcept {
+  s_stale_poll_cnt.store(0, std::memory_order_relaxed);
 }
 
 uint8_t Wallpad_GetStx() noexcept {
