@@ -224,6 +224,7 @@ bool ProtocolDiag_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char
                                       uint16_t port, const char *name) noexcept;
 bool ProtocolDiag_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept;
 bool ProtocolDiag_ResetBridgeFraming(uint8_t slot_idx) noexcept;
+void ProtocolDiag_ResetBridgeStats() noexcept;
 
 // ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
 struct RS485_PacketDispatcher;

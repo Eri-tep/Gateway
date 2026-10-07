@@ -217,8 +217,10 @@ void Fcu_HandleRx(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
   // 2) 19바이트 0x03 상태 쿼리 응답 처리
   if (len >= 19 && data[0] == 0x01 && data[1] == 0x03 && data[2] == 0x0E) {
     auto parse_res = ModbusRtu::parseStatusResponse(std::span<const uint8_t>(data, len));
-    if (!parse_res)
+    if (!parse_res) {
+      Bridge_RecordSlotCrcError(slot_idx);
       return; // 파싱/CRC 실패 시 드롭
+    }
 
     const auto &new_snap = *parse_res;
     rt.waiting_response = false;
@@ -356,6 +358,7 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
       if (now_ms - rt.query_sent_ms >= Config::FCU::RX_TIMEOUT_MS) {
         rt.waiting_response = false;
         rt.timeout_count++;
+        Bridge_RecordSlotTimeout(slot_idx);
         if (rt.timeout_count >= Config::FCU::MAX_TIMEOUT_COUNT) {
           rt.is_online = false;
         }
@@ -504,4 +507,10 @@ bool Fcu_GetSlotRuntime(uint8_t slot_idx, Fcu::SlotRuntime &out_rt) noexcept {
     return false;
   out_rt = s_fcu_slots[slot_idx];
   return true;
+}
+
+void Fcu_ResetStats() noexcept {
+  for (uint8_t i = 1; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
+    s_fcu_slots[i].timeout_count = 0;
+  }
 }

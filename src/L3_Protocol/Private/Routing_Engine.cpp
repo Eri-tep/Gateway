@@ -66,15 +66,20 @@ public:
     return false;
   }
 
+  [[nodiscard]] size_t getRoutes(std::span<DeviceRouteEntry> out_span) const noexcept {
+    if (out_span.empty()) return 0;
+    CriticalSectionLocker lock(&_mux);
+    const size_t n = std::min(_count, out_span.size());
+    for (size_t i = 0; i < n; i++) {
+      out_span[i] = _entries[i];
+    }
+    return n;
+  }
+
   [[nodiscard]] size_t getRoutes(DeviceRouteEntry *out_buf,
                                  size_t max_count) const noexcept {
     if (!out_buf || max_count == 0) return 0;
-    CriticalSectionLocker lock(&_mux);
-    const size_t n = std::min(_count, max_count);
-    for (size_t i = 0; i < n; i++) {
-      out_buf[i] = _entries[i];
-    }
-    return n;
+    return getRoutes(std::span<DeviceRouteEntry>(out_buf, max_count));
   }
 
   void clear() noexcept {
@@ -110,9 +115,13 @@ void Router_ClearRoutes() noexcept {
 
 // ── Router_GetRoutes ──────────────────────────────────────────────────────────
 
+size_t Router_GetRoutes(std::span<DeviceRouteEntry> out_buf) noexcept {
+  return s_route_registry.getRoutes(out_buf);
+}
+
 size_t Router_GetRoutes(DeviceRouteEntry *out_buf, size_t max_count) noexcept {
   if (!out_buf || max_count == 0) return 0;
-  return s_route_registry.getRoutes(out_buf, max_count);
+  return s_route_registry.getRoutes(std::span<DeviceRouteEntry>(out_buf, max_count));
 }
 
 // ── Router_EnqueueDownlink ────────────────────────────────────────────────────
@@ -170,15 +179,17 @@ bool Router_DispatchControl(StaticPacket &req,
 
   bool unidir = false;
   ControlAction act = Wallpad_EvaluateControl(req, virtual_ack_out, unidir);
-  if (act == ControlAction::VIRTUAL_ACK_IMMEDIATE) {
+
+  switch (act) {
+  case ControlAction::VIRTUAL_ACK_IMMEDIATE:
     return true;
-  }
-  if (act == ControlAction::TRANSMIT_LOCAL) {
+
+  case ControlAction::TRANSMIT_LOCAL: {
     // Check if device is routed via EW11 (CH5)
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
     auto *parser = WallpadParserFactory::getActiveParser();
     if (parser && parser->extractDeviceKey(
-                      span<const uint8_t>(req.data.data(), req.length),
+                      std::span<const uint8_t>(req.data.data(), req.length),
                       dev_id, sub1, sub2)) {
       RouteEndpoint ep{1, -1, 0};
       if (Router_LookupRoute(dev_id, sub1, sub2, ep) &&
@@ -193,5 +204,24 @@ bool Router_DispatchControl(StaticPacket &req,
     return RS485_EnqueueControl(req, is_vip);
   }
 
-  return false;
+  case ControlAction::FORWARD_CH5: {
+    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+    auto *parser = WallpadParserFactory::getActiveParser();
+    if (parser && parser->extractDeviceKey(
+                      std::span<const uint8_t>(req.data.data(), req.length),
+                      dev_id, sub1, sub2)) {
+      RouteEndpoint ep{5, -1, 0};
+      if (Router_LookupRoute(dev_id, sub1, sub2, ep) &&
+          ep.slot_idx >= 0 && ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+        return Router_ForwardToCh5(static_cast<uint8_t>(ep.slot_idx), req,
+                                   unidir);
+      }
+    }
+    return false;
+  }
+
+  case ControlAction::DROP:
+  default:
+    return false;
+  }
 }

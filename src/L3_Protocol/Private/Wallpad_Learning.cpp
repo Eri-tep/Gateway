@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <span>
+#include <utility>
 
 // ============================================================================
 // PART 1: AUTO-PROBING ENGINE IMPLEMENTATION
@@ -105,7 +107,7 @@ template <class T> uint8_t argmax256(const T *a, uint16_t &mx) {
 } // namespace
 
 uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
-                                             span<const uint8_t> data) const noexcept {
+                                             std::span<const uint8_t> data) const noexcept {
   const size_t len = data.size();
   if (len < 3)
     return 0;
@@ -143,7 +145,7 @@ uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
                                              size_t len) const {
   if (!data || len < 3)
     return 0;
-  return calculateChecksum(algo, span<const uint8_t>(data, len));
+  return calculateChecksum(algo, std::span<const uint8_t>(data, len));
 }
 
 void AutoProbingEngine::initFromNvs() {
@@ -210,7 +212,7 @@ void AutoProbingEngine::initFromNvs() {
            prof.etx, getAlgoName(prof.cs_algo));
 }
 
-void AutoProbingEngine::feedFrame(span<const uint8_t> f) {
+void AutoProbingEngine::feedFrame(std::span<const uint8_t> f) {
   if (f.size() < 3 || f.size() > 64)
     return;
 
@@ -228,8 +230,7 @@ void AutoProbingEngine::feedFrame(span<const uint8_t> f) {
     if (_desc.is_locked) {
       const bool ok = stx == _desc.stx && etx == _desc.etx &&
                       (_desc.checksum_algo == ChecksumAlgo::NONE ||
-                       calculateChecksum(_desc.checksum_algo, f.data(),
-                                         f.size()) == actual_cs);
+                       calculateChecksum(_desc.checksum_algo, f) == actual_cs);
       if (ok) {
         _desc.matched_packets++;
         _consecutive_mismatches = 0;
@@ -315,12 +316,12 @@ void AutoProbingEngine::feedFrame(span<const uint8_t> f) {
     ProfileRepository::syncAutoProfileToNvs(snap);
 }
 
-void AutoProbingEngine::feedOpcodePair(span<const uint8_t>,
-                                       span<const uint8_t>) {
+void AutoProbingEngine::feedOpcodePair(std::span<const uint8_t>,
+                                       std::span<const uint8_t>) {
   // 조기 opcode 잠금 제거 — analyzeCacheMatrix() 가 유일한 opcode 판정자
 }
 
-void AutoProbingEngine::feedControlFrame(span<const uint8_t> ctrl) {
+void AutoProbingEngine::feedControlFrame(std::span<const uint8_t> ctrl) {
   if (ctrl.size() < 5)
     return;
 
@@ -1353,6 +1354,8 @@ constexpr ActionBuilderFn kActionBuilders[] = {
     buildActionPower,      // MOMENTARY_TRIGGER
     buildActionVentMode    // VENT_MODE
 };
+static_assert(std::size(kActionBuilders) == 6,
+              "kActionBuilders size must match ControlActionType count");
 
 void clearActionSlots(GroupControlTemplate &g) {
   g.power_slot = ActionSlot{};
@@ -1782,8 +1785,8 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
   if (!parser)
     return false;
 
-  const size_t act_idx = static_cast<size_t>(action);
-  if (act_idx >= sizeof(kActionBuilders) / sizeof(kActionBuilders[0]))
+  const size_t act_idx = std::to_underlying(action);
+  if (act_idx >= std::size(kActionBuilders))
     return false;
 
   out.channel_id = 1;
@@ -2216,6 +2219,8 @@ static constexpr ClassDecoderFn kClassDecoders[] = {
     decodeVent,       // VENT = 6
     decodeAircon      // AIRCON = 7
 };
+static_assert(std::size(kClassDecoders) == 8,
+              "kClassDecoders size must match DeviceClass count");
 
 } // namespace
 
@@ -2243,8 +2248,8 @@ void ControlTemplate_DecodeDeviceState(const GroupControlTemplate &grp,
   }
 
   // 2. 클래스별 디스패치 (특수 전원 및 파라미터 개별 디코딩)
-  const size_t idx = static_cast<size_t>(grp.coverage.dev_class);
-  if (idx < sizeof(kClassDecoders) / sizeof(kClassDecoders[0])) {
+  const size_t idx = std::to_underlying(grp.coverage.dev_class);
+  if (idx < std::size(kClassDecoders)) {
     kClassDecoders[idx](grp, ack, dev, out);
   } else {
     decodeUnknown(grp, ack, dev, out);

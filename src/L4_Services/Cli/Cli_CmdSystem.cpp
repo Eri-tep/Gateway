@@ -345,6 +345,7 @@ void cmdStats(CliContext &ctx) {
     const char *sub = ctx.args.get(1);
     if (strcasecmp(sub, "clear") == 0) {
       System_ResetTrafficStats();
+      ProtocolDiag_ResetBridgeStats();
       ProtocolDiag_PollingResetHits();
       sendTelnetMsg(client, "All traffic statistics, hits, and metrics history "
                             "CLEARED to 0.\r\n");
@@ -812,7 +813,6 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   }
 
   FixedBuf<16> chan_name;
-  FixedBuf<24> drp_str;
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
     HubClientSlotSnapshot slot;
     System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
@@ -824,14 +824,18 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
                            slot.target_port ? slot.target_port
                                             : Config::TCP::EW11_SLOT_PORTS[s]);
 
-    uint32_t drp = slot.dropped_pkts;
-    drp_str.reset();
-    drp_str.appendFormat("%u", static_cast<unsigned>(drp));
+    uint32_t rx = slot.rx_pkts, crc = slot.crc_errors;
+    r_str.reset();
+    r_str.appendFormat("%u (%.2f%%)", static_cast<unsigned>(crc),
+                       rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
 
     out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", chan_name.c_str(),
                      static_cast<unsigned>(slot.rx_pkts),
                      static_cast<unsigned>(slot.tx_pkts),
-                     drp > 0 ? drp_str.c_str() : "0 (0.00%)", 0u, 0u, 0u);
+                     r_str.c_str(),
+                     static_cast<unsigned>(slot.invalid_frames),
+                     static_cast<unsigned>(slot.timeouts),
+                     static_cast<unsigned>(slot.uncached_pkts));
   }
 }
 

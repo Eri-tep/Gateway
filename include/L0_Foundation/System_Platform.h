@@ -325,6 +325,10 @@ struct HubClientSlotSnapshot {
   uint32_t last_rx_ms{0};
   uint32_t rx_pkts{0};
   uint32_t tx_pkts{0};
+  uint32_t crc_errors{0};
+  uint32_t invalid_frames{0};
+  uint32_t timeouts{0};
+  uint32_t uncached_pkts{0};
   uint32_t dropped_pkts{0};
 };
 
@@ -416,6 +420,7 @@ void System_RecordMetricsSample(uint16_t used_ram_kb) noexcept;
 
 // ── Traffic Counters & Connection Status ─────────────────────────────────────
 void System_ResetTrafficStats() noexcept;
+void System_ResetBridgeStats() noexcept;
 void System_RecordCh5Tx() noexcept;
 void System_RecordCh5Rx() noexcept;
 void System_RecordCh5Dropped() noexcept;

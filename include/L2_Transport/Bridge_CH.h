@@ -25,6 +25,11 @@ bool Bridge_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t por
 bool Bridge_SendRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
 bool Bridge_SendRaw(uint8_t slot_idx, std::span<const uint8_t> data) noexcept;
 void Bridge_RecordSlotRx(uint8_t slot_idx) noexcept;
+void Bridge_RecordSlotCrcError(uint8_t slot_idx) noexcept;
+void Bridge_RecordSlotInvalidFrame(uint8_t slot_idx) noexcept;
+void Bridge_RecordSlotTimeout(uint8_t slot_idx) noexcept;
+void Bridge_RecordSlotUncached(uint8_t slot_idx) noexcept;
+void Bridge_ResetStats() noexcept;
 
 void Bridge_Init();
 void Bridge_StartServer() noexcept;

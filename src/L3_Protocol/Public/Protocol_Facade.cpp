@@ -9,6 +9,7 @@
 #include "L2_Transport/Bridge_CH.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L3_Protocol/Private/Wallpad_Learning.h"
+#include "L3_Protocol/Private/Fcu_Engine.h"
 #include "esp_log.h"
 #include <algorithm>
 #include <atomic>
@@ -565,6 +566,11 @@ bool ProtocolDiag_ResetBridgeFraming(uint8_t slot_idx) noexcept {
   return Bridge_ResetFramingTracker(slot_idx);
 }
 
+void ProtocolDiag_ResetBridgeStats() noexcept {
+  Bridge_ResetStats();
+  Fcu_ResetStats();
+}
+
 // ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
 void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onBuildPoll = Wallpad_BuildNextPollPacket;
@@ -668,7 +674,7 @@ size_t Protocol_GetRoutes(DeviceRouteSnapshot *out_buf, size_t max_count) noexce
   if (!out_buf || max_count == 0) return 0;
   static DeviceRouteEntry tmp_entries[64];
   const size_t cap = std::min(max_count, sizeof(tmp_entries) / sizeof(tmp_entries[0]));
-  const size_t count = Router_GetRoutes(tmp_entries, cap);
+  const size_t count = Router_GetRoutes(std::span<DeviceRouteEntry>(tmp_entries, cap));
   for (size_t i = 0; i < count; ++i) {
     out_buf[i].dev_id = tmp_entries[i].dev_id;
     out_buf[i].sub1 = tmp_entries[i].sub1;

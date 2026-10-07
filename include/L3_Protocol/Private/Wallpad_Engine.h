@@ -119,20 +119,20 @@ public:
     ChecksumMismatch,
   };
 
-  [[nodiscard]] std::expected<span<const uint8_t>, FrameValidationError>
-  validateFrame(span<const uint8_t> frame) const noexcept;
+  [[nodiscard]] std::expected<std::span<const uint8_t>, FrameValidationError>
+  validateFrame(std::span<const uint8_t> frame) const noexcept;
 
-  bool validatePacket(span<const uint8_t> frame) const;
-  bool isQueryPacket(span<const uint8_t> frame) const;
-  bool isControlPacket(span<const uint8_t> frame) const;
-  bool isAckPacket(span<const uint8_t> frame) const;
+  bool validatePacket(std::span<const uint8_t> frame) const;
+  bool isQueryPacket(std::span<const uint8_t> frame) const;
+  bool isControlPacket(std::span<const uint8_t> frame) const;
+  bool isAckPacket(std::span<const uint8_t> frame) const;
 
-  bool extractDeviceKey(span<const uint8_t> frame, uint8_t &dev_id,
+  bool extractDeviceKey(std::span<const uint8_t> frame, uint8_t &dev_id,
                         uint8_t &sub1, uint8_t &sub2) const;
   bool buildQueryPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                         StaticPacket &out) const;
 
-  uint8_t calculateChecksum(span<const uint8_t> data) const noexcept;
+  uint8_t calculateChecksum(std::span<const uint8_t> data) const noexcept;
   uint8_t calculateChecksum(const uint8_t *data, size_t len) const;
   uint8_t getStx() const;
   uint8_t getEtx() const;
@@ -263,13 +263,13 @@ uint32_t Wallpad_GetStalePollCount() noexcept;
 
 uint8_t Wallpad_GetStx() noexcept;
 bool Wallpad_IsAutoUnlocked() noexcept;
-void Wallpad_FeedAutoFrame(span<const uint8_t> frame) noexcept;
+void Wallpad_FeedAutoFrame(std::span<const uint8_t> frame) noexcept;
 int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept;
-bool Wallpad_ValidatePacket(span<const uint8_t> frame) noexcept;
+bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept;
 
 bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
                                StaticPacket &virtual_ack_out) noexcept;
-void Wallpad_FeedControlFrame(span<const uint8_t> frame) noexcept;
+void Wallpad_FeedControlFrame(std::span<const uint8_t> frame) noexcept;
 
 // ── Doorphone (CH4) Handling & FSM ──────────────────────────────────────────
 struct FramingTracker {
@@ -322,4 +322,4 @@ void Wallpad_HandleDoorphonePacket(const StaticPacket &packet) noexcept;
 void Wallpad_ResetDoorphoneBellState() noexcept;
 const DoorphoneSpec *Wallpad_MatchDoorphone(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
 bool Wallpad_MatchDoorphoneLock(uint8_t stx, uint8_t etx, uint8_t len, uint8_t &out_fixed_len) noexcept;
-bool Wallpad_IsQueryPacket(span<const uint8_t> frame) noexcept;
+bool Wallpad_IsQueryPacket(std::span<const uint8_t> frame) noexcept;

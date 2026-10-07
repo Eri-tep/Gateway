@@ -117,3 +117,4 @@ bool Fcu_SetFanSpeed(uint8_t slot_idx, Fcu::FanSpeed f) noexcept;
 bool Fcu_SetSwing(uint8_t slot_idx, Fcu::Swing s) noexcept;
 bool Fcu_SetTargetTemp(uint8_t slot_idx, uint8_t temp_c) noexcept;
 bool Fcu_GetSlotRuntime(uint8_t slot_idx, Fcu::SlotRuntime &out_rt) noexcept;
+void Fcu_ResetStats() noexcept;

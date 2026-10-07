@@ -7,7 +7,10 @@
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Private/Routing_Engine.h"
 #include "L0_Foundation/System_Buffer.h"
+#include "L0_Foundation/System_Platform.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 
+#include <span>
 #include <Arduino.h>
 #include <Preferences.h>
 #include <algorithm>
@@ -109,7 +112,7 @@ EffProfile effectiveProfile() {
   return e;
 }
 
-inline int opOf(span<const uint8_t> f, const EffProfile &e) {
+inline int opOf(std::span<const uint8_t> f, const EffProfile &e) {
   return f.size() > e.op_off ? f[e.op_off] : -1;
 }
 
@@ -301,7 +304,7 @@ size_t UniversalProtocolEngine::getActiveProfileKey(char *out,
   return snprintf(out, max_len, "%s", desc.key);
 }
 
-static inline bool checkFramingPure(span<const uint8_t> f, uint8_t stx,
+static inline bool checkFramingPure(std::span<const uint8_t> f, uint8_t stx,
                                     uint8_t etx, uint8_t min_len,
                                     uint8_t max_len, ChecksumAlgo algo) {
   if (f.size() < min_len || f.size() > max_len || f.size() < 3)
@@ -314,8 +317,8 @@ static inline bool checkFramingPure(span<const uint8_t> f, uint8_t stx,
          f[f.size() - 2];
 }
 
-std::expected<span<const uint8_t>, UniversalProtocolEngine::FrameValidationError>
-UniversalProtocolEngine::validateFrame(span<const uint8_t> frame) const noexcept {
+std::expected<std::span<const uint8_t>, UniversalProtocolEngine::FrameValidationError>
+UniversalProtocolEngine::validateFrame(std::span<const uint8_t> frame) const noexcept {
   if (frame.size() < 3 || frame.size() > 64)
     return std::unexpected(FrameValidationError::InvalidLength);
 
@@ -336,16 +339,16 @@ UniversalProtocolEngine::validateFrame(span<const uint8_t> frame) const noexcept
   return frame;
 }
 
-bool UniversalProtocolEngine::validatePacket(span<const uint8_t> frame) const {
+bool UniversalProtocolEngine::validatePacket(std::span<const uint8_t> frame) const {
   return validateFrame(frame).has_value();
 }
 
-bool UniversalProtocolEngine::isQueryPacket(span<const uint8_t> frame) const {
+bool UniversalProtocolEngine::isQueryPacket(std::span<const uint8_t> frame) const {
   const EffProfile e = effectiveProfile();
   return opOf(frame, e) == e.q_op;
 }
 
-bool UniversalProtocolEngine::isControlPacket(span<const uint8_t> frame) const {
+bool UniversalProtocolEngine::isControlPacket(std::span<const uint8_t> frame) const {
   const EffProfile e = effectiveProfile();
   const int op = opOf(frame, e);
   if (op < 0)
@@ -353,13 +356,13 @@ bool UniversalProtocolEngine::isControlPacket(span<const uint8_t> frame) const {
   return e.ctrl_strict ? (op == e.c_op) : (op != e.q_op && op != e.a_op);
 }
 
-bool UniversalProtocolEngine::isAckPacket(span<const uint8_t> frame) const {
+bool UniversalProtocolEngine::isAckPacket(std::span<const uint8_t> frame) const {
   const EffProfile e = effectiveProfile();
   const int op = opOf(frame, e);
   return op == e.a_op || op == e.q_op;
 }
 
-bool UniversalProtocolEngine::extractDeviceKey(span<const uint8_t> frame,
+bool UniversalProtocolEngine::extractDeviceKey(std::span<const uint8_t> frame,
                                                uint8_t &dev_id, uint8_t &sub1,
                                                uint8_t &sub2) const {
   const EffProfile e = effectiveProfile();
@@ -410,7 +413,7 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
   return true;
 }
 
-uint8_t UniversalProtocolEngine::calculateChecksum(span<const uint8_t> data) const noexcept {
+uint8_t UniversalProtocolEngine::calculateChecksum(std::span<const uint8_t> data) const noexcept {
   return AutoProbe_GetEngine().calculateChecksum(effectiveProfile().algo, data);
 }
 
@@ -418,7 +421,7 @@ uint8_t UniversalProtocolEngine::calculateChecksum(const uint8_t *data,
                                                    size_t len) const {
   if (!data)
     return 0;
-  return calculateChecksum(span<const uint8_t>(data, len));
+  return calculateChecksum(std::span<const uint8_t>(data, len));
 }
 uint8_t UniversalProtocolEngine::getStx() const {
   return effectiveProfile().stx;
@@ -450,7 +453,7 @@ int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
     if (stx_idx + l > stream_len)
       return 0; // 아직 덜 들어옴
     if (stream[stx_idx + l - 1] == e.etx &&
-        checkFramingPure(span<const uint8_t>(&stream[stx_idx], l), e.stx, e.etx,
+        checkFramingPure(std::span<const uint8_t>(&stream[stx_idx], l), e.stx, e.etx,
                          safe_min, safe_max, e.algo)) {
       return static_cast<int>(l);
     }
@@ -885,6 +888,8 @@ static size_t s_current_dev_idx = 0;
 static uint32_t s_stable_start_ms = 0;
 static size_t s_last_active_tgts = 0;
 static bool s_convergence_done = false;
+static bool s_convergence_reset_done = false;
+static uint32_t s_convergence_time_ms = 0;
 static std::atomic<uint32_t> s_stale_poll_cnt{0};
 
 } // namespace
@@ -901,7 +906,7 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
                         "bus offsets...\r\n");
   }
 
-  if (!s_convergence_done) {
+  if (!s_convergence_done || !s_convergence_reset_done) {
     Wallpad_CheckConvergence(false);
   }
 
@@ -1006,8 +1011,8 @@ void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
     Polling_GetRegistry().updateResponse(matching_query->data.data(), matching_query->length,
                                      ack.data.data(), ack.length);
     AutoProbe_GetEngine().feedOpcodePair(
-        span<const uint8_t>(matching_query->data.data(), matching_query->length),
-        span<const uint8_t>(ack.data.data(), ack.length));
+        std::span<const uint8_t>(matching_query->data.data(), matching_query->length),
+        std::span<const uint8_t>(ack.data.data(), ack.length));
   }
 
   Device_ProcessBusPacket(ack);
@@ -1015,7 +1020,7 @@ void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
   auto *parser = WallpadParserFactory::getActiveParser();
   if (parser) {
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    span<const uint8_t> ack_span(ack.data.data(), ack.length);
+    std::span<const uint8_t> ack_span(ack.data.data(), ack.length);
     if (parser->extractDeviceKey(ack_span, dev_id, sub1, sub2)) {
       if (channel_id == 1) {
         Polling_GetRegistry().markVerified(dev_id, sub1, sub2);
@@ -1039,7 +1044,7 @@ ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_a
   auto *parser = WallpadParserFactory::getActiveParser();
   if (!parser)
     return ControlAction::DROP;
-  span<const uint8_t> frame(req.data.data(), req.length);
+  std::span<const uint8_t> frame(req.data.data(), req.length);
 
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
   const bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
@@ -1116,6 +1121,8 @@ bool Wallpad_TakeRelearnRequest() noexcept {
 bool Wallpad_CheckConvergence(bool reset) noexcept {
   if (reset) {
     s_convergence_done = false;
+    s_convergence_reset_done = false;
+    s_convergence_time_ms = 0;
     s_stable_start_ms = 0;
     s_last_active_tgts = 0;
     if (g_system_event_group) {
@@ -1125,6 +1132,15 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
   }
 
   if (s_convergence_done) {
+    if (!s_convergence_reset_done && s_convergence_time_ms > 0 &&
+        TimeUtils::isElapsed(s_convergence_time_ms, 2000)) {
+      s_convergence_reset_done = true;
+      System_ResetTrafficStats();
+      ProtocolDiag_ResetBridgeStats();
+      System_TraceMessage(
+          "[SYSTEM MSG]  ★ Post-Convergence Settle Period (2s) Ended. "
+          "Traffic statistics synchronized to 0 for pure 1:1 runtime tracking.\r\n");
+    }
     return true;
   }
 
@@ -1149,6 +1165,8 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
     } else if (TimeUtils::isElapsed(s_stable_start_ms,
                                     Config::Timing::CACHE_CONVERGENCE_STABLE_MS)) {
       s_convergence_done = true;
+      s_convergence_time_ms = millis();
+      s_convergence_reset_done = false;
       if (g_system_event_group) {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
       }
@@ -1185,7 +1203,7 @@ bool Wallpad_IsAutoUnlocked() noexcept {
   return parser && parser->isAutoMode() && !parser->isLocked();
 }
 
-void Wallpad_FeedAutoFrame(span<const uint8_t> frame) noexcept {
+void Wallpad_FeedAutoFrame(std::span<const uint8_t> frame) noexcept {
   AutoProbe_GetEngine().feedFrame(frame);
 }
 
@@ -1194,7 +1212,7 @@ int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_i
   return parser ? parser->extractPacketLength(stream, stream_len, stx_idx) : -1;
 }
 
-bool Wallpad_ValidatePacket(span<const uint8_t> frame) noexcept {
+bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept {
   auto *parser = WallpadParserFactory::getActiveParser();
   return parser ? parser->validatePacket(frame) : false;
 }
@@ -1203,7 +1221,7 @@ bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
                                StaticPacket &virtual_ack_out) noexcept {
   auto *parser = WallpadParserFactory::getActiveParser();
   if (!parser) return false;
-  span<const uint8_t> frame(req.data.data(), req.length);
+  std::span<const uint8_t> frame(req.data.data(), req.length);
   if (!parser->isQueryPacket(frame)) {
     return false;
   }
@@ -1215,7 +1233,7 @@ bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
   return Device_CopyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
 }
 
-void Wallpad_FeedControlFrame(span<const uint8_t> frame) noexcept {
+void Wallpad_FeedControlFrame(std::span<const uint8_t> frame) noexcept {
   AutoProbe_GetEngine().feedControlFrame(frame);
 }
 
@@ -1766,7 +1784,7 @@ bool Wallpad_MatchDoorphoneLock(uint8_t stx, uint8_t etx, uint8_t len,
   return false;
 }
 
-bool Wallpad_IsQueryPacket(span<const uint8_t> frame) noexcept {
+bool Wallpad_IsQueryPacket(std::span<const uint8_t> frame) noexcept {
   auto *parser = WallpadParserFactory::getActiveParser();
   return parser ? parser->isQueryPacket(frame) : false;
 }

@@ -87,9 +87,9 @@ private:
 public:
   AutoProbingEngine();
   void initFromNvs();
-  void feedFrame(span<const uint8_t> raw_frame);
-  void feedOpcodePair(span<const uint8_t> req, span<const uint8_t> ack);
-  void feedControlFrame(span<const uint8_t> ctrl_frame);
+  void feedFrame(std::span<const uint8_t> raw_frame);
+  void feedOpcodePair(std::span<const uint8_t> req, std::span<const uint8_t> ack);
+  void feedControlFrame(std::span<const uint8_t> ctrl_frame);
   bool isLocked() const;
   bool isOffsetsLocked() const;
   AutoProbeDescriptor getDescriptor() const;
@@ -97,7 +97,7 @@ public:
   void injectControlSpec(uint8_t ctrl_op, uint8_t ctrl_len);
   bool analyzeCacheMatrix();
   uint8_t calculateChecksum(ChecksumAlgo algo,
-                            span<const uint8_t> data) const noexcept;
+                            std::span<const uint8_t> data) const noexcept;
   uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
                             size_t len) const;
   static const char *getAlgoName(ChecksumAlgo algo);
@@ -191,8 +191,17 @@ private:
 public:
   void registerOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                        const uint8_t *raw_pkt = nullptr, size_t raw_len = 0);
+  void registerOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                       std::span<const uint8_t> raw_pkt) {
+    registerOrTouch(ch, dev_id, sub1, sub2, raw_pkt.data(), raw_pkt.size());
+  }
   void updateResponse(const uint8_t *query_pkt, size_t query_len,
                       const uint8_t *ack_pkt, size_t ack_len);
+  void updateResponse(std::span<const uint8_t> query_pkt,
+                      std::span<const uint8_t> ack_pkt) {
+    updateResponse(query_pkt.data(), query_pkt.size(), ack_pkt.data(),
+                   ack_pkt.size());
+  }
   void reindexWithOffsets(uint8_t dev_id_offset, uint8_t sub1_offset,
                           uint8_t sub2_offset);
   void sweepExpired(uint32_t ttl_ms = 30000);

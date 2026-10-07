@@ -38,6 +38,10 @@ struct HubClientSlot {
   uint32_t last_rx_ms{0};
   uint32_t rx_pkts{0};
   uint32_t tx_pkts{0};
+  uint32_t crc_errors{0};
+  uint32_t invalid_frames{0};
+  uint32_t timeouts{0};
+  uint32_t uncached_pkts{0};
   uint32_t dropped_pkts{0};
   uint8_t last_query_data[64]{0};
   uint8_t last_query_len{0};
@@ -86,6 +90,10 @@ bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) {
   out.last_rx_ms = s.last_rx_ms;
   out.rx_pkts = s.rx_pkts;
   out.tx_pkts = s.tx_pkts;
+  out.crc_errors = s.crc_errors;
+  out.invalid_frames = s.invalid_frames;
+  out.timeouts = s.timeouts;
+  out.uncached_pkts = s.uncached_pkts;
   out.dropped_pkts = s.dropped_pkts;
   return true;
 }
@@ -192,6 +200,51 @@ void Bridge_RecordSlotRx(uint8_t slot_idx) noexcept {
   System_RecordCh5Rx();
 }
 
+void Bridge_RecordSlotCrcError(uint8_t slot_idx) noexcept {
+  if (slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+    MutexLocker lock(s_ch5_mutex);
+    s_hub_slots[slot_idx].crc_errors++;
+  }
+}
+
+void Bridge_RecordSlotInvalidFrame(uint8_t slot_idx) noexcept {
+  if (slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+    MutexLocker lock(s_ch5_mutex);
+    s_hub_slots[slot_idx].invalid_frames++;
+  }
+}
+
+void Bridge_RecordSlotTimeout(uint8_t slot_idx) noexcept {
+  if (slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+    MutexLocker lock(s_ch5_mutex);
+    s_hub_slots[slot_idx].timeouts++;
+  }
+}
+
+void Bridge_RecordSlotUncached(uint8_t slot_idx) noexcept {
+  if (slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+    MutexLocker lock(s_ch5_mutex);
+    s_hub_slots[slot_idx].uncached_pkts++;
+  }
+}
+
+void Bridge_ResetStats() noexcept {
+  MutexLocker lock(s_ch5_mutex);
+  for (int i = 0; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
+    s_hub_slots[i].rx_pkts = 0;
+    s_hub_slots[i].tx_pkts = 0;
+    s_hub_slots[i].crc_errors = 0;
+    s_hub_slots[i].invalid_frames = 0;
+    s_hub_slots[i].timeouts = 0;
+    s_hub_slots[i].uncached_pkts = 0;
+    s_hub_slots[i].dropped_pkts = 0;
+  }
+}
+
+void System_ResetBridgeStats() noexcept {
+  Bridge_ResetStats();
+}
+
 namespace {
 
 inline void consumeRxBuffer(HubClientSlot *slot, size_t consumed) {
@@ -232,6 +285,8 @@ void demuxPacketStream(HubClientSlot *slot) {
       drp_pkt.data[0] = slot->rx_buf[p];
       System_TracePacket(5, false, TraceType::DRP, drp_pkt);
       System_RecordCh5Dropped();
+      slot->invalid_frames++;
+      slot->dropped_pkts++;
       p++;
       continue;
     }
@@ -249,6 +304,8 @@ void demuxPacketStream(HubClientSlot *slot) {
                 drp_pkt.data.begin());
       System_TracePacket(5, false, TraceType::DRP, drp_pkt);
       System_RecordCh5Dropped();
+      slot->crc_errors++;
+      slot->dropped_pkts++;
       p += p_len;
       continue;
     }

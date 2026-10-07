@@ -22,6 +22,7 @@
 #include "L0_Foundation/System_Buffer.h"
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 // ── Multi-Channel Route Endpoint & Entry PODs ──────────────────────────────
 struct RouteEndpoint {
@@ -55,6 +56,7 @@ void Router_ClearRoutes() noexcept;
 
 /// Copy all route entries into caller-supplied buffer for inspection/export.
 /// Returns number of entries copied.
+[[nodiscard]] size_t Router_GetRoutes(std::span<DeviceRouteEntry> out_buf) noexcept;
 [[nodiscard]] size_t Router_GetRoutes(DeviceRouteEntry *out_buf,
                                        size_t max_count) noexcept;
 
