@@ -9,7 +9,7 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
-#include "L3_Protocol/Public/Device_Registry.h"
+#include "L3_Protocol/Public/Protocol_Device.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -211,6 +211,13 @@ int ProtocolDiag_ExtractPacketLength(const uint8_t *buf, size_t len, size_t offs
 bool ProtocolDiag_ValidatePacket(const uint8_t *buf, size_t len) noexcept;
 bool ProtocolDiag_IsQueryPacket(const uint8_t *buf, size_t len) noexcept;
 uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
+
+// ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
+bool ProtocolDiag_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept;
+bool ProtocolDiag_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
+                                      uint16_t port, const char *name) noexcept;
+bool ProtocolDiag_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept;
+bool ProtocolDiag_ResetBridgeFraming(uint8_t slot_idx) noexcept;
 
 // ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
 struct RS485_PacketDispatcher;

@@ -14,6 +14,7 @@
 
 // ── EW11 Slot Snapshot & Management API (0-extern 정보 은닉) ──
 bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out);
+bool Bridge_IsSlotOnline(uint8_t slot_idx) noexcept;
 bool Bridge_SetSlotEnabled(uint8_t slot_idx, bool enabled);
 bool Bridge_SetFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len);
 bool Bridge_ResetFramingTracker(uint8_t slot_idx);

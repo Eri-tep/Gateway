@@ -5,7 +5,7 @@
 
 #include "L4_Services/CLI_Service.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L4_Services/Cli/Cli_Commands.h"
 
 #include <WiFi.h>
@@ -298,7 +298,7 @@ static bool Tcp_ConstantTimeStrcmp(const char *a, const char *b) {
     return false;
   volatile int result = 0;
   for (size_t i = 0; i < len_a; ++i)
-    result |= a[i] ^ b[i];
+    result = result | (a[i] ^ b[i]);
   return result == 0;
 }
 

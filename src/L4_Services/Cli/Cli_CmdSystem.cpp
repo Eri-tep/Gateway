@@ -2,7 +2,7 @@
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/Cli/Cli_Commands.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 #include <WiFi.h>
 #include <esp_core_dump.h>
 #include <esp_heap_caps.h>

@@ -1,6 +1,6 @@
 #include "L4_Services/Mgmt_Service.h"
 #include "L4_Services/Mgmt/Mgmt_Internal.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 
 #include <cstddef>

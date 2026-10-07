@@ -8,8 +8,6 @@
 
 #include <Preferences.h>
 #include <algorithm>
-#include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -47,7 +45,8 @@ struct HubClientSlot {
 
 static HubClientSlot s_hub_slots[Config::TCP::MAX_EW11_SLOTS];
 static SemaphoreHandle_t s_ch5_mutex = nullptr;
-static int s_ew11_server_fds[Config::TCP::MAX_EW11_SLOTS] = {-1, -1, -1, -1, -1};
+static int s_ew11_server_fds[Config::TCP::MAX_EW11_SLOTS] = {-1, -1, -1, -1,
+                                                             -1};
 
 static Bridge_PacketDispatcher s_dispatcher{};
 static BridgeRxCallback s_slot_rx_cb = nullptr;
@@ -57,7 +56,8 @@ static void Hub_LoadConfig();
 static void Hub_SaveConfig();
 static bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt);
 
-void Bridge_RegisterDispatcher(const Bridge_PacketDispatcher &dispatcher) noexcept {
+void Bridge_RegisterDispatcher(
+    const Bridge_PacketDispatcher &dispatcher) noexcept {
   s_dispatcher = dispatcher;
 }
 
@@ -90,8 +90,17 @@ bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) {
   return true;
 }
 
-bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept {
+bool System_GetBridgeSlotSnapshot(uint8_t slot_idx,
+                                  HubClientSlotSnapshot &out) noexcept {
   return Bridge_GetSlotSnapshot(slot_idx, out);
+}
+
+bool Bridge_IsSlotOnline(uint8_t slot_idx) noexcept {
+  if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) {
+    return false;
+  }
+  MutexLocker lock(s_ch5_mutex);
+  return s_hub_slots[slot_idx].enabled && s_hub_slots[slot_idx].is_connected;
 }
 
 bool Bridge_SetSlotEnabled(uint8_t slot_idx, bool enabled) {
@@ -112,7 +121,8 @@ bool Bridge_SetSlotEnabled(uint8_t slot_idx, bool enabled) {
   return true;
 }
 
-bool Bridge_SetFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) {
+bool Bridge_SetFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx,
+                           uint8_t len) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) {
     return false;
   }
@@ -153,7 +163,8 @@ bool Bridge_ResetFramingTracker(uint8_t slot_idx) {
   return true;
 }
 
-bool Bridge_SendRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
+bool Bridge_SendRaw(uint8_t slot_idx, const uint8_t *data,
+                    size_t len) noexcept {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS || !data || len == 0) {
     return false;
   }
@@ -209,9 +220,10 @@ void demuxPacketStream(HubClientSlot *slot) {
       continue;
     }
 
-    int len_res = s_dispatcher.onExtractLength
-                      ? s_dispatcher.onExtractLength(slot->rx_buf, slot->rx_len, p)
-                      : 0;
+    int len_res =
+        s_dispatcher.onExtractLength
+            ? s_dispatcher.onExtractLength(slot->rx_buf, slot->rx_len, p)
+            : 0;
     if (len_res == 0)
       break;
 
@@ -374,8 +386,9 @@ void processStream(int slot_idx, HubClientSlot *slot) {
   if (slot_idx == 0) {
     demuxPacketStream(slot);
   } else if (s_slot_rx_cb) {
-    size_t consumed = s_slot_rx_cb(static_cast<uint8_t>(slot_idx),
-                                  std::span<const uint8_t>(slot->rx_buf, slot->rx_len));
+    size_t consumed =
+        s_slot_rx_cb(static_cast<uint8_t>(slot_idx),
+                     std::span<const uint8_t>(slot->rx_buf, slot->rx_len));
     consumeRxBuffer(slot, consumed);
   }
 }
@@ -537,8 +550,7 @@ static void Hub_LoadConfig() {
         .toCharArray(s_hub_slots[i].name, sizeof(s_hub_slots[i].name));
     p.getString(k_ip, "").toCharArray(s_hub_slots[i].target_ip,
                                       sizeof(s_hub_slots[i].target_ip));
-    uint16_t def_slot_port =
-        Config::TCP::EW11_SLOT_PORTS[i];
+    uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[i];
     uint16_t pi = p.getUShort(k_pt, def_slot_port);
     if (pi == 0 || pi == 8899)
       pi = def_slot_port;
@@ -585,8 +597,8 @@ static void Hub_SaveConfig() {
   p.end();
 }
 
-bool Bridge_SetSlot(uint8_t slot_idx, bool enabled, const char *ip, uint16_t port,
-                    const char *name) {
+bool Bridge_SetSlot(uint8_t slot_idx, bool enabled, const char *ip,
+                    uint16_t port, const char *name) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS)
     return false;
 
@@ -648,7 +660,8 @@ static bool Hub_SendPacket(uint8_t slot_idx, const StaticPacket &pkt) {
   return false;
 }
 
-void Bridge_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept {
+void Bridge_PopulateFds(fd_set &readfds, fd_set &errorfds,
+                        int &max_fd) noexcept {
   auto add_fd = [&](int fd) {
     if (fd >= 0) {
       FD_SET(fd, &readfds);
@@ -698,8 +711,8 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
           slot.sock = -1;
           slot.is_connected = false;
           slot.rx_len = 0;
-          ESP_LOGW("EW11", "[CH5] Slot %d (%s) socket error detected. Closed.", s,
-                   slot.name);
+          ESP_LOGW("EW11", "[CH5] Slot %d (%s) socket error detected. Closed.",
+                   s, slot.name);
           continue;
         }
 
@@ -763,7 +776,8 @@ void Bridge_StartServer() noexcept {
       saddr.sin_family = AF_INET;
       saddr.sin_addr.s_addr = htonl(INADDR_ANY);
       saddr.sin_port = htons(listen_port);
-      if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr), sizeof(saddr)) < 0 ||
+      if (bind(sfd, reinterpret_cast<struct sockaddr *>(&saddr),
+               sizeof(saddr)) < 0 ||
           listen(sfd, 1) < 0) {
         ESP_LOGE("EW11",
                  "Failed to bind/listen EW11 slot %d on port %u: errno %d", s,
@@ -771,8 +785,8 @@ void Bridge_StartServer() noexcept {
         close(sfd);
         sfd = -1;
       } else {
-        ESP_LOGI("EW11", "[CH5] Listening for EW11 slot %d (%s) on port %u",
-                 s, s_hub_slots[s].name, listen_port);
+        ESP_LOGI("EW11", "[CH5] Listening for EW11 slot %d (%s) on port %u", s,
+                 s_hub_slots[s].name, listen_port);
       }
     }
     s_ew11_server_fds[s] = sfd;

@@ -75,34 +75,8 @@ bool Router_ForwardToCh5(uint8_t slot_idx, const StaticPacket &pkt,
                          bool burst) noexcept;
 
 
-/// Dispatches an RX packet received from physical bus (CH1~CH4) into L3 domain decoders.
-void Router_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
-                            const StaticPacket *matching_query) noexcept;
-
-/// Assembles the next device polling packet for CH1 transmission.
-bool Router_BuildNextPoll(StaticPacket &out_pkt, uint8_t &poll_dev_id,
-                          uint8_t &poll_sub1, uint8_t &poll_sub2) noexcept;
-
-/// Notifies L3 subsystem of polling timeout on a target device.
-void Router_HandlePollTimeout(uint8_t poll_dev_id, uint8_t poll_sub1,
-                              uint8_t poll_sub2) noexcept;
-
-/// Handles sub-bus (CH2/CH3) query packets with cache virtual response.
-bool Router_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
-                              StaticPacket &virtual_ack_out) noexcept;
-
 /// Dispatches a control or query request: handles virtual ACK, routing to CH5, or enqueuing to local bus.
 [[nodiscard]] bool Router_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept;
-
-// ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
-bool Router_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept;
-bool Router_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
-                                uint16_t port, const char *name) noexcept;
-bool Router_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept;
-bool Router_ResetBridgeFraming(uint8_t slot_idx) noexcept;
-[[nodiscard]] bool Router_IsBridgeSlotOnline(uint8_t slot_idx) noexcept;
-bool Router_SendBridgeRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept;
-void Router_RecordBridgeSlotRx(uint8_t slot_idx) noexcept;
 
 
 

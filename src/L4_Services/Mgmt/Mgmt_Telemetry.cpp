@@ -5,9 +5,9 @@
 #include "L4_Services/Mgmt/Mgmt_Internal.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L4_Services/Mgmt_Service.h"
-#include "L3_Protocol/Public/Packet_Router.h"
-#include "L3_Protocol/Public/Device_Registry.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Protocol_Router.h"
+#include "L3_Protocol/Public/Protocol_Device.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 
 #include <algorithm>
 #include <atomic>

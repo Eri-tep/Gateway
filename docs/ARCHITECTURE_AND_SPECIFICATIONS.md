@@ -18,17 +18,14 @@ This document defines the system specifications, runtime topology, channel mappi
 > 2. **L1 Physical HAL Drivers**: Hardware abstractions (`Uart_Driver`, `Diagnostics_Driver`, `OTA_Driver`, `Wifi_Driver`). Complete information hiding. Exclusively implements physical driver health, dual-partition OTA engine, NVS/RTC reboot logs, Wi-Fi connectivity/reconnect FSM (bound to L0 `System_Wifi*`), and hardware telemetry. 4 canonical drivers maintain strict cohesion and 1:1 header-source parity.
 > 3. **L2 Transport & Data Link Channels**: Raw frame transport, timeslot scheduling, and socket polling (`RS485_CH`, `TCP_CH`). Pure transport leaves; zero awareness of L3 device state, scheduler strategies, or L4 listeners. Consumes upper-layer requests strictly via injected raw DI callbacks (`onTakeRelearnRequest`, `onCheckConvergence`, `onBuildPoll`).
 > 4. **L3 Routing, Subsystem & Shell-Core Engine**:
->    - **L3 Public Shell (External Boundary Gateways)**:
->      - `Packet_Router` : **The ONLY bidirectional packet gateway** between L3 and L2 (`Router_EnqueueDownlink`, `Router_BuildNextPoll`).
->      - `Device_Registry`: SSOT device repository and decoupled control/state ingress.
->      - `Protocol_Diagnostics`: Pure protocol & routing diagnostics facade for L4 (strictly zero hardware HAL includes; zero non-protocol state; includes `ProtocolDiag_RequestRelearn()`).
->      - `Modbus_Codec`: FCU Modbus RTU byte stream encoder, decoder & CRC-16.
+>    - **L3 Public Shell (External Boundary Gateways & Facades)**:
+>      - `Protocol_Device`: SSOT device repository, decoupled control/state ingress, and event dispatch.
+>      - `Protocol_Facade`: Pure protocol & routing diagnostics facade for L4 CLI/RPC (strictly zero hardware HAL includes; zero non-protocol state; read-only snapshots & `ProtocolDiag_RequestRelearn()`).
+>      - `Protocol_Router`: **The ONLY bidirectional packet gateway** between L3 and L2 (`Router_EnqueueDownlink`, `Router_HandleBusPacket`, `Router_BuildNextPollPacket`).
 >    - **L3 Private Core (100% Encapsulated Engines)**:
->      - `Wallpad_Engine`: Internal protocol FSM and doorphone state machine (`FramingTracker` sealed here; sole owner of protocol convergence & relearn state `s_relearn_requested`).
->      - `Wallpad_Parser`: Binary frame parser and checksum validation.
->      - `Polling_Registry`: Dynamic polling target registry, warm cache, and **sole owner of internal `stale_poll_cnt`**.
->      - `Auto_Probing`: Runtime heuristic protocol matrix solver.
->      - `Control_Registry`: Device capability blueprints and action slot decoders.
+>      - `Wallpad_Engine`: Internal protocol FSM, zero-copy packet parser (integrated framing parser sealed here), and doorphone state machine (`FramingTracker` sealed here; sole owner of protocol convergence & relearn state `s_relearn_requested`).
+>      - `Wallpad_Learning`: Collocated learning & registration SSOT engine (dynamic polling targets, warm cache, auto-probing heuristic matrix solver, control blueprints/coverage, and sole owner of `stale_poll_cnt`).
+>      - `Fcu_Engine`: Dedicated FCU Modbus-RTU protocol engine & register handler.
 > 5. **L4 Application Services**: High-level orchestrators (`Mgmt_Service`, `EW11_Service`, `CLI_Service`). Interacts strictly with L3 Public for protocol needs, and consumes cross-cutting platform capabilities directly via L0 `System_Platform.h`. Possesses 0% access to L3 Private or L2 Channels.
 
 ```
@@ -44,19 +41,17 @@ include/
 │   └── Wifi_Driver.h         (Physical Wi-Fi HAL driver & System_Wifi* platform binding)
 ├── L2_Transport/                   [L2: Transport & Data Link Channels]
 │   ├── RS485_CH.h            (Ch1~Ch4 serial channel manager, FreeRTOS timeslot loops)
-│   └── TCP_CH.h              (Core 0 TCP reactor, socket FSM, embedded IPFilter)
+│   ├── TCP_CH.h              (Core 0 TCP reactor, socket FSM, embedded IPFilter)
+│   └── Bridge_CH.h           (Ch5/Ch6 EW11 TCP bridge channels, atomic slot online & socket proxy)
 ├── L3_Protocol/                    [L3: Routing, Subsystem & Shell-Core Hub]
 │   ├── Public/               [L3 Public Shell: External Gateways for L4 & L2]
-│   │   ├── Packet_Router.h   (Sole L3 ↔ L2 bidirectional packet gateway & downlink egress)
-│   │   ├── Device_Registry.h (SSOT device state repository & control ingress API)
-│   │   ├── Protocol_Diagnostics.h (Thread-safe read-only protocol diagnostic snapshots & facade)
-│   │   └── Modbus_Codec.h    (FCU Modbus RTU byte stream encoder, decoder & CRC-16)
+│   │   ├── Protocol_Device.h (SSOT device state repository & control ingress API)
+│   │   ├── Protocol_Facade.h (Thread-safe read-only protocol diagnostic snapshots & facade)
+│   │   └── Protocol_Router.h (Sole L3 ↔ L2 bidirectional packet gateway & downlink egress)
 │   └── Private/              [L3 Private Core: 100% Internal Subsystem Engines]
-│       ├── Wallpad_Engine.h  (Internal protocol FSM & Doorphone FramingTracker engine)
-│       ├── Wallpad_Parser.h  (Hyundai Wallpad packet framing & checksum algorithms)
-│       ├── Polling_Registry.h(1st-tier dynamic polling targets & internal stale_poll_cnt)
-│       ├── Auto_Probing.h    (Runtime automatic matrix solver & profile discovery)
-│       └── Control_Registry.h(Control blueprints, slot coverage & frame synthesis)
+│       ├── Wallpad_Engine.h  (Internal protocol FSM, framing parser & Doorphone engine)
+│       ├── Wallpad_Learning.h(Polling registry, warm cache, auto-probing matrix solver & control blueprints)
+│       └── Fcu_Engine.h      (FCU Modbus-RTU protocol engine & register handler)
 └── L4_Services/                    [L4: Application Services]
     ├── Mgmt_Service.h        (Port 8900 JSON-RPC remote bridge & session coordinator)
     ├── EW11_Service.h        (Virtual RS-485 EW11 TCP client/server session coordinator)
@@ -79,19 +74,17 @@ src/
 │   └── Wifi_Driver.cpp       (WiFi event handler, reconnect FSM & System_Wifi* binding)
 ├── L2_Transport/
 │   ├── RS485_CH.cpp          (Task_Ch1, Task_Ch2Ch3, Task_Ch4 FreeRTOS worker loops)
-│   └── TCP_CH.cpp            (Task_TcpCore0 socket polling and IP whitelist filter)
+│   ├── TCP_CH.cpp            (Task_TcpCore0 socket polling and IP whitelist filter)
+│   └── Bridge_CH.cpp         (Ch5/Ch6 socket connections & non-allocating bridge I/O)
 ├── L3_Protocol/
 │   ├── Public/
-│   │   ├── Packet_Router.cpp (Downlink queue dispatch & horizontal bus routing)
-│   │   ├── Device_Registry.cpp(Mutex-protected snapshot API, 0% extern global state leaks)
-│   │   ├── Protocol_Diagnostics.cpp(Facade query methods & protocol snapshot mapping)
-│   │   └── Modbus_Codec.cpp  (FCU Modbus RTU byte stream encoder & CRC-16 implementation)
+│   │   ├── Protocol_Device.cpp(Mutex-protected snapshot API, 0% extern global state leaks)
+│   │   ├── Protocol_Facade.cpp(Facade query methods & protocol snapshot mapping)
+│   │   └── Protocol_Router.cpp(Downlink queue dispatch & horizontal bus routing)
 │   └── Private/
-│       ├── Wallpad_Engine.cpp(Doorphone FSM, guard delays, framing engine implementation)
-│       ├── Wallpad_Parser.cpp(Zero-copy span packet parsers)
-│       ├── Polling_Registry.cpp(Dynamic polling targets, warm cache & stale_poll_cnt)
-│       ├── Auto_Probing.cpp  (Matrix solver & convergence detection)
-│       └── Control_Registry.cpp(Blueprint synthesis & action execution)
+│       ├── Wallpad_Engine.cpp(Doorphone FSM, guard delays, framing engine & zero-copy parser)
+│       ├── Wallpad_Learning.cpp(Unified dynamic polling targets, matrix solver & blueprint execution)
+│       └── Fcu_Engine.cpp    (FCU Modbus-RTU frame processing & register snapshot management)
 ├── L4_Services/
 │   ├── Mgmt_Service.cpp
 │   ├── EW11_Service.cpp      (EW11 proxy coordinator with self-contained frame metadata)
@@ -105,13 +98,13 @@ src/
 
 1. **Total Shell-Core Model (100% Information Hiding)**:
    - All external ingress into L3 (from L4) must target **L3 Public headers exclusively**.
-   - All external egress from L3 (to L2) must traverse **`Packet_Router::Router_EnqueueDownlink()` exclusively**.
-   - L3 Private headers (`Wallpad_Engine.h`, `Polling_Registry.h`, `Control_Registry.h`, etc.) are strictly forbidden from being included by L4 Services or L2 Channels.
+   - All external egress from L3 (to L2) must traverse **`Protocol_Router::Router_EnqueueDownlink()` exclusively**.
+   - L3 Private headers (`Wallpad_Engine.h`, `Wallpad_Learning.h`, `Fcu_Engine.h`) are strictly forbidden from being included by L4 Services or L2 Channels.
 2. **Zero Upward Dependencies & Zero Layer Skipping (Strict Pipeline)**:
    - Upward includes ($L_M \rightarrow L_N$ where $M < N$) are strictly prohibited.
    - Vertical runtime calls must follow the strictly adjacent hierarchy: $L4 \rightarrow L3 \rightarrow L2 \rightarrow L1$. Layer skipping ($L3 \rightarrow L1$ or $L4 \rightarrow L2$) is prohibited.
 3. **No Middle-Man Semantic Leakage**:
-   - L3 scheduler decisions (such as "stale device polling") belong strictly inside L3 (`Polling_Registry::_stale_poll_cnt`). L3 must never pass scheduler semantics down to L2 channels as parameters or delegate metric increments to lower layers.
+   - L3 scheduler decisions (such as "stale device polling") belong strictly inside L3 (`Wallpad_Learning::_stale_poll_cnt`). L3 must never pass scheduler semantics down to L2 channels as parameters or delegate metric increments to lower layers.
 4. **No Overreaching Metric Invasions**:
    - L3 protocol convergence (`Wallpad_CheckConvergence`) must only stabilize its own cache and signal system milestone `SYS_EVT_CACHE_READY`. It is strictly forbidden for L3 to wipe or reset L1 hardware metrics (`g_pkt_stats`, `g_metrics`).
 5. **L0 Base Foundation Soil & Cross-Cutting Platform DIP (Rule 17)**:
@@ -251,9 +244,9 @@ These principles represent the engineering standard established across the Canon
 | Architectural Subsystem | Canonical Modules | Core Architectural Enhancements | Quantifiable Results |
 |---|---|---|---|
 | **L4 Services (CLI & Mgmt)** | `CLI_Service.cpp`, `Console_Commands.cpp`, `CmdSystem.cpp`, `CmdConfig.cpp`, `CmdDevice.cpp`, `CmdTrace.cpp`, `Mgmt_Service.cpp`, `Mgmt_Rpc.cpp`, `Mgmt_Telemetry.cpp`, `Wifi_Manager.cpp`, `EW11_Service.cpp` | ANSI Telnet FSM; 8-slot ring history; Port 8900 JSON-RPC reactor; Virtual EW11 bridge; zero direct L1/L2 dependencies | **Zero-Heap CLI**, 0 deadlock, direct L0 platform DIP integration |
-| **L3 Protocol Engine** | `Packet_Router.cpp`, `Device_Registry.cpp`, `Protocol_Diagnostics.cpp`, `Modbus_Codec.cpp`, `Wallpad_Engine.cpp`, `Wallpad_Parser.cpp`, `Polling_Registry.cpp`, `Auto_Probing.cpp`, `Control_Registry.cpp` | Public Shell / Private Core segregation; `span` zero-copy codecs; dynamic 48-slot polling matrix; 100% pure protocol logic (**0% L1 HAL pollution**) | 0 CRC error, 0 dropped frame, auto protocol matrix solver |
-| **L2 Transport & Data Link** | `RS485_CH.cpp`, `TCP_CH.cpp` | Ch1~Ch4 FreeRTOS dedicated timeslot loops; Core 0 non-blocking TCP select reactor; embedded IP whitelist | Strict L2 transport leaves, 0 L3/L4 semantic awareness |
-| **L1 Physical HAL Drivers** | `Uart_Driver.cpp`, `Diagnostics_Driver.cpp`, `OTA_Driver.cpp` | Unified HW UART0~2 + SoftwareSerial; NVS `LogManager`; Task WDT monitor; dual-partition rollback engine | Complete HW information hiding, atomic driver metrics |
+| **L3 Protocol Engine** | `Protocol_Router.cpp`, `Protocol_Device.cpp`, `Protocol_Facade.cpp`, `Wallpad_Engine.cpp`, `Wallpad_Learning.cpp`, `Fcu_Engine.cpp` | Public Shell / Private Core segregation; `span` zero-copy codecs; dynamic 48-slot polling matrix; 100% pure protocol logic (**0% L1 HAL pollution**) | 0 CRC error, 0 dropped frame, auto protocol matrix solver |
+| **L2 Transport & Data Link** | `RS485_CH.cpp`, `TCP_CH.cpp`, `Bridge_CH.cpp` | Ch1~Ch4 FreeRTOS dedicated timeslot loops; Core 0 non-blocking TCP select reactor; embedded IP whitelist; zero-copy bridge proxy | Strict L2 transport leaves, 0 L3/L4 semantic awareness |
+| **L1 Physical HAL Drivers** | `Uart_Driver.cpp`, `Diagnostics_Driver.cpp`, `OTA_Driver.cpp`, `Wifi_Driver.cpp` | Unified HW UART0~2 + SoftwareSerial; NVS `LogManager`; Task WDT monitor; dual-partition rollback engine; Wi-Fi FSM | Complete HW information hiding, atomic driver metrics |
 | **L0 Foundation Soil** | `System_Buffer.cpp`, `System_Config.cpp`, `System_Platform.cpp` | Universal static leaf; `FixedBuf`/`AppendBuf` zero-heap builders; `System_*` abstract platform contracts | Accessible by all layers ($L1 \sim L4$), zero upward dependencies |
 
 ---

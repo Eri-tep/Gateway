@@ -1,7 +1,7 @@
 #pragma once
 
 // ============================================================================
-// Fcu_Protocol: Level 3 Private Modbus-RTU FCU Protocol Engine & Codec
+// Fcu_Engine: Level 3 Private Modbus-RTU FCU Protocol Engine & Codec
 // 100% Encapsulated Private Core (AGENTS.md Rule 17)
 // ============================================================================
 

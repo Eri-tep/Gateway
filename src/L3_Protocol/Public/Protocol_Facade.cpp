@@ -2,13 +2,13 @@
 // ProtocolDiagnostics: Level 3 Public Diagnostics & Engine Facade Implementation
 // ============================================================================
 
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
-#include "L3_Protocol/Public/Packet_Router.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
+#include "L3_Protocol/Public/Protocol_Router.h"
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/TCP_CH.h"
 #include "L2_Transport/Bridge_CH.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
-#include "L3_Protocol/Private/Control_Registry.h"
+#include "L3_Protocol/Private/Wallpad_Learning.h"
 #include "esp_log.h"
 #include <algorithm>
 #include <atomic>
@@ -527,11 +527,29 @@ uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept
   return parser ? parser->calculateChecksum(data, len) : 0;
 }
 
+// ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
+bool ProtocolDiag_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept {
+  return Bridge_SetSlotEnabled(slot_idx, enabled);
+}
+
+bool ProtocolDiag_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
+                                      uint16_t port, const char *name) noexcept {
+  return Bridge_SetSlot(slot_idx, enabled, ip, port, name);
+}
+
+bool ProtocolDiag_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept {
+  return Bridge_SetFramingLock(slot_idx, stx, etx, len);
+}
+
+bool ProtocolDiag_ResetBridgeFraming(uint8_t slot_idx) noexcept {
+  return Bridge_ResetFramingTracker(slot_idx);
+}
+
 // ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
 void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
-  dispatcher.onBuildPoll = Router_BuildNextPoll;
-  dispatcher.onBusPacket = Router_HandleBusPacket;
-  dispatcher.onTimeout = Router_HandlePollTimeout;
+  dispatcher.onBuildPoll = Wallpad_BuildNextPollPacket;
+  dispatcher.onBusPacket = Wallpad_HandleBusPacket;
+  dispatcher.onTimeout = Wallpad_HandlePollTimeout;
   dispatcher.onDispatchControl = Router_DispatchControl;
   dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
   dispatcher.onGetStx = Wallpad_GetStx;
@@ -539,7 +557,7 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
   dispatcher.onExtractLength = Wallpad_ExtractLength;
   dispatcher.onValidatePacket = Wallpad_ValidatePacket;
-  dispatcher.onHandleSubBusQuery = Router_HandleSubBusQuery;
+  dispatcher.onHandleSubBusQuery = Wallpad_HandleSubBusQuery;
   dispatcher.onFeedControlFrame = Wallpad_FeedControlFrame;
   dispatcher.onDoorphonePacket = Wallpad_HandleDoorphonePacket;
   dispatcher.onDoorphoneReset = Wallpad_ResetDoorphoneBellState;

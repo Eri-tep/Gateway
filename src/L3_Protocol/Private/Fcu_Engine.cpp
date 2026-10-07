@@ -1,13 +1,14 @@
 // ============================================================================
-// Fcu_Protocol: Level 3 Private Modbus-RTU FCU Protocol Engine & Codec
+// Fcu_Engine: Level 3 Private Modbus-RTU FCU Protocol Engine & Codec
 // 100% Encapsulated Private Core (AGENTS.md Rule 17)
 // ============================================================================
 
-#include "L3_Protocol/Private/Fcu_Protocol.h"
+#include "L3_Protocol/Private/Fcu_Engine.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L3_Protocol/Public/Device_Registry.h"
-#include "L3_Protocol/Public/Packet_Router.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L2_Transport/Bridge_CH.h"
+#include "L3_Protocol/Public/Protocol_Device.h"
+#include "L3_Protocol/Public/Protocol_Router.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 
 #include <algorithm>
 #include <cstring>
@@ -175,7 +176,7 @@ static bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
     return true;
   }
 
-  bool ok = Router_SendBridgeRaw(slot_idx, pkt, len);
+  bool ok = Bridge_SendRaw(slot_idx, pkt, len);
   if (ok) {
     System_RecordCh5Tx();
     StaticPacket trace_pkt{5, static_cast<uint8_t>(len)};
@@ -280,7 +281,7 @@ size_t Fcu_HandleRxStream(uint8_t slot_idx,
     size_t rem = len - p;
     // 19바이트 0x03 상태 쿼리 응답
     if (rem >= 19 && buf[p + 1] == 0x03 && buf[p + 2] == 0x0E) {
-      Router_RecordBridgeSlotRx(slot_idx);
+      Bridge_RecordSlotRx(slot_idx);
       StaticPacket trace_pkt{5, 19};
       std::copy(&buf[p], &buf[p + 19], trace_pkt.data.begin());
       System_TracePacket(5, false, TraceType::RMT, trace_pkt);
@@ -292,7 +293,7 @@ size_t Fcu_HandleRxStream(uint8_t slot_idx,
 
     // 8바이트 0x06 / 0x10 제어 ACK
     if (rem >= 8 && (buf[p + 1] == 0x06 || buf[p + 1] == 0x10)) {
-      Router_RecordBridgeSlotRx(slot_idx);
+      Bridge_RecordSlotRx(slot_idx);
       StaticPacket trace_pkt{5, 8};
       std::copy(&buf[p], &buf[p + 8], trace_pkt.data.begin());
       System_TracePacket(5, false, TraceType::RMT, trace_pkt);
@@ -314,7 +315,7 @@ size_t Fcu_HandleRxStream(uint8_t slot_idx,
 
 void Fcu_PollTick(uint32_t now_ms) noexcept {
   for (uint8_t slot_idx = 1; slot_idx < Config::TCP::MAX_EW11_SLOTS; ++slot_idx) {
-    if (!Router_IsBridgeSlotOnline(slot_idx))
+    if (!Bridge_IsSlotOnline(slot_idx))
       continue;
 
     auto &rt = s_fcu_slots[slot_idx];
@@ -330,7 +331,7 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
         rt.has_pending_temp = false;
         auto temp_frame = ModbusRtu::buildWriteSingle(
             0x0005, static_cast<uint16_t>(rt.pending_temp));
-        if (Router_SendBridgeRaw(slot_idx, temp_frame.data(), temp_frame.size())) {
+        if (Bridge_SendRaw(slot_idx, temp_frame.data(), temp_frame.size())) {
           System_RecordCh5Tx();
           StaticPacket trace_pkt{5, static_cast<uint8_t>(temp_frame.size())};
           std::copy(temp_frame.begin(), temp_frame.end(), trace_pkt.data.begin());
@@ -348,7 +349,7 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
       if (!rt.waiting_response) {
         uint8_t len = rt.pending_cmd_len;
         rt.pending_cmd_len = 0;
-        if (Router_SendBridgeRaw(slot_idx, rt.pending_cmd_buf, len)) {
+        if (Bridge_SendRaw(slot_idx, rt.pending_cmd_buf, len)) {
           System_RecordCh5Tx();
           StaticPacket trace_pkt{5, len};
           std::copy(rt.pending_cmd_buf, rt.pending_cmd_buf + len, trace_pkt.data.begin());
@@ -385,7 +386,7 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
                                           ModbusRtu::kQueryPkt.size());
       Router_RecordRoute(5, slot_idx, Config::FCU::DEV_ID, slot_idx, 0);
 
-      if (Router_SendBridgeRaw(slot_idx, ModbusRtu::kQueryPkt.data(),
+      if (Bridge_SendRaw(slot_idx, ModbusRtu::kQueryPkt.data(),
                                ModbusRtu::kQueryPkt.size())) {
         System_RecordCh5Tx();
         StaticPacket trace_pkt{5, static_cast<uint8_t>(ModbusRtu::kQueryPkt.size())};

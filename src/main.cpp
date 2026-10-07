@@ -15,9 +15,9 @@
 #include "L2_Transport/Bridge_CH.h"
 
 // ── L3 Protocol Routing ──
-#include "L3_Protocol/Public/Device_Registry.h"
-#include "L3_Protocol/Public/Packet_Router.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Protocol_Device.h"
+#include "L3_Protocol/Public/Protocol_Router.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 
 // ── L4 Network Services ──
 #include "L4_Services/Mgmt_Service.h"

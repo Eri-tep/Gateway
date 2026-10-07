@@ -1,9 +1,10 @@
 #include "L4_Services/Cli/Cli_Fmt.h"
 #include "L4_Services/CLI_Service.h"
 #include "L4_Services/Cli/Cli_Commands.h"
-#include "L3_Protocol/Public/Packet_Router.h"
+#include "L3_Protocol/Public/Protocol_Router.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L3_Protocol/Public/Device_Registry.h"
+#include "L3_Protocol/Public/Protocol_Device.h"
 #include <WiFi.h>
 
 namespace ConfigCli {
@@ -535,7 +536,7 @@ static bool ew11ParseSlot(int sock, const char *arg, int &slot,
 }
 
 static void ew11SetEnable(int sock, int slot, bool enabled) {
-  Router_SetBridgeSlotEnabled(static_cast<uint8_t>(slot), enabled);
+  ProtocolDiag_SetBridgeSlotEnabled(static_cast<uint8_t>(slot), enabled);
   sendTelnetMsgf(sock, "[OK] EW11 Slot #%d %s and saved to NVS flash.\r\n",
                  slot, enabled ? "ENABLED" : "DISABLED");
 }
@@ -685,7 +686,7 @@ void cmdEw11(CliContext &ctx) {
              enabled = (v != 0);
            }
          }
-         if (Router_SetBridgeSlotConfig(static_cast<uint8_t>(slot), enabled, ip_str, port,
+         if (ProtocolDiag_SetBridgeSlotConfig(static_cast<uint8_t>(slot), enabled, ip_str, port,
                                         name_str)) {
            System_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
            sendTelnetMsgf(
@@ -718,7 +719,7 @@ void cmdEw11(CliContext &ctx) {
            if (CliFmt::ParseInt(args.get(5), parsed_len, 0, 255))
              len = static_cast<uint8_t>(parsed_len);
          }
-         Router_SetBridgeFramingLock(static_cast<uint8_t>(slot), stx, etx, len);
+         ProtocolDiag_SetBridgeFramingLock(static_cast<uint8_t>(slot), stx, etx, len);
          sendTelnetMsgf(sock,
                         "[OK] EW11 Slot #%d framing permanently fixed to STX "
                         "0x%02X, ETX 0x%02X, Len %u.\r\n",
@@ -729,7 +730,7 @@ void cmdEw11(CliContext &ctx) {
          int slot = -1;
          if (!ew11ParseSlot(sock, args.get(2), slot, "reset"))
            return;
-         Router_ResetBridgeFraming(static_cast<uint8_t>(slot));
+         ProtocolDiag_ResetBridgeFraming(static_cast<uint8_t>(slot));
          sendTelnetMsgf(sock,
                         "[OK] EW11 Slot #%d framing tracker reset to "
                         "autonomous auto-probing.\r\n",

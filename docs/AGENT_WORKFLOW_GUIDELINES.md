@@ -72,20 +72,20 @@ This document provides mandatory procedural guidelines for AI agents (Antigravit
   ```bash
   # 1. Extract target block to new module (100% byte integrity preserved)
   (
-    echo '#include "L3_Protocol/Control_Registry.h"'
-    echo '#include "L3_Protocol/Private/Wallpad_Parser.h"'
+    echo '#include "L3_Protocol/Private/Wallpad_Learning.h"'
+    echo '#include "L3_Protocol/Private/Wallpad_Engine.h"'
     echo ''
-    sed -n '603,1588p' src/L3_Protocol/Private/Control_Registry.cpp
-  ) > src/L3_Protocol/Private/Control_Learning.cpp
+    sed -n '603,1588p' src/L3_Protocol/Private/Wallpad_Learning.cpp
+  ) > src/L3_Protocol/Private/Wallpad_Ext.cpp
 
   # 2. Cut out extracted block from original source file
   (
-    head -n 602 src/L3_Protocol/Private/Control_Registry.cpp
+    head -n 602 src/L3_Protocol/Private/Wallpad_Learning.cpp
     echo ''
-    echo '// (onControlTransaction has been extracted to src/L3_Protocol/Private/Control_Learning.cpp)'
+    echo '// (extracted to src/L3_Protocol/Private/Wallpad_Ext.cpp)'
     echo ''
-    tail -n +1589 src/L3_Protocol/Private/Control_Registry.cpp
-  ) > src/L3_Protocol/Private/Control_Registry.cpp.tmp && mv src/L3_Protocol/Private/Control_Registry.cpp.tmp src/L3_Protocol/Private/Control_Registry.cpp
+    tail -n +1589 src/L3_Protocol/Private/Wallpad_Learning.cpp
+  ) > src/L3_Protocol/Private/Wallpad_Learning.cpp.tmp && mv src/L3_Protocol/Private/Wallpad_Learning.cpp.tmp src/L3_Protocol/Private/Wallpad_Learning.cpp
   ```
 - **Benefits**:
   - Zero model I/O tokens consumed for the extracted body.

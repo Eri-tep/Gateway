@@ -4,10 +4,10 @@
 
 #include "L4_Services/Mgmt/Mgmt_Internal.h"
 static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
-#include "L3_Protocol/Public/Packet_Router.h"
+#include "L3_Protocol/Public/Protocol_Router.h"
 #include "L4_Services/Mgmt_Service.h"
-#include "L3_Protocol/Public/Device_Registry.h"
-#include "L3_Protocol/Public/Protocol_Diagnostics.h"
+#include "L3_Protocol/Public/Protocol_Device.h"
+#include "L3_Protocol/Public/Protocol_Facade.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -503,7 +503,7 @@ static void HandleRpc_SetEw11(int sock, long req_id, const char *json_str,
                                          : def_slot_port);
     if (target_port == 8899)
       target_port = def_slot_port; // 구버전 8899 기본값 보정
-    if (Router_SetBridgeSlotConfig(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr,
+    if (ProtocolDiag_SetBridgeSlotConfig(static_cast<uint8_t>(slot), enabled, ip[0] ? ip : nullptr,
                                    target_port, name[0] ? name : nullptr)) {
       const char *ok_msg = "{\"res\":\"ok\"}\n";
       send(sock, ok_msg, strlen(ok_msg), MSG_DONTWAIT);

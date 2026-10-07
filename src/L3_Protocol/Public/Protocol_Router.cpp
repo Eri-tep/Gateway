@@ -15,10 +15,9 @@
 //   - g_route_registry is accessed only via Router_* API (Rule 17).
 // ============================================================================
 
-#include "L3_Protocol/Public/Packet_Router.h"
+#include "L3_Protocol/Public/Protocol_Router.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L2_Transport/RS485_CH.h"
-#include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Config.h"
 
 #include <Arduino.h>
@@ -201,59 +200,6 @@ bool Router_DispatchControl(StaticPacket &req,
   }
 
   return false;
-}
-
-void Router_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
-                            const StaticPacket *matching_query) noexcept {
-  Wallpad_HandleBusPacket(channel_id, ack_pkt, matching_query);
-}
-
-bool Router_BuildNextPoll(StaticPacket &out_pkt, uint8_t &poll_dev_id,
-                          uint8_t &poll_sub1, uint8_t &poll_sub2) noexcept {
-  return Wallpad_BuildNextPollPacket(out_pkt, poll_dev_id, poll_sub1, poll_sub2);
-}
-
-void Router_HandlePollTimeout(uint8_t poll_dev_id, uint8_t poll_sub1,
-                              uint8_t poll_sub2) noexcept {
-  Wallpad_HandlePollTimeout(poll_dev_id, poll_sub1, poll_sub2);
-}
-
-bool Router_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
-                              StaticPacket &virtual_ack_out) noexcept {
-  return Wallpad_HandleSubBusQuery(channel_id, req, virtual_ack_out);
-}
-
-bool Router_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept {
-  return Bridge_SetSlotEnabled(slot_idx, enabled);
-}
-
-bool Router_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
-                                uint16_t port, const char *name) noexcept {
-  return Bridge_SetSlot(slot_idx, enabled, ip, port, name);
-}
-
-bool Router_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept {
-  return Bridge_SetFramingLock(slot_idx, stx, etx, len);
-}
-
-bool Router_ResetBridgeFraming(uint8_t slot_idx) noexcept {
-  return Bridge_ResetFramingTracker(slot_idx);
-}
-
-bool Router_IsBridgeSlotOnline(uint8_t slot_idx) noexcept {
-  HubClientSlotSnapshot slot{};
-  if (!Bridge_GetSlotSnapshot(slot_idx, slot)) {
-    return false;
-  }
-  return slot.enabled && slot.is_connected;
-}
-
-bool Router_SendBridgeRaw(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
-  return Bridge_SendRaw(slot_idx, data, len);
-}
-
-void Router_RecordBridgeSlotRx(uint8_t slot_idx) noexcept {
-  Bridge_RecordSlotRx(slot_idx);
 }
 
 
