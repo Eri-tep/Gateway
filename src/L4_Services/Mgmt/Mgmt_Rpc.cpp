@@ -16,27 +16,87 @@ static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include <lwip/sockets.h>
 
 
+void Remote_ResetTrustedHubIp() noexcept {
+  s_trusted_hub_ip = IPAddress(0, 0, 0, 0);
+}
+
+IPAddress Remote_GetTrustedHubIp() noexcept {
+  return s_trusted_hub_ip;
+}
+
+static bool Socket_SendAll(int sock, const void *buf, size_t len,
+                           uint32_t timeout_ms = 1000) {
+  if (sock < 0 || !buf || len == 0)
+    return false;
+  const uint8_t *p = static_cast<const uint8_t *>(buf);
+  size_t total_sent = 0;
+  uint32_t start_ms = millis();
+
+  while (total_sent < len) {
+    ssize_t sent = send(sock, p + total_sent, len - total_sent, MSG_DONTWAIT);
+    if (sent > 0) {
+      total_sent += static_cast<size_t>(sent);
+      continue;
+    }
+    if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      if (millis() - start_ms >= timeout_ms) {
+        return false;
+      }
+      fd_set wfds;
+      FD_ZERO(&wfds);
+      FD_SET(sock, &wfds);
+      struct timeval tv;
+      tv.tv_sec = 0;
+      tv.tv_usec = 20000; // 20ms
+      int r = select(sock + 1, nullptr, &wfds, nullptr, &tv);
+      if (r <= 0 && (millis() - start_ms >= timeout_ms)) {
+        return false;
+      }
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 static inline const char *findJsonStringValue(const char *json, const char *key,
                                               char *out_val, size_t max_len) {
   if (!json || !key || !out_val || max_len == 0)
     return nullptr;
   char pattern[64];
   snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-  const char *p = strstr(json, pattern);
-  if (!p)
-    return nullptr;
-  p += strlen(pattern);
-  while (*p == ' ' || *p == ':' || *p == '\t')
-    p++;
-  if (*p != '\"')
-    return nullptr; // 문자열 시작 따옴표 필수 확인
-  p++;
-  size_t idx = 0;
-  while (*p && *p != '\"' && *p != '\r' && *p != '\n' && idx + 1 < max_len) {
-    out_val[idx++] = *p++;
+  const char *p = json;
+  while ((p = strstr(p, pattern)) != nullptr) {
+    const char *after = p + strlen(pattern);
+    while (*after == ' ' || *after == '\t')
+      after++;
+    if (*after == ':') {
+      after++;
+      while (*after == ' ' || *after == '\t')
+        after++;
+      if (*after != '\"')
+        return nullptr;
+      after++;
+      size_t idx = 0;
+      bool escaped = false;
+      while (*after && *after != '\r' && *after != '\n' && idx + 1 < max_len) {
+        if (!escaped && *after == '\\') {
+          escaped = true;
+          after++;
+          continue;
+        }
+        if (!escaped && *after == '\"') {
+          break;
+        }
+        escaped = false;
+        out_val[idx++] = *after++;
+      }
+      out_val[idx] = '\0';
+      return out_val;
+    }
+    p += strlen(pattern);
   }
-  out_val[idx] = '\0';
-  return out_val;
+  return nullptr;
 }
 
 static inline long findJsonIntValue(const char *json, const char *key,
@@ -45,17 +105,26 @@ static inline long findJsonIntValue(const char *json, const char *key,
     return default_val;
   char pattern[64];
   snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-  const char *p = strstr(json, pattern);
-  if (!p)
-    return default_val;
-  p += strlen(pattern);
-  while (*p == ' ' || *p == ':' || *p == '\t')
-    p++;
-  char *endp = nullptr;
-  long val = strtol(p, &endp, 10);
-  if (endp == p)
-    return default_val;
-  return val;
+  const char *p = json;
+  while ((p = strstr(p, pattern)) != nullptr) {
+    const char *after = p + strlen(pattern);
+    while (*after == ' ' || *after == '\t')
+      after++;
+    if (*after == ':') {
+      after++;
+      while (*after == ' ' || *after == '\t')
+        after++;
+      if (*after == '\"')
+        after++;
+      char *endp = nullptr;
+      long val = strtol(after, &endp, 10);
+      if (endp == after)
+        return default_val;
+      return val;
+    }
+    p += strlen(pattern);
+  }
+  return default_val;
 }
 
 static void sendRpcResponse(int sock, long req_id, const char *res,
@@ -82,7 +151,7 @@ static void sendRpcResponse(int sock, long req_id, const char *res,
     }
   }
   if (len > 0 && static_cast<size_t>(len) < sizeof(buf)) {
-    send(sock, buf, len, MSG_DONTWAIT);
+    Socket_SendAll(sock, buf, len);
   }
 }
 
@@ -98,7 +167,7 @@ static void HandleRpc_GetTelemetry(int sock, long req_id,
   AppendBuf ab{s_mgmt_resp_buf, sizeof(s_mgmt_resp_buf)};
   Mgmt_SerializeTelemetry(ab, req_id);
   ab.append("\n");
-  send(sock, ab.buf, ab.offset, MSG_DONTWAIT);
+  Socket_SendAll(sock, ab.buf, ab.offset);
   System_RecordCh6Tx();
 }
 
@@ -608,7 +677,7 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     const char *err_msg =
         "{\"res\":\"error\",\"msg\":\"Invalid action "
         "(power/set_temp/fan_speed/valve_close/momentary/vent_mode/mode)\"}\n";
-    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+    Socket_SendAll(sock, err_msg, strlen(err_msg));
     return;
   }
 
@@ -619,7 +688,7 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     const char *err_msg =
         "{\"res\":\"error\",\"msg\":\"Failed to build control packet (ctl_spec "
         "missing or forbidden action)\"}\n";
-    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+    Socket_SendAll(sock, err_msg, strlen(err_msg));
     return;
   }
 
@@ -712,24 +781,30 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   if (cmd[0] == '\0') {
     const char *err_msg =
         "{\"res\":\"error\",\"msg\":\"Missing 'cmd' or 'c' field\"}\n";
-    send(sock, err_msg, strlen(err_msg), MSG_DONTWAIT);
+    Socket_SendAll(sock, err_msg, strlen(err_msg));
     return;
   }
 
   long req_id = findJsonIntValue(json_str, "id", -1);
   IPAddress client_ip = Remote_GetClientIp(sock);
 
-  // SmartThings Edge Driver가 주기적으로 telemetry 요청 시 허브 IP 자동 학습 및
-  // 갱신
+  // SmartThings Edge Driver가 주기적으로 telemetry 요청 시 허브 IP 자동 학습 및 Lock-in
   if (strcasecmp(cmd, "get_telemetry") == 0 &&
       client_ip != IPAddress(0, 0, 0, 0)) {
-    s_trusted_hub_ip = client_ip;
+    if (s_trusted_hub_ip == IPAddress(0, 0, 0, 0)) {
+      s_trusted_hub_ip = client_ip;
+      ESP_LOGI("NET", "[RPC] Trusted Hub IP locked to %s",
+               s_trusted_hub_ip.toString().c_str());
+    }
   }
 
   for (const auto &entry : kRpcDispatchTable) {
     if (strcasecmp(cmd, entry.cmd) == 0) {
       if (entry.is_dangerous) {
-        if (s_trusted_hub_ip != IPAddress(0, 0, 0, 0) &&
+        // 보안 검증:
+        // 1) 아직 허브가 등록되지 않은 상태(0.0.0.0)에서는 위험 명령 원천 거부 (부팅 직후 바이패스 차단)
+        // 2) 등록된 허브 IP와 불일치하는 제3자의 위험 명령 차단 (탈취 및 임의 조작 방어)
+        if (s_trusted_hub_ip == IPAddress(0, 0, 0, 0) ||
             client_ip != s_trusted_hub_ip) {
           sendRpcResponse(sock, req_id, "error",
                           "403 Access Denied: Unauthorized client IP");

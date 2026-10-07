@@ -198,13 +198,38 @@ QueueHandle_t Uart_GetEventQueue(uart_port_t u_num) {
   }
 }
 
+// ── Persistent Per-Channel Stream Context (Prevents Packet Truncation on Return) ──
+struct ChannelRxStreamContext {
+  uint8_t stream[Config::Packet::MAX_STREAM_BUF]{};
+  size_t stream_len{0};
+  uint32_t last_rx_ms{0};
+};
+
+static ChannelRxStreamContext s_uart_rx_streams[3];
+
+static inline void Uart_FlushChannelInput(uart_port_t u_num) {
+  uart_flush_input(u_num);
+  size_t u_idx = static_cast<size_t>(u_num);
+  if (u_idx < 3) {
+    s_uart_rx_streams[u_idx].stream_len = 0;
+    s_uart_rx_streams[u_idx].last_rx_ms = 0;
+  }
+}
+
 UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
                              uint32_t tout_ms, UartPollCallback on_poll,
                              void *poll_ctx, const StaticPacket *echo_match) {
-  uint8_t stream[Config::Packet::MAX_STREAM_BUF];
-  size_t stream_len = 0;
+  size_t u_idx = static_cast<size_t>(u_num);
+  if (u_idx >= 3)
+    return UartRxStatus::TIMEOUT;
+
+  auto &rx_ctx = s_uart_rx_streams[u_idx];
+  uint8_t *stream = rx_ctx.stream;
+  size_t &stream_len = rx_ctx.stream_len;
+  uint32_t &last_rx_ms = rx_ctx.last_rx_ms;
+  constexpr size_t max_stream_buf = sizeof(rx_ctx.stream);
+
   uint32_t start_ms = millis();
-  uint32_t last_rx_ms = 0;
   const bool is_auto_unlocked =
       s_dispatcher.onIsAutoUnlocked ? s_dispatcher.onIsAutoUnlocked() : false;
   const uint8_t stx =
@@ -310,9 +335,9 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
       if (xQueueReceive(evt_q, &evt, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
         if (evt.type == UART_DATA) {
           received_new_bytes = Uart_DrainToStreamBuffer(
-              u_num, stream, stream_len, sizeof(stream), last_rx_ms);
+              u_num, stream, stream_len, max_stream_buf, last_rx_ms);
         } else if (evt.type == UART_FIFO_OVF || evt.type == UART_BUFFER_FULL) {
-          uart_flush_input(u_num);
+          Uart_FlushChannelInput(u_num);
           xQueueReset(evt_q);
         }
       }
@@ -321,7 +346,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
     }
 
     if (!received_new_bytes) {
-      Uart_DrainToStreamBuffer(u_num, stream, stream_len, sizeof(stream),
+      Uart_DrainToStreamBuffer(u_num, stream, stream_len, max_stream_buf,
                                last_rx_ms);
     }
   }
@@ -402,7 +427,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
       return;
     }
 
-    uart_flush_input(UART_NUM_0);
+    Uart_FlushChannelInput(UART_NUM_0);
     uart_write_bytes(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
     uart_wait_tx_done(UART_NUM_0,
                       pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
@@ -510,7 +535,7 @@ void Ch1_PollNext(size_t &current_dev_idx) {
         continue;
       }
 
-      uart_flush_input(UART_NUM_0);
+      Uart_FlushChannelInput(UART_NUM_0);
       uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
       uart_wait_tx_done(UART_NUM_0,
                         pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
@@ -577,7 +602,7 @@ void Task_Ch1(void *pvParameters) {
     while (xQueueReceive(s_uart0_event_queue, (void *)&u_evt, 0) == pdTRUE) {
       if (u_evt.type == UART_FIFO_OVF || u_evt.type == UART_BUFFER_FULL) {
         Diag_RecordChannelInvalidFrame(1);
-        uart_flush_input(UART_NUM_0);
+        Uart_FlushChannelInput(UART_NUM_0);
       } else if (u_evt.type == UART_PARITY_ERR ||
                  u_evt.type == UART_FRAME_ERR) {
         Diag_RecordChannelCrcError(1);
@@ -687,7 +712,7 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
     return;
   }
 
-  uart_flush_input(cfg->uart_num);
+  Uart_FlushChannelInput(cfg->uart_num);
   TimestampedPacketQueue<8> ack_queue;
 
   if (g_system_event_group) {

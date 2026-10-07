@@ -26,7 +26,7 @@ This document defines the system specifications, runtime topology, channel mappi
 >      - `Wallpad_Engine`: Internal protocol FSM, zero-copy packet parser (integrated framing parser sealed here), and doorphone state machine (`FramingTracker` sealed here; sole owner of protocol convergence & relearn state `s_relearn_requested`).
 >      - `Wallpad_Learning`: Collocated learning & registration SSOT engine (dynamic polling targets, warm cache, auto-probing heuristic matrix solver, control blueprints/coverage, and sole owner of `stale_poll_cnt`).
 >      - `Fcu_Engine`: Dedicated FCU Modbus-RTU protocol engine & register handler.
-> 5. **L4 Application Services**: High-level orchestrators (`Mgmt_Service`, `EW11_Service`, `CLI_Service`). Interacts strictly with L3 Public for protocol needs, and consumes cross-cutting platform capabilities directly via L0 `System_Platform.h`. Possesses 0% access to L3 Private or L2 Channels.
+> 5. **L4 Application Services**: High-level orchestrators (`CLI_Service`, `Mgmt_Service`). Interacts strictly with L3 Public for protocol needs, and consumes cross-cutting platform capabilities directly via L0 `System_Platform.h`. Possesses 0% access to L3 Private or L2 Channels.
 
 ```
 include/
@@ -53,14 +53,9 @@ include/
 │       ├── Wallpad_Learning.h(Polling registry, warm cache, auto-probing matrix solver & control blueprints)
 │       └── Fcu_Engine.h      (FCU Modbus-RTU protocol engine & register handler)
 └── L4_Services/                    [L4: Application Services]
-    ├── Mgmt_Service.h        (Port 8900 JSON-RPC remote bridge & session coordinator)
-    ├── EW11_Service.h        (Virtual RS-485 EW11 TCP client/server session coordinator)
-    ├── CLI_Service.h         (Telnet virtual stream diagnostic console REPL / TCP Port 23)
-    ├── Console/              [CLI Submodules - Domain Modularization]
-    │   ├── Console_Commands.h(Unified command table dispatch definition)
-    │   └── Console_Fmt.h     (ANSI styling and tabular text formatting utilities)
-    └── Mgmt/                 [Mgmt & Remote Submodules]
-        └── Mgmt_Internal.h   (Internal session types, mutexes, and fallback guards)
+    ├── CLI_Commands.h        (Unified CLI command declarations, formatting utilities & scratch buffer)
+    ├── CLI_Service.h         (Telnet virtual stream diagnostic console REPL / TCP Port 23 & tracer)
+    └── Mgmt_Service.h        (Port 8900 JSON-RPC remote bridge, telemetry & session coordinator)
 
 src/
 ├── L0_Foundation/
@@ -86,11 +81,10 @@ src/
 │       ├── Wallpad_Learning.cpp(Unified dynamic polling targets, matrix solver & blueprint execution)
 │       └── Fcu_Engine.cpp    (FCU Modbus-RTU frame processing & register snapshot management)
 ├── L4_Services/
-│   ├── Mgmt_Service.cpp
-│   ├── EW11_Service.cpp      (EW11 proxy coordinator with self-contained frame metadata)
-│   ├── CLI_Service.cpp       (Telnet virtual stream diagnostic console REPL / TCP Port 23; strictly network-only)
-│   ├── Console/              (Console_Commands.cpp, CmdConfig.cpp, CmdDevice.cpp, CmdSystem.cpp, CmdTrace.cpp)
-│   └── Mgmt/                 (Mgmt_Rpc.cpp, Mgmt_Telemetry.cpp, Wifi_Manager.cpp)
+│   ├── CLI_Service.cpp       (Telnet session engine, command routing table & 5KB scratch buffer)
+│   ├── Mgmt_Service.cpp      (HTTP/WS/JSON-RPC management coordinator & WebServer loop)
+│   ├── Cli/                  (Domain command modules: Cli_CmdConfig.cpp, Cli_CmdDevice.cpp, Cli_CmdSystem.cpp, Cli_CmdTrace.cpp)
+│   └── Mgmt/                 (Mgmt_Rpc.cpp, Mgmt_Telemetry.cpp)
 └── main.cpp                  (Bootstrapping, dependency injection & task launches)
 ```
 
@@ -243,7 +237,7 @@ These principles represent the engineering standard established across the Canon
 
 | Architectural Subsystem | Canonical Modules | Core Architectural Enhancements | Quantifiable Results |
 |---|---|---|---|
-| **L4 Services (CLI & Mgmt)** | `CLI_Service.cpp`, `Console_Commands.cpp`, `CmdSystem.cpp`, `CmdConfig.cpp`, `CmdDevice.cpp`, `CmdTrace.cpp`, `Mgmt_Service.cpp`, `Mgmt_Rpc.cpp`, `Mgmt_Telemetry.cpp`, `Wifi_Manager.cpp`, `EW11_Service.cpp` | ANSI Telnet FSM; 8-slot ring history; Port 8900 JSON-RPC reactor; Virtual EW11 bridge; zero direct L1/L2 dependencies | **Zero-Heap CLI**, 0 deadlock, direct L0 platform DIP integration |
+| **L4 Services (CLI & Mgmt)** | `CLI_Service.cpp`, `Cli_CmdConfig.cpp`, `Cli_CmdDevice.cpp`, `Cli_CmdSystem.cpp`, `Cli_CmdTrace.cpp`, `Mgmt_Service.cpp`, `Mgmt_Rpc.cpp`, `Mgmt_Telemetry.cpp` | ANSI Telnet FSM; 8-slot ring history; Port 8900 JSON-RPC reactor; zero direct L1/L2 dependencies | **Zero-Heap CLI**, 0 deadlock, direct L0 platform DIP integration |
 | **L3 Protocol Engine** | `Protocol_Router.cpp`, `Protocol_Device.cpp`, `Protocol_Facade.cpp`, `Wallpad_Engine.cpp`, `Wallpad_Learning.cpp`, `Fcu_Engine.cpp` | Public Shell / Private Core segregation; `span` zero-copy codecs; dynamic 48-slot polling matrix; 100% pure protocol logic (**0% L1 HAL pollution**) | 0 CRC error, 0 dropped frame, auto protocol matrix solver |
 | **L2 Transport & Data Link** | `RS485_CH.cpp`, `TCP_CH.cpp`, `Bridge_CH.cpp` | Ch1~Ch4 FreeRTOS dedicated timeslot loops; Core 0 non-blocking TCP select reactor; embedded IP whitelist; zero-copy bridge proxy | Strict L2 transport leaves, 0 L3/L4 semantic awareness |
 | **L1 Physical HAL Drivers** | `Uart_Driver.cpp`, `Diagnostics_Driver.cpp`, `OTA_Driver.cpp`, `Wifi_Driver.cpp` | Unified HW UART0~2 + SoftwareSerial; NVS `LogManager`; Task WDT monitor; dual-partition rollback engine; Wi-Fi FSM | Complete HW information hiding, atomic driver metrics |
