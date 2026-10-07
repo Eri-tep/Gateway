@@ -22,3 +22,5 @@ void Wifi_Driver_Init(const WifiHwConfig &cfg);
 [[nodiscard]] int8_t Wifi_Driver_GetRssi() noexcept;
 void Wifi_Driver_Reconnect() noexcept;
 [[nodiscard]] EventBits_t Wifi_Driver_GetEventBits() noexcept;
+void Wifi_Driver_StartFallbackAp() noexcept;
+[[nodiscard]] bool Wifi_Driver_IsApActive() noexcept;

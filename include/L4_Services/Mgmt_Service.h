@@ -51,6 +51,7 @@ void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
                                  bool is_arrival) noexcept;
 void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
+void Mgmt_DrainTelemetryQueue() noexcept;
 
 // ── Network Subsystem Entry Points & Lifecycle ──
 void Remote_Init();

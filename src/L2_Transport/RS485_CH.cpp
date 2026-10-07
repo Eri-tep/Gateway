@@ -136,7 +136,7 @@ void RS485_EnqueueCh4Passthrough(const StaticPacket &pkt) noexcept {
 // ============================================================================
 
 enum class UartRxStatus { SUCCESS, TIMEOUT };
-using UartPollCallback = void (*)(void *ctx);
+using UartPollCallback = uint32_t (*)(void *ctx);
 
 QueueHandle_t Uart_GetEventQueue(uart_port_t u_num);
 UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
@@ -239,8 +239,9 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
   while (millis() - start_ms < tout_ms) {
     esp_task_wdt_reset();
+    uint32_t poll_max_wait = 25;
     if (on_poll)
-      on_poll(poll_ctx);
+      poll_max_wait = on_poll(poll_ctx);
 
     if (stream_len >= 3) {
       if (is_auto_unlocked) {
@@ -328,7 +329,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
     if (elapsed >= tout_ms)
       break;
     uint32_t rem_ms = tout_ms - elapsed;
-    uint32_t wait_ms = std::min<uint32_t>(rem_ms, 5);
+    uint32_t wait_ms = std::min<uint32_t>(rem_ms, std::max<uint32_t>(1, poll_max_wait));
 
     bool received_new_bytes = false;
     if (evt_q) {
@@ -672,10 +673,10 @@ struct TaskAckPollContext {
   SingleChannelStats *stats;
 };
 
-static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
+static uint32_t Ch2Ch3_DrainVirtualAckQueue(void *arg) {
   auto *ctx = static_cast<TaskAckPollContext *>(arg);
   if (!ctx || !ctx->ack_q || !ctx->cfg || !ctx->stats)
-    return;
+    return 25;
 
   StaticPacket next_ack;
   uint32_t next_due = 0;
@@ -705,6 +706,12 @@ static void Ch2Ch3_DrainVirtualAckQueue(void *arg) {
       ctx->stats->tx_pkts.fetch_add(1, std::memory_order_relaxed);
     }
   }
+
+  if (ctx->ack_q->peek(next_ack, next_due)) {
+    now = millis();
+    return (next_due > now) ? std::max<uint32_t>(1, next_due - now) : 1;
+  }
+  return 25;
 }
 
 static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
@@ -884,7 +891,6 @@ void Task_Ch4(void *pvParameters) {
 
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
         Config_Get().doorphone_baud_rate);
-    uint32_t burst_spin_total = 0;
     while (Uart_AvailableSwSerial() > 0) {
       uint8_t byte = 0;
       if (Uart_ReadSwSerial(&byte, 1) == 0) {
@@ -905,15 +911,6 @@ void Task_Ch4(void *pvParameters) {
         buf[buf_len++] = byte;
       }
       last_byte_ms = now;
-
-      if (burst_spin_total < 20) {
-        uint32_t drain_start = millis();
-        while (Uart_AvailableSwSerial() == 0 &&
-               (millis() - drain_start < 6)) {
-          esp_rom_delay_us(100);
-        }
-        burst_spin_total += (millis() - drain_start);
-      }
     }
 
     uint8_t target_stx = 0;

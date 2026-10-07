@@ -445,21 +445,53 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
 
   out.appendFormat("],\"count\":%u}\n", static_cast<unsigned>(locked_count));
 }
-void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
-  char buf[128];
-  int len = snprintf(
-      buf, sizeof(buf),
-      "{\"event\":\"doorphone\",\"front_bell\":%s,\"lobby_bell\":%s}\n",
-      front_bell ? "true" : "false", lobby_bell ? "true" : "false");
-  if (len <= 0 || !Remote_GetSessionMutex())
-    return;
+namespace {
 
-  MutexLocker lock(Remote_GetSessionMutex());
-  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
-    if (Remote_GetSessions()[i].sock >= 0) {
-      send(Remote_GetSessions()[i].sock, buf, len, MSG_DONTWAIT);
-      System_RecordCh6Tx();
-    }
+enum class TelemetryEventType : uint8_t {
+  DEVICE_RESULT,
+  DOORPHONE,
+  ELEVATOR
+};
+
+struct TelemetryItem {
+  TelemetryEventType type{TelemetryEventType::DEVICE_RESULT};
+  DeviceUpdateResult device_res{};
+  uint8_t sub1{0};
+  uint8_t sub2{0};
+  uint8_t floor{0};
+  uint8_t ho{0};
+  uint8_t power{0};
+  bool is_arrival{false};
+  bool front_bell{false};
+  bool lobby_bell{false};
+};
+
+constexpr size_t TELEMETRY_QUEUE_LEN = 16;
+static StaticQueue_t s_telemetry_queue_struct;
+static uint8_t s_telemetry_queue_storage[TELEMETRY_QUEUE_LEN * sizeof(TelemetryItem)];
+static QueueHandle_t s_telemetry_queue = nullptr;
+
+QueueHandle_t GetTelemetryQueue() noexcept {
+  if (UNLIKELY(!s_telemetry_queue)) {
+    s_telemetry_queue = xQueueCreateStatic(
+        TELEMETRY_QUEUE_LEN,
+        sizeof(TelemetryItem),
+        s_telemetry_queue_storage,
+        &s_telemetry_queue_struct);
+  }
+  return s_telemetry_queue;
+}
+
+} // namespace
+
+void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
+  QueueHandle_t q = GetTelemetryQueue();
+  if (q) {
+    TelemetryItem item{};
+    item.type = TelemetryEventType::DOORPHONE;
+    item.front_bell = front_bell;
+    item.lobby_bell = lobby_bell;
+    xQueueSend(q, &item, 0);
   }
 }
 
@@ -550,31 +582,86 @@ void Mgmt_BroadcastDeviceResult(const DeviceUpdateResult &res) noexcept {
   if (!res.should_broadcast)
     return;
 
-  Mgmt_BroadcastDeviceState(
-      res.dev_id, res.sub1, res.sub2, res.state.dev_class, res.state.power,
-      res.state.target_temp, res.state.current_temp, res.state.fan_speed,
-      res.state.valve_state, res.state.power_w, res.state.floor,
-      res.state.direction, res.state.ho, res.state.vent_mode);
-
-  for (uint8_t i = 0; i < res.extra_count; ++i) {
-    const auto &ex = res.extra[i];
-    Mgmt_BroadcastDeviceState(
-        res.dev_id, ex.sub1, 0, ex.state.dev_class, ex.state.power,
-        ex.state.target_temp, ex.state.current_temp, ex.state.fan_speed,
-        ex.state.valve_state, ex.state.power_w, ex.state.floor,
-        ex.state.direction, ex.state.ho, ex.state.vent_mode);
+  QueueHandle_t q = GetTelemetryQueue();
+  if (q) {
+    TelemetryItem item{};
+    item.type = TelemetryEventType::DEVICE_RESULT;
+    item.device_res = res;
+    xQueueSend(q, &item, 0);
   }
 }
 
 void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
                                  uint8_t ho, uint8_t power,
                                  bool is_arrival) noexcept {
-  if (is_arrival) {
-    Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY, 0,
-                              0, 0, 0, nullptr, 0.0f, floor, 0, ho);
-  } else {
-    Mgmt_BroadcastDeviceState(0x34, sub1, sub2, DeviceClass::MOMENTARY, power,
-                              0, 0, 0, nullptr, 0.0f, 15, 0, 0);
+  QueueHandle_t q = GetTelemetryQueue();
+  if (q) {
+    TelemetryItem item{};
+    item.type = TelemetryEventType::ELEVATOR;
+    item.sub1 = sub1;
+    item.sub2 = sub2;
+    item.floor = floor;
+    item.ho = ho;
+    item.power = power;
+    item.is_arrival = is_arrival;
+    xQueueSend(q, &item, 0);
+  }
+}
+
+void Mgmt_DrainTelemetryQueue() noexcept {
+  QueueHandle_t q = GetTelemetryQueue();
+  if (!q)
+    return;
+
+  TelemetryItem item;
+  while (xQueueReceive(q, &item, 0) == pdTRUE) {
+    switch (item.type) {
+    case TelemetryEventType::DEVICE_RESULT: {
+      const auto &res = item.device_res;
+      Mgmt_BroadcastDeviceState(
+          res.dev_id, res.sub1, res.sub2, res.state.dev_class, res.state.power,
+          res.state.target_temp, res.state.current_temp, res.state.fan_speed,
+          res.state.valve_state, res.state.power_w, res.state.floor,
+          res.state.direction, res.state.ho, res.state.vent_mode);
+
+      for (uint8_t i = 0; i < res.extra_count; ++i) {
+        const auto &ex = res.extra[i];
+        Mgmt_BroadcastDeviceState(
+            res.dev_id, ex.sub1, 0, ex.state.dev_class, ex.state.power,
+            ex.state.target_temp, ex.state.current_temp, ex.state.fan_speed,
+            ex.state.valve_state, ex.state.power_w, ex.state.floor,
+            ex.state.direction, ex.state.ho, ex.state.vent_mode);
+      }
+      break;
+    }
+    case TelemetryEventType::DOORPHONE: {
+      char buf[128];
+      int len = snprintf(
+          buf, sizeof(buf),
+          "{\"event\":\"doorphone\",\"front_bell\":%s,\"lobby_bell\":%s}\n",
+          item.front_bell ? "true" : "false", item.lobby_bell ? "true" : "false");
+      if (len > 0 && Remote_GetSessionMutex()) {
+        MutexLocker lock(Remote_GetSessionMutex());
+        for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+          if (Remote_GetSessions()[i].sock >= 0) {
+            send(Remote_GetSessions()[i].sock, buf, len, MSG_DONTWAIT);
+            System_RecordCh6Tx();
+          }
+        }
+      }
+      break;
+    }
+    case TelemetryEventType::ELEVATOR: {
+      if (item.is_arrival) {
+        Mgmt_BroadcastDeviceState(0x34, item.sub1, item.sub2, DeviceClass::MOMENTARY, 0,
+                                  0, 0, 0, nullptr, 0.0f, item.floor, 0, item.ho);
+      } else {
+        Mgmt_BroadcastDeviceState(0x34, item.sub1, item.sub2, DeviceClass::MOMENTARY, item.power,
+                                  0, 0, 0, nullptr, 0.0f, 15, 0, 0);
+      }
+      break;
+    }
+    }
   }
 }
 

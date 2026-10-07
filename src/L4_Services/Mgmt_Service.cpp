@@ -322,6 +322,11 @@ void handleFsmDisconnected(uint32_t now, EventBits_t bits) noexcept {
     s_sta_retry_interval_ms =
         std::min(s_sta_retry_interval_ms * 2, kMaxStaRetryIntervalMs);
   }
+
+  // After 30s of persistent disconnection, activate SoftAP fallback for rescue access
+  if (now > 30000 && !System_WifiIsApActive()) {
+    System_WifiStartFallbackAp();
+  }
 }
 
 enum class ConvergenceSettleState : uint8_t {
@@ -372,6 +377,8 @@ void StepConvergenceSettleFsm(uint32_t now) noexcept {
 } // namespace
 
 void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
+  Mgmt_DrainTelemetryQueue();
+
   if (!System_IsRescueMode()) {
     const EventBits_t bits = System_WifiGetEventBits();
 

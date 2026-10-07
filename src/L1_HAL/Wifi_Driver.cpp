@@ -12,6 +12,8 @@
 static EventGroupHandle_t s_wifi_event_group = nullptr;
 static StaticEventGroup_t s_wifi_event_group_buf;
 static uint32_t s_wifi_disconnect_count = 0;
+static WifiHwConfig s_hw_cfg;
+static std::atomic<bool> s_ap_active{false};
 
 static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
@@ -36,6 +38,10 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (g_system_event_group) {
       xEventGroupSetBits(g_system_event_group, SYS_EVT_NETWORK_READY);
     }
+    WiFi.setSleep(false);
+    configTime(0, 0, "pool.ntp.org", "asia.pool.ntp.org");
+    setenv("TZ", "KST-9", 1);
+    tzset();
     break;
   case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
     s_wifi_disconnect_count++;
@@ -50,6 +56,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
     break;
   case ARDUINO_EVENT_WIFI_AP_START:
+    s_ap_active.store(true, std::memory_order_relaxed);
     Serial.println(F("[WIFI EVENT] SoftAP Started"));
     if (s_wifi_event_group) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
@@ -60,6 +67,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
     break;
   case ARDUINO_EVENT_WIFI_AP_STOP:
+    s_ap_active.store(false, std::memory_order_relaxed);
     Serial.println(F("[WIFI EVENT] SoftAP Stopped"));
     if (s_wifi_event_group) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
@@ -95,6 +103,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 }
 
 void Wifi_Driver_Init(const WifiHwConfig &cfg) {
+  s_hw_cfg = cfg;
   if (!s_wifi_event_group) {
     s_wifi_event_group = xEventGroupCreateStatic(&s_wifi_event_group_buf);
   }
@@ -102,9 +111,8 @@ void Wifi_Driver_Init(const WifiHwConfig &cfg) {
 
   const char *ssid = (cfg.sta_ssid && cfg.sta_ssid[0]) ? cfg.sta_ssid : "";
   const char *pass = cfg.sta_password ? cfg.sta_password : "";
-  uint16_t tout = cfg.timeout_s ? cfg.timeout_s : 30;
 
-  Serial.printf("[WIFI] Connecting to '%s' (Timeout: %us)...\r\n", ssid, tout);
+  Serial.printf("[WIFI] Connecting to '%s' (Async Fast-Boot)...\r\n", ssid);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
   WiFi.mode(WIFI_STA);
@@ -129,41 +137,50 @@ void Wifi_Driver_Init(const WifiHwConfig &cfg) {
   esp_wifi_connect();
 
   uint32_t t_start = millis();
-  uint32_t max_wait = tout * 1000;
+  constexpr uint32_t kBootFastGraceMs = 1500;
   bool connected = false;
 
-  while (millis() - t_start < max_wait) {
+  while (millis() - t_start < kBootFastGraceMs) {
     if ((connected = (WiFi.status() == WL_CONNECTED)))
       break;
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 
   if (connected) {
     WiFi.setSleep(false);
-    Serial.printf("[WIFI] Connected successfully! IP: %s, RSSI: %d dBm\r\n",
+    Serial.printf("[WIFI] Fast-boot connected successfully! IP: %s, RSSI: %d dBm\r\n",
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    configTime(0, 0, "pool.ntp.org", "asia.pool.ntp.org");
-    setenv("TZ", "KST-9", 1);
-    tzset();
   } else {
-    WiFi.mode(WIFI_AP_STA);
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    WiFi.softAPConfig(IPAddress(172, 30, 2, 1), IPAddress(172, 30, 2, 1),
-                      IPAddress(255, 255, 255, 0));
-    const char *fallback_ap =
-        (cfg.ap_ssid && cfg.ap_ssid[0]) ? cfg.ap_ssid : "Sweet_Home_Rescue";
-    const char *fallback_pass =
-        (cfg.ap_password && cfg.ap_password[0]) ? cfg.ap_password : "";
-    bool ap_ok = WiFi.softAP(fallback_ap, fallback_pass, 1, 0, 4);
-
-    WiFi.setSleep(false);
-    esp_wifi_set_max_tx_power(78);
-    Serial.printf("[WIFI] STA connect failed. Fallback SoftAP '%s' started: "
-                  "%s (IP: %s)\r\n",
-                  fallback_ap, ap_ok ? "SUCCESS" : "FAILED",
-                  WiFi.softAPIP().toString().c_str());
+    Serial.println(F("[WIFI] Fast-boot: STA association in progress asynchronously. Local buses starting immediately..."));
   }
+}
+
+void Wifi_Driver_StartFallbackAp() noexcept {
+  bool expected = false;
+  if (!s_ap_active.compare_exchange_strong(expected, true)) {
+    return;
+  }
+
+  WiFi.mode(WIFI_AP_STA);
+  vTaskDelay(pdMS_TO_TICKS(100));
+
+  WiFi.softAPConfig(IPAddress(172, 30, 2, 1), IPAddress(172, 30, 2, 1),
+                    IPAddress(255, 255, 255, 0));
+  const char *fallback_ap =
+      (s_hw_cfg.ap_ssid && s_hw_cfg.ap_ssid[0]) ? s_hw_cfg.ap_ssid : "Sweet_Home_Rescue";
+  const char *fallback_pass =
+      (s_hw_cfg.ap_password && s_hw_cfg.ap_password[0]) ? s_hw_cfg.ap_password : "";
+  bool ap_ok = WiFi.softAP(fallback_ap, fallback_pass, 1, 0, 4);
+
+  WiFi.setSleep(false);
+  esp_wifi_set_max_tx_power(78);
+  Serial.printf("[WIFI] Fallback SoftAP '%s' started: %s (IP: %s)\r\n",
+                fallback_ap, ap_ok ? "SUCCESS" : "FAILED",
+                WiFi.softAPIP().toString().c_str());
+}
+
+[[nodiscard]] bool Wifi_Driver_IsApActive() noexcept {
+  return s_ap_active.load(std::memory_order_relaxed);
 }
 
 [[nodiscard]] bool Wifi_Driver_IsConnected() noexcept {
@@ -235,4 +252,12 @@ void System_WifiReconnect() noexcept {
 
 [[nodiscard]] EventBits_t System_WifiGetEventBits() noexcept {
   return Wifi_Driver_GetEventBits();
+}
+
+void System_WifiStartFallbackAp() noexcept {
+  Wifi_Driver_StartFallbackAp();
+}
+
+bool System_WifiIsApActive() noexcept {
+  return Wifi_Driver_IsApActive();
 }

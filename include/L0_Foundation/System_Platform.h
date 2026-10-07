@@ -475,6 +475,8 @@ void System_WifiInit() noexcept;
 [[nodiscard]] int8_t System_WifiGetRssi() noexcept;
 void System_WifiReconnect() noexcept;
 [[nodiscard]] EventBits_t System_WifiGetEventBits() noexcept;
+void System_WifiStartFallbackAp() noexcept;
+[[nodiscard]] bool System_WifiIsApActive() noexcept;
 
 // ── Bridge Transport Channel Slot Snapshot Contract ──────────────────────────
 bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;
