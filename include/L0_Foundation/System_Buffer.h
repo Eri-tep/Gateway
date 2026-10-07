@@ -10,6 +10,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -54,6 +55,33 @@ namespace Endian {
 [[nodiscard]] [[gnu::always_inline]] constexpr uint16_t loadLe16(const uint8_t *p) noexcept {
   return static_cast<uint16_t>((static_cast<uint16_t>(p[1]) << 8) | p[0]);
 }
+
+[[gnu::always_inline]] constexpr void storeBe16(std::span<uint8_t, 2> p, uint16_t v) noexcept {
+  p[0] = static_cast<uint8_t>(v >> 8);
+  p[1] = static_cast<uint8_t>(v & 0xFF);
+}
+[[gnu::always_inline]] constexpr void storeBe16(uint8_t *p, uint16_t v) noexcept {
+  p[0] = static_cast<uint8_t>(v >> 8);
+  p[1] = static_cast<uint8_t>(v & 0xFF);
+}
+
+[[gnu::always_inline]] constexpr void storeLe16(std::span<uint8_t, 2> p, uint16_t v) noexcept {
+  p[0] = static_cast<uint8_t>(v & 0xFF);
+  p[1] = static_cast<uint8_t>(v >> 8);
+}
+[[gnu::always_inline]] constexpr void storeLe16(uint8_t *p, uint16_t v) noexcept {
+  p[0] = static_cast<uint8_t>(v & 0xFF);
+  p[1] = static_cast<uint8_t>(v >> 8);
+}
+
+[[nodiscard]] constexpr std::optional<uint16_t> loadBe16At(std::span<const uint8_t> b, size_t off) noexcept {
+  if (off > b.size() || b.size() - off < 2) return std::nullopt;
+  return static_cast<uint16_t>((static_cast<uint16_t>(b[off]) << 8) | b[off + 1]);
+}
+[[nodiscard]] constexpr std::optional<uint16_t> loadLe16At(std::span<const uint8_t> b, size_t off) noexcept {
+  if (off > b.size() || b.size() - off < 2) return std::nullopt;
+  return static_cast<uint16_t>((static_cast<uint16_t>(b[off + 1]) << 8) | b[off]);
+}
 } // namespace Endian
 
 static_assert(HexLUT::kHexLut[0x00][0] == '0' && HexLUT::kHexLut[0x00][1] == '0', "HexLUT 0x00 check failed");
@@ -61,6 +89,39 @@ static_assert(HexLUT::kHexLut[0xFF][0] == 'F' && HexLUT::kHexLut[0xFF][1] == 'F'
 static_assert(Endian::loadBe16(std::array<uint8_t, 2>{0x12, 0x34}) == 0x1234, "loadBe16 test failed");
 static_assert(Endian::loadLe16(std::array<uint8_t, 2>{0x34, 0x12}) == 0x1234, "loadLe16 test failed");
 static_assert(Endian::loadBe32(std::array<uint8_t, 4>{0x12, 0x34, 0x56, 0x78}) == 0x12345678, "loadBe32 test failed");
+
+// 1. 물리 바이트 레이아웃 직접 검증 (storeBe16 / storeLe16 엔디안 정합성)
+static_assert([] {
+  std::array<uint8_t, 4> buf{};
+  std::span s{buf};
+  Endian::storeBe16(s.subspan<0, 2>(), 0xFEDC);
+  Endian::storeLe16(s.subspan<2, 2>(), 0xFEDC);
+  return buf[0] == 0xFE && buf[1] == 0xDC &&
+         buf[2] == 0xDC && buf[3] == 0xFE;
+}(), "Endian store byte layout mismatch");
+
+// 2. store <-> load 왕복 및 최상위 비트(MSB>=0x8000) 부호 확장 회귀 검증
+static_assert([] {
+  std::array<uint8_t, 4> buf{};
+  std::span s{buf};
+  Endian::storeBe16(s.subspan<0, 2>(), 0xFEDC);
+  Endian::storeLe16(s.subspan<2, 2>(), 0x1234);
+  return Endian::loadBe16(s.subspan<0, 2>()) == 0xFEDC &&
+         Endian::loadLe16(s.subspan<2, 2>()) == 0x1234 &&
+         Endian::loadBe16At(buf, 0) == 0xFEDC &&
+         Endian::loadLe16At(buf, 2) == 0x1234;
+}(), "Endian load/store roundtrip or sign-extension failed");
+
+// 3. 경계 초과, off > size 언더플로 방어, 극단값(size_t max) 검증
+static_assert([] {
+  const std::array<uint8_t, 4> buf{0x12, 0x34, 0x56, 0x78};
+  return Endian::loadBe16At(buf, 2) == 0x5678 &&
+         !Endian::loadBe16At(buf, 3).has_value() &&
+         !Endian::loadLe16At(buf, 3).has_value() &&
+         !Endian::loadBe16At(buf, 4).has_value() &&
+         !Endian::loadBe16At(buf, 5).has_value() &&
+         !Endian::loadBe16At(buf, static_cast<size_t>(-1)).has_value();
+}(), "Endian load*At bounds check or underflow defense failed");
 
 namespace TimeUtils {
 [[nodiscard]] bool isElapsed(uint32_t start_ms, uint32_t duration_ms) noexcept;

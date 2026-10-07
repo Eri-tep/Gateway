@@ -1,13 +1,7 @@
 // ============================================================================
-// Packet_Router.cpp — L3 Routing / Protocol Layer
-// Packet Routing Hub Bridge Implementation
+// Routing_Engine.cpp — L3 Routing / Protocol Layer (Private Core Engine)
+// Packet Routing Hub Implementation
 // ============================================================================
-//
-// PHASED MIGRATION NOTE (Step 3 of 5):
-//   This file implements the canonical Routing/Packet_Router.h API.
-//   g_route_registry and its implementation remain in NetworkRouter.cpp
-//   during migration. Step 5 merges routing impl here and removes
-//   the DeviceRouteRegistry from Transport/NetworkRouter.
 //
 // INVARIANTS (AGENTS.md):
 //   - No #include of L4 headers (Services).
@@ -15,7 +9,7 @@
 //   - g_route_registry is accessed only via Router_* API (Rule 17).
 // ============================================================================
 
-#include "L3_Protocol/Public/Protocol_Router.h"
+#include "L3_Protocol/Private/Routing_Engine.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L2_Transport/RS485_CH.h"
 #include "L0_Foundation/System_Config.h"
@@ -201,6 +195,3 @@ bool Router_DispatchControl(StaticPacket &req,
 
   return false;
 }
-
-
-

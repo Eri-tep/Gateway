@@ -16,7 +16,6 @@
 
 // ── L3 Protocol Routing ──
 #include "L3_Protocol/Public/Protocol_Device.h"
-#include "L3_Protocol/Public/Protocol_Router.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 
 // ── L4 Network Services ──
@@ -102,7 +101,7 @@ static void Boot_CheckCrashLoop() {
   }
 
   esp_reset_reason_t reset_reason = esp_reset_reason();
-  Diag_EvaluateCrashCounter(reset_reason);
+  const uint32_t crash_count = Diag_EvaluateCrashCounter(reset_reason);
 
   pinMode(Config::GPIO::BTN_PIN, INPUT_PULLUP);
   if (digitalRead(Config::GPIO::BTN_PIN) == LOW) {
@@ -135,7 +134,7 @@ static void Boot_CheckCrashLoop() {
   }
 
   if (!System_IsRescueMode() &&
-      Diag_GetCrashCounter() >= 3) {
+      crash_count >= 3) {
     const esp_partition_t *run_p = esp_ota_get_running_partition();
     const esp_partition_t *next_p_check =
         esp_ota_get_next_update_partition(nullptr);
@@ -214,14 +213,14 @@ static void Boot_RestoreConfigAndState() {
 
 static bool HandleRemoteControl(StaticPacket &req,
                                 StaticPacket &out_ack) noexcept {
-  return Router_DispatchControl(req, out_ack);
+  return Protocol_DispatchControl(req, out_ack);
 }
 
 static void Boot_InitSubsystems() {
   // ── Mediator: Wire L4 Services Decoupled Event Listeners ──
   Device_RegisterStateListener(Mgmt_BroadcastDeviceResult);
   Device_RegisterDoorphoneListener(Mgmt_BroadcastDoorphoneEvent);
-  Router_RegisterCh5ForwardHandler(Bridge_ForwardPacket);
+  Protocol_RegisterBridgeForwardHandler(Bridge_ForwardPacket);
 
   Device_RegisterElevatorListener(Mgmt_BroadcastElevatorEvent);
 
@@ -261,24 +260,44 @@ static void Boot_InitSubsystems() {
 
 static void Boot_InitHardwareAndDevices() {
   const auto &cfg = Config_Get();
-  Uart_InitHw(UART_NUM_0, 2, 1,
-              cfg.uart_baud_rate, cfg.uart_data_bits,
-              cfg.uart_parity, cfg.uart_stop_bits,
-              RS485_GetUartEventQueuePtr(0));
-  Uart_InitHw(UART_NUM_1, 6, 5,
-              cfg.ch2_baud_rate, cfg.ch2_data_bits,
-              cfg.ch2_parity, cfg.ch2_stop_bits,
-              RS485_GetUartEventQueuePtr(1));
-  Uart_InitHw(UART_NUM_2, 8, 7,
-              cfg.ch3_baud_rate, cfg.ch3_data_bits,
-              cfg.ch3_parity, cfg.ch3_stop_bits,
-              RS485_GetUartEventQueuePtr(2));
 
-  Uart_InitDoorphone(cfg.doorphone_baud_rate,
-                     cfg.doorphone_data_bits,
-                     cfg.doorphone_parity,
-                     cfg.doorphone_stop_bits,
-                     Config::GPIO::RX_GPIO, Config::GPIO::TX_GPIO);
+  auto buildUartConfig = [](uint32_t baud, uint8_t data_bits, uint8_t parity,
+                            uint8_t stop_bits) noexcept -> UartHwConfig {
+    auto d = toEnum<DataBits>(data_bits, DataBits::Five, DataBits::Eight)
+                 .value_or(DataBits::Eight);
+    auto p = toEnum<Parity>(parity, Parity::None, Parity::Odd)
+                 .value_or(Parity::None);
+    auto s = toEnum<StopBits>(stop_bits, StopBits::One, StopBits::Two)
+                 .value_or(StopBits::One);
+    return makeUartConfig(baud, d, p, s);
+  };
+
+  if (esp_err_t err = Uart_InitHw(UART_NUM_0, 2, 1,
+                                  buildUartConfig(cfg.uart_baud_rate, cfg.uart_data_bits,
+                                                  cfg.uart_parity, cfg.uart_stop_bits),
+                                  RS485_GetUartEventQueuePtr(0)); err != ESP_OK) {
+    ESP_LOGE("BOOT", "Failed to init UART0 (CH1): %s", esp_err_to_name(err));
+  }
+  if (esp_err_t err = Uart_InitHw(UART_NUM_1, 6, 5,
+                                  buildUartConfig(cfg.ch2_baud_rate, cfg.ch2_data_bits,
+                                                  cfg.ch2_parity, cfg.ch2_stop_bits),
+                                  RS485_GetUartEventQueuePtr(1)); err != ESP_OK) {
+    ESP_LOGE("BOOT", "Failed to init UART1 (CH2): %s", esp_err_to_name(err));
+  }
+  if (esp_err_t err = Uart_InitHw(UART_NUM_2, 8, 7,
+                                  buildUartConfig(cfg.ch3_baud_rate, cfg.ch3_data_bits,
+                                                  cfg.ch3_parity, cfg.ch3_stop_bits),
+                                  RS485_GetUartEventQueuePtr(2)); err != ESP_OK) {
+    ESP_LOGE("BOOT", "Failed to init UART2 (CH3): %s", esp_err_to_name(err));
+  }
+
+  if (esp_err_t err = Uart_InitSwSerial(Config::GPIO::RX_GPIO, Config::GPIO::TX_GPIO,
+                                        buildUartConfig(cfg.doorphone_baud_rate,
+                                                        cfg.doorphone_data_bits,
+                                                        cfg.doorphone_parity,
+                                                        cfg.doorphone_stop_bits)); err != ESP_OK) {
+    ESP_LOGE("BOOT", "Failed to init SW Serial (CH4): %s", esp_err_to_name(err));
+  }
   Device_Init();
 }
 

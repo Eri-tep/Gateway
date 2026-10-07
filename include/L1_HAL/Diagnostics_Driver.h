@@ -208,23 +208,23 @@ inline const char *Diag_ResetReasonToString(esp_reset_reason_t rr) noexcept {
 }
 void Diag_DiagnoseStuck();
 void Diag_CheckCoreDump();
-uint32_t Diag_EvaluateCrashCounter(esp_reset_reason_t reason) noexcept;
-uint32_t Diag_GetCrashCounter() noexcept;
+[[nodiscard]] uint32_t Diag_EvaluateCrashCounter(esp_reset_reason_t reason) noexcept;
+[[nodiscard]] uint32_t Diag_GetCrashCounter() noexcept;
 void Diag_ResetCrashCounter() noexcept;
 void Diag_ResetTaskWdtAlive() noexcept;
 
-const char *Diag_GetPendingRebootReason() noexcept;
-const char *Diag_ConsumePendingRebootReason() noexcept;
+[[nodiscard]] const char *Diag_GetPendingRebootReason() noexcept;
+[[nodiscard]] const char *Diag_ConsumePendingRebootReason() noexcept;
 void Diag_SetPendingRebootReason(const char *reason) noexcept;
 
-uint32_t Diag_GetBootTimeMs() noexcept;
+[[nodiscard]] uint32_t Diag_GetBootTimeMs() noexcept;
 void Diag_SetBootTimeMs(uint32_t ms) noexcept;
 
 void Diagnostics_Init() noexcept;
 
 // ── Packet & Channel Statistics Recording API (100% Encapsulated) ──
-SingleChannelStats *Diag_GetChannelStats(uint8_t ch) noexcept;
-TcpSocketStats *Diag_GetTcpStats(uint8_t ch) noexcept;
+[[nodiscard]] SingleChannelStats *Diag_GetChannelStats(uint8_t ch) noexcept;
+[[nodiscard]] TcpSocketStats *Diag_GetTcpStats(uint8_t ch) noexcept;
 
 void Diag_RecordChannelTx(uint8_t ch) noexcept;
 void Diag_RecordChannelRx(uint8_t ch) noexcept;
@@ -233,7 +233,7 @@ void Diag_RecordChannelLockTimeout(uint8_t ch) noexcept;
 void Diag_RecordChannelInvalidFrame(uint8_t ch) noexcept;
 void Diag_RecordChannelCrcError(uint8_t ch) noexcept;
 void Diag_RecordChannelActivity(uint8_t ch, uint32_t now_ms) noexcept;
-uint32_t Diag_GetChannelLastActivityMs(uint8_t ch) noexcept;
+[[nodiscard]] uint32_t Diag_GetChannelLastActivityMs(uint8_t ch) noexcept;
 
 void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_t now_ms) noexcept;
 

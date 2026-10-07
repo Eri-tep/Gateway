@@ -2079,11 +2079,11 @@ namespace {
 static void decodeOutlet(const GroupControlTemplate &grp,
                          const StaticPacket &ack, const DeviceStateEntry *,
                          DecodedDeviceState &out) {
-  uint8_t w_off = grp.getWattageOffset(ack.length);
-  if (w_off + 1 < ack.length) {
-    uint16_t raw_w =
-        (static_cast<uint16_t>(ack.data[w_off]) << 8) | ack.data[w_off + 1];
-    out.power_w = (raw_w < 50000) ? static_cast<float>(raw_w) : 0.0f;
+  out.power_w = 0.0f;
+  const uint8_t w_off = grp.getWattageOffset(ack.length);
+  const size_t valid_len = std::min<size_t>(ack.length, ack.data.size());
+  if (auto raw_w = Endian::loadBe16At(std::span(ack.data.data(), valid_len), w_off)) {
+    out.power_w = (*raw_w < 50000) ? static_cast<float>(*raw_w) : 0.0f;
   }
 }
 

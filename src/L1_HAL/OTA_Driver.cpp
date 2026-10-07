@@ -7,12 +7,15 @@
 #include <Update.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <esp_idf_version.h>
 #include <esp_task_wdt.h>
+#include <expected>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <string_view>
 #include <strings.h>
 
 // ── Pure OTA URL Trust Policy (Consolidated L1 Physical HAL) ─────────────────
@@ -45,75 +48,141 @@ bool Ota_HasUnsafePathSegments(const char *path) {
           strstr(path, "/%2E") != nullptr || strstr(path, "\\") != nullptr);
 }
 
+enum class UrlParseError : uint8_t {
+  EmptyUrl,
+  UrlTooLong,
+  UnsupportedScheme,
+  CredentialsNotAllowed,
+  EmptyHost,
+  InvalidPort
+};
+
+struct UrlParts {
+  std::string_view host{};
+  uint16_t port{0};
+  std::string_view path{"/"};
+  bool is_https{false};
+};
+
+[[nodiscard]] constexpr bool iequalsScheme(std::string_view str, std::string_view prefix) noexcept {
+  if (str.size() < prefix.size()) return false;
+  for (size_t i = 0; i < prefix.size(); ++i) {
+    char c1 = str[i];
+    char c2 = prefix[i];
+    if (c1 >= 'A' && c1 <= 'Z') c1 = static_cast<char>(c1 + ('a' - 'A'));
+    if (c2 >= 'A' && c2 <= 'Z') c2 = static_cast<char>(c2 + ('a' - 'A'));
+    if (c1 != c2) return false;
+  }
+  return true;
+}
+
+[[nodiscard]] constexpr std::expected<UrlParts, UrlParseError> parseUrl(std::string_view url) noexcept {
+  if (url.empty()) {
+    return std::unexpected(UrlParseError::EmptyUrl);
+  }
+  if (url.size() > 1024) {
+    return std::unexpected(UrlParseError::UrlTooLong);
+  }
+
+  bool is_https = false;
+  size_t scheme_len = 0;
+  if (iequalsScheme(url, "https://")) {
+    is_https = true;
+    scheme_len = 8;
+  } else if (iequalsScheme(url, "http://")) {
+    is_https = false;
+    scheme_len = 7;
+  } else {
+    return std::unexpected(UrlParseError::UnsupportedScheme);
+  }
+
+  uint16_t port = is_https ? 443 : 80;
+  std::string_view rest = url.substr(scheme_len);
+
+  // Authority ends at '/', '?', or '#'
+  size_t auth_end = rest.find_first_of("/?#");
+  std::string_view authority = (auth_end == std::string_view::npos) ? rest : rest.substr(0, auth_end);
+
+  if (authority.find('@') != std::string_view::npos) {
+    return std::unexpected(UrlParseError::CredentialsNotAllowed);
+  }
+
+  std::string_view host = authority;
+  size_t colon_pos = authority.find(':');
+  if (colon_pos != std::string_view::npos) {
+    host = authority.substr(0, colon_pos);
+    std::string_view port_str = authority.substr(colon_pos + 1);
+    if (port_str.empty()) {
+      return std::unexpected(UrlParseError::InvalidPort);
+    }
+    uint32_t parsed_port = 0;
+    for (char c : port_str) {
+      if (c < '0' || c > '9') {
+        return std::unexpected(UrlParseError::InvalidPort);
+      }
+      parsed_port = parsed_port * 10 + static_cast<uint32_t>(c - '0');
+      if (parsed_port > 65535) {
+        return std::unexpected(UrlParseError::InvalidPort);
+      }
+    }
+    if (parsed_port == 0) {
+      return std::unexpected(UrlParseError::InvalidPort);
+    }
+    port = static_cast<uint16_t>(parsed_port);
+  }
+
+  if (host.empty()) {
+    return std::unexpected(UrlParseError::EmptyHost);
+  }
+
+  std::string_view path = "/";
+  if (auth_end != std::string_view::npos && rest[auth_end] == '/') {
+    std::string_view path_and_query = rest.substr(auth_end);
+    size_t query_pos = path_and_query.find_first_of("?#");
+    path = (query_pos == std::string_view::npos) ? path_and_query : path_and_query.substr(0, query_pos);
+  }
+
+  return UrlParts{
+      .host = host,
+      .port = port,
+      .path = path,
+      .is_https = is_https
+  };
+}
+
+static_assert(parseUrl("https://example.com/bin").has_value());
+static_assert(parseUrl("https://example.com/bin")->port == 443);
+static_assert(parseUrl("http://example.com/bin")->port == 80);
+static_assert(parseUrl("HTTP://EXAMPLE.COM:8080/foo?bar=1")->port == 8080);
+static_assert(parseUrl("HTTP://EXAMPLE.COM:8080/foo?bar=1")->path == "/foo");
+static_assert(parseUrl("https://user:pass@example.com/").error() == UrlParseError::CredentialsNotAllowed);
+static_assert(parseUrl("https://example.com:70000/").error() == UrlParseError::InvalidPort);
+static_assert(parseUrl("https://:8080/").error() == UrlParseError::EmptyHost);
+static_assert(parseUrl("ftp://example.com/").error() == UrlParseError::UnsupportedScheme);
+
 bool Ota_ExtractUrlComponents(const char *url, char *out_host,
                               size_t max_host_len, int &out_port,
                               char *out_path, size_t max_path_len,
                               bool &out_is_https) {
-  if (!url)
+  if (!url) {
     return false;
-  out_is_https = (strncmp(url, "https://", 8) == 0);
-  bool is_http = (strncmp(url, "http://", 7) == 0);
-  if (!out_is_https && !is_http)
-    return false;
-
-  out_port = out_is_https ? 443 : 80;
-  const char *host_start = out_is_https ? (url + 8) : (url + 7);
-
-  const char *p = host_start;
-  while (*p && *p != '/' && *p != '?' && *p != '#') {
-    p++;
   }
-  const char *auth_end = p;
-
-  if (memchr(host_start, '@', static_cast<size_t>(auth_end - host_start)) !=
-      nullptr) {
+  auto parsed = parseUrl(std::string_view(url));
+  if (!parsed.has_value()) {
+    return false;
+  }
+  if (parsed->host.size() >= max_host_len || parsed->path.size() >= max_path_len) {
     return false;
   }
 
-  const char *colon = static_cast<const char *>(
-      memchr(host_start, ':', static_cast<size_t>(auth_end - host_start)));
-  const char *host_end = colon ? colon : auth_end;
-  size_t host_len = static_cast<size_t>(host_end - host_start);
+  memcpy(out_host, parsed->host.data(), parsed->host.size());
+  out_host[parsed->host.size()] = '\0';
 
-  if (host_len == 0 || host_len >= max_host_len) {
-    return false;
-  }
-  memcpy(out_host, host_start, host_len);
-  out_host[host_len] = '\0';
+  memcpy(out_path, parsed->path.data(), parsed->path.size());
+  out_path[parsed->path.size()] = '\0';
 
-  if (colon) {
-    int port = 0;
-    bool has_port_digits = false;
-    for (const char *cp = colon + 1; cp < auth_end; ++cp) {
-      if (*cp < '0' || *cp > '9')
-        return false;
-      has_port_digits = true;
-      port = port * 10 + (*cp - '0');
-      if (port > 65535)
-        return false;
-    }
-    if (!has_port_digits || port == 0)
-      return false;
-    out_port = port;
-  }
-
-  if (*auth_end == '/') {
-    const char *path_end = auth_end;
-    while (*path_end && *path_end != '?' && *path_end != '#') {
-      path_end++;
-    }
-    size_t path_len = static_cast<size_t>(path_end - auth_end);
-    if (path_len >= max_path_len)
-      return false;
-    memcpy(out_path, auth_end, path_len);
-    out_path[path_len] = '\0';
-  } else {
-    if (max_path_len < 2)
-      return false;
-    out_path[0] = '/';
-    out_path[1] = '\0';
-  }
-
+  out_port = parsed->port;
+  out_is_https = parsed->is_https;
   return true;
 }
 
@@ -165,6 +234,22 @@ bool Ota_IsTrustedUrl(const char *url, OtaUrlContext context) {
 
 static HttpOtaState s_http_ota_state{};
 static char s_ota_target_url[256] = {0};
+
+constexpr std::array<const char *, 6> kOtaStageNames{
+    "Idle", "Connecting", "Downloading", "Flashing", "Success", "Failed"};
+static_assert(kOtaStageNames.size() == 6);
+
+static void ota_set_stage(OtaStage stage, const char *status_override = nullptr) noexcept {
+  s_http_ota_state.stage.store(stage, std::memory_order_relaxed);
+  if (status_override) {
+    snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status), "%s", status_override);
+  } else {
+    auto idx = std::to_underlying(stage);
+    if (idx < kOtaStageNames.size()) {
+      snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status), "%s", kOtaStageNames[idx]);
+    }
+  }
+}
 
 static constexpr size_t MAX_REDIRECT_LOCATION_LEN = 1024;
 
@@ -230,7 +315,7 @@ static void ota_fail(const char *fmt, ...) {
   vsnprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
             fmt, args);
   va_end(args);
-  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status), "Failed");
+  ota_set_stage(OtaStage::Failed);
   ::Serial.printf("[OTA] Error: %s\r\n", s_http_ota_state.last_error);
 }
 
@@ -255,8 +340,7 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
 
   ::Serial.printf("[OTA] Starting Stream OTA to target host: %s (port %d)\r\n",
                   initial_host, initial_port);
-  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
-           "Connecting...");
+  ota_set_stage(OtaStage::Connecting, "Connecting...");
   s_http_ota_state.progress_pct = 0;
   s_http_ota_state.last_error[0] = '\0';
 
@@ -417,8 +501,7 @@ static bool Ota_StreamAndWritePartition(HTTPClient &http,
     return false;
   }
 
-  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
-           "Downloading...");
+  ota_set_stage(OtaStage::Downloading, "Downloading...");
   ::Serial.printf(
       "[OTA] Phase 3: Update.begin OK. Starting stream write...\r\n");
 
@@ -529,6 +612,8 @@ static bool Ota_StreamAndWritePartition(HTTPClient &http,
       (unsigned)written);
   esp_task_wdt_reset();
 
+  ota_set_stage(OtaStage::Flashing, "Flashing...");
+
   if (!Update.end()) {
     ota_fail("Update.end failed (code %u)", (unsigned)Update.getError());
     http.end();
@@ -567,13 +652,14 @@ static bool do_ota(const char *initial_url) {
     return false;
   }
 
-  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status), "Success");
+  ota_set_stage(OtaStage::Success, "Success");
   s_http_ota_state.progress_pct = 100;
   ::Serial.printf(
       "[OTA] Firmware update SUCCESS! Rebooting in 1 second...\r\n");
   ota_guard.dismiss();
   return true;
 }
+
 
 static void Task_HttpOta(void *pvParameters) {
   // 진입 즉시 FreeRTOS WDT 감시 등록 (접속 단계 행 방지)
@@ -731,8 +817,7 @@ void System_StartHttpOta(const char *url) {
   strncpy(s_ota_target_url, target, sizeof(s_ota_target_url) - 1);
   s_ota_target_url[sizeof(s_ota_target_url) - 1] = '\0';
 
-  snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
-           "Starting...");
+  ota_set_stage(OtaStage::Connecting, "Starting...");
   s_http_ota_state.progress_pct = 0;
   s_http_ota_state.last_error[0] = '\0';
 
@@ -742,8 +827,7 @@ void System_StartHttpOta(const char *url) {
 
   if (res != pdPASS) {
     ::Serial.printf("[OTA] Failed to create HttpOtaTask: %d\r\n", res);
-    snprintf(s_http_ota_state.status, sizeof(s_http_ota_state.status),
-             "Failed");
+    ota_set_stage(OtaStage::Failed);
     snprintf(s_http_ota_state.last_error, sizeof(s_http_ota_state.last_error),
              "Failed to spawn OTA task");
     return;

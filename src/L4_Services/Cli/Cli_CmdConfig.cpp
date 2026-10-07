@@ -1,5 +1,4 @@
 #include "L4_Services/CLI_Commands.h"
-#include "L3_Protocol/Public/Protocol_Router.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
@@ -771,14 +770,14 @@ void cmdRoutes(CliContext &ctx) {
   int argc = ctx.args.count();
 
   if (argc == 1 && strcasecmp(ctx.args.get(1), "clear") == 0) {
-    Router_ClearRoutes();
+    Protocol_ClearRoutes();
     sendTelnetMsg(sock,
                   "[OK] Dynamic device ingress routing table cleared.\r\n");
     return;
   }
 
-  static DeviceRouteEntry entries[64];
-  size_t count = Router_GetRoutes(entries, 64);
+  static DeviceRouteSnapshot entries[64];
+  size_t count = Protocol_GetRoutes(entries, 64);
 
   withScratchBuf(sock, [count](AppendBuf &out) {
     CliFmt::PrintBoxHeader(
@@ -804,12 +803,12 @@ void cmdRoutes(CliContext &ctx) {
         tgt_str.reset();
         dst_str.reset();
         tgt_str.appendFormat("0x%02X:%02X:%02X", e.dev_id, e.sub1, e.sub2);
-        if (e.endpoint.channel_id == 5 && e.endpoint.slot_idx >= 0) {
-          dst_str.appendFormat("CH#5 Slot %d", e.endpoint.slot_idx);
+        if (e.channel_id == 5 && e.slot_idx >= 0) {
+          dst_str.appendFormat("CH#5 Slot %d", e.slot_idx);
         } else {
-          dst_str.appendFormat("CH#%u", e.endpoint.channel_id);
+          dst_str.appendFormat("CH#%u", e.channel_id);
         }
-        Fmt::FormatElapsed(now, e.endpoint.last_seen_ms, el_str,
+        Fmt::FormatElapsed(now, e.last_seen_ms, el_str,
                            sizeof(el_str));
         table.row({tgt_str.c_str(), dst_str.c_str(), el_str});
       }

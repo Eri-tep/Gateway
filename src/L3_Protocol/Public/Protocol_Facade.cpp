@@ -3,7 +3,7 @@
 // ============================================================================
 
 #include "L3_Protocol/Public/Protocol_Facade.h"
-#include "L3_Protocol/Public/Protocol_Router.h"
+#include "L3_Protocol/Private/Routing_Engine.h"
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/TCP_CH.h"
 #include "L2_Transport/Bridge_CH.h"
@@ -630,5 +630,41 @@ bool ProtocolDiag_RegisterTcpParticipant(const ProtocolTcpParticipant &p) noexce
   rp.processEvents = p.processEvents;
   rp.tick = p.tick;
   return Transport::TcpReactor::registerParticipant(rp);
+}
+
+uint8_t Protocol_LookupDeviceChannel(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+  RouteEndpoint ep{1, -1, 0};
+  if (Router_LookupRoute(dev_id, sub1, sub2, ep)) {
+    return ep.channel_id;
+  }
+  return 1;
+}
+
+void Protocol_ClearRoutes() noexcept {
+  Router_ClearRoutes();
+}
+
+size_t Protocol_GetRoutes(DeviceRouteSnapshot *out_buf, size_t max_count) noexcept {
+  if (!out_buf || max_count == 0) return 0;
+  static DeviceRouteEntry tmp_entries[64];
+  const size_t cap = std::min(max_count, sizeof(tmp_entries) / sizeof(tmp_entries[0]));
+  const size_t count = Router_GetRoutes(tmp_entries, cap);
+  for (size_t i = 0; i < count; ++i) {
+    out_buf[i].dev_id = tmp_entries[i].dev_id;
+    out_buf[i].sub1 = tmp_entries[i].sub1;
+    out_buf[i].sub2 = tmp_entries[i].sub2;
+    out_buf[i].channel_id = tmp_entries[i].endpoint.channel_id;
+    out_buf[i].slot_idx = tmp_entries[i].endpoint.slot_idx;
+    out_buf[i].last_seen_ms = tmp_entries[i].endpoint.last_seen_ms;
+  }
+  return count;
+}
+
+bool Protocol_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept {
+  return Router_DispatchControl(req, virtual_ack_out);
+}
+
+void Protocol_RegisterBridgeForwardHandler(BridgeForwardHandler handler) noexcept {
+  Router_RegisterCh5ForwardHandler(handler);
 }
 

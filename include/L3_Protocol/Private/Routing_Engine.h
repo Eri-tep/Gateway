@@ -1,27 +1,28 @@
 #pragma once
 
 // ============================================================================
-// Packet_Router.h — L3 Routing / Protocol Layer
+// Routing_Engine.h — L3 Routing / Protocol Layer (Private Core Engine)
 // Central L3 Packet Routing Hub: U-Turn Bypass, Cache Virtual Response,
 // Route Registry, and Channel Dispatch
-// Canonical 4+1 Layer: L3 — depends only on L2↓ (RS485_CH/TCP_CH), L1↓, L0↓.
-//                           Zero L4 includes. Zero horizontal L3 coupling.
+// Canonical 4+1 Layer: L3 Private — depends only on L2↓ (RS485_CH/TCP_CH), L1↓, L0↓.
+//                                   Zero L4 includes. Zero horizontal L3 coupling.
 // ============================================================================
 //
 // Architecture invariants:
-//   1. Packet_Router is the ONLY L3 Hub. All other L3 modules (codecs,
-//      Device_Registry) are pure Leaf modules called only by this Router.
+//   1. Routing_Engine is the internal L3 Hub. All other L3 modules (codecs,
+//      Device_Registry) are Leaf modules or cooperating engines.
 //   2. U-Turn bypass (CH1 ↔ CH2/3) occurs entirely within this module —
 //      L4 is never involved in channel-to-channel routing.
 //   3. Cache virtual response: CH2/3 polling is answered directly from
 //      Device_Registry cache and returned to CH2/3 — CH1 traffic = 0%.
-//   4. g_route_registry is static-sealed in NetworkRouter.cpp (Rule 17).
+//   4. g_route_registry is static-sealed in Routing_Engine.cpp (Rule 17).
 //      External callers use Router_RecordRoute / Router_LookupRoute API.
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
 #include <cstddef>
 #include <cstdint>
+
 // ── Multi-Channel Route Endpoint & Entry PODs ──────────────────────────────
 struct RouteEndpoint {
   uint8_t channel_id{1}; // Default channel: CH1 (Main Physical RS-485)
@@ -74,9 +75,5 @@ void Router_RegisterCh5ForwardHandler(Ch5ForwardHandler handler) noexcept;
 bool Router_ForwardToCh5(uint8_t slot_idx, const StaticPacket &pkt,
                          bool burst) noexcept;
 
-
 /// Dispatches a control or query request: handles virtual ACK, routing to CH5, or enqueuing to local bus.
 [[nodiscard]] bool Router_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept;
-
-
-

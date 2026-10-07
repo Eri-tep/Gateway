@@ -9,8 +9,18 @@
 #include <cstddef>
 #include <cstdint>
 
+enum class OtaStage : uint8_t {
+  Idle = 0,
+  Connecting,
+  Downloading,
+  Flashing,
+  Success,
+  Failed
+};
+
 struct HttpOtaState {
   std::atomic<bool> in_progress{false};
+  std::atomic<OtaStage> stage{OtaStage::Idle};
   char status[64]{"Idle"};
   uint8_t progress_pct{0};
   char last_error[64]{""};

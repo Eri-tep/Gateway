@@ -792,7 +792,7 @@ static inline void Ch4_SendPassthrough(const StaticPacket &pkt,
   System_TracePacket(4, true, TraceType::RMT, pkt);
   last_tx_pkt = pkt; // Correctly recorded in all code paths to avoid echo
                      // reflection misinterpretation
-  Uart_WriteDoorphone(pkt.data.data(), pkt.length);
+  Uart_WriteSwSerial(pkt.data.data(), pkt.length);
   last_tx_ms = millis();
   Diag_RecordChannelTx(4);
 }
@@ -878,9 +878,11 @@ void Task_Ch4(void *pvParameters) {
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
         Config_Get().doorphone_baud_rate);
     uint32_t burst_spin_total = 0;
-    while (Uart_AvailableDoorphone() > 0) {
+    while (Uart_AvailableSwSerial() > 0) {
       uint8_t byte = 0;
-      Uart_ReadDoorphone(&byte, 1);
+      if (Uart_ReadSwSerial(&byte, 1) == 0) {
+        break;
+      }
       uint32_t now = millis();
 
       if (buf_len > 0 && last_byte_ms > 0 &&
@@ -899,7 +901,7 @@ void Task_Ch4(void *pvParameters) {
 
       if (burst_spin_total < 20) {
         uint32_t drain_start = millis();
-        while (Uart_AvailableDoorphone() == 0 &&
+        while (Uart_AvailableSwSerial() == 0 &&
                (millis() - drain_start < 6)) {
           esp_rom_delay_us(100);
         }

@@ -4,7 +4,6 @@
 
 #include "L4_Services/Mgmt_Service.h"
 static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
-#include "L3_Protocol/Public/Protocol_Router.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include <cstddef>

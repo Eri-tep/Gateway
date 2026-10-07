@@ -434,18 +434,18 @@ void System_FeedWdt(size_t index) noexcept;
 void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept;
 
 // ── Persistent Reboot Log & Boot Lifecycle ───────────────────────────────────
-size_t System_GetRebootLogCount() noexcept;
-bool System_GetRebootLogEntry(size_t index, LogEntry &out_entry) noexcept;
+[[nodiscard]] size_t System_GetRebootLogCount() noexcept;
+[[nodiscard]] bool System_GetRebootLogEntry(size_t index, LogEntry &out_entry) noexcept;
 void System_WriteRebootLog(const char *reason) noexcept;
 void System_ClearRebootLog() noexcept;
-const char *System_ConsumePendingRebootReason() noexcept;
-const char *System_ResetReasonToString(esp_reset_reason_t rr) noexcept;
-uint32_t System_GetBootTimeMs() noexcept;
+[[nodiscard]] const char *System_ConsumePendingRebootReason() noexcept;
+[[nodiscard]] const char *System_ResetReasonToString(esp_reset_reason_t rr) noexcept;
+[[nodiscard]] uint32_t System_GetBootTimeMs() noexcept;
 
 // ── HTTP / Cloud Firmware OTA Engine ─────────────────────────────────────────
 void System_StartHttpOta(const char *url) noexcept;
 void System_GetHttpOtaSnapshot(HttpOtaSnapshot &out) noexcept;
-bool System_IsHttpOtaInProgress() noexcept;
+[[nodiscard]] bool System_IsHttpOtaInProgress() noexcept;
 
 // ── Network & Wi-Fi Platform Services (L0 Universal Contract) ────────────────
 constexpr EventBits_t WIFI_BIT_CONNECTED = BIT0;
@@ -453,14 +453,14 @@ constexpr EventBits_t WIFI_BIT_DISCONNECTED = BIT1;
 constexpr EventBits_t WIFI_BIT_GOT_IP = BIT2;
 
 void System_WifiInit() noexcept;
-bool System_WifiIsConnected() noexcept;
-IPAddress System_WifiGetIp() noexcept;
-IPAddress System_WifiGetSubnetMask() noexcept;
-IPAddress System_WifiGetApIp() noexcept;
-IPAddress System_WifiGetApSubnetMask() noexcept;
-int8_t System_WifiGetRssi() noexcept;
+[[nodiscard]] bool System_WifiIsConnected() noexcept;
+[[nodiscard]] IPAddress System_WifiGetIp() noexcept;
+[[nodiscard]] IPAddress System_WifiGetSubnetMask() noexcept;
+[[nodiscard]] IPAddress System_WifiGetApIp() noexcept;
+[[nodiscard]] IPAddress System_WifiGetApSubnetMask() noexcept;
+[[nodiscard]] int8_t System_WifiGetRssi() noexcept;
 void System_WifiReconnect() noexcept;
-EventBits_t System_WifiGetEventBits() noexcept;
+[[nodiscard]] EventBits_t System_WifiGetEventBits() noexcept;
 
 // ── Bridge Transport Channel Slot Snapshot Contract ──────────────────────────
 bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;

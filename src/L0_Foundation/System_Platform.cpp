@@ -87,25 +87,25 @@ void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt) {
 }
 
 const char *System_ResetReasonToString(esp_reset_reason_t rr) noexcept {
-  struct ResetReasonMap {
-    esp_reset_reason_t reason;
-    const char *desc;
-  };
-  static constexpr ResetReasonMap kResetReasonTable[] = {
-      {ESP_RST_POWERON, "Power-On Reset"},
-      {ESP_RST_EXT, "Hardware Reset Pin (EXT)"},
-      {ESP_RST_SW, "Software Restart"},
-      {ESP_RST_PANIC, "CPU Panic / Crash Exception"},
-      {ESP_RST_INT_WDT, "Interrupt Watchdog Reset"},
-      {ESP_RST_TASK_WDT, "Task Watchdog Reset"},
-      {ESP_RST_WDT, "Other Watchdog Reset"},
-      {ESP_RST_BROWNOUT, "HW: Brownout Reset (Low Voltage)"},
-      {ESP_RST_SDIO, "HW: SDIO Reset"},
-  };
-  for (const auto &entry : kResetReasonTable) {
-    if (entry.reason == rr) {
-      return entry.desc;
-    }
+  switch (rr) {
+  case ESP_RST_UNKNOWN:    return "Unknown Reset";
+  case ESP_RST_POWERON:    return "Power-On Reset";
+  case ESP_RST_EXT:        return "Hardware Reset Pin (EXT)";
+  case ESP_RST_SW:         return "Software Restart";
+  case ESP_RST_PANIC:      return "CPU Panic / Crash Exception";
+  case ESP_RST_INT_WDT:    return "Interrupt Watchdog Reset";
+  case ESP_RST_TASK_WDT:   return "Task Watchdog Reset";
+  case ESP_RST_WDT:        return "Other Watchdog Reset";
+  case ESP_RST_DEEPSLEEP:  return "Deep Sleep Reset";
+  case ESP_RST_BROWNOUT:   return "HW: Brownout Reset (Low Voltage)";
+  case ESP_RST_SDIO:       return "HW: SDIO Reset";
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+  case ESP_RST_USB:        return "HW: USB Reset";
+  case ESP_RST_JTAG:       return "HW: JTAG Reset";
+  case ESP_RST_EFUSE:      return "HW: eFuse Reset";
+  case ESP_RST_PWR_GLITCH: return "HW: Power Glitch Reset";
+  case ESP_RST_CPU_LOCKUP: return "HW: CPU Lockup Reset";
+#endif
   }
   return "Unknown Hardware Reset";
 }

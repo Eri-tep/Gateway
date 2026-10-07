@@ -164,18 +164,18 @@ void Wifi_Driver_Init(const WifiHwConfig &cfg) {
   }
 }
 
-bool Wifi_Driver_IsConnected() noexcept {
+[[nodiscard]] bool Wifi_Driver_IsConnected() noexcept {
   return (WiFi.status() == WL_CONNECTED);
 }
 
-IPAddress Wifi_Driver_GetIp() noexcept {
+[[nodiscard]] IPAddress Wifi_Driver_GetIp() noexcept {
   if (WiFi.status() == WL_CONNECTED) {
     return WiFi.localIP();
   }
   return WiFi.softAPIP();
 }
 
-int8_t Wifi_Driver_GetRssi() noexcept {
+[[nodiscard]] int8_t Wifi_Driver_GetRssi() noexcept {
   return static_cast<int8_t>(WiFi.RSSI());
 }
 
@@ -227,10 +227,10 @@ void System_WifiReconnect() noexcept {
   Wifi_Driver_Reconnect();
 }
 
-EventBits_t Wifi_Driver_GetEventBits() noexcept {
+[[nodiscard]] EventBits_t Wifi_Driver_GetEventBits() noexcept {
   return s_wifi_event_group ? xEventGroupGetBits(s_wifi_event_group) : 0;
 }
 
-EventBits_t System_WifiGetEventBits() noexcept {
+[[nodiscard]] EventBits_t System_WifiGetEventBits() noexcept {
   return Wifi_Driver_GetEventBits();
 }

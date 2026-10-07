@@ -17,8 +17,8 @@ struct WifiHwConfig {
 };
 
 void Wifi_Driver_Init(const WifiHwConfig &cfg);
-bool Wifi_Driver_IsConnected() noexcept;
-IPAddress Wifi_Driver_GetIp() noexcept;
-int8_t Wifi_Driver_GetRssi() noexcept;
+[[nodiscard]] bool Wifi_Driver_IsConnected() noexcept;
+[[nodiscard]] IPAddress Wifi_Driver_GetIp() noexcept;
+[[nodiscard]] int8_t Wifi_Driver_GetRssi() noexcept;
 void Wifi_Driver_Reconnect() noexcept;
-EventBits_t Wifi_Driver_GetEventBits() noexcept;
+[[nodiscard]] EventBits_t Wifi_Driver_GetEventBits() noexcept;

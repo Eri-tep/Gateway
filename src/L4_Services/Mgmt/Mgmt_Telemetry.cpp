@@ -4,7 +4,6 @@
 
 #include "L0_Foundation/System_Platform.h"
 #include "L4_Services/Mgmt_Service.h"
-#include "L3_Protocol/Public/Protocol_Router.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 
@@ -369,11 +368,7 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
                  snap.sub2);
       }
 
-      RouteEndpoint ep{1, -1, 0};
-      uint8_t ch = 1;
-      if (Router_LookupRoute(snap.dev_id, snap.sub1, snap.sub2, ep)) {
-        ch = ep.channel_id;
-      }
+      const uint8_t ch = Protocol_LookupDeviceChannel(snap.dev_id, snap.sub1, snap.sub2);
 
       if (locked_count > 0)
         out.append(",");
