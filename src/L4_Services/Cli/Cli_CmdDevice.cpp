@@ -126,7 +126,11 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
         continue;
 
       ack_hex.reset();
-      if (dev.last_ack_len > 0) {
+      if (dev.dev_id == Config::FCU::DEV_ID) {
+        static constexpr uint8_t kFcuDispPkt[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08};
+        Fmt::FormatHex(kFcuDispPkt, sizeof(kFcuDispPkt), ack_hex.storage, sizeof(ack_hex.storage));
+        ack_hex.offset = strlen(ack_hex.storage);
+      } else if (dev.last_ack_len > 0) {
         Fmt::FormatHex(dev.last_ack_data.data(), dev.last_ack_len, ack_hex.storage,
                        sizeof(ack_hex.storage));
         ack_hex.offset = strlen(ack_hex.storage);

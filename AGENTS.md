@@ -24,6 +24,7 @@ Integrated project: **M5Stack AtomS3 Lite RS-485/TCP Gateway Firmware (C++23 / G
 | **Architecture & Philosophy** | [`docs/ARCHITECTURE_AND_SPECIFICATIONS.md`](docs/ARCHITECTURE_AND_SPECIFICATIONS.md) | Task topology, CH1~6 ports, lock hierarchy & 7 engineering pillars |
 | **Protocol Specification** | [`docs/HYUNDAI_WALLPAD_PROTOCOL_SPECIFICATION.md`](docs/HYUNDAI_WALLPAD_PROTOCOL_SPECIFICATION.md) | Hyundai RS-485 packet frames, slots, doorphone FSM |
 | **FCU Protocol Spec** | [`docs/AP_FCU_PROTOCOL_SPECIFICATION.md`](docs/AP_FCU_PROTOCOL_SPECIFICATION.md) | AP FCU Modbus-RTU packet frames, registers & CRC-16 |
+| **Stability & Benchmark** | [`docs/EMBEDDED_STABILITY_AND_BENCHMARK_SPECIFICATION.md`](docs/EMBEDDED_STABILITY_AND_BENCHMARK_SPECIFICATION.md) | ESP32-S3 cycle-accurate hot-path mock harness, WDT 12 pillars (P0~P11) & CPU profiling |
 | **Edge Driver** | [`docs/SMARTTHINGS_EDGE_DRIVER_GUIDE.md`](docs/SMARTTHINGS_EDGE_DRIVER_GUIDE.md) | `Gateway-edge-driver/` Lua code, profiles, cosock |
 
 ---
