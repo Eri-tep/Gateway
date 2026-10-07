@@ -104,40 +104,70 @@ template <class T> uint8_t argmax256(const T *a, uint16_t &mx) {
     }
   return best;
 }
+
+using ChecksumFunc = uint8_t (*)(const uint8_t *p, size_t end) noexcept;
+
+inline uint8_t calcXorAll(const uint8_t *p, size_t end) noexcept {
+  uint8_t r = 0;
+  for (size_t i = 0; i < end; ++i) r ^= p[i];
+  return r;
+}
+
+inline uint8_t calcXorNoStx(const uint8_t *p, size_t end) noexcept {
+  uint8_t r = 0;
+  for (size_t i = 1; i < end; ++i) r ^= p[i];
+  return r;
+}
+
+inline uint8_t calcSumAll(const uint8_t *p, size_t end) noexcept {
+  uint8_t r = 0;
+  for (size_t i = 0; i < end; ++i) r += p[i];
+  return r;
+}
+
+inline uint8_t calcSumNoStx(const uint8_t *p, size_t end) noexcept {
+  uint8_t r = 0;
+  for (size_t i = 1; i < end; ++i) r += p[i];
+  return r;
+}
+
+inline uint8_t calcTwosComp(const uint8_t *p, size_t end) noexcept {
+  return static_cast<uint8_t>(-calcSumNoStx(p, end));
+}
+
+inline uint8_t calcOnesComp(const uint8_t *p, size_t end) noexcept {
+  return static_cast<uint8_t>(~calcSumAll(p, end));
+}
+
+inline uint8_t calcCrc8Maxim(const uint8_t *p, size_t end) noexcept {
+  return crc8Poly31(p, end);
+}
+
+constexpr ChecksumFunc CHECKSUM_DISPATCH_TABLE[] = {
+    nullptr,        // 0: UNKNOWN
+    calcXorAll,     // 1: XOR_ALL
+    calcXorNoStx,   // 2: XOR_NO_STX
+    calcSumAll,     // 3: SUM_ALL
+    calcSumNoStx,   // 4: SUM_NO_STX
+    calcTwosComp,   // 5: TWOS_COMPLEMENT
+    calcOnesComp,   // 6: ONES_COMPLEMENT
+    calcCrc8Maxim,  // 7: CRC8_MAXIM
+    nullptr         // 8: NONE
+};
+
 } // namespace
 
 uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
                                              std::span<const uint8_t> data) const noexcept {
   const size_t len = data.size();
-  if (len < 3)
-    return 0;
-  if (algo == ChecksumAlgo::CRC8_MAXIM)
-    return crc8Poly31(data.data(), len - 2);
-
-  const bool is_xor =
-      (algo == ChecksumAlgo::XOR_ALL || algo == ChecksumAlgo::XOR_NO_STX);
-  const bool is_sum =
-      (algo == ChecksumAlgo::SUM_ALL || algo == ChecksumAlgo::SUM_NO_STX ||
-       algo == ChecksumAlgo::TWOS_COMPLEMENT ||
-       algo == ChecksumAlgo::ONES_COMPLEMENT);
-  if (!is_xor && !is_sum)
+  if (UNLIKELY(len < 3))
     return 0;
 
-  // STX 를 제외하는 알고리즘은 1부터 시작
-  const size_t start =
-      (algo == ChecksumAlgo::XOR_NO_STX || algo == ChecksumAlgo::SUM_NO_STX ||
-       algo == ChecksumAlgo::TWOS_COMPLEMENT)
-          ? 1
-          : 0;
-  uint8_t r = 0;
-  for (size_t i = start; i < len - 2; ++i)
-    r = is_xor ? (r ^ data[i]) : (r + data[i]);
-
-  if (algo == ChecksumAlgo::TWOS_COMPLEMENT)
-    return static_cast<uint8_t>(-r);
-  if (algo == ChecksumAlgo::ONES_COMPLEMENT)
-    return static_cast<uint8_t>(~r);
-  return r;
+  const size_t idx = static_cast<size_t>(algo);
+  if (LIKELY(idx < std::size(CHECKSUM_DISPATCH_TABLE) && CHECKSUM_DISPATCH_TABLE[idx])) {
+    return CHECKSUM_DISPATCH_TABLE[idx](data.data(), len - 2);
+  }
+  return 0;
 }
 
 uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,

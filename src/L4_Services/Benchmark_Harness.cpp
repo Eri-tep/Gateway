@@ -282,6 +282,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
   uint64_t total_cycles = 0;
   uint32_t min_c = UINT32_MAX, max_c = 0;
 
+  auto *active_parser = WallpadParserFactory::getActiveParser();
   uint32_t t_start = micros();
 
   for (uint32_t i = 0; i < iterations; ++i) {
@@ -289,9 +290,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
 
     // 1-A Checksum Calculation
     uint32_t t0 = esp_cpu_get_cycle_count();
-    uint8_t cs = WallpadParserFactory::getActiveParser()
-                     ? WallpadParserFactory::getActiveParser()->calculateChecksum(span_pkt)
-                     : 0;
+    uint8_t cs = active_parser ? active_parser->calculateChecksum(span_pkt) : 0;
     uint32_t t1 = esp_cpu_get_cycle_count();
     sum_cs += static_cast<uint32_t>(t1 - t0);
     s_observable_sink += cs;
