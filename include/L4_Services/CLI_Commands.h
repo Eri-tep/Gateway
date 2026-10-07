@@ -1,21 +1,25 @@
 #pragma once
 
+// ============================================================================
+// CLI_Commands: Level 4 Interactive Console Commands & 80-Col Formatting (C++23)
+// ============================================================================
+
 #include "L4_Services/CLI_Service.h"
-#include "L4_Services/Cli/Cli_Commands.h"
 #include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 
-// Shared scratch buffer for CLI output rendering (single allocation in
-// ConsoleFmt.cpp)
+// ── Shared Scratch Buffer Interface ─────────────────────────────────────────
 char *Cli_GetScratchBuffer();
 size_t Cli_GetScratchBufferSize();
+void withScratchBufInternal(int sock, std::function<void(AppendBuf &)> fn);
 
-// ============================================================================
-// CLI 80-COLUMN UNIFIED FORMATTING & BUFFER HELPERS
-// ============================================================================
+template <typename F> inline void withScratchBuf(int sock, F &&fn) {
+  withScratchBufInternal(sock, std::forward<F>(fn));
+}
 
+// ── CLI 80-Column Unified Formatting & Subcommand Helpers ───────────────────
 namespace CliFmt {
 constexpr char BOX80_EQ[] = "+================================================="
                             "=============================+\r\n";
@@ -93,26 +97,12 @@ inline bool IsHelp(const char *s) {
   return s && (s[0] == '?' || strcasecmp(s, "help") == 0);
 }
 
-// Unified subcommand descriptor: carries dispatch handler AND help strings.
-// handler == nullptr marks a help-only (separator / header) row.
 struct SubCmdDef {
-  const char *name;   // token matched against args.get(1), e.g. "frame"
-  const char *syntax; // help table left column
-  const char *desc;   // help table right column
-  void (*handler)(int sock, int argc,
-                  const Args &args); // nullptr = help row only
+  const char *name;
+  const char *syntax;
+  const char *desc;
+  void (*handler)(int sock, int argc, const Args &args);
 };
-
-} // namespace CliFmt
-
-// Shared scratch buffer executor
-void withScratchBufInternal(int sock, std::function<void(AppendBuf &)> fn);
-
-template <typename F> inline void withScratchBuf(int sock, F &&fn) {
-  withScratchBufInternal(sock, std::forward<F>(fn));
-}
-
-namespace CliFmt {
 
 inline void PrintSubCmdHelp(int sock, const char *title, const SubCmdDef *defs,
                             size_t count, const char *tip = nullptr) {
@@ -138,7 +128,6 @@ inline void PrintSubCmdHelp(int sock, const char *title, const SubCmdDef *defs,
   });
 }
 
-// Dispatch: scan defs[], call matching handler. Returns true if matched.
 inline bool DispatchSubCmd(const char *sub, int sock, int argc,
                            const Args &args, const SubCmdDef *defs,
                            size_t count) {
@@ -158,3 +147,63 @@ void FormatHwMetrics(AppendBuf &out, const HwSnapshot &hw);
 void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt);
 void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt);
 } // namespace Fmt
+
+// ── CLI Subsystem Command Interfaces ────────────────────────────────────────
+namespace WifiCli {
+void cmdWifi(CliContext &ctx);
+} // namespace WifiCli
+
+namespace WallpadCli {
+void cmdWallpad(CliContext &ctx);
+void cmdCtl(CliContext &ctx);
+void cmdTrace(CliContext &ctx);
+void cmdStop(CliContext &ctx);
+void cmdDevs(CliContext &ctx);
+
+void wallpadPrintStatus(AppendBuf &out);
+void wallpadListProfiles(AppendBuf &out);
+void wallpadSaveProfile(int sock, const char *name);
+void wallpadDeleteProfile(int sock, const char *target);
+void wallpadSetProfile(int sock, const char *key);
+
+void devsPrintSummary(AppendBuf &out, uint32_t now);
+void devsPrintTier1Targets(AppendBuf &out, uint32_t now);
+void devsPrintTier2Cache(AppendBuf &out, uint32_t now);
+
+void wallpadPrintControlTable(AppendBuf &out);
+void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id);
+} // namespace WallpadCli
+
+namespace SystemCli {
+void cmdStats(CliContext &ctx);
+void cmdReboot(CliContext &ctx);
+void cmdLogView(CliContext &ctx);
+void cmdCoreDump(CliContext &ctx);
+void cmdOta(CliContext &ctx);
+void cmdHelp(CliContext &ctx);
+
+void printStats(int sock);
+void printSystemOverview(AppendBuf &out);
+void otaPrintStatus(AppendBuf &out);
+void otaTriggerRollback(int sock);
+void otaValidate(int sock);
+} // namespace SystemCli
+
+namespace ConfigCli {
+void cmdConfig(CliContext &ctx);
+void cmdSave(CliContext &ctx);
+void cmdEw11(CliContext &ctx);
+void cmdRoutes(CliContext &ctx);
+void printConfig(int sock);
+void setConfig(int sock, const char *key, const char *value);
+} // namespace ConfigCli
+
+// ── Unified Command Table Definition ────────────────────────────────────────
+struct CommandDef {
+  const char *name;
+  const char *help;
+  void (*handler)(CliContext &ctx);
+};
+
+extern const CommandDef kConsoleCmds[];
+extern const size_t kConsoleCmdsCount;

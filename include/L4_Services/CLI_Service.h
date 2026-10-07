@@ -322,11 +322,13 @@ public:
   void flushToClient();
 };
 
-extern TelnetManager g_telnet_manager;
-extern TelnetTracer g_telnet_tracer;
-extern std::atomic<bool> g_restart_pending;
-extern const char *g_restart_reason;
-extern TelnetManager::WifiScanReq g_wifi_scan_req;
+// ── Sealed CLI Subsystem Accessors (Rule 17) ──
+TelnetManager &CLI_GetTelnetManager() noexcept;
+TelnetTracer &CLI_GetTracer() noexcept;
+void CLI_RequestRestart(const char *reason = nullptr) noexcept;
+bool CLI_IsRestartPending() noexcept;
+const char *CLI_GetRestartReason() noexcept;
+TelnetManager::WifiScanReq &CLI_GetWifiScanReq() noexcept;
 
 struct CliContext {
   TelnetManager::TelnetSession &session;

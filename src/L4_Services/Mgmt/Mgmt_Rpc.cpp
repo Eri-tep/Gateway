@@ -2,10 +2,9 @@
 // RemoteService: Level 4 Network Remote Services
 // ============================================================================
 
-#include "L4_Services/Mgmt/Mgmt_Internal.h"
+#include "L4_Services/Mgmt_Service.h"
 static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include "L3_Protocol/Public/Protocol_Router.h"
-#include "L4_Services/Mgmt_Service.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include <cstddef>
@@ -271,15 +270,17 @@ static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
 
   for (int i = 0; i < scan_limit; ++i) {
     const int idx = indices[i];
-    String raw_s = WiFi.SSID(idx);
-    raw_s.trim();
-    if (raw_s.length() == 0)
+    const String raw_str = WiFi.SSID(idx);
+    const char *src = raw_str.c_str();
+    while (*src && isspace(static_cast<unsigned char>(*src)))
+      src++;
+    if (!*src)
       continue;
 
     // 중복 SSID 검사
     bool duplicate = false;
     for (size_t a = 0; a < top_aps_count; ++a) {
-      if (strcmp(top_aps[a].ssid, raw_s.c_str()) == 0) {
+      if (strcmp(top_aps[a].ssid, src) == 0) {
         duplicate = true;
         break;
       }
@@ -294,7 +295,6 @@ static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
     info.pct = pct;
     // JSON escape 단순 복사 (32바이트 바운드)
     size_t d_idx = 0;
-    const char *src = raw_s.c_str();
     while (*src && d_idx + 2 < sizeof(info.ssid)) {
       if (*src == '"' || *src == '\\') {
         info.ssid[d_idx++] = '\\';
@@ -412,12 +412,7 @@ static void HandleRpc_SetWifi(int sock, long req_id, const char *json_str,
   }
 
   const auto &cfg = Config_Get();
-  strncpy(g_wifi_guard.prev_ssid, cfg.wifi_ssid,
-          sizeof(g_wifi_guard.prev_ssid) - 1);
-  strncpy(g_wifi_guard.prev_pass, cfg.wifi_password,
-          sizeof(g_wifi_guard.prev_pass) - 1);
-  g_wifi_guard.start_ms = millis();
-  g_wifi_guard.testing.store(true, std::memory_order_release);
+  Remote_StartWifiFallbackTest(cfg.wifi_ssid, cfg.wifi_password);
 
   RuntimeConfig staged_cfg = cfg;
   strncpy(staged_cfg.wifi_ssid, new_ssid, sizeof(staged_cfg.wifi_ssid) - 1);

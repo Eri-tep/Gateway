@@ -57,7 +57,20 @@ void Remote_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept
 void Remote_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
 void Remote_Tick(bool ota_now, uint32_t now_ms) noexcept;
 
+#include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 // ── Remote Control Handler Registration ──
 using DeviceControlHandler = bool (*)(StaticPacket &req,
                                       StaticPacket &out_ack) noexcept;
 void Remote_RegisterControlHandler(DeviceControlHandler handler) noexcept;
+
+// ── Management Remote Server Session & Fallback Contracts (Rule 17) ──
+MgmtSession *Remote_GetSessions();
+SemaphoreHandle_t Remote_GetSessionMutex();
+IPAddress Remote_GetClientIp(int sock);
+DeviceControlHandler Remote_GetControlHandler();
+void Remote_SendRpcResponse(int sock, long req_id, const char *res,
+                            const char *msg = nullptr);
+void Remote_StartWifiFallbackTest(const char *prev_ssid, const char *prev_pass) noexcept;

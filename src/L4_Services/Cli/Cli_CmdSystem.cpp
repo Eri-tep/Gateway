@@ -1,6 +1,4 @@
-#include "L4_Services/Cli/Cli_Fmt.h"
-#include "L4_Services/CLI_Service.h"
-#include "L4_Services/Cli/Cli_Commands.h"
+#include "L4_Services/CLI_Commands.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include <WiFi.h>
@@ -97,7 +95,7 @@ static void AsyncWifiScanTask(void *pvParameters) {
   out.append("\r\n");
   WiFi.scanDelete();
 
-  g_telnet_manager.sendScanResult(req, out.buf);
+  CLI_GetTelnetManager().sendScanResult(req, out.buf);
   s_wifi_scan_running.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
 }
@@ -160,10 +158,11 @@ void cmdWifi(CliContext &ctx) {
          }
          sendTelnetMsg(
              s, "[WIFI] Scanning background 2.4GHz APs (Takes 2-3s)...\r\n");
-         g_wifi_scan_req.clientIp = IPAddress(0, 0, 0, 0);
-         g_wifi_scan_req.sessionId = 0;
+         auto &scan_req = CLI_GetWifiScanReq();
+         scan_req.clientIp = IPAddress(0, 0, 0, 0);
+         scan_req.sessionId = 0;
          xTaskCreatePinnedToCore(AsyncWifiScanTask, "WifiScanWorker", 4096,
-                                 &g_wifi_scan_req, 2, NULL, 0);
+                                 &scan_req, 2, NULL, 0);
        }},
       {"connect", "connect <ssid> [password]",
        "Connect to specified AP and save to NVS",
@@ -358,8 +357,7 @@ void cmdStats(CliContext &ctx) {
 void cmdReboot(CliContext &ctx) {
   int client = ctx.sock;
   sendTelnetMsg(client, "Rebooting...\r\n");
-  g_restart_reason = "Telnet Command";
-  g_restart_pending.store(true, std::memory_order_release);
+  CLI_RequestRestart("Telnet Command");
 }
 
 static void FormatRebootLogEntry(AppendBuf &out, const LogEntry &e, size_t idx, size_t count) {

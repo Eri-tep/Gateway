@@ -1,5 +1,4 @@
 #include "L4_Services/Mgmt_Service.h"
-#include "L4_Services/Mgmt/Mgmt_Internal.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 
@@ -10,8 +9,30 @@ constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 #include <fcntl.h>
 #include <lwip/sockets.h>
 #include <unistd.h>
+#include <atomic>
 
-WifiFallbackGuard g_wifi_guard;
+namespace {
+struct WifiFallbackGuard {
+  std::atomic<bool> testing{false};
+  uint32_t start_ms{0};
+  char prev_ssid[64]{0};
+  char prev_pass[64]{0};
+};
+static WifiFallbackGuard s_wifi_guard;
+} // namespace
+
+void Remote_StartWifiFallbackTest(const char *prev_ssid, const char *prev_pass) noexcept {
+  if (prev_ssid) {
+    strncpy(s_wifi_guard.prev_ssid, prev_ssid, sizeof(s_wifi_guard.prev_ssid) - 1);
+    s_wifi_guard.prev_ssid[sizeof(s_wifi_guard.prev_ssid) - 1] = '\0';
+  }
+  if (prev_pass) {
+    strncpy(s_wifi_guard.prev_pass, prev_pass, sizeof(s_wifi_guard.prev_pass) - 1);
+    s_wifi_guard.prev_pass[sizeof(s_wifi_guard.prev_pass) - 1] = '\0';
+  }
+  s_wifi_guard.start_ms = millis();
+  s_wifi_guard.testing.store(true, std::memory_order_release);
+}
 static MgmtSession s_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
 static SemaphoreHandle_t s_mgmt_mutex = nullptr;
 static DeviceControlHandler s_control_handler = nullptr;
@@ -253,7 +274,7 @@ void handleFsmOperational(uint32_t now, EventBits_t bits) noexcept {
 void handleFsmTesting(uint32_t now, EventBits_t bits) noexcept {
   // Success check: got IP while testing
   if (System_IsNetworkReady() || (bits & WIFI_BIT_GOT_IP)) {
-    g_wifi_guard.testing.store(false, std::memory_order_release);
+    s_wifi_guard.testing.store(false, std::memory_order_release);
     Serial.println(
         F("[WIFI] ★ New Wi-Fi connected successfully! Saved to NVS."));
     Remote_StartServer();
@@ -262,8 +283,8 @@ void handleFsmTesting(uint32_t now, EventBits_t bits) noexcept {
   }
 
   // Timeout check: failed to connect within 15 seconds
-  if (TimeUtils::isElapsed(g_wifi_guard.start_ms, 15000)) {
-    g_wifi_guard.testing.store(false, std::memory_order_release);
+  if (TimeUtils::isElapsed(s_wifi_guard.start_ms, 15000)) {
+    s_wifi_guard.testing.store(false, std::memory_order_release);
     const auto &cfg = Config_Get();
     Serial.printf(
         "[WIFI] ⚠️ New Wi-Fi failed within 15s! Reverting to '%s'...\r\n",
@@ -279,7 +300,7 @@ void handleFsmTesting(uint32_t now, EventBits_t bits) noexcept {
 
 void handleFsmDisconnected(uint32_t now, EventBits_t bits) noexcept {
   // If credential testing started, transition immediately
-  if (g_wifi_guard.testing.load(std::memory_order_acquire)) {
+  if (s_wifi_guard.testing.load(std::memory_order_acquire)) {
     s_net_fsm = NetworkFsmState::TESTING;
     return;
   }

@@ -6,7 +6,7 @@
 #include "L4_Services/CLI_Service.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
-#include "L4_Services/Cli/Cli_Commands.h"
+#include "L4_Services/CLI_Commands.h"
 
 #include <WiFi.h>
 #include <algorithm>
@@ -28,13 +28,25 @@
 // GLOBAL INSTANCES & SYNCHRONIZATION OBJECTS
 // ============================================================================
 
-TelnetManager g_telnet_manager(Config::TCP::TELNET_PORT);
-TelnetTracer g_telnet_tracer;
+static TelnetManager s_telnet_manager(Config::TCP::TELNET_PORT);
+static TelnetTracer s_telnet_tracer;
 static SemaphoreHandle_t s_telnet_tx_sem = nullptr;
 static SemaphoreHandle_t s_tracer_sem = nullptr;
-std::atomic<bool> g_restart_pending{false};
-const char *g_restart_reason = nullptr;
-TelnetManager::WifiScanReq g_wifi_scan_req;
+static std::atomic<bool> s_restart_pending{false};
+static const char *s_restart_reason = nullptr;
+static TelnetManager::WifiScanReq s_wifi_scan_req;
+
+TelnetManager &CLI_GetTelnetManager() noexcept { return s_telnet_manager; }
+TelnetTracer &CLI_GetTracer() noexcept { return s_telnet_tracer; }
+void CLI_RequestRestart(const char *reason) noexcept {
+  s_restart_reason = reason;
+  s_restart_pending.store(true, std::memory_order_release);
+}
+bool CLI_IsRestartPending() noexcept {
+  return s_restart_pending.load(std::memory_order_acquire);
+}
+const char *CLI_GetRestartReason() noexcept { return s_restart_reason; }
+TelnetManager::WifiScanReq &CLI_GetWifiScanReq() noexcept { return s_wifi_scan_req; }
 
 // ============================================================================
 // TELNET LOW-LEVEL OUTPUT HELPERS
@@ -450,6 +462,73 @@ bool TelnetManager::handlePassword(TelnetSession *session,
 
 TelnetManager::TelnetManager(uint16_t port) : _port(port) {}
 
+// ============================================================================
+// Shared CLI 5KB Scratch Buffer Implementation
+// ============================================================================
+
+static char s_cli_scratch_buf[5120];
+
+char *Cli_GetScratchBuffer() {
+  return s_cli_scratch_buf;
+}
+
+size_t Cli_GetScratchBufferSize() {
+  return sizeof(s_cli_scratch_buf);
+}
+
+void withScratchBufInternal(int sock, std::function<void(AppendBuf &)> fn) {
+  s_cli_scratch_buf[0] = '\0';
+  AppendBuf out{s_cli_scratch_buf, sizeof(s_cli_scratch_buf)};
+  fn(out);
+  if (sock >= 0 && out.offset > 0) {
+    sendTelnetMsgLen(sock, out.buf, out.offset);
+  }
+}
+
+// ============================================================================
+// Top-Level Unified Command Table Dispatch Definition
+// ============================================================================
+
+const CommandDef kConsoleCmds[] = {
+    {"stats", "Show real-time HW metrics & traffic stats [clear]",
+     SystemCli::cmdStats},
+    {"devs", "Show device registry & cache [1|2|all|clear]",
+     WallpadCli::cmdDevs},
+    {"wifi", "Manage WiFi connection [status|scan|connect|disconnect]",
+     WifiCli::cmdWifi},
+    {"trace", "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]",
+     WallpadCli::cmdTrace},
+    {"wallpad",
+     "Wallpad protocol & auto-probing "
+     "[status|list|set|save|delete|auto|reset|simulate]",
+     WallpadCli::cmdWallpad},
+    {"ctl", "Device control blueprints [table|<dev_id>|name|class|reset]",
+     WallpadCli::cmdCtl},
+    {"config", "View or modify runtime configuration [set|reset]",
+     ConfigCli::cmdConfig},
+    {"save", "Save current runtime configuration to NVS flash",
+     ConfigCli::cmdSave},
+    {"ew11", "CH5 EW11 hub sockets & FCU [list|set|frame|reset|enable|disable]",
+     ConfigCli::cmdEw11},
+    {"routes", "Show dynamic device ingress routing table [clear]",
+     ConfigCli::cmdRoutes},
+    {"logview",
+     "Persistent reboot history & crash logs [list|<1-20>|last|clear]",
+     SystemCli::cmdLogView},
+    {"coredump", "Show crash core dump summary or erase partition [clear]",
+     SystemCli::cmdCoreDump},
+    {"ota", "Dual-partition OTA & rollback [status|rollback|validate|cloud]",
+     SystemCli::cmdOta},
+    {"reboot", "Perform hardware system reboot with safe shutdown",
+     SystemCli::cmdReboot},
+    {"q", "Stop active packet tracing (shortcut for 'trace off')",
+     WallpadCli::cmdStop},
+    {"exit", "Disconnect current Telnet CLI session", TelnetManager::cmdExit},
+    {"help", "Display comprehensive command reference and usage examples",
+     SystemCli::cmdHelp}};
+
+const size_t kConsoleCmdsCount = sizeof(kConsoleCmds) / sizeof(kConsoleCmds[0]);
+
 static void dispatchCommand(CliContext &ctx) {
   if (ctx.args.argc == 0)
     return;
@@ -577,7 +656,7 @@ static bool handlePasswordInput(TelnetManager::TelnetSession *session,
     if (session->pwLen > 0) {
       session->pwBuffer[session->pwLen] = '\0';
       if (!session->pwLen ||
-          !g_telnet_manager.handlePassword(session, session->pwBuffer)) {
+          !s_telnet_manager.handlePassword(session, session->pwBuffer)) {
         should_close = true;
         return true;
       }
@@ -601,7 +680,7 @@ static void handleAuthenticatedInput(TelnetManager::TelnetSession *session,
       session->addHistory(session->lineBuf);
       session->browse_idx = -1;
 
-      g_telnet_tracer.pause();
+      s_telnet_tracer.pause();
       sendTelnetMsg(session->sock, "\r\n");
 
       Args args;
@@ -627,7 +706,7 @@ static void handleAuthenticatedInput(TelnetManager::TelnetSession *session,
       }
       session->lineLen = 0;
       sendTelnetMsg(session->sock, "\r\n> ");
-      g_telnet_tracer.resume();
+      s_telnet_tracer.resume();
     } else if (c == '\r') {
       sendTelnetMsg(session->sock, "\r\n> ");
     }
@@ -717,7 +796,7 @@ void TelnetManager::sendScanResult(const WifiScanReq &req,
 
 void TelnetManager::cmdExit(CliContext &ctx) {
   sendTelnetMsg(ctx.sock, "Goodbye!\r\n");
-  g_telnet_manager.handleClientDisconnect(&ctx.session);
+  s_telnet_manager.handleClientDisconnect(&ctx.session);
 }
 
 // ============================================================================
@@ -803,16 +882,16 @@ void TelnetManager::handleClientDisconnect(TelnetSession *session) {
   if (!session || session->sock < 0)
     return;
 
-  if (g_telnet_tracer.isClient(session->sock)) {
-    g_telnet_tracer.setTrace(false);
-    g_telnet_tracer.setClient(-1);
+  if (s_telnet_tracer.isClient(session->sock)) {
+    s_telnet_tracer.setTrace(false);
+    s_telnet_tracer.setClient(-1);
   }
   session->reset();
 }
 
 void TelnetManager::shutdownForReboot() {
-  g_telnet_tracer.setTrace(false);
-  g_telnet_tracer.setClient(-1);
+  s_telnet_tracer.setTrace(false);
+  s_telnet_tracer.setClient(-1);
   MutexLocker cliLock(_cli_mutex);
   for (int i = 0; i < Config::TCP::MAX_TELNET_CLIENTS; ++i) {
     _sessions[i].reset();
@@ -824,8 +903,8 @@ void TelnetManager::shutdownForReboot() {
 }
 
 void TelnetManager::stopServer() noexcept {
-  g_telnet_tracer.setTrace(false);
-  g_telnet_tracer.setClient(-1);
+  s_telnet_tracer.setTrace(false);
+  s_telnet_tracer.setClient(-1);
 
   if (_cli_mutex) {
     MutexLocker cliLock(_cli_mutex);
@@ -1004,15 +1083,15 @@ void Task_Telnet(void *pvParameters) {
   SystemTraceSink sink;
   sink.trace_packet = [](uint8_t ch, bool tx, TraceType ty,
                          const StaticPacket &pkt) {
-    g_telnet_tracer.trace(ch, tx, ty, pkt);
+    s_telnet_tracer.trace(ch, tx, ty, pkt);
   };
-  sink.trace_msg = [](const char *msg) { g_telnet_tracer.trace(msg); };
+  sink.trace_msg = [](const char *msg) { s_telnet_tracer.trace(msg); };
   System_RegisterTraceSink(sink);
 
   System_RegisterShutdownHook([]() {
-    g_telnet_tracer.setTrace(false);
-    g_telnet_tracer.setClient(-1);
-    g_telnet_manager.shutdownForReboot();
+    s_telnet_tracer.setTrace(false);
+    s_telnet_tracer.setClient(-1);
+    s_telnet_manager.shutdownForReboot();
   });
   TSTAGE(3);
 
@@ -1046,7 +1125,7 @@ void Task_Telnet(void *pvParameters) {
     // ⭐️ [FreeRTOS Event-Driven] 오프라인 시 이벤트 비트 대기 (CPU 점유 0%
     // 슬립)
     if (!System_IsNetworkReady()) {
-      g_telnet_manager.stopServer();
+      s_telnet_manager.stopServer();
 
       // 네트워크 비트가 켜질 때까지 슬립 (WDT 피딩을 위해 1초 단위 블로킹 대기)
       while (!System_IsNetworkReady()) {
@@ -1059,7 +1138,7 @@ void Task_Telnet(void *pvParameters) {
         }
       }
 
-      g_telnet_manager.startServer();
+      s_telnet_manager.startServer();
     }
 
     // ── 아래부터는 무조건 '네트워크 가용(Online)' 상태 보장 ──
@@ -1068,7 +1147,7 @@ void Task_Telnet(void *pvParameters) {
     if (g_ota_in_progress.load(std::memory_order_acquire)) {
       TSTAGE(4);
       if (!ota_notice_sent) {
-        ota_notice_sent = g_telnet_manager.broadcastNoticeNonBlocking(
+        ota_notice_sent = s_telnet_manager.broadcastNoticeNonBlocking(
             "\r\n[OTA] Firmware update in progress. Telnet CLI paused...\r\n");
       }
       feed_twdt();
@@ -1078,21 +1157,21 @@ void Task_Telnet(void *pvParameters) {
     ota_notice_sent = false;
 
     // 2. 시스템 재부팅 가드
-    if (g_restart_pending.load(std::memory_order_acquire)) {
-      g_restart_pending.store(false, std::memory_order_relaxed);
-      System_Restart(g_restart_reason ? g_restart_reason : "Telnet Command");
+    if (s_restart_pending.load(std::memory_order_acquire)) {
+      s_restart_pending.store(false, std::memory_order_relaxed);
+      System_Restart(s_restart_reason ? s_restart_reason : "Telnet Command");
     }
 
     // 3. 온라인 메인 I/O 처리
-    g_telnet_manager.tick();
+    s_telnet_manager.tick();
 
     // 4. 비동기 NVS 저장 커밋 (Task_Ch1으로부터 분리된 저우선순위 백그라운드 플러시)
     ProtocolDiag_CommitAutoProfileNvsIfPending();
 
     TSTAGE(11);
-    const bool has_clients = g_telnet_manager.hasActiveClients();
+    const bool has_clients = s_telnet_manager.hasActiveClients();
     if (has_clients) {
-      g_telnet_tracer.flushToClient();
+      s_telnet_tracer.flushToClient();
     }
     TSTAGE(14);
     xSemaphoreTake(s_tracer_sem, has_clients ? pdMS_TO_TICKS(5) : 0);

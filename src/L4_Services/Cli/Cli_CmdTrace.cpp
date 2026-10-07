@@ -1,6 +1,4 @@
-#include "L4_Services/Cli/Cli_Fmt.h"
-#include "L4_Services/CLI_Service.h"
-#include "L4_Services/Cli/Cli_Commands.h"
+#include "L4_Services/CLI_Commands.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L0_Foundation/System_Platform.h"
@@ -491,14 +489,16 @@ void cmdTrace(CliContext &ctx) {
     return;
   }
 
+  auto &tracer = CLI_GetTracer();
+
   if (strcasecmp(sub, "off") == 0) {
-    g_telnet_tracer.setTrace(false);
+    tracer.setTrace(false);
     sendTelnetMsg(sock, "Packet trace DISABLED.\r\n");
     return;
   }
 
-  g_telnet_tracer.setClient(sock);
-  g_telnet_tracer.setTrace(true);
+  tracer.setClient(sock);
+  tracer.setTrace(true);
 
   struct TraceFilterDef {
     std::string_view key;
@@ -518,7 +518,7 @@ void cmdTrace(CliContext &ctx) {
 
   for (const auto &f : kTraceFilters) {
     if (f.key == sub_sv || strcasecmp(sub, f.key.data()) == 0) {
-      g_telnet_tracer.setFilter(f.type);
+      tracer.setFilter(f.type);
       sendTelnetMsgf(sock, "Packet trace ENABLED: %s.\r\n", f.desc);
       return;
     }
@@ -537,7 +537,7 @@ void cmdTrace(CliContext &ctx) {
     }
 
     if (ch_ok) {
-      g_telnet_tracer.setFilter(TraceType::CH, static_cast<uint8_t>(ch_val));
+      tracer.setFilter(TraceType::CH, static_cast<uint8_t>(ch_val));
       sendTelnetMsgf(sock, "Packet trace ENABLED: Channel %u only.\r\n",
                      static_cast<unsigned>(ch_val));
     } else {
@@ -556,7 +556,7 @@ void cmdTrace(CliContext &ctx) {
     } else if (is_hex_prefix) {
       id = static_cast<uint8_t>(strtol(sub, nullptr, 16));
     }
-    g_telnet_tracer.setFilter(TraceType::DEVID, id);
+    tracer.setFilter(TraceType::DEVID, id);
     sendTelnetMsgf(sock, "Packet trace ENABLED: Device ID 0x%02X only.\r\n", id);
     return;
   }
@@ -570,7 +570,7 @@ void cmdTrace(CliContext &ctx) {
 
 void cmdStop(CliContext &ctx) {
   int sock = ctx.sock;
-  g_telnet_tracer.setTrace(false);
+  CLI_GetTracer().setTrace(false);
   sendTelnetMsg(sock, "Packet trace DISABLED.\r\n");
 }
 

@@ -1,6 +1,4 @@
-#include "L4_Services/Cli/Cli_Fmt.h"
-#include "L4_Services/CLI_Service.h"
-#include "L4_Services/Cli/Cli_Commands.h"
+#include "L4_Services/CLI_Commands.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include <WiFi.h>
