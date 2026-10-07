@@ -242,8 +242,10 @@ void Fcu_HandleRx(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
                  "[FCU#%d] Flap motor calibrated. Queuing swing restore (2)...",
                  slot_idx);
         auto sw_frame = ModbusRtu::buildWriteSingle(0x0003, 0x0002);
-        memcpy(rt.pending_cmd_buf, sw_frame.data(), sw_frame.size());
-        rt.pending_cmd_len = static_cast<uint8_t>(sw_frame.size());
+        const size_t copy_len =
+            std::min(sw_frame.size(), sizeof(rt.pending_cmd_buf));
+        memcpy(rt.pending_cmd_buf, sw_frame.data(), copy_len);
+        rt.pending_cmd_len = static_cast<uint8_t>(copy_len);
       }
       rt.pending_restore_swing = 0;
     }

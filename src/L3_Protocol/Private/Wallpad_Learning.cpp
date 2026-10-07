@@ -798,6 +798,7 @@ void AutoProbingEngine::reset() {
   _consecutive_mismatches = 0;
   strncpy(_desc.description, "Probing bus traffic...",
           sizeof(_desc.description) - 1);
+  _desc.description[sizeof(_desc.description) - 1] = '\0';
   memset(_stx_counts, 0, sizeof(_stx_counts));
   memset(_etx_counts, 0, sizeof(_etx_counts));
   memset(_algo_matches, 0, sizeof(_algo_matches));

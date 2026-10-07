@@ -53,14 +53,14 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
     }
 
     int act = 0;
-    struct timeval tv = {0, 10000}; // 10ms
+    struct timeval tv = {0, 2000}; // 2ms responsive non-blocking cadence
     if (max_fd >= 0) {
       act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
       if (ota_now) {
         vTaskDelay(pdMS_TO_TICKS(10));
       }
     } else {
-      vTaskDelay(pdMS_TO_TICKS(10));
+      vTaskDelay(pdMS_TO_TICKS(2));
     }
 
     esp_task_wdt_reset();

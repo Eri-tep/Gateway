@@ -414,9 +414,10 @@ void setConfig(int sock, const char *key, const char *value) {
                                   s_staged_config.doorphone_stop_bits, value,
                                   sock, key);
       case PARAM_STRING: {
-        if (strlen(value) <= p.maxVal) {
-          strncpy(p.ptr.str, value, p.maxVal);
-          p.ptr.str[p.maxVal] = '\0';
+        const size_t in_len = strlen(value);
+        if (in_len <= p.maxVal) {
+          memcpy(p.ptr.str, value, in_len);
+          p.ptr.str[in_len] = '\0';
           s_has_staged_changes = true;
           sendTelnetMsgf(
               sock,

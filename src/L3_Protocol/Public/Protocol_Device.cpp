@@ -227,8 +227,11 @@ bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
   CriticalSectionLocker lock(&_cache_mux);
   const auto *dev = findMutable(dev_id, sub1, sub2, false);
   if (dev && dev->last_ack_len > 0) {
-    out.length = dev->last_ack_len;
-    memcpy(out.data.data(), dev->last_ack_data.data(), dev->last_ack_len);
+    const size_t copy_len = std::min({static_cast<size_t>(dev->last_ack_len),
+                                      dev->last_ack_data.size(),
+                                      out.data.size()});
+    out.length = static_cast<uint8_t>(copy_len);
+    memcpy(out.data.data(), dev->last_ack_data.data(), copy_len);
     return true;
   }
   return false;
@@ -433,11 +436,13 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     }
 
     if (!is_vent_mode_ack) {
+      const size_t ack_len =
+          std::min(static_cast<size_t>(ack.length), dev->last_ack_data.size());
       ack_changed =
-          (dev->last_ack_len != ack.length ||
-           memcmp(dev->last_ack_data.data(), ack.data.data(), ack.length) != 0);
-      dev->last_ack_len = ack.length;
-      memcpy(dev->last_ack_data.data(), ack.data.data(), ack.length);
+          (dev->last_ack_len != ack_len ||
+           memcmp(dev->last_ack_data.data(), ack.data.data(), ack_len) != 0);
+      dev->last_ack_len = static_cast<uint8_t>(ack_len);
+      memcpy(dev->last_ack_data.data(), ack.data.data(), ack_len);
     } else {
       // 모드 패킷 수신 시 모드 상태 변경 여부 확인하여 브로드캐스트 트리거
       ack_changed = true;

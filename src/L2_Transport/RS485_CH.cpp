@@ -388,27 +388,31 @@ void Ch1_RecordTxFinish() {
 }
 
 void Ch1_WaitBusIdle(uint32_t silence_ms) {
-  // 1. 연속 제어 명령 간 120ms Guard Interval 보장
+  // 1. 연속 제어 명령 간 35ms 최소 Guard Interval 보장 (월패드 RX 버퍼 처리 여유 확보)
   uint32_t last_tx = s_last_ch1_tx_ms.load(std::memory_order_acquire);
   if (last_tx > 0) {
     uint32_t now_tx = millis();
-    constexpr uint32_t kGuardIntervalMs = 120;
+    constexpr uint32_t kGuardIntervalMs = 35;
     if (now_tx - last_tx < kGuardIntervalMs) {
       uint32_t rem_tx = kGuardIntervalMs - (now_tx - last_tx);
-      if (rem_tx > 0) {
-        vTaskDelay(pdMS_TO_TICKS(rem_tx) > 0 ? pdMS_TO_TICKS(rem_tx) : 1);
+      if (rem_tx >= 2) {
+        vTaskDelay(pdMS_TO_TICKS(rem_tx));
+      } else if (rem_tx > 0) {
+        delayMicroseconds(rem_tx * 1000);
       }
     }
   }
 
+  // 2. 물리 버스 무음(Bus Silence) 확인
   uint32_t last_act = Diag_GetChannelLastActivityMs(1);
   uint32_t now_ms = millis();
 
   if (now_ms - last_act < silence_ms) {
     uint32_t rem_ms = silence_ms - (now_ms - last_act);
-    if (rem_ms > 0) {
-      TickType_t delay_ticks = pdMS_TO_TICKS(rem_ms);
-      vTaskDelay(delay_ticks > 0 ? delay_ticks : 1);
+    if (rem_ms >= 2) {
+      vTaskDelay(pdMS_TO_TICKS(rem_ms));
+    } else if (rem_ms > 0) {
+      delayMicroseconds(rem_ms * 1000);
     }
   }
 }

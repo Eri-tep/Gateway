@@ -143,7 +143,8 @@ void wallpadPrintStatus(AppendBuf &out) {
   char sub1_list_buf[64];
   auto print_addr_field = [&](const char *param, uint8_t off,
                               const uint8_t *ids, size_t cnt,
-                              char *saved_buf = nullptr) {
+                              char *saved_buf = nullptr,
+                              size_t saved_buf_len = 0) {
     FixedBuf<32> label;
     char list_buf[64];
     if (desc.offsets_locked)
@@ -151,13 +152,15 @@ void wallpadPrintStatus(AppendBuf &out) {
     else
       label.append("Probing...");
     format_hex_list(ids, cnt, label.c_str(), list_buf, sizeof(list_buf));
-    if (saved_buf)
-      strcpy(saved_buf, list_buf);
+    if (saved_buf && saved_buf_len > 0) {
+      strncpy(saved_buf, list_buf, saved_buf_len - 1);
+      saved_buf[saved_buf_len - 1] = '\0';
+    }
     print_row("", param, list_buf, addr_status);
   };
   print_addr_field("[ID] Device", desc.dev_id_offset, dev_ids, dev_id_cnt);
   print_addr_field("[S1] Sub Addr", desc.sub1_offset, sub1_ids, sub1_cnt,
-                   sub1_list_buf);
+                   sub1_list_buf, sizeof(sub1_list_buf));
   if (desc.sub2_offset != 0xFF && desc.sub2_offset != desc.sub1_offset &&
       sub2_cnt > 0) {
     print_addr_field("[S2] Sub Addr", desc.sub2_offset, sub2_ids, sub2_cnt);

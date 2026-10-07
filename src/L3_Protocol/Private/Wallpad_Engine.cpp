@@ -1022,8 +1022,10 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
 
   out_pkt.channel_id = 1;
   if (poll_raw_len > 0 && poll_raw_ptr) {
-    out_pkt.length = poll_raw_len;
-    memcpy(out_pkt.data.data(), poll_raw_ptr, poll_raw_len);
+    const size_t copy_len =
+        std::min(static_cast<size_t>(poll_raw_len), out_pkt.data.size());
+    out_pkt.length = static_cast<uint8_t>(copy_len);
+    memcpy(out_pkt.data.data(), poll_raw_ptr, copy_len);
   } else {
     auto *parser = WallpadParserFactory::getActiveParser();
     if (parser) {
@@ -1385,21 +1387,39 @@ void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
   if (!nvs_ns)
     nvs_ns = "dp_frame_p0";
 
+  uint8_t s = candidate_stx.load(std::memory_order_relaxed);
+  uint8_t e = candidate_etx.load(std::memory_order_relaxed);
+  uint8_t l = candidate_len.load(std::memory_order_relaxed);
+  bool is_locked =
+      (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
+  bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
+
+  static uint8_t s_last_s = 0, s_last_e = 0, s_last_l = 0;
+  static bool s_last_locked = false, s_last_fixed = false;
+  static char s_last_ns[16] = {0};
+
+  if (s == s_last_s && e == s_last_e && l == s_last_l &&
+      is_locked == s_last_locked && fixed == s_last_fixed &&
+      strncmp(s_last_ns, nvs_ns, sizeof(s_last_ns)) == 0) {
+    return; // 동일 설정 중복 쓰기 방지로 Flash I/O 지연 스킵
+  }
+
   Preferences prefs;
   if (prefs.begin(nvs_ns, false)) {
-    uint8_t s = candidate_stx.load(std::memory_order_relaxed);
-    uint8_t e = candidate_etx.load(std::memory_order_relaxed);
-    uint8_t l = candidate_len.load(std::memory_order_relaxed);
-    bool is_locked =
-        (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
-    bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
-
     prefs.putUChar("stx", s);
     prefs.putUChar("etx", e);
     prefs.putUChar("len", l);
     prefs.putBool("locked", is_locked);
     prefs.putBool("fixed", fixed);
     prefs.end();
+
+    s_last_s = s;
+    s_last_e = e;
+    s_last_l = l;
+    s_last_locked = is_locked;
+    s_last_fixed = fixed;
+    strncpy(s_last_ns, nvs_ns, sizeof(s_last_ns) - 1);
+    s_last_ns[sizeof(s_last_ns) - 1] = '\0';
 
     ::Serial.printf("[%s] Persisted framing to NVS (%s): STX=0x%02X, "
                     "ETX=0x%02X, LEN=%u%s\r\n",
