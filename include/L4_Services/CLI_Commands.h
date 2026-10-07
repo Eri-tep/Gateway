@@ -140,6 +140,17 @@ inline bool DispatchSubCmd(const char *sub, int sock, int argc,
   return false;
 }
 
+inline void PrintSubCmdHelp(int sock, const char *title,
+                            std::span<const SubCmdDef> defs,
+                            const char *tip = nullptr) {
+  PrintSubCmdHelp(sock, title, defs.data(), defs.size(), tip);
+}
+
+inline bool DispatchSubCmd(const char *sub, int sock, int argc,
+                           const Args &args, std::span<const SubCmdDef> defs) {
+  return DispatchSubCmd(sub, sock, argc, args, defs.data(), defs.size());
+}
+
 } // namespace CliFmt
 
 namespace Fmt {

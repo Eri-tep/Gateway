@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <span>
 
 // ── Core Repositories & Metrics Trackers ──
 static RS485_PacketDispatcher s_dispatcher{};
@@ -248,7 +249,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
                                  Config::Timing::WALLPAD_AUTO_IPG_MS)) {
           if (s_dispatcher.onFeedAutoFrame) {
             s_dispatcher.onFeedAutoFrame(
-                span<const uint8_t>(stream, stream_len));
+                std::span<const uint8_t>(stream, stream_len));
           }
 
           if (echo_match && echo_match->length == stream_len &&
@@ -287,7 +288,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
           uint8_t pkt_len = static_cast<uint8_t>(len_res);
           uint8_t *pkt = &stream[idx];
-          span<const uint8_t> pkt_span(pkt, pkt_len);
+          std::span<const uint8_t> pkt_span(pkt, pkt_len);
           if (s_dispatcher.onValidatePacket &&
               !s_dispatcher.onValidatePacket(pkt_span)) {
             uint8_t ch = (u_num == UART_NUM_0)   ? 1
@@ -353,7 +354,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
   if (stream_len >= 3 && is_auto_unlocked) {
     if (s_dispatcher.onFeedAutoFrame) {
-      s_dispatcher.onFeedAutoFrame(span<const uint8_t>(stream, stream_len));
+      s_dispatcher.onFeedAutoFrame(std::span<const uint8_t>(stream, stream_len));
     }
     if (!(echo_match && echo_match->length == stream_len &&
           memcmp(echo_match->data.data(), stream, stream_len) == 0)) {
@@ -634,7 +635,7 @@ void Task_Ch1(void *pvParameters) {
 
     if (activated == s_ch1_control_queue && s_ch1_control_queue &&
         xQueueReceive(s_ch1_control_queue, &ctrlPacket, 0) == pdTRUE) {
-      span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
+      std::span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
       bool is_query = s_dispatcher.onIsQueryPacket
                           ? s_dispatcher.onIsQueryPacket(frame)
                           : false;
@@ -741,7 +742,7 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
                         &poll_ctx) == UartRxStatus::SUCCESS) {
       stats->rx_pkts.fetch_add(1, std::memory_order_relaxed);
       req.channel_id = cfg->channel_id;
-      span<const uint8_t> frame(req.data.data(), req.length);
+      std::span<const uint8_t> frame(req.data.data(), req.length);
       StaticPacket virtual_ack;
       if (s_dispatcher.onHandleSubBusQuery &&
           s_dispatcher.onHandleSubBusQuery(cfg->channel_id, req, virtual_ack)) {

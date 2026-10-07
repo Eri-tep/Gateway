@@ -484,7 +484,6 @@ void cmdTrace(CliContext &ctx) {
   if (CliFmt::IsHelp(sub)) {
     CliFmt::PrintSubCmdHelp(
         sock, "TRACE COMMAND REFERENCE", kTraceHelp,
-        sizeof(kTraceHelp) / sizeof(kTraceHelp[0]),
         "Tip: Use 'q' shortcut to quickly stop active tracing");
     return;
   }
@@ -564,7 +563,6 @@ void cmdTrace(CliContext &ctx) {
   // If unrecognized, show reference help
   CliFmt::PrintSubCmdHelp(
       sock, "TRACE COMMAND REFERENCE", kTraceHelp,
-      sizeof(kTraceHelp) / sizeof(kTraceHelp[0]),
       "Tip: Use 'q' shortcut to quickly stop active tracing");
 }
 
@@ -661,18 +659,15 @@ void cmdWallpad(CliContext &ctx) {
   if (CliFmt::IsHelp(sub)) {
     CliFmt::PrintSubCmdHelp(
         sock, "WALLPAD COMMAND REFERENCE", kWallpadDefs,
-        sizeof(kWallpadDefs) / sizeof(kWallpadDefs[0]),
         "Tip: Use 'ctl' for device control blueprints & slots");
     return;
   }
 
-  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kWallpadDefs,
-                             sizeof(kWallpadDefs) / sizeof(kWallpadDefs[0])))
+  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kWallpadDefs))
     return;
 
   CliFmt::PrintSubCmdHelp(
       sock, "WALLPAD COMMAND REFERENCE", kWallpadDefs,
-      sizeof(kWallpadDefs) / sizeof(kWallpadDefs[0]),
       "Tip: Use 'ctl' for device control blueprints & slots");
 }
 

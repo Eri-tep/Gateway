@@ -16,6 +16,8 @@
 #include <cstring>
 #include <esp_wifi.h>
 #include <lwip/sockets.h>
+#include <span>
+#include <utility>
 
 // ── JSON-RPC & TCP Management Server (formerly Service.cpp) ──
 // ============================================================================
@@ -318,12 +320,18 @@ static void FormatMomentaryProps(AppendBuf &out, const DecodedDeviceState &st) {
   out.appendFormat(",\"floor\":%d,\"direction\":%d", st.floor, st.direction);
 }
 
+static void FormatAirconProps(AppendBuf &out, const DecodedDeviceState &st) {
+  out.appendFormat(",\"target_temp\":%d,\"current_temp\":%d,\"fan_speed\":%d",
+                   st.target_temp, st.current_temp, st.fan_speed);
+}
+
 static constexpr DevicePropFormatEntry kPropFormatters[] = {
     {DeviceClass::THERMOSTAT, FormatThermostatProps},
     {DeviceClass::VENT,       FormatVentProps},
     {DeviceClass::GAS,        FormatGasProps},
     {DeviceClass::OUTLET,     FormatOutletProps},
     {DeviceClass::MOMENTARY,  FormatMomentaryProps},
+    {DeviceClass::AIRCON,     FormatAirconProps},
 };
 
 void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
@@ -496,6 +504,15 @@ int formatDeviceStateJson(char *buf, size_t buf_size, uint8_t dev_id,
                     "%d,\"direction\":%d,\"ho\":%d}\n",
                     dev_id, sub1, sub2, power, floor, direction, ho);
 
+  case DeviceClass::AIRCON:
+    return snprintf(buf, buf_size,
+                    "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":%u,"
+                    "\"class\":\"aircon\",\"power\":%d,\"target_temp\":%d,\"current_temp\":%d,"
+                    "\"fan_speed\":%d}\n",
+                    dev_id, sub1, sub2, power, target_temp, current_temp, speed);
+
+  case DeviceClass::SWITCH:
+  case DeviceClass::UNKNOWN:
   default:
     return snprintf(buf, buf_size,
                     "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,"

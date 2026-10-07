@@ -888,8 +888,6 @@ static size_t s_current_dev_idx = 0;
 static uint32_t s_stable_start_ms = 0;
 static size_t s_last_active_tgts = 0;
 static bool s_convergence_done = false;
-static bool s_convergence_reset_done = false;
-static uint32_t s_convergence_time_ms = 0;
 static std::atomic<uint32_t> s_stale_poll_cnt{0};
 
 } // namespace
@@ -906,7 +904,7 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
                         "bus offsets...\r\n");
   }
 
-  if (!s_convergence_done || !s_convergence_reset_done) {
+  if (!s_convergence_done) {
     Wallpad_CheckConvergence(false);
   }
 
@@ -1121,8 +1119,6 @@ bool Wallpad_TakeRelearnRequest() noexcept {
 bool Wallpad_CheckConvergence(bool reset) noexcept {
   if (reset) {
     s_convergence_done = false;
-    s_convergence_reset_done = false;
-    s_convergence_time_ms = 0;
     s_stable_start_ms = 0;
     s_last_active_tgts = 0;
     if (g_system_event_group) {
@@ -1132,16 +1128,6 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
   }
 
   if (s_convergence_done) {
-    if (!s_convergence_reset_done && s_convergence_time_ms > 0 &&
-        TimeUtils::isElapsed(s_convergence_time_ms, 2000)) {
-      s_convergence_reset_done = true;
-      System_ResetTrafficStats();
-      ProtocolDiag_ResetBridgeStats();
-      Polling_GetRegistry().resetHits();
-      System_TraceMessage(
-          "[SYSTEM MSG]  ★ Post-Convergence Settle Period (2s) Ended. "
-          "Traffic statistics synchronized to 0 for pure 1:1 runtime tracking.\r\n");
-    }
     return true;
   }
 
@@ -1166,8 +1152,6 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
     } else if (TimeUtils::isElapsed(s_stable_start_ms,
                                     Config::Timing::CACHE_CONVERGENCE_STABLE_MS)) {
       s_convergence_done = true;
-      s_convergence_time_ms = millis();
-      s_convergence_reset_done = false;
       if (g_system_event_group) {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
       }

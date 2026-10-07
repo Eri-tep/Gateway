@@ -301,8 +301,7 @@ void cmdDevs(CliContext &ctx) {
        }},
   };
 
-  if (CliFmt::DispatchSubCmd(sub, client, argc, ctx.args, kDevsDefs,
-                             sizeof(kDevsDefs) / sizeof(kDevsDefs[0])))
+  if (CliFmt::DispatchSubCmd(sub, client, argc, ctx.args, kDevsDefs))
     return;
 
   withScratchBuf(client,
@@ -459,8 +458,7 @@ void cmdCtl(CliContext &ctx) {
   };
 
   const char *sub = ctx.args.get(1);
-  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kCtlDefs,
-                             sizeof(kCtlDefs) / sizeof(kCtlDefs[0])))
+  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kCtlDefs))
     return;
 
   char *endp = nullptr;
@@ -472,7 +470,6 @@ void cmdCtl(CliContext &ctx) {
   } else {
     CliFmt::PrintSubCmdHelp(
         sock, "CONTROL BLUEPRINT COMMANDS", kCtlDefs,
-        sizeof(kCtlDefs) / sizeof(kCtlDefs[0]),
         "Tip: Use 'ctl 0x18' to view detailed frame action offsets");
   }
 }

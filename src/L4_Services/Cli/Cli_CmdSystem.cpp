@@ -195,12 +195,10 @@ void cmdWifi(CliContext &ctx) {
        }},
   };
 
-  if (CliFmt::DispatchSubCmd(subCmd, sock, count, ctx.args, kWifiDefs,
-                             sizeof(kWifiDefs) / sizeof(kWifiDefs[0])))
+  if (CliFmt::DispatchSubCmd(subCmd, sock, count, ctx.args, kWifiDefs))
     return;
 
   CliFmt::PrintSubCmdHelp(sock, "WIFI COMMAND REFERENCE", kWifiDefs,
-                          sizeof(kWifiDefs) / sizeof(kWifiDefs[0]),
                           "Tip: Configuration persists to NVS flash memory");
 }
 
@@ -705,13 +703,11 @@ void cmdOta(CliContext &ctx) {
        }},
   };
 
-  if (CliFmt::DispatchSubCmd(subCmd, sock, count, ctx.args, kOtaDefs,
-                             sizeof(kOtaDefs) / sizeof(kOtaDefs[0])))
+  if (CliFmt::DispatchSubCmd(subCmd, sock, count, ctx.args, kOtaDefs))
     return;
 
   CliFmt::PrintSubCmdHelp(
       sock, "OTA COMMAND REFERENCE", kOtaDefs,
-      sizeof(kOtaDefs) / sizeof(kOtaDefs[0]),
       "Tip: Unvalidated firmware auto-rolls back on reboot");
 }
 

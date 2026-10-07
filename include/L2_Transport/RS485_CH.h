@@ -27,6 +27,7 @@
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L1_HAL/Uart_Driver.h"
+#include <span>
 
 // ── Packet Timing & Queuing Primitives ──────────────────────────────────────
 struct TimestampedPacket {
@@ -109,20 +110,20 @@ struct RS485_PacketDispatcher {
   uint32_t (*onGetPollIntervalMs)() noexcept{nullptr};
   uint8_t (*onGetStx)() noexcept{nullptr};
   bool (*onIsAutoUnlocked)() noexcept{nullptr};
-  void (*onFeedAutoFrame)(span<const uint8_t> frame) noexcept{nullptr};
+  void (*onFeedAutoFrame)(std::span<const uint8_t> frame) noexcept{nullptr};
   int (*onExtractLength)(const uint8_t *stream, size_t stream_len,
                          size_t stx_idx) noexcept{nullptr};
-  bool (*onValidatePacket)(span<const uint8_t> frame) noexcept{nullptr};
+  bool (*onValidatePacket)(std::span<const uint8_t> frame) noexcept{nullptr};
   bool (*onHandleSubBusQuery)(uint8_t ch, const StaticPacket &req,
                               StaticPacket &virtual_ack_out) noexcept{nullptr};
-  void (*onFeedControlFrame)(span<const uint8_t> frame) noexcept{nullptr};
+  void (*onFeedControlFrame)(std::span<const uint8_t> frame) noexcept{nullptr};
   void (*onDoorphonePacket)(const StaticPacket &pkt) noexcept{nullptr};
   void (*onDoorphoneReset)() noexcept{nullptr};
   bool (*onMatchDoorphoneLock)(uint8_t stx, uint8_t etx, uint8_t len,
                                uint8_t &out_fixed_len) noexcept{nullptr};
   bool (*onDoorphoneGetLockedFraming)(uint8_t &stx, uint8_t &etx, uint8_t &len) noexcept{nullptr};
   void (*onDoorphoneFrameDetected)(uint8_t stx, uint8_t etx, uint8_t len) noexcept{nullptr};
-  bool (*onIsQueryPacket)(span<const uint8_t> frame) noexcept{nullptr};
+  bool (*onIsQueryPacket)(std::span<const uint8_t> frame) noexcept{nullptr};
 };
 
 void RS485_RegisterDispatcher(const RS485_PacketDispatcher &dispatcher) noexcept;

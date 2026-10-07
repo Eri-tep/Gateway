@@ -7,6 +7,8 @@
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 #include <lwip/sockets.h>
+#include <span>
+#include <utility>
 
 // ============================================================================
 // SECTION 1: TELNET PROTOCOL & IAC ENUMS
@@ -62,6 +64,10 @@ public:
   explicit CliWriter(int s = -1, AppendBuf *b = nullptr) : sock(s), buf(b) {}
 
   void write(const char *data, size_t len);
+  void write(std::span<const char> data) { write(data.data(), data.size()); }
+  void write(std::span<const uint8_t> data) {
+    write(reinterpret_cast<const char *>(data.data()), data.size());
+  }
   void text(const char *s);
   void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
   void line(const char *fmt = nullptr, ...);
@@ -263,7 +269,7 @@ private:
 
   std::atomic<int> _client_fd{-1};
   std::atomic<bool> _traceEnabled{false};
-  std::atomic<uint8_t> _filterMode{static_cast<uint8_t>(TraceType::ALL)};
+  std::atomic<uint8_t> _filterMode{std::to_underlying(TraceType::ALL)};
   std::atomic<uint8_t> _filterTargetVal{0};
   std::atomic<uint8_t> _channelMask{0};
 
@@ -294,7 +300,7 @@ public:
     return _traceEnabled.load(std::memory_order_acquire);
   }
   void setFilter(TraceType mode, uint8_t targetVal = 0) {
-    _filterMode.store(static_cast<uint8_t>(mode), std::memory_order_release);
+    _filterMode.store(std::to_underlying(mode), std::memory_order_release);
     _filterTargetVal.store(targetVal, std::memory_order_release);
     if (mode == TraceType::CH && targetVal >= 1 && targetVal <= 6) {
       _channelMask.store(1 << targetVal, std::memory_order_release);

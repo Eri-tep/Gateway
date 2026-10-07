@@ -324,6 +324,51 @@ void handleFsmDisconnected(uint32_t now, EventBits_t bits) noexcept {
   }
 }
 
+enum class ConvergenceSettleState : uint8_t {
+  IDLE,       // Waiting for cache convergence bit (Cache Not Ready)
+  COUNTDOWN,  // Cache ready detected, counting down 2-second settle window
+  EXECUTED    // Settle period ended, metrics cleared to 0 (Steady-State Latch)
+};
+
+void StepConvergenceSettleFsm(uint32_t now) noexcept {
+  if (!g_system_event_group)
+    return;
+
+  static ConvergenceSettleState s_state = ConvergenceSettleState::IDLE;
+  static uint32_t s_start_ms = 0;
+
+  const bool cache_ready =
+      (xEventGroupGetBits(g_system_event_group) & SYS_EVT_CACHE_READY) != 0;
+
+  if (!cache_ready) {
+    s_state = ConvergenceSettleState::IDLE;
+    s_start_ms = 0;
+    return;
+  }
+
+  switch (s_state) {
+  case ConvergenceSettleState::IDLE:
+    s_start_ms = now;
+    s_state = ConvergenceSettleState::COUNTDOWN;
+    break;
+
+  case ConvergenceSettleState::COUNTDOWN:
+    if (TimeUtils::isElapsed(s_start_ms, 2000)) {
+      s_state = ConvergenceSettleState::EXECUTED;
+      System_ResetTrafficStats();
+      ProtocolDiag_ResetBridgeStats();
+      ProtocolDiag_PollingResetHits();
+      System_TraceMessage(
+          "[SYSTEM MSG]  ★ Post-Convergence Settle Period (2s) Ended. "
+          "Traffic statistics synchronized to 0 for pure 1:1 runtime tracking.\r\n");
+    }
+    break;
+
+  case ConvergenceSettleState::EXECUTED:
+    break;
+  }
+}
+
 } // namespace
 
 void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
@@ -353,6 +398,7 @@ void Remote_Tick(bool /*ota_now*/, uint32_t now) noexcept {
 
   Network_HandleMaintenance(s_chk_ms, s_met_ms, s_tcp_ms, now);
   ProtocolDiag_WarmCacheCheckNvsDebounce();
+  StepConvergenceSettleFsm(now);
 }
 
 void Remote_StartServer() noexcept {

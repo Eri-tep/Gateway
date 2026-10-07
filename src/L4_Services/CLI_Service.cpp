@@ -18,7 +18,9 @@
 #include <esp_task_wdt.h>
 #include <initializer_list>
 #include <lwip/sockets.h>
+#include <span>
 #include <string_view>
+#include <utility>
 
 // ============================================================================
 // From src/Telnet/Telnet.cpp
@@ -527,7 +529,8 @@ const CommandDef kConsoleCmds[] = {
     {"help", "Display comprehensive command reference and usage examples",
      SystemCli::cmdHelp}};
 
-const size_t kConsoleCmdsCount = sizeof(kConsoleCmds) / sizeof(kConsoleCmds[0]);
+constexpr size_t kConsoleCmdsCount = std::size(kConsoleCmds);
+static_assert(kConsoleCmdsCount > 0, "kConsoleCmds table cannot be empty");
 
 static void dispatchCommand(CliContext &ctx) {
   if (ctx.args.argc == 0)
@@ -547,7 +550,8 @@ static void dispatchCommand(CliContext &ctx) {
 }
 
 static inline bool consumeIac(TelnetManager::TelnetSession *sess, uint8_t c) {
-  if (sess->iacState == IacState::GOT_IAC) {
+  switch (sess->iacState) {
+  case IacState::GOT_IAC:
     if (c == TelnetCmd::WILL || c == TelnetCmd::WONT || c == TelnetCmd::DO ||
         c == TelnetCmd::DONT) {
       sess->iacState = IacState::GOT_OPTION;
@@ -557,21 +561,24 @@ static inline bool consumeIac(TelnetManager::TelnetSession *sess, uint8_t c) {
       sess->iacState = IacState::NORMAL;
     }
     return true;
-  }
-  if (sess->iacState == IacState::GOT_OPTION) {
+
+  case IacState::GOT_OPTION:
     sess->iacState = IacState::NORMAL;
     return true;
-  }
-  if (sess->iacState == IacState::IN_SUBNEG) {
+
+  case IacState::IN_SUBNEG:
     if (c == TelnetCmd::IAC)
       sess->iacState = IacState::GOT_IAC;
     return true;
+
+  case IacState::NORMAL:
+  default:
+    if (c == TelnetCmd::IAC) {
+      sess->iacState = IacState::GOT_IAC;
+      return true;
+    }
+    return false;
   }
-  if (c == TelnetCmd::IAC) {
-    sess->iacState = IacState::GOT_IAC;
-    return true;
-  }
-  return false;
 }
 
 static void redrawLine(TelnetManager::TelnetSession *sess,

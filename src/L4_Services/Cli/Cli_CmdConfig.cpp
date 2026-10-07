@@ -170,7 +170,7 @@ static const ConfigParamDef PARAM_TABLE[] = {
      0,
      "Telnet Login Password"},
 };
-static const size_t PARAM_COUNT = sizeof(PARAM_TABLE) / sizeof(ConfigParamDef);
+static constexpr size_t PARAM_COUNT = std::size(PARAM_TABLE);
 
 void printConfig(int sock) {
   ensureStagingInitialized();
@@ -495,8 +495,7 @@ void cmdConfig(CliContext &ctx) {
   };
 
   const char *sub = ctx.args.get(1);
-  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kConfigDefs,
-                             sizeof(kConfigDefs) / sizeof(kConfigDefs[0])))
+  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kConfigDefs))
     return;
 
   printConfigHelp(sock);
@@ -750,18 +749,15 @@ void cmdEw11(CliContext &ctx) {
   if (CliFmt::IsHelp(sub)) {
     CliFmt::PrintSubCmdHelp(
         sock, "EW11 COMMAND REFERENCE", kEw11Defs,
-        sizeof(kEw11Defs) / sizeof(kEw11Defs[0]),
         "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
     return;
   }
 
-  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kEw11Defs,
-                             sizeof(kEw11Defs) / sizeof(kEw11Defs[0])))
+  if (CliFmt::DispatchSubCmd(sub, sock, argc, ctx.args, kEw11Defs))
     return;
 
   CliFmt::PrintSubCmdHelp(
       sock, "EW11 COMMAND REFERENCE", kEw11Defs,
-      sizeof(kEw11Defs) / sizeof(kEw11Defs[0]),
       "Tip: Slot index 0 is Master Hub, 1-4 are FCU Bridges");
 }
 
