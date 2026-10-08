@@ -1018,10 +1018,21 @@ void PollingTargetRegistry::registerOrTouch(uint8_t ch, uint8_t dev_id,
     CriticalSectionLocker lock(&_mux);
 
     PollingTargetEntry *hit = nullptr;
-    for (size_t i = 0; i < _count; ++i) {
-      if (entryMatches(_entries[i], dev_id, sub1, sub2, raw_pkt, raw_len)) {
-        hit = &_entries[i];
-        break;
+    const bool in_key = (dev_id || sub1 || sub2);
+    if (in_key) [[likely]] {
+      for (size_t i = 0; i < _count; ++i) {
+        if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
+            _entries[i].sub2 == sub2) {
+          hit = &_entries[i];
+          break;
+        }
+      }
+    } else {
+      for (size_t i = 0; i < _count; ++i) {
+        if (entryMatches(_entries[i], dev_id, sub1, sub2, raw_pkt, raw_len)) {
+          hit = &_entries[i];
+          break;
+        }
       }
     }
 

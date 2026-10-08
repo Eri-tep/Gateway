@@ -681,40 +681,35 @@ struct TaskAckPollContext {
   TimestampedPacketQueue<8> *ack_q;
   const WallpadChannelConfig *cfg;
   SingleChannelStats *stats;
+  SemaphoreHandle_t uart_mutex;
 };
 
 static uint32_t Ch2Ch3_DrainVirtualAckQueue(void *arg) {
   auto *ctx = static_cast<TaskAckPollContext *>(arg);
-  if (!ctx || !ctx->ack_q || !ctx->cfg || !ctx->stats)
+  if (UNLIKELY(!ctx || !ctx->ack_q || !ctx->cfg || !ctx->stats))
     return 25;
 
   StaticPacket next_ack;
-  uint32_t next_due = 0;
   uint32_t now = millis();
 
-  while (ctx->ack_q->peek(next_ack, next_due)) {
-    if (now < next_due)
-      break;
-    if (ctx->ack_q->dequeue(next_ack, next_due)) {
-      SemaphoreHandle_t u_mux =
-          (ctx->cfg->uart_num == UART_NUM_1) ? s_uart1_mutex : s_uart2_mutex;
-      MutexLocker lock(u_mux, pdMS_TO_TICKS(100));
-      if (lock.isLocked()) {
-        uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
-                         next_ack.length);
-      } else {
-        ctx->stats->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-        System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
-      }
-      System_TracePacket(ctx->cfg->channel_id, true, TraceType::ACK,
-                            next_ack);
-      ctx->stats->tx_pkts.fetch_add(1, std::memory_order_relaxed);
+  while (ctx->ack_q->dequeueIfDue(now, next_ack)) {
+    MutexLocker lock(ctx->uart_mutex, pdMS_TO_TICKS(100));
+    if (LIKELY(lock.isLocked())) {
+      uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
+                       next_ack.length);
+    } else {
+      ctx->stats->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+      System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
     }
+    System_TracePacket(ctx->cfg->channel_id, true, TraceType::ACK,
+                       next_ack);
+    ctx->stats->tx_pkts.fetch_add(1, std::memory_order_relaxed);
   }
 
-  if (ctx->ack_q->peek(next_ack, next_due)) {
+  const auto next_due = ctx->ack_q->getNextDueMs();
+  if (next_due.has_value()) {
     now = millis();
-    return (next_due > now) ? std::max<uint32_t>(1, next_due - now) : 1;
+    return (*next_due > now) ? std::max<uint32_t>(1, *next_due - now) : 1;
   }
   return 25;
 }
@@ -739,7 +734,8 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
                         pdFALSE, portMAX_DELAY);
   }
 
-  TaskAckPollContext poll_ctx{&ack_queue, cfg, stats};
+  SemaphoreHandle_t u_mux = (cfg->uart_num == UART_NUM_1) ? s_uart1_mutex : s_uart2_mutex;
+  TaskAckPollContext poll_ctx{&ack_queue, cfg, stats, u_mux};
 
   for (;;) {
     System_FeedWdt(task_idx);
@@ -763,24 +759,24 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
       std::span<const uint8_t> frame(req.data.data(), req.length);
       StaticPacket virtual_ack;
       if (s_dispatcher.onHandleSubBusQuery &&
-          s_dispatcher.onHandleSubBusQuery(cfg->channel_id, req, virtual_ack)) {
+          s_dispatcher.onHandleSubBusQuery(cfg->channel_id, req, virtual_ack)) [[likely]] {
         System_TracePacket(cfg->channel_id, false, TraceType::QRY, req);
         const auto &timing = TimingConfig_Get();
         uint32_t delay_ms = (cfg->channel_id == 2)
                                 ? timing.ch2_cache_delay_ms
                                 : timing.ch3_cache_delay_ms;
         uint32_t target_due = millis() + delay_ms;
-        if (!ack_queue.enqueue(virtual_ack, target_due)) {
+        if (!ack_queue.enqueue(virtual_ack, target_due)) [[unlikely]] {
           stats->uncached_pkts.fetch_add(1, std::memory_order_relaxed);
           System_TraceMessage("[WARN] Wallpad virtual ACK queue overflow, "
                               "packet dropped.\r\n");
         }
       } else {
-        if (s_dispatcher.onFeedControlFrame) {
+        if (s_dispatcher.onFeedControlFrame) [[unlikely]] {
           s_dispatcher.onFeedControlFrame(frame);
         }
         StaticPacket dummy_ack;
-        if (s_dispatcher.onDispatchControl) {
+        if (s_dispatcher.onDispatchControl) [[unlikely]] {
           s_dispatcher.onDispatchControl(req, dummy_ack);
         }
       }
@@ -820,12 +816,22 @@ static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
                                             StaticPacket &last_pkt,
                                             uint32_t &last_pkt_ms,
                                             uint32_t now) {
+  if (packet.length != last_pkt.length) [[likely]] {
+    last_pkt = packet;
+    last_pkt_ms = now;
+    if (s_dispatcher.onDoorphonePacket) {
+      s_dispatcher.onDoorphonePacket(packet);
+    }
+    System_TracePacket(4, false, TraceType::RMT, packet);
+    Diag_RecordChannelRx(4);
+    return;
+  }
+
   bool is_debounce =
-      (packet.length == last_pkt.length &&
-       memcmp(packet.data.data(), last_pkt.data.data(), packet.length) == 0 &&
+      (memcmp(packet.data.data(), last_pkt.data.data(), packet.length) == 0 &&
        !TimeUtils::isElapsed(last_pkt_ms,
                              Config::Timing::DOORPHONE_DEBOUNCE_MS));
-  if (is_debounce)
+  if (is_debounce) [[unlikely]]
     return;
 
   last_pkt = packet;
@@ -896,26 +902,28 @@ void Task_Ch4(void *pvParameters) {
 
     const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
         Config_Get().doorphone_baud_rate);
-    while (Uart_AvailableSwSerial() > 0) {
-      uint8_t byte = 0;
-      if (Uart_ReadSwSerial(&byte, 1) == 0) {
-        break;
-      }
-      uint32_t now = millis();
-
+    const int avail = Uart_AvailableSwSerial();
+    if (avail > 0) {
+      const uint32_t now = millis();
       if (buf_len > 0 && last_byte_ms > 0 &&
           TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
         buf_len = 0;
       }
 
-      if (buf_len < sizeof(buf)) {
-        buf[buf_len++] = byte;
-      } else {
-        memmove(buf, buf + 1, buf_len - 1);
-        buf_len--;
-        buf[buf_len++] = byte;
+      uint8_t temp[32];
+      const int to_read = std::min(avail, static_cast<int>(sizeof(temp)));
+      const int read_bytes = Uart_ReadSwSerial(temp, to_read);
+      for (int i = 0; i < read_bytes; ++i) {
+        if (buf_len < sizeof(buf)) {
+          buf[buf_len++] = temp[i];
+        } else {
+          memmove(buf, buf + 1, buf_len - 1);
+          buf[buf_len - 1] = temp[i];
+        }
       }
-      last_byte_ms = now;
+      if (read_bytes > 0) {
+        last_byte_ms = now;
+      }
     }
 
     uint8_t target_stx = 0;

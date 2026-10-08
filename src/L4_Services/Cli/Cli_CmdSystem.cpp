@@ -325,7 +325,12 @@ void printStats(int sock) {
   uint32_t poll_cnt = 0, vip_cnt = 0, norm_cnt = 0;
   System_GetCh1Metrics(poll_cnt, vip_cnt, norm_cnt);
 
+  uint32_t telem_drops = 0, telem_hw = 0;
+  Telemetry_GetStats(telem_drops, telem_hw);
+
   out.appendFormat(
+      "%-55s %24u\r\n"
+      "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
@@ -337,7 +342,11 @@ void printStats(int sock) {
       "Normal Controls (Wallpad)",
       static_cast<unsigned>(norm_cnt),
       "Stale Emerg Polls",
-      static_cast<unsigned>(diag_snap.stale_poll_count));
+      static_cast<unsigned>(diag_snap.stale_poll_count),
+      "Telemetry Drops (Drop-Oldest)",
+      static_cast<unsigned>(telem_drops),
+      "Telemetry High-Watermark (Max 16)",
+      static_cast<unsigned>(telem_hw));
 
   System_FormatTaskStacks(out, stack_snap);
 
@@ -362,6 +371,7 @@ void cmdStats(CliContext &ctx) {
       System_ResetTrafficStats();
       ProtocolDiag_ResetBridgeStats();
       ProtocolDiag_PollingResetHits();
+      Telemetry_ResetStats();
       sendTelnetMsg(client, "All traffic statistics, hits, and metrics history "
                             "CLEARED to 0.\r\n");
       return;

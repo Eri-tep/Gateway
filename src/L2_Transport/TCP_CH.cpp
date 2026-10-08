@@ -47,16 +47,16 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
     int max_fd = -1;
 
     for (size_t i = 0; i < s_participant_count; ++i) {
-      if (s_participants[i].populateFds) {
+      if (s_participants[i].populateFds) [[likely]] {
         s_participants[i].populateFds(readfds, errorfds, max_fd);
       }
     }
 
     int act = 0;
     struct timeval tv = {0, 2000}; // 2ms responsive non-blocking cadence
-    if (max_fd >= 0) {
+    if (max_fd >= 0) [[likely]] {
       act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
-      if (ota_now) {
+      if (ota_now) [[unlikely]] {
         vTaskDelay(pdMS_TO_TICKS(10));
       }
     } else {
@@ -66,16 +66,16 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
     esp_task_wdt_reset();
     System_FeedWdt(Config::Task::WDT_ID_NET);
 
-    if (act > 0) {
+    if (act > 0) [[likely]] {
       for (size_t i = 0; i < s_participant_count; ++i) {
-        if (s_participants[i].processEvents) {
+        if (s_participants[i].processEvents) [[likely]] {
           s_participants[i].processEvents(readfds, errorfds, ota_now);
         }
       }
     }
 
     for (size_t i = 0; i < s_participant_count; ++i) {
-      if (s_participants[i].tick) {
+      if (s_participants[i].tick) [[likely]] {
         s_participants[i].tick(ota_now, now_ms);
       }
     }

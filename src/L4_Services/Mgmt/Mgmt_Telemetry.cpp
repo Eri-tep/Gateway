@@ -200,6 +200,12 @@ static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
       f_bell ? "true" : "false", l_bell ? "true" : "false",
       static_cast<unsigned>(b_ms));
 
+  uint32_t telem_drops = 0, telem_hw = 0;
+  Telemetry_GetStats(telem_drops, telem_hw);
+  out.appendFormat(
+      ",\"telemetry\":{\"drop_count\":%u,\"high_watermark\":%u}",
+      telem_drops, telem_hw);
+
   out.append("}}");
 }
 
@@ -530,8 +536,11 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 }
 
 void Mgmt_DrainTelemetryQueue() noexcept {
+  constexpr size_t MAX_DRAIN_PER_TICK = 16;
   TelemetryItem item{};
-  while (Telemetry_Dequeue(item)) {
+  size_t drained = 0;
+  while (drained < MAX_DRAIN_PER_TICK && Telemetry_Dequeue(item)) {
+    ++drained;
     switch (item.type) {
     case TelemetryEventType::DEVICE_RESULT: {
       const auto &res = item.device_res;

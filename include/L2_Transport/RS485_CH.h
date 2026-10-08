@@ -67,6 +67,25 @@ public:
     return true;
   }
 
+  bool dequeueIfDue(uint32_t now, StaticPacket &out_pkt) noexcept {
+    CriticalSectionLocker lock(&_mux);
+    if (_size == 0 || now < _elements[_head].due_ms) {
+      return false;
+    }
+    out_pkt = _elements[_head].pkt;
+    _head = (_head + 1) % Capacity;
+    _size--;
+    return true;
+  }
+
+  [[nodiscard]] std::optional<uint32_t> getNextDueMs() const noexcept {
+    CriticalSectionLocker lock(const_cast<portMUX_TYPE *>(&_mux));
+    if (_size == 0) {
+      return std::nullopt;
+    }
+    return _elements[_head].due_ms;
+  }
+
   bool peek(StaticPacket &out_pkt, uint32_t &out_due_ms) noexcept {
     CriticalSectionLocker lock(&_mux);
     if (_size == 0) {

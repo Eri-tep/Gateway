@@ -328,6 +328,8 @@ struct TelemetryItem {
 
 bool Telemetry_Enqueue(const TelemetryItem &item) noexcept;
 [[nodiscard]] bool Telemetry_Dequeue(TelemetryItem &out_item) noexcept;
+void Telemetry_GetStats(uint32_t &drop_count, uint32_t &high_watermark) noexcept;
+void Telemetry_ResetStats() noexcept;
 
 /// Process incoming bus ACK packet: updates SSOT cache and dispatches to registered listener.
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept;

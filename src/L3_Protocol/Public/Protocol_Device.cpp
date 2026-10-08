@@ -685,6 +685,13 @@ constexpr size_t TELEMETRY_QUEUE_LEN = 16;
 static StaticQueue_t s_telemetry_queue_struct;
 static uint8_t s_telemetry_queue_storage[TELEMETRY_QUEUE_LEN * sizeof(TelemetryItem)];
 static QueueHandle_t s_telemetry_queue = nullptr;
+static std::atomic<uint32_t> s_telemetry_drop_count{0};
+static std::atomic<uint32_t> s_telemetry_high_watermark{0};
+
+static uint32_t s_last_broadcast_ms = 0;
+static uint8_t s_last_broadcast_dev = 0;
+static uint8_t s_last_broadcast_sub1 = 0;
+static uint8_t s_last_broadcast_sub2 = 0;
 
 QueueHandle_t GetTelemetryQueue() noexcept {
   if (UNLIKELY(!s_telemetry_queue)) {
@@ -700,12 +707,37 @@ QueueHandle_t GetTelemetryQueue() noexcept {
 
 bool Telemetry_Enqueue(const TelemetryItem &item) noexcept {
   QueueHandle_t q = GetTelemetryQueue();
-  return q ? (xQueueSend(q, &item, 0) == pdTRUE) : false;
+  if (UNLIKELY(!q)) return false;
+
+  // Drop-Oldest backpressure: keep newest telemetry event on burst
+  if (xQueueSend(q, &item, 0) != pdTRUE) {
+    TelemetryItem discarded{};
+    xQueueReceive(q, &discarded, 0);
+    s_telemetry_drop_count.fetch_add(1, std::memory_order_relaxed);
+    xQueueSend(q, &item, 0);
+  }
+
+  const uint32_t waiting = static_cast<uint32_t>(uxQueueMessagesWaiting(q));
+  uint32_t cur_hw = s_telemetry_high_watermark.load(std::memory_order_relaxed);
+  while (waiting > cur_hw &&
+         !s_telemetry_high_watermark.compare_exchange_weak(cur_hw, waiting, std::memory_order_relaxed)) {
+  }
+  return true;
 }
 
 bool Telemetry_Dequeue(TelemetryItem &out_item) noexcept {
   QueueHandle_t q = GetTelemetryQueue();
   return q ? (xQueueReceive(q, &out_item, 0) == pdTRUE) : false;
+}
+
+void Telemetry_GetStats(uint32_t &drop_count, uint32_t &high_watermark) noexcept {
+  drop_count = s_telemetry_drop_count.load(std::memory_order_relaxed);
+  high_watermark = s_telemetry_high_watermark.load(std::memory_order_relaxed);
+}
+
+void Telemetry_ResetStats() noexcept {
+  s_telemetry_drop_count.store(0, std::memory_order_relaxed);
+  s_telemetry_high_watermark.store(0, std::memory_order_relaxed);
 }
 
 void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
@@ -725,6 +757,20 @@ void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept {
   DeviceUpdateResult res = s_device_repo.updateFromBus(ack_pkt);
   if (res.should_broadcast) {
+    const uint32_t now = millis();
+    // 50ms throttle window: suppress rapid flapping of identical non-momentary device (bypass elevator 0x34)
+    if (res.dev_id != 0x34 &&
+        res.dev_id == s_last_broadcast_dev &&
+        res.sub1 == s_last_broadcast_sub1 &&
+        res.sub2 == s_last_broadcast_sub2 &&
+        (now - s_last_broadcast_ms < Config::Timing::DEVICE_BROADCAST_THROTTLE_MS)) {
+      return;
+    }
+    s_last_broadcast_ms = now;
+    s_last_broadcast_dev = res.dev_id;
+    s_last_broadcast_sub1 = res.sub1;
+    s_last_broadcast_sub2 = res.sub2;
+
     TelemetryItem item{};
     item.type = TelemetryEventType::DEVICE_RESULT;
     item.device_res = res;
