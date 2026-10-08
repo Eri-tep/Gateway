@@ -75,11 +75,11 @@ namespace Endian {
 }
 
 [[nodiscard]] constexpr std::optional<uint16_t> loadBe16At(std::span<const uint8_t> b, size_t off) noexcept {
-  if (off > b.size() || b.size() - off < 2) return std::nullopt;
+  if (b.size() < 2 || off > b.size() - 2) return std::nullopt;
   return static_cast<uint16_t>((static_cast<uint16_t>(b[off]) << 8) | b[off + 1]);
 }
 [[nodiscard]] constexpr std::optional<uint16_t> loadLe16At(std::span<const uint8_t> b, size_t off) noexcept {
-  if (off > b.size() || b.size() - off < 2) return std::nullopt;
+  if (b.size() < 2 || off > b.size() - 2) return std::nullopt;
   return static_cast<uint16_t>((static_cast<uint16_t>(b[off + 1]) << 8) | b[off]);
 }
 } // namespace Endian
@@ -147,8 +147,8 @@ void FormatElapsed(uint32_t now, uint32_t timestamp, char *out,
 } // namespace Fmt
 
 struct AppendBuf {
-  char *buf;
-  size_t cap;
+  char *buf{nullptr};
+  size_t cap{0};
   size_t offset = 0;
 
 public:

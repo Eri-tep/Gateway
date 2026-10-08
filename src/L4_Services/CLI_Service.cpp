@@ -635,7 +635,7 @@ static void handleTabCompletion(TelnetManager::TelnetSession *sess) {
   if (memchr(sess->lineBuf, ' ', sess->lineLen) != nullptr)
     return;
 
-  const char *matches[32];
+  const char *matches[32]{};
   size_t match_count = 0;
 
   for (size_t i = 0; i < kConsoleCmdsCount && match_count < 32; ++i) {
@@ -1027,7 +1027,7 @@ void TelnetManager::tick() {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
     int new_sock =
-        accept(_server_fd, (struct sockaddr *)&client_addr, &client_len);
+        accept(_server_fd, reinterpret_cast<struct sockaddr *>(&client_addr), &client_len);
     if (new_sock >= 0) {
       if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < 32768) {
         close(new_sock);
@@ -1289,11 +1289,11 @@ void TelnetTracer::trace(const char *fmt, ...) {
 
 namespace {
 struct ChannelTracker {
-  uint8_t dev_id;
-  struct timeval tv;
-  bool is_query;
-  bool is_control;
-  bool active;
+  uint8_t dev_id = 0;
+  struct timeval tv = {0, 0};
+  bool is_query = false;
+  bool is_control = false;
+  bool active = false;
 };
 
 static ChannelTracker s_trackers[7] = {};

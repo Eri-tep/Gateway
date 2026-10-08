@@ -229,7 +229,7 @@ void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
     const char *p_name = ProfileRepository::getActiveProfile(cur_p)
                              ? (cur_p.name[0] ? cur_p.name : cur_p.key)
                              : nullptr;
-    if (p_name && catalog_vendor && strcmp(catalog_vendor, "Unknown") != 0 &&
+    if (p_name && strcmp(catalog_vendor, "Unknown") != 0 &&
         strcmp(p_name, catalog_vendor) != 0) {
       snprintf(out_buf, max_len, "%s (%s)", p_name, catalog_vendor);
     } else if (p_name) {

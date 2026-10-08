@@ -807,12 +807,13 @@ constexpr FcuActionHandler kFcuActions[] = {
     {"temp",          FcuActionHandler::ActionType::TargetTemp},
 };
 
-static_assert([] {
+constexpr bool areFcuActionsSorted() noexcept {
   for (size_t i = 1; i < sizeof(kFcuActions) / sizeof(kFcuActions[0]); ++i) {
     if (kFcuActions[i - 1].action >= kFcuActions[i].action) return false;
   }
   return true;
-}(), "kFcuActions must be strictly sorted alphabetically for binary search");
+}
+static_assert(areFcuActionsSorted(), "kFcuActions must be strictly sorted alphabetically for binary search");
 
 } // namespace
 

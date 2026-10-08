@@ -133,11 +133,11 @@ public:
     uint32_t last_activity_ms = 0;
     IPAddress clientIp{0, 0, 0, 0};
 
-    char pwBuffer[64];
+    char pwBuffer[64]{0};
     size_t pwLen = 0;
     uint32_t sessionId = 0;
 
-    char lineBuf[128];
+    char lineBuf[128]{0};
     uint8_t lineLen = 0;
 
     enum class EscState : uint8_t {

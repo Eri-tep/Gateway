@@ -33,7 +33,7 @@ struct HubClientSlot {
   int sock{-1};
   bool is_connected{false};
   uint32_t last_reconnect_ms{0};
-  uint8_t rx_buf[Config::TCP::HUB_RX_BUFFER_SIZE];
+  uint8_t rx_buf[Config::TCP::HUB_RX_BUFFER_SIZE]{0};
   size_t rx_len{0};
   uint32_t last_rx_ms{0};
   uint32_t rx_pkts{0};
@@ -454,17 +454,18 @@ bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count,
   return true;
 }
 
-void processStream(int slot_idx, HubClientSlot *slot) {
-  if (!slot)
+void processStream(size_t slot_idx, HubClientSlot *slot) {
+  if (!slot || slot_idx >= Config::TCP::MAX_EW11_SLOTS)
     return;
-  if (slot_idx > 0 && slot_idx < static_cast<int>(Config::TCP::MAX_EW11_SLOTS) &&
-      s_slot_drivers[slot_idx].onRxStream) {
-    size_t consumed =
-        s_slot_drivers[slot_idx].onRxStream(
-            static_cast<uint8_t>(slot_idx),
-            std::span<const uint8_t>(slot->rx_buf, slot->rx_len));
-    consumeRxBuffer(slot, consumed);
-  } else if (slot_idx == 0) {
+  if (slot_idx > 0 && slot_idx < std::size(s_slot_drivers)) {
+    if (s_slot_drivers[slot_idx].onRxStream) {
+      size_t consumed =
+          s_slot_drivers[slot_idx].onRxStream(
+              static_cast<uint8_t>(slot_idx),
+              std::span<const uint8_t>(slot->rx_buf, slot->rx_len));
+      consumeRxBuffer(slot, consumed);
+    }
+  } else {
     demuxPacketStream(slot);
   }
 }
@@ -579,7 +580,7 @@ void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
   std::copy(data, data + copy_len, slot->rx_buf + slot->rx_len);
   slot->rx_len += copy_len;
 
-  int slot_idx = static_cast<int>(slot - s_hub_slots);
+  size_t slot_idx = static_cast<size_t>(slot - s_hub_slots);
   Ew11Manager::processStream(slot_idx, slot);
 }
 
@@ -773,7 +774,7 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
   if (!ota_now) {
     struct PendingChunk {
       int slot_idx{-1};
-      uint8_t buf[Config::TCP::POLL_RX_CHUNK_SIZE];
+      uint8_t buf[Config::TCP::POLL_RX_CHUNK_SIZE]{0};
       int len{0};
     };
     PendingChunk pending[Config::TCP::MAX_EW11_SLOTS];
