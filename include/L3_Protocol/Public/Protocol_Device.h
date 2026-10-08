@@ -187,6 +187,7 @@ struct DeviceKey {
 struct DeviceStateEntry {
   uint8_t dev_id;
   uint8_t sub1, sub2;
+  uint64_t shadow_packed_state{0}; ///< 64-bit packed state fingerprint
   std::array<uint8_t, 64> last_ack_data;
   uint8_t last_ack_len{0};
   uint8_t last_target_temp{0};
@@ -202,6 +203,28 @@ struct DeviceStateEntry {
                                 Config::Timing::STALE_DEVICE_THRESHOLD_MS);
   }
 };
+
+[[nodiscard]] constexpr uint64_t Device_PackState(uint8_t dev_id, uint8_t sub1,
+                                                   uint8_t power, uint8_t target_temp,
+                                                   uint8_t current_temp, uint8_t fan_speed,
+                                                   uint8_t vent_mode, uint8_t sub2) noexcept {
+  return (static_cast<uint64_t>(dev_id) << 56) |
+         (static_cast<uint64_t>(sub1) << 48) |
+         (static_cast<uint64_t>(power) << 40) |
+         (static_cast<uint64_t>(target_temp) << 32) |
+         (static_cast<uint64_t>(current_temp) << 24) |
+         (static_cast<uint64_t>(fan_speed) << 16) |
+         (static_cast<uint64_t>(vent_mode) << 8) |
+         (static_cast<uint64_t>(sub2));
+}
+
+[[nodiscard]] inline uint64_t Device_ExtractPackedPacket(const uint8_t *data, size_t len) noexcept {
+  if (UNLIKELY(!data || len < 6)) return 0;
+  uint64_t p = 0;
+  const size_t copy_len = std::min<size_t>(len - 5, sizeof(uint64_t));
+  std::memcpy(&p, data + 5, copy_len);
+  return p;
+}
 
 static_assert(std::is_trivially_copyable_v<DeviceStateEntry>,
               "DeviceStateEntry must be trivially copyable");
@@ -268,6 +291,10 @@ void Device_Clear() noexcept;
 [[nodiscard]] bool Device_FindCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                    DeviceStateEntry &out_copy) noexcept;
 
+/// Get 64-bit packed state fingerprint (thread-safe, zero struct copy).
+[[nodiscard]] bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                         uint64_t &out_packed) noexcept;
+
 /// Get copy of device entry at index (thread-safe copy).
 [[nodiscard]] bool Device_GetAtCopy(size_t index,
                                     DeviceStateEntry &out_copy) noexcept;
@@ -330,6 +357,11 @@ bool Telemetry_Enqueue(const TelemetryItem &item) noexcept;
 [[nodiscard]] bool Telemetry_Dequeue(TelemetryItem &out_item) noexcept;
 void Telemetry_GetStats(uint32_t &drop_count, uint32_t &high_watermark) noexcept;
 void Telemetry_ResetStats() noexcept;
+
+/// Fast O(1) 64-bit packed state query for ultra-low latency deduplication.
+[[nodiscard]] bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1,
+                                         uint8_t sub2,
+                                         uint64_t &out_packed) noexcept;
 
 /// Process incoming bus ACK packet: updates SSOT cache and dispatches to registered listener.
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept;

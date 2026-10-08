@@ -7,6 +7,7 @@
 #include "L3_Protocol/Private/Fcu_Engine.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L3_Protocol/Private/Wallpad_Learning.h"
+#include "L3_Protocol/Private/Routing_Engine.h"
 #include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/Lockless_RingBuffer.h"
 #include "L0_Foundation/System_Platform.h"
@@ -80,6 +81,8 @@ public:
   void clear();
   [[nodiscard]] bool findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                               DeviceStateEntry &out_copy) const noexcept;
+  [[nodiscard]] bool getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                    uint64_t &out_packed) const noexcept;
   [[nodiscard]] bool getSnapshot(size_t index,
                                  DeviceStateEntry &out_copy) const noexcept;
   [[nodiscard]] size_t getSnapshotChunk(size_t start_idx,
@@ -171,7 +174,7 @@ DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
   return findMutableFast(dev_id, sub1, sub2, h, auto_create);
 }
 
-const DeviceStateEntry *
+IRAM_ATTR const DeviceStateEntry *
 DeviceRepository::findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
                                    uint8_t sub2, uint8_t h) const noexcept {
   const size_t cnt = _device_count.load(std::memory_order_relaxed);
@@ -234,6 +237,19 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   if (!e) [[unlikely]]
     return false;
   copyEntryBounded(out_copy, *e);
+  return true;
+}
+
+IRAM_ATTR bool DeviceRepository::getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                                uint64_t &out_packed) const noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
+  CriticalSectionLocker lock(&_cache_mux);
+  const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
+  if (!e) [[unlikely]]
+    return false;
+  out_packed = e->shadow_packed_state;
   return true;
 }
 
@@ -506,15 +522,25 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
       prev_ho = (dev->last_ack_len > 1) ? dev->last_ack_data[1] : 0;
     }
 
+    const uint64_t new_packed = Device_ExtractPackedPacket(ack.data.data(), ack_len);
     if (!is_vent_mode_ack) {
-      ack_changed =
-          (dev->last_ack_len != ack_len ||
-           memcmp(dev->last_ack_data.data(), ack.data.data(), ack_len) != 0);
-      dev->last_ack_len = static_cast<uint8_t>(ack_len);
-      memcpy(dev->last_ack_data.data(), ack.data.data(), ack_len);
+      if (LIKELY(ack_len <= 13)) {
+        ack_changed = (dev->shadow_packed_state != new_packed || dev->last_ack_len != ack_len);
+      } else {
+        ack_changed = (dev->last_ack_len != ack_len ||
+                       memcmp(dev->last_ack_data.data(), ack.data.data(), ack_len) != 0);
+      }
+      if (ack_changed) {
+        dev->shadow_packed_state = new_packed;
+        dev->last_ack_len = static_cast<uint8_t>(ack_len);
+        memcpy(dev->last_ack_data.data(), ack.data.data(), ack_len);
+      }
     } else {
       // 모드 패킷 수신 시 모드 상태 변경 여부 확인하여 브로드캐스트 트리거
       ack_changed = true;
+      dev->shadow_packed_state = new_packed;
+      dev->last_ack_len = static_cast<uint8_t>(ack_len);
+      memcpy(dev->last_ack_data.data(), ack.data.data(), ack_len);
     }
     dev->last_updated_ms = now;
     dev->timeout_count = 0;
@@ -634,6 +660,11 @@ bool Device_FindCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   return s_device_repo.findCopy(dev_id, sub1, sub2, out_copy);
 }
 
+IRAM_ATTR bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                     uint64_t &out_packed) noexcept {
+  return s_device_repo.getPackedState(dev_id, sub1, sub2, out_packed);
+}
+
 bool Device_GetAtCopy(size_t index, DeviceStateEntry &out_copy) noexcept {
   return s_device_repo.getSnapshot(index, out_copy);
 }
@@ -662,7 +693,7 @@ void Device_SetLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept {
 
 // ── Device_UpdateFromBus ──────────────────────────────────────────────────────
 
-DeviceUpdateResult Device_UpdateFromBus(StaticPacket &ack_pkt) noexcept {
+IRAM_ATTR DeviceUpdateResult Device_UpdateFromBus(StaticPacket &ack_pkt) noexcept {
   return s_device_repo.updateFromBus(ack_pkt);
 }
 
@@ -684,8 +715,7 @@ bool Device_CopyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 
 namespace {
 constexpr size_t TELEMETRY_QUEUE_LEN = 32;
-static Foundation::LocklessSpscRingBuffer<TelemetryItem, TELEMETRY_QUEUE_LEN> s_telemetry_ring;
-static portMUX_TYPE s_telemetry_producer_mux = portMUX_INITIALIZER_UNLOCKED;
+static Foundation::SpinlockMpscRingBuffer<TelemetryItem, TELEMETRY_QUEUE_LEN> s_telemetry_queue;
 static std::atomic<uint32_t> s_telemetry_drop_count{0};
 static std::atomic<uint32_t> s_telemetry_high_watermark{0};
 
@@ -696,18 +726,12 @@ static uint8_t s_last_broadcast_sub2 = 0;
 } // namespace
 
 bool Telemetry_Enqueue(const TelemetryItem &item) noexcept {
-  bool pushed = false;
-  {
-    CriticalSectionLocker lock(s_telemetry_producer_mux);
-    pushed = s_telemetry_ring.push(item);
-  }
-
-  if (UNLIKELY(!pushed)) {
+  if (UNLIKELY(!s_telemetry_queue.push(item))) {
     s_telemetry_drop_count.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
 
-  const uint32_t waiting = static_cast<uint32_t>(s_telemetry_ring.size());
+  const uint32_t waiting = static_cast<uint32_t>(s_telemetry_queue.size());
   uint32_t cur_hw = s_telemetry_high_watermark.load(std::memory_order_relaxed);
   while (waiting > cur_hw &&
          !s_telemetry_high_watermark.compare_exchange_weak(cur_hw, waiting, std::memory_order_relaxed)) {
@@ -716,7 +740,7 @@ bool Telemetry_Enqueue(const TelemetryItem &item) noexcept {
 }
 
 bool Telemetry_Dequeue(TelemetryItem &out_item) noexcept {
-  return s_telemetry_ring.pop(out_item);
+  return s_telemetry_queue.pop(out_item);
 }
 
 void Telemetry_GetStats(uint32_t &drop_count, uint32_t &high_watermark) noexcept {
@@ -908,7 +932,10 @@ void registerMockDevice(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
     dev->is_online = true;
     dev->last_updated_ms = millis();
     dev->last_ack_len = 11;
+    dev->last_target_temp = 22;
+    dev->shadow_packed_state = Device_PackState(dev_id, sub1, 1, 22, 20, 0, 1, sub2);
   }
+  Router_RecordRoute(1, -1, dev_id, sub1, sub2);
 }
 
 } // namespace DeviceBenchmark

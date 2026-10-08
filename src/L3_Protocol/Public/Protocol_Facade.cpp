@@ -607,7 +607,11 @@ bool ProtocolDiag_RegisterTcpParticipant(const ProtocolTcpParticipant &p) noexce
   return Transport::TcpReactor::registerParticipant(rp);
 }
 
-uint8_t Protocol_LookupDeviceChannel(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+IRAM_ATTR uint8_t Protocol_LookupDeviceChannel(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+  const uint8_t fast_ch = Router_GetFastChannel(dev_id, sub1, sub2);
+  if (fast_ch != Protocol::Routing::ROUTE_INVALID) [[likely]] {
+    return fast_ch;
+  }
   RouteEndpoint ep{1, -1, 0};
   if (Router_LookupRoute(dev_id, sub1, sub2, ep)) {
     return ep.channel_id;

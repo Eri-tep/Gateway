@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <optional>
 #include <type_traits>
+#include "L0_Foundation/System_Platform.h"
 
 namespace Foundation {
 
@@ -133,6 +134,57 @@ private:
 
   // Contiguous slot storage: Cache-line aligned
   alignas(64) T storage_[Capacity]{};
+};
+
+/// Multi-Producer Single-Consumer (MPSC) Hybrid Ring Buffer
+/// - Producers: Serialized via lightweight SMP hardware spinlock (~20 cyc).
+/// - Consumer: 100% Lock-Free pop via underlying SPSC ring buffer (~27 cyc).
+template <typename T, size_t Capacity>
+class SpinlockMpscRingBuffer {
+public:
+  constexpr SpinlockMpscRingBuffer() noexcept = default;
+  ~SpinlockMpscRingBuffer() noexcept = default;
+
+  SpinlockMpscRingBuffer(const SpinlockMpscRingBuffer &) = delete;
+  SpinlockMpscRingBuffer &operator=(const SpinlockMpscRingBuffer &) = delete;
+  SpinlockMpscRingBuffer(SpinlockMpscRingBuffer &&) = delete;
+  SpinlockMpscRingBuffer &operator=(SpinlockMpscRingBuffer &&) = delete;
+
+  /// Push item with producer-side spinlock serialization (Multi-Producer safe).
+  [[nodiscard]] bool push(const T &item) noexcept {
+    CriticalSectionLocker lock(mux_);
+    return ring_.push(item);
+  }
+
+  /// Push item with move semantics and producer-side spinlock serialization.
+  [[nodiscard]] bool push(T &&item) noexcept {
+    CriticalSectionLocker lock(mux_);
+    return ring_.push(std::move(item));
+  }
+
+  /// Pop item (Single-Consumer lock-free).
+  [[nodiscard]] bool pop(T &out_item) noexcept {
+    return ring_.pop(out_item);
+  }
+
+  /// Pop item returning std::optional (Single-Consumer lock-free).
+  [[nodiscard]] std::optional<T> pop() noexcept {
+    return ring_.pop();
+  }
+
+  [[nodiscard]] bool empty() const noexcept { return ring_.empty(); }
+  [[nodiscard]] bool full() const noexcept { return ring_.full(); }
+  [[nodiscard]] size_t size() const noexcept { return ring_.size(); }
+  [[nodiscard]] static constexpr size_t capacity() noexcept { return Capacity; }
+
+  void reset() noexcept {
+    CriticalSectionLocker lock(mux_);
+    ring_.reset();
+  }
+
+private:
+  LocklessSpscRingBuffer<T, Capacity> ring_;
+  portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
 };
 
 } // namespace Foundation

@@ -23,6 +23,9 @@
 
 namespace {
 
+// DRAM-allocated 256-byte direct lock-free route cache (Cache-line aligned)
+alignas(64) static std::atomic<uint8_t> s_fast_route_cache[256];
+
 class DeviceRouteRegistry {
 public:
   static constexpr size_t MAX_ROUTES = 64;
@@ -36,6 +39,9 @@ private:
 public:
   DeviceRouteRegistry() noexcept {
     memset(_lookup_map, -1, sizeof(_lookup_map));
+    for (size_t i = 0; i < 256; ++i) {
+      s_fast_route_cache[i].store(Protocol::Routing::ROUTE_INVALID, std::memory_order_relaxed);
+    }
   }
 
   void recordRoute(uint8_t channel_id, int8_t slot_idx, uint8_t dev_id,
@@ -145,6 +151,9 @@ public:
     _count.store(0, std::memory_order_relaxed);
     memset(_lookup_map, -1, sizeof(_lookup_map));
     memset(_entries, 0, sizeof(_entries));
+    for (size_t i = 0; i < 256; ++i) {
+      s_fast_route_cache[i].store(Protocol::Routing::ROUTE_INVALID, std::memory_order_relaxed);
+    }
   }
 };
 
@@ -157,6 +166,15 @@ static DeviceRouteRegistry s_route_registry;
 void Router_RecordRoute(uint8_t channel_id, int8_t slot_idx,
                          uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
   s_route_registry.recordRoute(channel_id, slot_idx, dev_id, sub1, sub2);
+  const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
+  s_fast_route_cache[h].store(channel_id, std::memory_order_release);
+}
+
+// ── Router_GetFastChannel ─────────────────────────────────────────────────────
+
+IRAM_ATTR uint8_t Router_GetFastChannel(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+  const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
+  return s_fast_route_cache[h].load(std::memory_order_relaxed);
 }
 
 // ── Router_LookupRoute ────────────────────────────────────────────────────────

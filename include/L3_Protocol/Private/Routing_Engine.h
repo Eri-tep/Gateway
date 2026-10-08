@@ -40,6 +40,15 @@ struct DeviceRouteEntry {
 
 // ── Route Registry API (replaces direct g_route_registry extern access) ───────
 
+namespace Protocol::Routing {
+constexpr uint8_t ROUTE_INVALID = 0xFF;
+}
+
+/// Fast O(1) lock-free channel lookup for hot-path packet dispatch.
+/// Returns channel_id (e.g. 1, 2, 3, 4, 5) or ROUTE_INVALID if not yet learned.
+[[nodiscard]] uint8_t Router_GetFastChannel(uint8_t dev_id, uint8_t sub1,
+                                            uint8_t sub2) noexcept;
+
 /// Record a channel route for a device (dev_id, sub1, sub2) → (channel, slot).
 /// Called during device discovery / polling registration.
 void Router_RecordRoute(uint8_t channel_id, int8_t slot_idx,

@@ -129,11 +129,11 @@ enum class UartRxStatus { SUCCESS, TIMEOUT };
 using UartPollCallback = uint32_t (*)(void *ctx);
 
 QueueHandle_t Uart_GetEventQueue(uart_port_t u_num);
-UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
-                             uint32_t tout_ms,
-                             UartPollCallback on_poll = nullptr,
-                             void *poll_ctx = nullptr,
-                             const StaticPacket *echo_match = nullptr);
+IRAM_ATTR UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
+                                       uint32_t tout_ms,
+                                       UartPollCallback on_poll = nullptr,
+                                       void *poll_ctx = nullptr,
+                                       const StaticPacket *echo_match = nullptr);
 
 void Ch1_WaitBusIdle(uint32_t silence_ms);
 void Ch1_HandleCtrl(const StaticPacket &ctrlPacket);
@@ -144,10 +144,10 @@ void Ch1_SetState(Ch1State &cur_state, Ch1State new_state);
 // 2. UART RX Stream Demux & Packet Validation (formerly UartRx.cpp)
 // ============================================================================
 
-static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
-                                            size_t &stream_len,
-                                            size_t max_stream_buf,
-                                            uint32_t &last_rx_ms) {
+static inline IRAM_ATTR bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
+                                                      size_t &stream_len,
+                                                      size_t max_stream_buf,
+                                                      uint32_t &last_rx_ms) {
   size_t avail = 0;
   uart_get_buffered_data_len(u_num, &avail);
   if (avail == 0)
@@ -207,9 +207,9 @@ static inline void Uart_FlushChannelInput(uart_port_t u_num) {
   }
 }
 
-UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
-                             uint32_t tout_ms, UartPollCallback on_poll,
-                             void *poll_ctx, const StaticPacket *echo_match) {
+IRAM_ATTR UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
+                                       uint32_t tout_ms, UartPollCallback on_poll,
+                                       void *poll_ctx, const StaticPacket *echo_match) {
   size_t u_idx = static_cast<size_t>(u_num);
   if (u_idx >= 3)
     return UartRxStatus::TIMEOUT;

@@ -323,9 +323,9 @@ size_t UniversalProtocolEngine::getActiveProfileKey(char *out,
   return snprintf(out, max_len, "%s", desc.key);
 }
 
-static inline bool checkFramingPure(std::span<const uint8_t> f, uint8_t stx,
-                                    uint8_t etx, uint8_t min_len,
-                                    uint8_t max_len, ChecksumAlgo algo) {
+static inline IRAM_ATTR bool checkFramingPure(std::span<const uint8_t> f, uint8_t stx,
+                                               uint8_t etx, uint8_t min_len,
+                                               uint8_t max_len, ChecksumAlgo algo) {
   if (f.size() < min_len || f.size() > max_len || f.size() < 3) [[unlikely]]
     return false;
   if (f[0] != stx || f[f.size() - 1] != etx) [[unlikely]]
@@ -336,7 +336,7 @@ static inline bool checkFramingPure(std::span<const uint8_t> f, uint8_t stx,
          f[f.size() - 2];
 }
 
-std::expected<std::span<const uint8_t>, UniversalProtocolEngine::FrameValidationError>
+IRAM_ATTR std::expected<std::span<const uint8_t>, UniversalProtocolEngine::FrameValidationError>
 UniversalProtocolEngine::validateFrame(std::span<const uint8_t> frame) const noexcept {
   if (frame.size() < 3 || frame.size() > 64)
     return std::unexpected(FrameValidationError::InvalidLength);
@@ -358,7 +358,7 @@ UniversalProtocolEngine::validateFrame(std::span<const uint8_t> frame) const noe
   return frame;
 }
 
-bool UniversalProtocolEngine::validatePacket(std::span<const uint8_t> frame) const {
+IRAM_ATTR bool UniversalProtocolEngine::validatePacket(std::span<const uint8_t> frame) const {
   return validateFrame(frame).has_value();
 }
 
@@ -447,7 +447,7 @@ uint16_t UniversalProtocolEngine::calculateChecksum(const uint8_t *data,
                                                    size_t len) const {
   return calculateChecksumDirect(effectiveProfile().algo, data, len);
 }
-uint8_t UniversalProtocolEngine::getStx() const {
+IRAM_ATTR uint8_t UniversalProtocolEngine::getStx() const {
   return effectiveProfile().stx;
 }
 uint8_t UniversalProtocolEngine::getEtx() const {
@@ -460,9 +460,9 @@ uint8_t UniversalProtocolEngine::getMaxPacketLen() const {
   return effectiveProfile().max_len;
 }
 
-int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
-                                                 size_t stream_len,
-                                                 size_t stx_idx) const {
+IRAM_ATTR int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
+                                                          size_t stream_len,
+                                                          size_t stx_idx) const {
   if (stx_idx >= stream_len)
     return -1;
   const EffProfile &e = effectiveProfile();
@@ -1226,15 +1226,15 @@ void Wallpad_ResetStalePollCount() noexcept {
   s_stale_poll_cnt.store(0, std::memory_order_relaxed);
 }
 
-uint8_t Wallpad_GetStx() noexcept {
+IRAM_ATTR uint8_t Wallpad_GetStx() noexcept {
   return Universal_GetEngine().getStx();
 }
 
-int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
+IRAM_ATTR int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
   return Universal_GetEngine().extractPacketLength(stream, stream_len, stx_idx);
 }
 
-bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept {
+IRAM_ATTR bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept {
   return Universal_GetEngine().validatePacket(frame);
 }
 

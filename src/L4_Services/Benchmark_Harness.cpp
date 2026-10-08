@@ -452,6 +452,8 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     (void)DeviceBenchmark::findCopyDirect(0x18, 0x01, 0x00, dummy);
     (void)DeviceBenchmark::findCopyDirect(0x99, 0x99, 0x99, dummy);
     (void)DeviceBenchmark::probeDirectExists(0x18, 0x01, 0x00);
+    uint64_t dummy_packed = 0;
+    (void)Device_GetPackedState(0x18, 0x01, 0x00, dummy_packed);
     (void)benchSpanCalc(sp);
     (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
     std::memcpy(s_null_sink, GOLDEN_ACK, sizeof(GOLDEN_ACK));
@@ -472,6 +474,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   uint32_t min_c = UINT32_MAX, max_c = 0;
 
   uint32_t t_start = micros();
+  constexpr uint64_t golden_packed = Device_PackState(0x18, 0x01, 1, 22, 20, 0, 1, 0);
 
   for (uint32_t i = 0; i < iterations; ++i) {
     uint32_t loop_start = esp_cpu_get_cycle_count();
@@ -546,16 +549,16 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
     // 2-I. Warm Path Shadow State Deduplication Hit (Identical state -> No delta emit)
     t0 = esp_cpu_get_cycle_count();
-    DeviceStateEntry snap_dedup;
-    bool dedup_hit = Device_FindCopy(0x18, 0x01, 0x00, snap_dedup);
-    bool is_delta = (snap_dedup.last_target_temp != 22);
+    uint64_t snap_packed = 0;
+    bool dedup_hit = Device_GetPackedState(0x18, 0x01, 0x00, snap_packed);
+    bool is_delta = (snap_packed != golden_packed);
     t1 = esp_cpu_get_cycle_count();
     sum_dedup_hit += static_cast<uint32_t>(t1 - t0);
 
     // 2-J. Warm Path Shadow State Delta Emit (State changed -> Event emission branch)
     t0 = esp_cpu_get_cycle_count();
-    snap_dedup.last_target_temp = 23;
-    bool delta_emitted = (snap_dedup.last_target_temp != 22);
+    snap_packed ^= (1ULL << 32);
+    bool delta_emitted = (snap_packed != golden_packed);
     t1 = esp_cpu_get_cycle_count();
     sum_dedup_delta += static_cast<uint32_t>(t1 - t0);
 
