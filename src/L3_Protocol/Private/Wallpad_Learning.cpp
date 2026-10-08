@@ -58,16 +58,6 @@ const char *AutoProbingEngine::getAlgoName(ChecksumAlgo algo) {
 }
 
 namespace {
-uint8_t crc8Poly31(const uint8_t *d, size_t n) {
-  uint8_t crc = 0;
-  for (size_t i = 0; i < n; ++i) {
-    crc ^= d[i];
-    for (int b = 0; b < 8; ++b)
-      crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x31)
-                         : static_cast<uint8_t>(crc << 1);
-  }
-  return crc;
-}
 
 // 제어 프레임 길이 학습 (신규면 true)
 bool addCtrlLen(AutoProbeDescriptor &d, uint8_t len) {
@@ -91,77 +81,17 @@ template <class T> uint8_t argmax256(const T *a, uint16_t &mx) {
   return best;
 }
 
-using ChecksumFunc = uint8_t (*)(const uint8_t *p, size_t end) noexcept;
-
-inline uint8_t calcXorAll(const uint8_t *p, size_t end) noexcept {
-  uint8_t r = 0;
-  for (size_t i = 0; i < end; ++i) r ^= p[i];
-  return r;
-}
-
-inline uint8_t calcXorNoStx(const uint8_t *p, size_t end) noexcept {
-  uint8_t r = 0;
-  for (size_t i = 1; i < end; ++i) r ^= p[i];
-  return r;
-}
-
-inline uint8_t calcSumAll(const uint8_t *p, size_t end) noexcept {
-  uint8_t r = 0;
-  for (size_t i = 0; i < end; ++i) r += p[i];
-  return r;
-}
-
-inline uint8_t calcSumNoStx(const uint8_t *p, size_t end) noexcept {
-  uint8_t r = 0;
-  for (size_t i = 1; i < end; ++i) r += p[i];
-  return r;
-}
-
-inline uint8_t calcTwosComp(const uint8_t *p, size_t end) noexcept {
-  return static_cast<uint8_t>(-calcSumNoStx(p, end));
-}
-
-inline uint8_t calcOnesComp(const uint8_t *p, size_t end) noexcept {
-  return static_cast<uint8_t>(~calcSumAll(p, end));
-}
-
-inline uint8_t calcCrc8Maxim(const uint8_t *p, size_t end) noexcept {
-  return crc8Poly31(p, end);
-}
-
-constexpr ChecksumFunc CHECKSUM_DISPATCH_TABLE[] = {
-    nullptr,        // 0: UNKNOWN
-    calcXorAll,     // 1: XOR_ALL
-    calcXorNoStx,   // 2: XOR_NO_STX
-    calcSumAll,     // 3: SUM_ALL
-    calcSumNoStx,   // 4: SUM_NO_STX
-    calcTwosComp,   // 5: TWOS_COMPLEMENT
-    calcOnesComp,   // 6: ONES_COMPLEMENT
-    calcCrc8Maxim,  // 7: CRC8_MAXIM
-    nullptr         // 8: NONE
-};
-
 } // namespace
 
-uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
+uint16_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
                                              std::span<const uint8_t> data) const noexcept {
-  const size_t len = data.size();
-  if (UNLIKELY(len < 3))
-    return 0;
-
-  const size_t idx = static_cast<size_t>(algo);
-  if (LIKELY(idx < std::size(CHECKSUM_DISPATCH_TABLE) && CHECKSUM_DISPATCH_TABLE[idx])) {
-    return CHECKSUM_DISPATCH_TABLE[idx](data.data(), len - 2);
-  }
-  return 0;
+  return calculateChecksumDirect(algo, data.data(), data.size());
 }
 
-uint8_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
+uint16_t AutoProbingEngine::calculateChecksum(ChecksumAlgo algo,
                                              const uint8_t *data,
                                              size_t len) const {
-  if (!data || len < 3)
-    return 0;
-  return calculateChecksum(algo, std::span<const uint8_t>(data, len));
+  return calculateChecksumDirect(algo, data, len);
 }
 
 void AutoProbingEngine::initFromNvs() {
@@ -298,7 +228,7 @@ void AutoProbingEngine::feedFrame(std::span<const uint8_t> f) {
     }
 
     if (matched == ChecksumAlgo::UNKNOWN &&
-        crc8Poly31(f.data(), payload_len) == actual_cs) {
+        calcCrc8Maxim(f.data(), payload_len) == actual_cs) {
       matched = ChecksumAlgo::CRC8_MAXIM;
     }
 
@@ -1906,8 +1836,11 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
     return false;
 
   if (out.length >= 3) {
-    out.data[out.length - 2] =
-        parser.calculateChecksum(out.data.data(), out.length);
+    const uint16_t cs = parser.calculateChecksum(out.data.data(), out.length);
+    if (cs == kChecksumInvalid) [[unlikely]] {
+      return false;
+    }
+    out.data[out.length - 2] = static_cast<uint8_t>(cs);
     out.data[out.length - 1] = parser.getEtx();
   }
   return true;

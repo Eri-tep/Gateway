@@ -474,9 +474,7 @@ void ProtocolDiag_ResetGroup(uint8_t dev_id, bool all) noexcept {
   Control_GetRegistry().resetGroup(dev_id, all);
 }
 
-uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept {
-  if (!data || len == 0)
-    return 0;
+uint16_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept {
   return Universal_GetEngine().calculateChecksum(data, len);
 }
 

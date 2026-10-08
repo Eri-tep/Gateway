@@ -266,7 +266,8 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
 
   // Warm-up (pre-heat instruction cache & Flash MMU XIP)
   for (uint32_t i = 0; i < 200; ++i) {
-    Universal_GetEngine().calculateChecksum(span_pkt);
+    (void)calculateChecksumDirect(ChecksumAlgo::XOR_NO_STX, span_pkt.data(), span_pkt.size());
+    (void)Universal_GetEngine().calculateChecksum(span_pkt);
     benchSpanCalc(span_pkt);
     benchPtrLenCalc(GOLDEN_QUERY, sizeof(GOLDEN_QUERY));
     (void)benchExpectedRet(GOLDEN_QUERY[3]);
@@ -275,7 +276,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
     test_atomic.fetch_add(1, std::memory_order_relaxed);
   }
 
-  uint64_t sum_cs = 0, sum_span = 0, sum_ptr = 0, sum_exp = 0, sum_bool = 0;
+  uint64_t sum_cs = 0, sum_cs_dir = 0, sum_span = 0, sum_ptr = 0, sum_exp = 0, sum_bool = 0;
   uint64_t sum_rel = 0, sum_acq = 0, sum_seq = 0;
   uint64_t total_cycles = 0;
   uint32_t min_c = UINT32_MAX, max_c = 0;
@@ -286,12 +287,17 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
   for (uint32_t i = 0; i < iterations; ++i) {
     uint32_t loop_start = esp_cpu_get_cycle_count();
 
-    // 1-A Checksum Calculation
+    // 1-A Checksum Calculation Micro A/B (Direct Inlined vs Universal E2E API)
     uint32_t t0 = esp_cpu_get_cycle_count();
-    uint8_t cs = active_parser.calculateChecksum(span_pkt);
+    uint16_t cs_dir = calculateChecksumDirect(ChecksumAlgo::XOR_NO_STX, span_pkt.data(), span_pkt.size());
     uint32_t t1 = esp_cpu_get_cycle_count();
+    sum_cs_dir += static_cast<uint32_t>(t1 - t0);
+
+    t0 = esp_cpu_get_cycle_count();
+    uint16_t cs = active_parser.calculateChecksum(span_pkt);
+    t1 = esp_cpu_get_cycle_count();
     sum_cs += static_cast<uint32_t>(t1 - t0);
-    s_observable_sink += cs;
+    s_observable_sink += static_cast<uint8_t>(cs ^ cs_dir);
 
     // 1-B Memory View: std::span vs pointer+length
     t0 = esp_cpu_get_cycle_count();
@@ -358,6 +364,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
         (static_cast<uint64_t>(iterations) * 1000000ULL) / r.total_duration_us);
   }
 
+  r.phase1.checksum_direct_cycles = static_cast<uint32_t>(sum_cs_dir / iterations);
   r.phase1.checksum_cycles = static_cast<uint32_t>(sum_cs / iterations);
   r.phase1.span_cycles = static_cast<uint32_t>(sum_span / iterations);
   r.phase1.ptr_len_cycles = static_cast<uint32_t>(sum_ptr / iterations);
@@ -901,8 +908,9 @@ void FormatReport(AppendBuf &out, const BenchmarkReport &r) noexcept {
   if (r.phase_id == 1) {
     out.append(CliFmt::BOX80_DASH);
     out.append("[PRIMITIVE & LANGUAGE FEATURE MICRO A/B (CYCLES)]\r\n");
-    out.append(CliFmt::BOX80_DASH);
-    out.appendFormat("1-A. Checksum Calculation     : %6u cycles (%.2f us)\r\n",
+    out.appendFormat("1-A. Direct Inlined Branch   : %6u cycles (%.2f us)\r\n",
+                     r.phase1.checksum_direct_cycles, r.phase1.checksum_direct_cycles / 240.0f);
+    out.appendFormat("     Universal Engine E2E API : %6u cycles (%.2f us)\r\n",
                      r.phase1.checksum_cycles, r.phase1.checksum_cycles / 240.0f);
     out.appendFormat("1-B. std::span Parameter View : %6u cycles (%.2f us)\r\n",
                      r.phase1.span_cycles, r.phase1.span_cycles / 240.0f);

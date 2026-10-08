@@ -80,8 +80,9 @@ struct Phase0CalibrationMetrics {
 
 // ── Phase 1: Primitive & Language Feature Micro A/B Metrics ───────────────────
 struct Phase1PrimitiveMetrics {
-  uint32_t checksum_cycles{0};       // 1-A: XOR/SUM checksum
-  uint32_t span_cycles{0};           // 1-B: std::span view
+  uint32_t checksum_cycles{0};        // 1-A: Universal Engine E2E API
+  uint32_t checksum_direct_cycles{0}; // 1-A: Direct Inlined Branch
+  uint32_t span_cycles{0};            // 1-B: std::span view
   uint32_t ptr_len_cycles{0};        // 1-B: const uint8_t*, size_t equivalent
   uint32_t expected_cycles{0};       // 1-C: std::expected return
   uint32_t bool_cycles{0};           // 1-C: bool return equivalent

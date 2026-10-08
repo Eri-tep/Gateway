@@ -222,7 +222,11 @@ bool ProtocolDiag_SetGroupClass(uint8_t dev_id, DeviceClass cls, const char *nam
 void ProtocolDiag_ResetGroup(uint8_t dev_id, bool all) noexcept;
 
 // ── Frame Checksum Helper (for RPC raw tests) ────────────────────────────────
-uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
+#ifndef K_CHECKSUM_INVALID_DEFINED
+#define K_CHECKSUM_INVALID_DEFINED
+inline constexpr uint16_t kChecksumInvalid = 0x0100;
+#endif
+[[nodiscard]] uint16_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
 
 // ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
 bool ProtocolDiag_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept;

@@ -115,8 +115,8 @@ public:
   bool buildQueryPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                         StaticPacket &out) const;
 
-  uint8_t calculateChecksum(std::span<const uint8_t> data) const noexcept;
-  uint8_t calculateChecksum(const uint8_t *data, size_t len) const;
+  [[nodiscard]] uint16_t calculateChecksum(std::span<const uint8_t> data) const noexcept;
+  [[nodiscard]] uint16_t calculateChecksum(const uint8_t *data, size_t len) const;
   uint8_t getStx() const;
   uint8_t getEtx() const;
   uint8_t getMinPacketLen() const;

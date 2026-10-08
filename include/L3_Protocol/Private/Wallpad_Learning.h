@@ -20,21 +20,11 @@
 #include <freertos/semphr.h>
 #include <span>
 
+#include "L3_Protocol/Private/Protocol_Checksum.h"
+
 // ============================================================================
 // 1. CHECKSUM ALGORITHM & AUTO-PROBING ENGINE DEFINITIONS
 // ============================================================================
-
-enum class ChecksumAlgo : uint8_t {
-  UNKNOWN = 0,
-  XOR_ALL = 1,         // XOR from 0 to N-3 (Hyundai HT, EzVille, etc.)
-  XOR_NO_STX = 2,      // XOR from 1 to N-3 (Kocom)
-  SUM_ALL = 3,         // Sum 0 to N-3 modulo 256 (Commax Legacy)
-  SUM_NO_STX = 4,      // Sum 1 to N-3 modulo 256 (Commax Modern)
-  TWOS_COMPLEMENT = 5, // (0x100 - Sum[1..N-3]) % 256 (Samsung SDS / EZON)
-  ONES_COMPLEMENT = 6, // (~Sum[0..N-3]) % 256
-  CRC8_MAXIM = 7,      // CRC-8 (poly 0x31, init 0x00)
-  NONE = 8             // Pure framing without checksum byte (Doorphone 0x02..0x03)
-};
 
 struct AutoProbeDescriptor {
   uint8_t stx{0xF7};
@@ -96,10 +86,10 @@ public:
   void reset();
   void injectControlSpec(uint8_t ctrl_op, uint8_t ctrl_len);
   bool analyzeCacheMatrix();
-  uint8_t calculateChecksum(ChecksumAlgo algo,
-                            std::span<const uint8_t> data) const noexcept;
-  uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
-                            size_t len) const;
+  [[nodiscard]] uint16_t calculateChecksum(ChecksumAlgo algo,
+                                           std::span<const uint8_t> data) const noexcept;
+  [[nodiscard]] uint16_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
+                                           size_t len) const;
   static const char *getAlgoName(ChecksumAlgo algo);
 };
 

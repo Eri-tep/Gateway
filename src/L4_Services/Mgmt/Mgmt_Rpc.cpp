@@ -737,9 +737,12 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     qry_req.data[5] = 0x43; // Category: 운전 모드
     qry_req.data[6] = 0x11;
     qry_req.data[7] = 0x00;
-    qry_req.data[8] = 0x00;
-    uint8_t cs = ProtocolDiag_CalculateChecksum(qry_req.data.data(), 11);
-    qry_req.data[9] = cs ? cs : 0x84;
+    const uint16_t cs = ProtocolDiag_CalculateChecksum(qry_req.data.data(), 11);
+    if (cs == kChecksumInvalid) [[unlikely]] {
+      sendRpcResponse(sock, req_id, "error", "Invalid checksum algorithm state");
+      return;
+    }
+    qry_req.data[9] = static_cast<uint8_t>(cs);
     qry_req.data[10] = 0xEE;
     (void)Protocol_DispatchControl(qry_req, dummy);
   }

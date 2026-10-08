@@ -49,7 +49,7 @@ template <class F> size_t countIf(const PollingTargetEntry *e, size_t n, F f) {
 struct EffProfile {
   bool is_auto = false;
   uint8_t stx = 0, etx = 0, min_len = 0, max_len = 0;
-  ChecksumAlgo algo = ChecksumAlgo::NONE;
+  ChecksumAlgo algo = ChecksumAlgo::UNKNOWN;
   uint8_t op_off = 0, q_op = 0, c_op = 0, a_op = 0;
   bool ctrl_strict =
       true; // true: ctrl==c_op 로만 판정, false: query/ack 가 아니면 제어
@@ -332,7 +332,7 @@ static inline bool checkFramingPure(std::span<const uint8_t> f, uint8_t stx,
     return false;
   if (algo == ChecksumAlgo::NONE) [[unlikely]]
     return true;
-  return AutoProbe_GetEngine().calculateChecksum(algo, f.data(), f.size()) ==
+  return calculateChecksumDirect(algo, f.data(), f.size()) ==
          f[f.size() - 2];
 }
 
@@ -352,7 +352,7 @@ UniversalProtocolEngine::validateFrame(std::span<const uint8_t> frame) const noe
   if (frame[0] != e.stx || frame[frame.size() - 1] != e.etx)
     return std::unexpected(FrameValidationError::HeaderMismatch);
   if (e.algo != ChecksumAlgo::NONE &&
-      AutoProbe_GetEngine().calculateChecksum(e.algo, frame) != frame[frame.size() - 2])
+      calculateChecksumDirect(e.algo, frame.data(), frame.size()) != frame[frame.size() - 2])
     return std::unexpected(FrameValidationError::ChecksumMismatch);
 
   return frame;
@@ -425,22 +425,27 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
   if (e.sub2_off > 0 && e.sub2_off < n)
     out.data[e.sub2_off] = sub2;
   if (n >= 3) {
-    out.data[n - 2] =
-        AutoProbe_GetEngine().calculateChecksum(e.algo, out.data.data(), n);
-    out.data[n - 1] = e.etx;
+    if (e.algo == ChecksumAlgo::NONE) {
+      out.data[n - 1] = e.etx;
+    } else {
+      const uint16_t cs = calculateChecksumDirect(e.algo, out.data.data(), n);
+      if (cs == kChecksumInvalid) [[unlikely]] {
+        return false;
+      }
+      out.data[n - 2] = static_cast<uint8_t>(cs);
+      out.data[n - 1] = e.etx;
+    }
   }
   return true;
 }
 
-uint8_t UniversalProtocolEngine::calculateChecksum(std::span<const uint8_t> data) const noexcept {
-  return AutoProbe_GetEngine().calculateChecksum(effectiveProfile().algo, data);
+uint16_t UniversalProtocolEngine::calculateChecksum(std::span<const uint8_t> data) const noexcept {
+  return calculateChecksumDirect(effectiveProfile().algo, data.data(), data.size());
 }
 
-uint8_t UniversalProtocolEngine::calculateChecksum(const uint8_t *data,
+uint16_t UniversalProtocolEngine::calculateChecksum(const uint8_t *data,
                                                    size_t len) const {
-  if (!data)
-    return 0;
-  return calculateChecksum(std::span<const uint8_t>(data, len));
+  return calculateChecksumDirect(effectiveProfile().algo, data, len);
 }
 uint8_t UniversalProtocolEngine::getStx() const {
   return effectiveProfile().stx;
@@ -1042,7 +1047,9 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
     out_pkt.length = static_cast<uint8_t>(copy_len);
     memcpy(out_pkt.data.data(), poll_raw_ptr, copy_len);
   } else {
-    Universal_GetEngine().buildQueryPacket(poll_dev_id, poll_sub1, poll_sub2, out_pkt);
+    if (!Universal_GetEngine().buildQueryPacket(poll_dev_id, poll_sub1, poll_sub2, out_pkt)) {
+      return false;
+    }
   }
   return true;
 }
