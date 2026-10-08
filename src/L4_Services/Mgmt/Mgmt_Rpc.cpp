@@ -530,12 +530,24 @@ static void HandleRpc_DoorphoneAction(int sock, long req_id,
   char action_buf[32] = {0};
   findJsonStringValue(json_str, "action", action_buf, sizeof(action_buf));
 
-  bool is_open_front = (strcasecmp(action_buf, "open_front") == 0 ||
-                        strcasecmp(action_buf, "open") == 0);
-  bool is_open_lobby = (strcasecmp(action_buf, "open_lobby") == 0);
+  bool is_lobby = false;
+  bool is_valid = false;
+  switch (Hash::fnv1a32_ci_rt(action_buf)) {
+  case Hash::fnv1a32_ci("open_front"):
+  case Hash::fnv1a32_ci("open"):
+    is_valid = true;
+    is_lobby = false;
+    break;
+  case Hash::fnv1a32_ci("open_lobby"):
+    is_valid = true;
+    is_lobby = true;
+    break;
+  default:
+    break;
+  }
 
-  if (is_open_front || is_open_lobby) {
-    if (!Device_DoorphoneOpen(is_open_lobby)) {
+  if (is_valid) {
+    if (!Device_DoorphoneOpen(is_lobby)) {
       sendRpcResponse(sock, req_id, "busy",
                       "Doorphone sequence already in progress");
       return;

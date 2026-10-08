@@ -538,119 +538,119 @@ static void ew11SetEnable(int sock, int slot, bool enabled) {
                  slot, enabled ? "ENABLED" : "DISABLED");
 }
 
+static void ew11PrintStatus(int sock) {
+  withScratchBuf(sock, [](AppendBuf &out) {
+    CliFmt::PrintBoxHeader(out, "CH5 EW11 TCP CLIENT SOCKET STATUS");
+    static constexpr Column EW11_COLS[] = {
+        {"Slot", 4, Align::CENTER, Align::CENTER},
+        {"Name", 10, Align::LEFT, Align::CENTER},
+        {"Port", 4, Align::CENTER, Align::CENTER},
+        {"Client IP", 15, Align::CENTER, Align::CENTER},
+        {"Status", 11, Align::CENTER, Align::CENTER},
+        {"Packets", 17, Align::CENTER, Align::CENTER},
+    };
+    TableRenderer table_sock(out, EW11_COLS, 6);
+    table_sock.header(false);
+
+    {
+      FixedBuf<8> s_buf, p_buf;
+      FixedBuf<24> pkt_buf;
+      for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+        HubClientSlotSnapshot slot;
+        System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
+        const char *status_str = !slot.enabled         ? "Disabled"
+                                 : !slot.is_connected  ? "Listening"
+                                 : (slot.rx_pkts == 0) ? "Idle"
+                                                       : "Connected";
+        const char *ip_str =
+            slot.is_connected
+                ? (slot.target_ip[0] ? slot.target_ip : "Connected")
+                : (slot.target_ip[0] ? slot.target_ip : "-");
+        s_buf.reset();
+        p_buf.reset();
+        pkt_buf.reset();
+        s_buf.appendFormat("#%d", s);
+        p_buf.appendFormat("%u", slot.target_port);
+        pkt_buf.appendFormat("%8u / %-8u",
+                             static_cast<unsigned>(slot.rx_pkts),
+                             static_cast<unsigned>(slot.tx_pkts));
+        table_sock.row(
+            {s_buf.c_str(), slot.name, p_buf.c_str(), ip_str, status_str, pkt_buf.c_str()});
+      }
+    }
+    table_sock.end('-');
+    CliFmt::PrintBoxFooter(
+        out, "Configured Max Slots: 5 | Bridge Target: CH1 & CH2/3");
+
+    // ── FCU Modbus 실시간 상태 테이블 ──
+    CliFmt::PrintBoxHeader(out, "CH5 FCU MODBUS DEVICE STATUS");
+    static constexpr Column FCU_COLS[] = {
+        {"Slot", 4, Align::CENTER, Align::CENTER},
+        {"Name", 6, Align::LEFT, Align::CENTER},
+        {"Port", 4, Align::CENTER, Align::CENTER},
+        {"Client IP", 14, Align::CENTER, Align::CENTER},
+        {"Pwr", 3, Align::CENTER, Align::CENTER},
+        {"Mode", 4, Align::CENTER, Align::CENTER},
+        {"Fan", 4, Align::CENTER, Align::CENTER},
+        {"Swng", 4, Align::CENTER, Align::CENTER},
+        {"Tgt", 3, Align::CENTER, Align::CENTER},
+        {"Room", 3, Align::CENTER, Align::CENTER},
+    };
+    TableRenderer table_fcu(out, FCU_COLS, 10);
+    table_fcu.header(false);
+
+    {
+      for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
+        HubClientSlotSnapshot slot;
+        System_GetBridgeSlotSnapshot(s, slot);
+        FcuDeviceSnapshot snap;
+        Device_GetFcuSnapshot(s, snap);
+
+        static constexpr const char *kModes[] = {"-", "Cool", "Heat", "Fan"};
+        static constexpr const char *kFans[] = {"OFF", "Low", "Mid", "High",
+                                                "Auto"};
+        uint16_t m_idx = snap.mode;
+        uint16_t f_idx = snap.fan_speed;
+        const char *pwr_str = snap.power ? "ON" : "OFF";
+        const char *mode_str =
+            (m_idx >= 1 && m_idx <= 3) ? kModes[m_idx] : "-";
+        const char *fan_str = (f_idx <= 4) ? kFans[f_idx] : "-";
+        const char *swng_str =
+            (snap.swing == 2) ? "ON" : "OFF";
+
+        char tgt_str[8] = "-", room_str[8] = "-";
+        if (snap.is_online) {
+          AppendBuf{tgt_str, sizeof(tgt_str)}.appendFormat("%uC", snap.target_temp);
+          AppendBuf{room_str, sizeof(room_str)}.appendFormat("%uC", snap.room_temp);
+        }
+        const char *ip_str =
+            (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
+
+        char s_buf[8], p_buf[8];
+        AppendBuf{s_buf, sizeof(s_buf)}.appendFormat("#%u", s);
+        AppendBuf{p_buf, sizeof(p_buf)}.appendFormat("%u", slot.target_port);
+
+        table_fcu.row({s_buf, slot.name, p_buf, ip_str, pwr_str, mode_str,
+                       fan_str, swng_str, tgt_str, room_str});
+      }
+    }
+    table_fcu.end('-');
+    out.append(CliFmt::BOX80_EQ);
+    out.append("\r\n");
+  });
+}
+
 void cmdEw11(CliContext &ctx) {
   int sock = ctx.sock;
   int argc = ctx.args.count();
-
-  if (argc == 0 || (argc == 1 && strcasecmp(ctx.args.get(1), "list") == 0) ||
-      (argc == 1 && strcasecmp(ctx.args.get(1), "status") == 0)) {
-    withScratchBuf(sock, [](AppendBuf &out) {
-      CliFmt::PrintBoxHeader(out, "CH5 EW11 TCP CLIENT SOCKET STATUS");
-      static constexpr Column EW11_COLS[] = {
-          {"Slot", 4, Align::CENTER, Align::CENTER},
-          {"Name", 10, Align::LEFT, Align::CENTER},
-          {"Port", 4, Align::CENTER, Align::CENTER},
-          {"Client IP", 15, Align::CENTER, Align::CENTER},
-          {"Status", 11, Align::CENTER, Align::CENTER},
-          {"Packets", 17, Align::CENTER, Align::CENTER},
-      };
-      TableRenderer table_sock(out, EW11_COLS, 6);
-      table_sock.header(false);
-
-      {
-        FixedBuf<8> s_buf, p_buf;
-        FixedBuf<24> pkt_buf;
-        for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-          HubClientSlotSnapshot slot;
-          System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
-          const char *status_str = !slot.enabled         ? "Disabled"
-                                   : !slot.is_connected  ? "Listening"
-                                   : (slot.rx_pkts == 0) ? "Idle"
-                                                         : "Connected";
-          const char *ip_str =
-              slot.is_connected
-                  ? (slot.target_ip[0] ? slot.target_ip : "Connected")
-                  : (slot.target_ip[0] ? slot.target_ip : "-");
-          s_buf.reset();
-          p_buf.reset();
-          pkt_buf.reset();
-          s_buf.appendFormat("#%d", s);
-          p_buf.appendFormat("%u", slot.target_port);
-          pkt_buf.appendFormat("%8u / %-8u",
-                               static_cast<unsigned>(slot.rx_pkts),
-                               static_cast<unsigned>(slot.tx_pkts));
-          table_sock.row(
-              {s_buf.c_str(), slot.name, p_buf.c_str(), ip_str, status_str, pkt_buf.c_str()});
-        }
-      }
-      table_sock.end('-');
-      CliFmt::PrintBoxFooter(
-          out, "Configured Max Slots: 5 | Bridge Target: CH1 & CH2/3");
-
-      // ── FCU Modbus 실시간 상태 테이블 ──
-      CliFmt::PrintBoxHeader(out, "CH5 FCU MODBUS DEVICE STATUS");
-      static constexpr Column FCU_COLS[] = {
-          {"Slot", 4, Align::CENTER, Align::CENTER},
-          {"Name", 6, Align::LEFT, Align::CENTER},
-          {"Port", 4, Align::CENTER, Align::CENTER},
-          {"Client IP", 14, Align::CENTER, Align::CENTER},
-          {"Pwr", 3, Align::CENTER, Align::CENTER},
-          {"Mode", 4, Align::CENTER, Align::CENTER},
-          {"Fan", 4, Align::CENTER, Align::CENTER},
-          {"Swng", 4, Align::CENTER, Align::CENTER},
-          {"Tgt", 3, Align::CENTER, Align::CENTER},
-          {"Room", 3, Align::CENTER, Align::CENTER},
-      };
-      TableRenderer table_fcu(out, FCU_COLS, 10);
-      table_fcu.header(false);
-
-      {
-        for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
-          HubClientSlotSnapshot slot;
-          System_GetBridgeSlotSnapshot(s, slot);
-          FcuDeviceSnapshot snap;
-          Device_GetFcuSnapshot(s, snap);
-
-          static constexpr const char *kModes[] = {"-", "Cool", "Heat", "Fan"};
-          static constexpr const char *kFans[] = {"OFF", "Low", "Mid", "High",
-                                                  "Auto"};
-          uint16_t m_idx = snap.mode;
-          uint16_t f_idx = snap.fan_speed;
-          const char *pwr_str = snap.power ? "ON" : "OFF";
-          const char *mode_str =
-              (m_idx >= 1 && m_idx <= 3) ? kModes[m_idx] : "-";
-          const char *fan_str = (f_idx <= 4) ? kFans[f_idx] : "-";
-          const char *swng_str =
-              (snap.swing == 2) ? "ON" : "OFF";
-
-          char tgt_str[8] = "-", room_str[8] = "-";
-          if (snap.is_online) {
-            AppendBuf{tgt_str, sizeof(tgt_str)}.appendFormat("%uC", snap.target_temp);
-            AppendBuf{room_str, sizeof(room_str)}.appendFormat("%uC", snap.room_temp);
-          }
-          const char *ip_str =
-              (slot.is_connected && slot.target_ip[0]) ? slot.target_ip : "-";
-
-          char s_buf[8], p_buf[8];
-          AppendBuf{s_buf, sizeof(s_buf)}.appendFormat("#%u", s);
-          AppendBuf{p_buf, sizeof(p_buf)}.appendFormat("%u", slot.target_port);
-
-          table_fcu.row({s_buf, slot.name, p_buf, ip_str, pwr_str, mode_str,
-                         fan_str, swng_str, tgt_str, room_str});
-        }
-      }
-      table_fcu.end('-');
-      out.append(CliFmt::BOX80_EQ);
-      out.append("\r\n");
-    });
-    return;
-  }
-
-  const char *sub = ctx.args.get(1);
+  const char *sub = (argc > 0) ? ctx.args.get(1) : "list";
 
   // Unified table: help strings + handlers in one place.
   static const CliFmt::SubCmdDef kEw11Defs[] = {
-      {"list", "list", "Show EW11 sockets & FCU runtime status", nullptr},
+      {"list", "list", "Show EW11 sockets & FCU runtime status",
+       [](int s, int, const Args &) { ew11PrintStatus(s); }},
+      {"status", "status", "Show EW11 sockets & FCU runtime status",
+       [](int s, int, const Args &) { ew11PrintStatus(s); }},
       {"set", "set <slot> [port] [ip] [name] [en]",
        "Configure EW11 bridge socket settings",
        [](int sock, int argc, const Args &args) {
@@ -766,10 +766,17 @@ void cmdRoutes(CliContext &ctx) {
   int sock = ctx.sock;
   int argc = ctx.args.count();
 
-  if (argc == 1 && strcasecmp(ctx.args.get(1), "clear") == 0) {
-    Protocol_ClearRoutes();
-    sendTelnetMsg(sock,
-                  "[OK] Dynamic device ingress routing table cleared.\r\n");
+  static const CliFmt::SubCmdDef kRoutesDefs[] = {
+      {"clear", "clear", "Clear dynamic device ingress routing table",
+       [](int s, int, const Args &) {
+         Protocol_ClearRoutes();
+         sendTelnetMsg(s,
+                       "[OK] Dynamic device ingress routing table cleared.\r\n");
+       }},
+  };
+
+  if (argc == 1 &&
+      CliFmt::DispatchSubCmd(ctx.args.get(1), sock, argc, ctx.args, kRoutesDefs)) {
     return;
   }
 

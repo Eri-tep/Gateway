@@ -406,160 +406,169 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
     device:emit_component_event(comp_main, cap_mgr.action({ value = action }))
   end
 
-  if action == "add" then
-    if device:get_field("sync_in_progress") then
-      log.warn("⚠️ [CHILD] Child device sync already in progress, ignoring duplicate action")
-      return
-    end
-    device:set_field("sync_in_progress", true)
-
-    cosock.spawn(function()
-      local front_exists = false
-      local lobby_exists = false
-
-      for _, dev in ipairs(driver:get_devices()) do
-        local p_key = dev.parent_assigned_child_key
-        if p_key == CHILD_FRONT_KEY or dev.label == "세대 도어 (현관)" then
-          front_exists = true
-        elseif p_key == CHILD_LOBBY_KEY or dev.label == "로비 도어 (공동현관)" then
-          lobby_exists = true
-        end
+  local DEVICE_MANAGER_ACTIONS = {
+    add = function()
+      if device:get_field("sync_in_progress") then
+        log.warn("⚠️ [CHILD] Child device sync already in progress, ignoring duplicate action")
+        return
       end
+      device:set_field("sync_in_progress", true)
 
-      if not front_exists then
-        log.info("🚪 [CHILD] Creating '세대 도어' Child Device...")
-        local success, err = driver:try_create_device({
-          type = "EDGE_CHILD",
-          label = "세대 도어",
-          profile = "single-door-device",
-          parent_device_id = device.id,
-          parent_assigned_child_key = CHILD_FRONT_KEY
-        })
-        if not success then
-          log.error("❌ [CHILD] Failed to create front door child: " .. tostring(err))
-        else
-          cosock.socket.sleep(0.5)
-        end
-      else
-        log.info("ℹ️ [CHILD] Front door child device already exists")
-      end
+      cosock.spawn(function()
+        local front_exists = false
+        local lobby_exists = false
 
-      if not lobby_exists then
-        log.info("🚪 [CHILD] Creating '로비 도어' Child Device...")
-        local success, err = driver:try_create_device({
-          type = "EDGE_CHILD",
-          label = "로비 도어",
-          profile = "single-door-device",
-          parent_device_id = device.id,
-          parent_assigned_child_key = CHILD_LOBBY_KEY
-        })
-        if not success then
-          log.error("❌ [CHILD] Failed to create lobby door child: " .. tostring(err))
-        else
-          cosock.socket.sleep(0.5)
-        end
-      else
-        log.info("ℹ️ [CHILD] Lobby door child device already exists")
-      end
-
-      -- ★ 게이트웨이에서 활성 기기 목록 동적 조회 및 자동 생성 (현대화된 get_devices RPC)
-      local ip = device.preferences.gatewayIp or "172.30.1.3"
-      local port = tonumber(device.preferences.gatewayPort) or 8900
-      log.info(string.format("🔍 [CHILD] Fetching active devices from Gateway %s:%d...", ip, port))
-      local res, err = gateway_client.get_devices(ip, port)
-
-      if res and res.devices and #res.devices > 0 then
-        log.info(string.format("📦 [CHILD] Found %d active devices on Gateway! Syncing...", #res.devices))
-        for _, ldev in ipairs(res.devices) do
-          local d_id = tonumber(ldev.dev_id) or 0
-          local s1 = tonumber(ldev.sub1) or 0
-          local s2 = tonumber(ldev.sub2) or 0
-          local d_cls = ldev.class or "switch"
-          local d_name = ldev.name or string.format("Device %02X-%d-%d", d_id, s1, s2)
-          local child_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
-
-          local exists = false
-          for _, ex_dev in ipairs(driver:get_devices()) do
-            if ex_dev.parent_assigned_child_key == child_key then
-              exists = true
-              break
-            end
+        for _, dev in ipairs(driver:get_devices()) do
+          local p_key = dev.parent_assigned_child_key
+          if p_key == CHILD_FRONT_KEY or dev.label == "세대 도어 (현관)" then
+            front_exists = true
+          elseif p_key == CHILD_LOBBY_KEY or dev.label == "로비 도어 (공동현관)" then
+            lobby_exists = true
           end
+        end
 
-          if not exists then
-            local prof = CLASS_TO_PROFILE[d_cls] or "child-switch"
-
-            log.info(string.format("✨ [CHILD] Creating Device '%s' (%s) with key '%s' [Profile: %s]...",
-                                   d_name, d_cls, child_key, prof))
-            local success, c_err = driver:try_create_device({
-              type = "EDGE_CHILD",
-              label = d_name,
-              profile = prof,
-              parent_device_id = device.id,
-              parent_assigned_child_key = child_key
-            })
-            if not success then
-              log.error(string.format("❌ [CHILD] Failed to create child device '%s': %s", d_name, tostring(c_err)))
-            else
-              -- 기기 생성 간 0.5초 대기로 허브 이벤트 루프 과부하 방지
-              cosock.socket.sleep(0.5)
-            end
+        if not front_exists then
+          log.info("🚪 [CHILD] Creating '세대 도어' Child Device...")
+          local success, err = driver:try_create_device({
+            type = "EDGE_CHILD",
+            label = "세대 도어",
+            profile = "single-door-device",
+            parent_device_id = device.id,
+            parent_assigned_child_key = CHILD_FRONT_KEY
+          })
+          if not success then
+            log.error("❌ [CHILD] Failed to create front door child: " .. tostring(err))
           else
-            log.info(string.format("ℹ️ [CHILD] Device '%s' (%s) already exists", child_key, d_name))
+            cosock.socket.sleep(0.5)
           end
+        else
+          log.info("ℹ️ [CHILD] Front door child device already exists")
         end
 
-        -- 자식 기기 생성 및 등록 후 SmartThings 플랫폼 초기화 완료를 위한 1.5초 대기 (Race condition 방지)
-        cosock.socket.sleep(1.5)
-        log.info("🔄 [CHILD] Applying initial states for all child devices from Gateway...")
-        for _, ldev in ipairs(res.devices) do
-          telemetry_handler.handle_device_state_event(driver, ldev)
+        if not lobby_exists then
+          log.info("🚪 [CHILD] Creating '로비 도어' Child Device...")
+          local success, err = driver:try_create_device({
+            type = "EDGE_CHILD",
+            label = "로비 도어",
+            profile = "single-door-device",
+            parent_device_id = device.id,
+            parent_assigned_child_key = CHILD_LOBBY_KEY
+          })
+          if not success then
+            log.error("❌ [CHILD] Failed to create lobby door child: " .. tostring(err))
+          else
+            cosock.socket.sleep(0.5)
+          end
+        else
+          log.info("ℹ️ [CHILD] Lobby door child device already exists")
         end
-      elseif err then
-        log.error("❌ [CHILD] Failed to fetch devices from Gateway: " .. tostring(err))
-      else
-        log.info("ℹ️ [CHILD] No active devices found on Gateway yet.")
+
+        -- ★ 게이트웨이에서 활성 기기 목록 동적 조회 및 자동 생성 (현대화된 get_devices RPC)
+        local ip = device.preferences.gatewayIp or "172.30.1.3"
+        local port = tonumber(device.preferences.gatewayPort) or 8900
+        log.info(string.format("🔍 [CHILD] Fetching active devices from Gateway %s:%d...", ip, port))
+        local res, err = gateway_client.get_devices(ip, port)
+
+        if res and res.devices and #res.devices > 0 then
+          log.info(string.format("📦 [CHILD] Found %d active devices on Gateway! Syncing...", #res.devices))
+          for _, ldev in ipairs(res.devices) do
+            local d_id = tonumber(ldev.dev_id) or 0
+            local s1 = tonumber(ldev.sub1) or 0
+            local s2 = tonumber(ldev.sub2) or 0
+            local d_cls = ldev.class or "switch"
+            local d_name = ldev.name or string.format("Device %02X-%d-%d", d_id, s1, s2)
+            local child_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+
+            local exists = false
+            for _, ex_dev in ipairs(driver:get_devices()) do
+              if ex_dev.parent_assigned_child_key == child_key then
+                exists = true
+                break
+              end
+            end
+
+            if not exists then
+              local prof = CLASS_TO_PROFILE[d_cls] or "child-switch"
+
+              log.info(string.format("✨ [CHILD] Creating Device '%s' (%s) with key '%s' [Profile: %s]...",
+                                     d_name, d_cls, child_key, prof))
+              local success, c_err = driver:try_create_device({
+                type = "EDGE_CHILD",
+                label = d_name,
+                profile = prof,
+                parent_device_id = device.id,
+                parent_assigned_child_key = child_key
+              })
+              if not success then
+                log.error(string.format("❌ [CHILD] Failed to create child device '%s': %s", d_name, tostring(c_err)))
+              else
+                -- 기기 생성 간 0.5초 대기로 허브 이벤트 루프 과부하 방지
+                cosock.socket.sleep(0.5)
+              end
+            else
+              log.info(string.format("ℹ️ [CHILD] Device '%s' (%s) already exists", child_key, d_name))
+            end
+          end
+
+          -- 자식 기기 생성 및 등록 후 SmartThings 플랫폼 초기화 완료를 위한 1.5초 대기 (Race condition 방지)
+          cosock.socket.sleep(1.5)
+          log.info("🔄 [CHILD] Applying initial states for all child devices from Gateway...")
+          for _, ldev in ipairs(res.devices) do
+            telemetry_handler.handle_device_state_event(driver, ldev)
+          end
+        elseif err then
+          log.error("❌ [CHILD] Failed to fetch devices from Gateway: " .. tostring(err))
+        else
+          log.info("ℹ️ [CHILD] No active devices found on Gateway yet.")
+        end
+
+        -- 동기화 완료 후 락 해제 및 Idle 복귀
+        device:set_field("sync_in_progress", nil)
+        if cap_mgr and comp_main then
+          device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
+        end
+      end, "child_device_add_worker")
+    end,
+
+    remove = function()
+      log.info("🗑️ [CHILD] Removing All Child Devices...")
+      local targets = {}
+      for _, dev in ipairs(driver:get_devices()) do
+        local p_key = dev.parent_assigned_child_key or ""
+        if p_key == "doorphone" or p_key == CHILD_FRONT_KEY or p_key == CHILD_LOBBY_KEY or
+           p_key:match("^dev_") or
+           dev.label == "도어폰" or dev.label == "세대 도어" or dev.label == "로비 도어" then
+          table.insert(targets, { id = dev.id, label = dev.label, key = p_key })
+        end
       end
 
-      -- 동기화 완료 후 락 해제 및 Idle 복귀
-      device:set_field("sync_in_progress", nil)
-      if cap_mgr and comp_main then
-        device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
-      end
-    end, "child_device_add_worker")
-  elseif action == "remove" then
-    log.info("🗑️ [CHILD] Removing All Child Devices...")
-    local targets = {}
-    for _, dev in ipairs(driver:get_devices()) do
-      local p_key = dev.parent_assigned_child_key or ""
-      if p_key == "doorphone" or p_key == CHILD_FRONT_KEY or p_key == CHILD_LOBBY_KEY or
-         p_key:match("^dev_") or
-         dev.label == "도어폰" or dev.label == "세대 도어" or dev.label == "로비 도어" then
-        table.insert(targets, { id = dev.id, label = dev.label, key = p_key })
-      end
-    end
-
-    log.info(string.format("🗑️ [CHILD] Found %d child devices to delete", #targets))
-    for i, t in ipairs(targets) do
-      local delay = (i - 1) * 0.15
-      device.thread:call_with_delay(delay, function()
-        log.info(string.format("🗑️ [CHILD] Deleting device (%d/%d): %s (ID: %s, Key: %s)", i, #targets, tostring(t.label), tostring(t.id), tostring(t.key)))
-        local ok, del_err = pcall(function()
-          driver:try_delete_device(t.id)
+      log.info(string.format("🗑️ [CHILD] Found %d child devices to delete", #targets))
+      for i, t in ipairs(targets) do
+        local delay = (i - 1) * 0.15
+        device.thread:call_with_delay(delay, function()
+          log.info(string.format("🗑️ [CHILD] Deleting device (%d/%d): %s (ID: %s, Key: %s)", i, #targets, tostring(t.label), tostring(t.id), tostring(t.key)))
+          local ok, del_err = pcall(function()
+            driver:try_delete_device(t.id)
+          end)
+          if not ok then
+            log.error("❌ [CHILD] Failed to delete device " .. tostring(t.id) .. ": " .. tostring(del_err))
+          end
         end)
-        if not ok then
-          log.error("❌ [CHILD] Failed to delete device " .. tostring(t.id) .. ": " .. tostring(del_err))
+      end
+
+      -- 모든 기기 삭제 완료 후 자동으로 Idle 복귀
+      local total_wait = math.max(2.0, (#targets * 0.15) + 1.0)
+      device.thread:call_with_delay(total_wait, function()
+        if cap_mgr and comp_main then
+          device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
         end
       end)
-    end
+    end,
+  }
 
-    -- 모든 기기 삭제 완료 후 자동으로 Idle 복귀
-    local total_wait = math.max(2.0, (#targets * 0.15) + 1.0)
-    device.thread:call_with_delay(total_wait, function()
-      if cap_mgr and comp_main then
-        device:emit_component_event(comp_main, cap_mgr.action({ value = "idle" }))
-      end
-    end)
+  local action_handler = DEVICE_MANAGER_ACTIONS[action]
+  if action_handler then
+    action_handler()
   end
 end
 
@@ -638,16 +647,23 @@ local function handle_momentary_switch_off(device)
   end
 end
 
-function CommandHandlers.handle_child_switch_on(driver, device, command)
-  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
-  if not d_id then return end
-  local ip, port = get_gateway_ip_port(driver)
-  log.info(string.format("💡 [CHILD CMD] %s ON -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
+local function resolve_child_class(d_id, p_key, device)
+  if d_id == 0x2C then return "fcu" end
+  if p_key:match("^dev_28_") or (device and device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID)) then
+    return "thermostat"
+  end
+  if p_key:match("^dev_34_") or (device and device:supports_capability_by_id(capabilities.momentary.ID)) then
+    return "momentary"
+  end
+  local cap_vent = capabilities["digituniverse06711.ventmode"]
+  if device and cap_vent and device:supports_capability_by_id(cap_vent.ID) then
+    return "vent"
+  end
+  return "switch"
+end
 
-  device:emit_event(capabilities.switch.switch.on())
-
-  if d_id == 0x2C then
-    -- [단일 복원 RPC 1회 전송] 전원 켤 때 마지막으로 저장된 냉방/난방 운전 상태를 단일 패킷으로 전달
+local CHILD_SWITCH_ON_DISPATCH = {
+  fcu = function(driver, device, d_id, s1, s2, ip, port)
     local saved_mode = device:get_field("saved_fcu_mode") or "cool"
     local val_map = { cool = 1, heat = 2, fanOnly = 3 }
     local m_val = val_map[saved_mode] or 1
@@ -684,11 +700,9 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
       temp = saved_temp
     }
     gateway_client.device_control_custom(ip, port, payload)
-    return
-  end
+  end,
 
-  local p_key = device.parent_assigned_child_key or ""
-  if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+  thermostat = function(driver, device, d_id, s1, s2, ip, port)
     -- 난방 전원 ON: 외출 모드 끄고 일반 난방(power=1) 가동
     local cap_away = capabilities["digituniverse06711.heatingAway"]
     if cap_away and device:supports_capability_by_id(cap_away.ID) then
@@ -697,15 +711,15 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
       device:emit_event(away_ev)
     end
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
-    return
-  end
+  end,
 
-  if p_key:match("^dev_34_") or device:supports_capability_by_id(capabilities.momentary.ID) then
+  momentary = function(driver, device, d_id, s1, s2, ip, port)
     handle_momentary_switch_on(device, ip, port, d_id, s1, s2)
-  else
+  end,
+
+  vent = function(driver, device, d_id, s1, s2, ip, port)
     local cap_vent = capabilities["digituniverse06711.ventmode"]
-    local is_vent = cap_vent and device:supports_capability_by_id(cap_vent.ID)
-    if is_vent then
+    if cap_vent and device:supports_capability_by_id(cap_vent.ID) then
       pcall(function()
         device:emit_event(cap_vent.ventMode({ value = "normal" }))
       end)
@@ -718,7 +732,55 @@ function CommandHandlers.handle_child_switch_on(driver, device, command)
       device:emit_event(capabilities.fanSpeed.fanSpeed(1))
     end
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
-  end
+  end,
+
+  switch = function(driver, device, d_id, s1, s2, ip, port)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+  end,
+}
+
+local CHILD_SWITCH_OFF_DISPATCH = {
+  fcu = function(driver, device, d_id, s1, s2, ip, port)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+  end,
+
+  thermostat = function(driver, device, d_id, s1, s2, ip, port)
+    -- 난방 전원 OFF: 외출 모드 끄고 난방 끄기(power=0)
+    local cap_away = capabilities["digituniverse06711.heatingAway"]
+    if cap_away and device:supports_capability_by_id(cap_away.ID) then
+      device:emit_event(cap_away.away("off"))
+    end
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+  end,
+
+  momentary = function(driver, device, d_id, s1, s2, ip, port)
+    handle_momentary_switch_off(device)
+  end,
+
+  vent = function(driver, device, d_id, s1, s2, ip, port)
+    if device:supports_capability_by_id(capabilities.fanSpeed.ID) then
+      device:emit_event(capabilities.fanSpeed.fanSpeed(0))
+    end
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+  end,
+
+  switch = function(driver, device, d_id, s1, s2, ip, port)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+  end,
+}
+
+function CommandHandlers.handle_child_switch_on(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local ip, port = get_gateway_ip_port(driver)
+  log.info(string.format("💡 [CHILD CMD] %s ON -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
+
+  device:emit_event(capabilities.switch.switch.on())
+
+  local p_key = device.parent_assigned_child_key or ""
+  local cls = resolve_child_class(d_id, p_key, device)
+  local handler = CHILD_SWITCH_ON_DISPATCH[cls] or CHILD_SWITCH_ON_DISPATCH["switch"]
+  handler(driver, device, d_id, s1, s2, ip, port)
 end
 
 function CommandHandlers.handle_child_switch_off(driver, device, command)
@@ -729,30 +791,10 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
 
   device:emit_event(capabilities.switch.switch.off())
 
-  if d_id == 0x2C then
-    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
-    return
-  end
-
   local p_key = device.parent_assigned_child_key or ""
-  if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
-    -- 난방 전원 OFF: 외출 모드 끄고 난방 끄기(power=0)
-    local cap_away = capabilities["digituniverse06711.heatingAway"]
-    if cap_away and device:supports_capability_by_id(cap_away.ID) then
-      device:emit_event(cap_away.away("off"))
-    end
-    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
-    return
-  end
-
-  if p_key:match("^dev_34_") or device:supports_capability_by_id(capabilities.momentary.ID) then
-    handle_momentary_switch_off(device)
-  else
-    if device:supports_capability_by_id(capabilities.fanSpeed.ID) then
-      device:emit_event(capabilities.fanSpeed.fanSpeed(0))
-    end
-    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
-  end
+  local cls = resolve_child_class(d_id, p_key, device)
+  local handler = CHILD_SWITCH_OFF_DISPATCH[cls] or CHILD_SWITCH_OFF_DISPATCH["switch"]
+  handler(driver, device, d_id, s1, s2, ip, port)
 end
 
 function CommandHandlers.handle_child_set_heating_away(driver, device, command)
@@ -862,12 +904,13 @@ function CommandHandlers.handle_child_set_thermostat_mode(driver, device, comman
     return
   end
 
-  local pwr = 0
-  if mode == "heat" then
-    pwr = 1
-  elseif mode == "away" or mode == "eco" then
-    pwr = 2
-  end
+  local THERMO_MODE_TO_PWR = {
+    heat = 1,
+    away = 2,
+    eco = 2,
+    off = 0
+  }
+  local pwr = THERMO_MODE_TO_PWR[mode] or 0
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (pwr=%d, DevID 0x%02X %d-%d)", device.label, mode, pwr, d_id, s1, s2))
   device:emit_event(capabilities.thermostatMode.thermostatMode(mode))

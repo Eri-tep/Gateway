@@ -372,20 +372,22 @@ void printStats(int sock) {
 
 void cmdStats(CliContext &ctx) {
   int client = ctx.sock;
-  int argc = ctx.args.count();
+  static const CliFmt::SubCmdDef kTrafficDefs[] = {
+      {"clear", "clear", "Reset all traffic statistics, hits, and metrics",
+       [](int s, int, const Args &) {
+         System_ResetTrafficStats();
+         ProtocolDiag_ResetBridgeStats();
+         ProtocolDiag_PollingResetHits();
+         Telemetry_ResetStats();
+         System_ResetNvsStats();
+         sendTelnetMsg(s, "All traffic statistics, hits, and metrics history "
+                          "CLEARED to 0.\r\n");
+       }},
+  };
 
-  if (argc > 0) {
-    const char *sub = ctx.args.get(1);
-    if (strcasecmp(sub, "clear") == 0) {
-      System_ResetTrafficStats();
-      ProtocolDiag_ResetBridgeStats();
-      ProtocolDiag_PollingResetHits();
-      Telemetry_ResetStats();
-      System_ResetNvsStats();
-      sendTelnetMsg(client, "All traffic statistics, hits, and metrics history "
-                            "CLEARED to 0.\r\n");
-      return;
-    }
+  if (ctx.args.count() > 0 &&
+      CliFmt::DispatchSubCmd(ctx.args.get(1), client, ctx.args.count(), ctx.args, kTrafficDefs)) {
+    return;
   }
   printStats(client);
 }
@@ -450,9 +452,97 @@ void cmdLogView(CliContext &ctx) {
   int client = ctx.sock;
   const char *sub_cmd = (ctx.args.count() > 0) ? ctx.args.get(1) : "list";
 
-  if (strcasecmp(sub_cmd, "clear") == 0) {
-    System_ClearRebootLog();
-    sendTelnetMsg(client, "Reboot log history CLEARED from NVS flash.\r\n");
+  static const CliFmt::SubCmdDef kLogViewDefs[] = {
+      {"clear", "clear", "Wipe persistent reboot log history",
+       [](int s, int, const Args &) {
+         System_ClearRebootLog();
+         sendTelnetMsg(s, "Reboot log history CLEARED from NVS flash.\r\n");
+       }},
+      {"list", "list", "List stored reboot logs overview",
+       [](int s, int, const Args &) {
+         size_t count = System_GetRebootLogCount();
+         if (count == 0) {
+           sendTelnetMsg(s, "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
+           return;
+         }
+         withScratchBuf(s, [count](AppendBuf &out) {
+           CliFmt::PrintBoxHeader(out, "PERSISTENT REBOOT LOG HISTORY");
+           CliFmt::PrintBoxSubtitlef(
+               out, "Total Stored: %u / 20 Logs | Non-Volatile RTC/NVS",
+               static_cast<unsigned>(count));
+
+           static constexpr Column REBOOT_COLS[] = {
+               {"No", 3, Align::CENTER, Align::CENTER},
+               {"Timestamp", 19, Align::CENTER, Align::CENTER},
+               {"Reboot Reason", 33, Align::LEFT, Align::CENTER},
+               {"Uptime", 12, Align::CENTER, Align::CENTER},
+           };
+           TableRenderer table(out, REBOOT_COLS, 4);
+           table.header(false);
+
+           FixedBuf<32> time_buf;
+           FixedBuf<16> up_buf;
+           FixedBuf<8> no_buf;
+
+           for (size_t i = 0; i < count; i++) {
+             LogEntry entry;
+             if (System_GetRebootLogEntry(i, entry)) {
+               time_buf.reset();
+               if (entry.timestamp > 0) {
+                 struct tm timeinfo;
+                 time_t sec = static_cast<time_t>(entry.timestamp);
+                 localtime_r(&sec, &timeinfo);
+                 if (timeinfo.tm_year >= 124) {
+                   strftime(time_buf.storage, sizeof(time_buf.storage), "%Y-%m-%d %H:%M:%S",
+                            &timeinfo);
+                   time_buf.offset = strlen(time_buf.storage);
+                 } else {
+                   time_buf.appendFormat("%04d-%02d-%02d %02d:%02d:%02d",
+                                         timeinfo.tm_year + 1900, timeinfo.tm_mon + 1,
+                                         timeinfo.tm_mday, timeinfo.tm_hour,
+                                         timeinfo.tm_min, timeinfo.tm_sec);
+                 }
+               } else {
+                 time_buf.append("N/A");
+               }
+               uint32_t sec = entry.stats_snapshot.uptime_ms / 1000;
+               up_buf.reset();
+               up_buf.appendFormat("%02uh %02um %02us", sec / 3600,
+                                   (sec % 3600) / 60, sec % 60);
+
+               no_buf.reset();
+               no_buf.appendFormat("#%u", static_cast<unsigned>(i + 1));
+               table.row({no_buf.c_str(), time_buf.c_str(), entry.reason, up_buf.c_str()});
+             }
+           }
+           table.end('-');
+           CliFmt::PrintBoxFooter(
+               out,
+               "Use 'logview <1-20>' for details, 'logview clear' to wipe history");
+         });
+       }},
+      {"last", "last", "Show latest reboot log snapshot",
+       [](int s, int, const Args &) {
+         size_t count = System_GetRebootLogCount();
+         if (count == 0) {
+           sendTelnetMsg(s, "\r\n[LOGVIEW] No persistent reboot logs found in NVS.\r\n");
+           return;
+         }
+         char *scratch = Cli_GetScratchBuffer();
+         size_t scratch_sz = Cli_GetScratchBufferSize();
+         scratch[0] = '\0';
+         AppendBuf out{scratch, scratch_sz};
+         LogEntry e;
+         if (System_GetRebootLogEntry(0, e)) {
+           FormatRebootLogEntry(out, e, 0, count);
+           sendTelnetMsgLen(s, out.buf, out.offset);
+         } else {
+           sendTelnetMsg(s, "\r\n[LOGVIEW] Failed to read reboot log entry.\r\n");
+         }
+       }},
+  };
+
+  if (CliFmt::DispatchSubCmd(sub_cmd, client, ctx.args.count(), ctx.args, kLogViewDefs)) {
     return;
   }
 
@@ -463,100 +553,41 @@ void cmdLogView(CliContext &ctx) {
     return;
   }
 
-  if (strcasecmp(sub_cmd, "list") == 0) {
-    withScratchBuf(client, [count](AppendBuf &out) {
-      CliFmt::PrintBoxHeader(out, "PERSISTENT REBOOT LOG HISTORY");
-      CliFmt::PrintBoxSubtitlef(
-          out, "Total Stored: %u / 20 Logs | Non-Volatile RTC/NVS",
-          static_cast<unsigned>(count));
-
-      static constexpr Column REBOOT_COLS[] = {
-          {"No", 3, Align::CENTER, Align::CENTER},
-          {"Timestamp", 19, Align::CENTER, Align::CENTER},
-          {"Reboot Reason", 33, Align::LEFT, Align::CENTER},
-          {"Uptime", 12, Align::CENTER, Align::CENTER},
-      };
-      TableRenderer table(out, REBOOT_COLS, 4);
-      table.header(false);
-
-      FixedBuf<32> time_buf;
-      FixedBuf<16> up_buf;
-      FixedBuf<8> no_buf;
-
-      for (size_t i = 0; i < count; i++) {
-        LogEntry entry;
-        if (System_GetRebootLogEntry(i, entry)) {
-          time_buf.reset();
-          if (entry.timestamp > 0) {
-            struct tm timeinfo;
-            time_t sec = static_cast<time_t>(entry.timestamp);
-            localtime_r(&sec, &timeinfo);
-            if (timeinfo.tm_year >= 124) {
-              strftime(time_buf.storage, sizeof(time_buf.storage), "%Y-%m-%d %H:%M:%S",
-                       &timeinfo);
-              time_buf.offset = strlen(time_buf.storage);
-            } else {
-              time_buf.appendFormat("%04d-%02d-%02d %02d:%02d:%02d",
-                                    timeinfo.tm_year + 1900, timeinfo.tm_mon + 1,
-                                    timeinfo.tm_mday, timeinfo.tm_hour,
-                                    timeinfo.tm_min, timeinfo.tm_sec);
-            }
-          } else {
-            time_buf.append("N/A");
-          }
-          uint32_t sec = entry.stats_snapshot.uptime_ms / 1000;
-          up_buf.reset();
-          up_buf.appendFormat("%02uh %02um %02us", sec / 3600,
-                              (sec % 3600) / 60, sec % 60);
-
-          no_buf.reset();
-          no_buf.appendFormat("#%u", static_cast<unsigned>(i + 1));
-          table.row({no_buf.c_str(), time_buf.c_str(), entry.reason, up_buf.c_str()});
-        }
-      }
-      table.end('-');
-      CliFmt::PrintBoxFooter(
-          out,
-          "Use 'logview <1-20>' for details, 'logview clear' to wipe history");
-    });
-    return;
-  }
-
-  size_t target_idx = 0;
-  if (strcasecmp(sub_cmd, "last") == 0) {
-    target_idx = 0;
-  } else {
-    char *endp = nullptr;
-    long val = strtol(sub_cmd, &endp, 10);
-    if (endp != sub_cmd && *endp == '\0' && val >= 1 &&
-        static_cast<size_t>(val) <= count) {
-      target_idx = static_cast<size_t>(val - 1);
+  char *endp = nullptr;
+  long val = strtol(sub_cmd, &endp, 10);
+  if (endp != sub_cmd && *endp == '\0' && val >= 1 &&
+      static_cast<size_t>(val) <= count) {
+    size_t target_idx = static_cast<size_t>(val - 1);
+    char *scratch = Cli_GetScratchBuffer();
+    size_t scratch_sz = Cli_GetScratchBufferSize();
+    scratch[0] = '\0';
+    AppendBuf out{scratch, scratch_sz};
+    LogEntry e;
+    if (System_GetRebootLogEntry(target_idx, e)) {
+      FormatRebootLogEntry(out, e, target_idx, count);
+      sendTelnetMsgLen(client, out.buf, out.offset);
     } else {
-      sendTelnetMsg(
-          client,
-          "[ERROR] Invalid log index. Use 'logview' or 'logview <1-20>'\r\n");
-      return;
+      sendTelnetMsg(client, "\r\n[LOGVIEW] Failed to read reboot log entry.\r\n");
     }
-  }
-
-  char *scratch = Cli_GetScratchBuffer();
-  size_t scratch_sz = Cli_GetScratchBufferSize();
-  scratch[0] = '\0';
-  AppendBuf out{scratch, scratch_sz};
-  LogEntry e;
-  if (System_GetRebootLogEntry(target_idx, e)) {
-    FormatRebootLogEntry(out, e, target_idx, count);
-    sendTelnetMsgLen(client, out.buf, out.offset);
   } else {
-    sendTelnetMsg(client, "\r\n[LOGVIEW] Failed to read reboot log entry.\r\n");
+    sendTelnetMsg(
+        client,
+        "[ERROR] Invalid log index. Use 'logview' or 'logview <1-20>'\r\n");
   }
 }
 
 void cmdCoreDump(CliContext &ctx) {
   int client = ctx.sock;
-  if (ctx.args.count() >= 1 && strcasecmp(ctx.args.get(1), "clear") == 0) {
-    esp_core_dump_image_erase();
-    sendTelnetMsg(client, "Crash core dump partition successfully ERASED.\r\n");
+  static const CliFmt::SubCmdDef kCoredumpDefs[] = {
+      {"clear", "clear", "Erase crash core dump partition",
+       [](int s, int, const Args &) {
+         esp_core_dump_image_erase();
+         sendTelnetMsg(s, "Crash core dump partition successfully ERASED.\r\n");
+       }},
+  };
+
+  if (ctx.args.count() >= 1 &&
+      CliFmt::DispatchSubCmd(ctx.args.get(1), client, ctx.args.count(), ctx.args, kCoredumpDefs)) {
     return;
   }
 

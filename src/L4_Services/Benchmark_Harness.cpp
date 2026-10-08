@@ -1075,23 +1075,24 @@ void cmdBench(CliContext &ctx) {
 
   const char *sub = ctx.args.get(1);
 
-  if (strcasecmp(sub, "health") == 0) {
-    withScratchBuf(client, [](AppendBuf &out) {
-      Benchmark::BenchmarkReport r = Benchmark::RunPhase0_BaselineCalibration();
-      Benchmark::FormatReport(out, r);
-    });
-    return;
-  }
-
-  if (strcasecmp(sub, "run") == 0) {
-    const char *phase_arg = (sub_count >= 2) ? ctx.args.get(2) : "0";
-    uint32_t custom_runs = 0;
-    if (sub_count >= 3) {
-      int parsed_runs = 0;
-      if (CliFmt::ParseInt(ctx.args.get(3), parsed_runs, 100, 2000000)) {
-        custom_runs = static_cast<uint32_t>(parsed_runs);
-      }
-    }
+  static const CliFmt::SubCmdDef kBenchDefs[] = {
+      {"health", "health", "Quick hardware safety & telemetry snapshot",
+       [](int client, int, const Args &) {
+         withScratchBuf(client, [](AppendBuf &out) {
+           Benchmark::BenchmarkReport r = Benchmark::RunPhase0_BaselineCalibration();
+           Benchmark::FormatReport(out, r);
+         });
+       }},
+      {"run", "run <0-5|all> [runs]", "Run benchmark phase",
+       [](int client, int sub_count, const Args &args) {
+         const char *phase_arg = (sub_count >= 2) ? args.get(2) : "0";
+         uint32_t custom_runs = 0;
+         if (sub_count >= 3) {
+           int parsed_runs = 0;
+           if (CliFmt::ParseInt(args.get(3), parsed_runs, 100, 2000000)) {
+             custom_runs = static_cast<uint32_t>(parsed_runs);
+           }
+         }
 
     struct PhaseRunner {
       const char *name;
@@ -1180,9 +1181,13 @@ void cmdBench(CliContext &ctx) {
       }
     }
 
-    withScratchBuf(client, [](AppendBuf &out) {
-      out.append("Invalid phase. Valid options: 0, 1, 2, 3, 4, 5, all\r\n");
-    });
+         withScratchBuf(client, [](AppendBuf &out) {
+           out.append("Invalid phase. Valid options: 0, 1, 2, 3, 4, 5, all\r\n");
+         });
+       }},
+  };
+
+  if (CliFmt::DispatchSubCmd(sub, client, sub_count, ctx.args, kBenchDefs)) {
     return;
   }
 

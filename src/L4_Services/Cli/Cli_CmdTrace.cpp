@@ -587,15 +587,12 @@ void cmdWallpad(CliContext &ctx) {
   int argc = ctx.args.count();
   const char *sub = (argc > 0) ? ctx.args.get(1) : "status";
 
-  if (argc == 0 || strcasecmp(sub, "status") == 0) {
-    withScratchBuf(sock, [](AppendBuf &out) { wallpadPrintStatus(out); });
-    return;
-  }
-
   // Unified table: help strings + handlers in one place.
   static const CliFmt::SubCmdDef kWallpadDefs[] = {
       {"status", "status", "Show auto-probing status & locked profile",
-       nullptr}, // handled above
+       [](int s, int, const Args &) {
+         withScratchBuf(s, [](AppendBuf &out) { wallpadPrintStatus(out); });
+       }},
       {"list", "list", "List available vendor & saved NVS profiles",
        [](int s, int, const Args &) {
          withScratchBuf(s, [](AppendBuf &out) { wallpadListProfiles(out); });

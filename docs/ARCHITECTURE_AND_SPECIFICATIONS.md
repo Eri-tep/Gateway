@@ -176,6 +176,111 @@ src/
 | `Network` | Core 0 | 5 (Med) | `TcpReactor::runTask()` (Core 0 Network Reactor) | Warm Path | Wi-Fi connectivity, CH5 EW11 hub client, CH6 Mgmt RPC |
 | `Telnet_CLI` | Core 0 | 2 (Low) | `Task_Telnet()` | Cold Path | Telnet CLI diagnostics, packet tracing, administration |
 
+### 1.3 Execution Path Tiering Architecture Specification (Hot / Warm / Cold Path 3계층 실행 경로 규격)
+
+임베디드 게이트웨이 시스템의 실시간 결정론(Real-Time Determinism), 대용량 처리량(Throughput), 그리고 데이터 무결성(Data Integrity)을 동시에 보장하기 위해 전체 실행 경로를 **핫패스(Hot Path)**, **웜패스(Warm Path)**, **콜드패스(Cold Path)**의 3계층으로 엄격히 분리하고 경로별 엔지니어링 불변식을 강제합니다.
+
+#### 1.3.1 Hot Path: 실시간 I/O, 초저지연, 타이밍 결정론 (Timing Determinism & Zero Jitter)
+- **목표 지연시간**: $\le 10\,\mu s$ (Zero Jitter)
+- **적용 대상**: UART ISR, RS-485 물리 슬롯 타이밍 제어 (`Task_Ch1`, `Task_Ch2Ch3` 마스터/슬레이브 송수신 루프)
+- **4대 최적화 불변식**:
+  1. **동기화 및 락 (Synchronization & Lock)**:
+     - **스핀락/뮤텍스 배제**: 무한 스핀락 및 멀티코어 버스 락을 배제하고, `std::atomic<uint32_t>` 기반의 Wait-free / Lock-free SPSC(Single Producer Single Consumer) 원형 링버퍼 적용. `memory_order_release` (생산자) / `memory_order_acquire` (소비자)로 오버헤드 최소화.
+     - **Direct Task Notification**: `xQueueSendFromISR` 등 무거운 FreeRTOS 큐(150~300 사이클)를 배제하고, 데이터는 SPSC 링버퍼에 즉시 적재하며 웨이크업은 Direct Task Notification (`vTaskNotifyGiveFromISR`, `ulTaskNotifyTake`, 15~30 사이클)으로 처리.
+     - **임계 영역 최소화**: `taskENTER_CRITICAL` 체류 시간은 수 $\mu s$ 이내로 제한하며, 임계 영역 내부에서는 원자적 인덱스 교환 및 플래그 갱신만 수행하고 패킷 복사나 파싱은 임계 영역 외부에서 실행.
+  2. **메모리 계층 및 캐시 (Memory Hierarchy & Cache)**:
+     - **Zero Dynamic Allocation**: 런타임 `malloc`, `free`, `new`, `delete` 및 동적 문자열 할당 영구 금지. 컴파일 타임 고정 크기 정적 메모리(`StaticPacket`, `std::array`)만 참조.
+     - **내부 SRAM 완전 상주 (`IRAM_ATTR` / `DRAM_ATTR`)**: 플래시(XIP) 캐시 미스 스톨(Stall) 및 콜드패스 플래시 Erase/Write 중 Cache Invalidation으로 인한 CPU 패닉을 방지하기 위해, 핫패스 함수 및 ISR은 `IRAM_ATTR`(.iram0.text), LUT(Lookup Table) 및 CRC 테이블은 `DRAM_ATTR`로 내부 SRAM에 고정 배치.
+     - **거짓 공유(False Sharing) 차단**: 링버퍼의 `write_head`와 `read_tail` 등 멀티코어 경합 변수는 `alignas(64)` 캐시 라인 정렬 패딩을 부여하여 물리 캐시 라인 간섭 차단.
+  3. **제어 흐름 및 CPU 파이프라인 (Execution Flow & Pipeline)**:
+     - **루프 불변식 레지스터 호이스팅(Register Hoisting)**: 구조체 포인터 멤버 간접 역참조(`pRing->head != pRing->tail`)를 배제하고 로컬 스택 변수로 레지스터 호이스팅하여 CPU 레지스터(Xtensa a2~a7)에서 초고속 처리 후 루프 종료 시점에 단 1회 메모리 반영.
+     - **분기 예측 최적화 & Branchless**: 분기 예측 실패(15~20 사이클 플러시) 방지를 위해 지배적인 패킷 수신 경로에 C++20 `[[likely]]` / `[[unlikely]]`를 명시하고, 체크섬/비트 연산은 Branchless 비트 마스킹으로 치환.
+     - **하드웨어 FIFO & DMA 연동**: 상태 레지스터 비지 폴링을 배제하고 UART 하드웨어 FIFO 워터마크 인터럽트 및 DMA 컨트롤러 활용.
+  4. **런타임 및 I/O (Runtime, FPU & I/O)**:
+     - **I/O 포맷팅 절대 금지**: `printf`, `sprintf`, `ESP_LOG` 등 C 표준 라이브러리 포맷팅 출력은 스택 과소비 및 블로킹을 유발하므로 핫패스 내 완전 금지. 원시 바이너리 텔레메트리 큐 기록 후 백그라운드로 오프로드.
+     - **부동소수점(FPU) 배제**: 컨텍스트 스위칭 시 FPU Lazy Stacking 오버헤드를 막기 위해 float/double 연산을 금지하고 정수 비트 시프트 또는 고정소수점(Fixed-point) 산술로 통일.
+     - **가상 함수(vtable) 제거**: 런타임 간접 함수 포인터 역참조 및 인라이닝 차단을 방지하기 위해 CRTP(Curiously Recurring Template Pattern) 또는 C++20 Concepts 기반 정적 다형성 적용.
+
+#### 1.3.2 Warm Path: FSM 상태 갱신, 패킷 디코딩, 처리량 및 배압 제어 (Throughput, Flow & Backpressure)
+- **목표 지연시간**: 수 $ms \sim$ 수십 $ms$
+- **적용 대상**: `Task_Broker`, `Task_Protocol`, `TcpReactor::runTask` (패킷 파싱, FSM 상태 머신 전이, TCP 스트리밍 I/O)
+- **5대 핵심 설계 원칙**:
+  1. **배압 제어 및 버퍼 관리 (Backpressure Strategy)**:
+     - **상태 압축 (State Coalescing / Deduplication)**: 주기적 상태 폴링 패킷 인입 시 동일 기기 ID의 이전 슬롯을 최신 상태로 덮어써 큐 폭발 방지.
+     - **오래된 데이터 드롭 (Drop-oldest)**: 버퍼 만충 시 최신 패킷 우선 반영 및 가장 오래된 비제어 데이터 드롭. 단, 제어 명령(Command Queue)은 별도 분리하여 무손실 보장.
+     - **큐 수신 타임아웃 명시**: `portMAX_DELAY` 무한 블로킹을 지양하고 명시적 타임아웃(예: `pdMS_TO_TICKS(100)`)을 설정하여 통신 두절 감지 및 Task Watchdog(TWDT) 정기 피딩.
+  2. **동시성 및 스케줄링 (Concurrency & Priority)**:
+     - **우선순위 역전(Priority Inversion) 방지**: 공유 자원 동기화 시 일반 바이너리 세마포어가 아닌 **우선순위 상속(Priority Inheritance) 메커니즘이 내장된 FreeRTOS Mutex(`xSemaphoreCreateMutex`)** 필수 사용.
+     - **우선순위 티어링(Priority Tiering)**: $\text{ISR (최고)} > \text{Hot Path (P5\sim P6)} > \text{Warm Path (P4)} > \text{Cold Path (P1\sim P2)}$.
+     - **CPU 독점 방지 및 협력적 양보**: 대량 패킷 파싱 루프 중간에 이벤트 기반 블로킹 또는 명시적 `taskYIELD()`, `vTaskDelay(1)`를 배치하여 하위 태스크 기아 방지.
+  3. **메모리 수명 및 자원 관리 (Memory Lifecycle)**:
+     - **동적 메모리 단편화 차단**: 빈번한 `malloc`/`free`나 `std::string` 조합을 금지하고, 컴파일 타임 고정 크기 메모리 풀(Object Pool) 또는 정적 순환 버퍼 재사용.
+     - **Zero-Copy 핸드오버 및 소유권 명확화**: 핫패스 링버퍼 $\rightarrow$ 웜패스 FSM $\rightarrow$ TCP 송신 간 복사를 최소화하고, 버퍼 슬롯의 인덱스 소유권 및 해제(Release) 생명주기를 엄격히 추적.
+  4. **이벤트 필터링 및 디바운싱 (Event Throttling)**:
+     - **상태 중복 전송 억제 (Deduplication)**: 내부 그림자 상태 캐시(Shadow State Table)를 유지하여 실제 물리 상태 변경(Delta)이 발생한 경우에만 상위 플랫폼(SmartThings / TCP)으로 이벤트 방출.
+     - **상위 플랫폼 플러딩 방지**: SmartThings 허브 메시지 큐 오버플로우 방지를 위한 디바운스/쓰로틀 타이머(300~500$ms$ Window) 적용. Edge Driver(Lua `cosock`)에서도 비차단 타이머로 이벤트 발행 속도 제어.
+  5. **오류 격리 및 관측 가능성 (Fault Isolation & Observability)**:
+     - **오류 국소화 (Drop & Resync)**: 패킷 CRC 오류나 프레임 깨짐 발생 시 태스크 패닉 없이 해당 프레임만 안전 폐기하고 다음 동기화 헤더(`0xF7` 등)로 복구.
+     - **레이트 리밋(Rate-limited) 로깅**: 반복 오류 발생 시 로그 스팸으로 인한 UART/플래시 고갈을 방지하기 위해 에러 로깅 주기(Rate Limit) 제어.
+     - **헬스 메트릭 수집**: Throughput, Queue High-Watermark, Drop 패킷 카운터를 원자적으로 누적하여 콜드패스 진단 서비스에 비간섭 스냅샷 제공.
+
+#### 1.3.3 Cold Path: 부팅/초기화, 설정 영속화, 네트워크 페어링, 무결성 & 불간섭 (Integrity, Safe Fallback & Non-Interference)
+- **목표 지연시간**: 수백 $ms \sim$ 수 초 허용
+- **적용 대상**: `Task_Telnet` (CLI 진단 콘솔), `Task_Mgmt` (NVS 설정 영속화, Wi-Fi/OTA, 시스템 헬스 모니터)
+- **5대 핵심 설계 원칙**:
+  1. **핫/웜패스 불간섭 원칙 (Isolation & Non-Interference)**:
+     - **SPI 플래시/NVS 쓰기 시 I-Cache Stall 차단**: NVS 섹터 Erase/Write 중 하드웨어 I-Cache 비활성화에 대비하여 Hot Path가 SRAM(`IRAM_ATTR`)에 상주함을 보증하고, 런타임 쓰기 작업은 통신 트래픽이 비는 유휴 시점(Idle Window)으로 지연(Deferred Commit) 처리.
+     - **스케줄링 우선순위 최하위 격리**: 시스템 최하위 우선순위(Priority 1~2)로 배치하여 실시간 버스 제어 태스크를 절대 선점하지 못하도록 격리.
+  2. **방어적 설계 및 데이터 무결성 (Integrity & Fault Tolerance)**:
+     - **원자적 저장 및 전원 차단 내성(Power-cut Tolerance)**: 설정 데이터는 A/B 뱅크 교대 기록 및 CRC-16/32 체크섬 검증을 적용하여 기록 도중 정전 발생 시에도 데이터 무결성 보존.
+     - **안전한 공장 초기화 폴백 (Safe Fallback)**: NVS 손상 또는 CRC 불일치 시 패닉 없이 ROM/플래시 기본 설정(Factory Default)으로 자동 복구.
+     - **입력값 전수 유효성 검증 (Defensive Validation)**: CLI 명령어, Web/App 설정값, OTA 메타데이터는 허용 범위(Range check)와 스키마를 엄격히 전수 검증.
+  3. **워치독 관리 및 점진적 처리 (WDT & Cooperative Yielding)**:
+     - **태스크 워치독(TWDT) 만료 방지**: 대용량 NVS 플러시, Flash Erase, TLS 핸드셰이크 등 수백 $ms$ 이상 소요 작업은 블록 단위 분할(Chunking) 및 매 스텝마다 명시적 `vTaskDelay(pdMS_TO_TICKS(1))` 삽입으로 WDT 리셋 및 타 태스크 기아 방지.
+     - **재시도 지수 백오프 (Exponential Backoff)**: Wi-Fi 및 업스트림 소켓 재연결 실패 시 $1s \rightarrow 2s \rightarrow 4s \dots \max 60s$ 지연 적용으로 자원 낭비 차단.
+  4. **메모리 관리 및 누수 차단 (Resource Teardown)**:
+     - **임시 자원의 완전한 해제 (Zero-leak via RAII)**: cJSON, 문자열 포맷팅 등 동적 힙 사용 후 예외 분기를 포함한 모든 경로에서 C++ RAII 기반 100% 자원 및 디스크립터 해제.
+     - **힙 단편화(Fragmentation) 예방**: 수 분 단위 주기 실행 작업은 동적 할당을 지양하고 부팅 시 1회 고정 할당 또는 정적 재사용 버퍼 채택.
+  5. **풍부한 관측 가능성 (Rich Diagnostics & Logging)**:
+     - 상세 텍스트 포맷팅 로깅(`printf`, `ESP_LOGI`)을 적극 허용하여 부팅 시퀀스, 연결 상태, 스택 여유량(`uxTaskGetStackHighWaterMark`), 시스템 최소 힙 잔여량(`esp_get_minimum_free_heap_size`)의 상세 추적성 확보.
+
+#### 1.3.4 Hot - Warm - Cold 통합 토폴로지 및 비교 매트릭스
+
+```mermaid
+flowchart TD
+    subgraph HotPath["[핫패스 (Hot Path)] 지연시간: <= 10us (Zero Jitter)"]
+        HW["RS-485 / UART HW FIFO"] -->|ISR + GDMA| ISR["UART ISR (IRAM_ATTR)"]
+        ISR -->|Wait-free SPSC / Direct Notify| HotTask["Task_Ch1 / Task_Ch2Ch3 (Priority 5~6)"]
+        HotTask -.->|Static DRAM / No Heap / Branchless| HotTask
+    end
+
+    subgraph WarmPath["[웜패스 (Warm Path)] 지연시간: 수 ms ~ 수십 ms"]
+        HotTask -->|Zero-Copy Slot Handover| WarmWorker["Task_Broker / Task_Protocol (Priority 4)"]
+        WarmWorker -->|FSM Update / State Deduplication| StateTable["Shadow State Cache"]
+        WarmWorker -->|Rate Limiting / Backpressure| TCPBridge["TCP Transport Bridge"]
+    end
+
+    subgraph ColdPath["[콜드패스 (Cold Path)] 지연시간: 수백 ms ~ 수 초"]
+        WarmWorker -.->|Deferred Event / Metrics| ColdMgmt["Task_Mgmt / Task_CLI (Priority 1~2)"]
+        ColdMgmt -->|Atomic Write + CRC| NVS["NVS / Flash Storage"]
+        ColdMgmt -->|Cooperative Yield + WDT Feed| CLI["CLI Console / Web OTA"]
+    end
+
+    ColdMgmt -.->|Config Snapshot (Read-Only)| HotTask
+```
+
+| 검토 영역 | 핫패스 (Hot Path) | 웜패스 (Warm Path) | 콜드패스 (Cold Path) |
+|---|---|---|---|
+| **설계 목표** | 극저지연, 타이밍 결정론 (Zero Jitter) | 높은 처리량, 배압 제어, 공존 (Flow) | 데이터 무결성, 고장 복구력, 불간섭 (Safety) |
+| **지연 허용치** | $\le 10\,\mu s$ | 수 $ms \sim$ 수십 $ms$ | 수백 $ms \sim$ 수 초 |
+| **스케줄링 티어** | ISR / Priority 5~6 (High) | Priority 4 (Core Worker) | Priority 1~2 (Background) |
+| **동기화 기법** | Wait-free SPSC, Direct Task Notify | Mutex (우선순위 상속), FreeRTOS Queue | EventGroup, Bounded Delay, 블로킹 I/O |
+| **메모리/캐시** | `IRAM_ATTR`, SRAM 고정, `alignas(64)` | 고정 크기 풀, Zero-Copy 슬롯 | RAII 힙 할당 허용, 단편화 방지 정적 버퍼 |
+| **제어 흐름** | Branchless, 레지스터 호이스팅, DMA | 상태 압축(Coalescing), Drop-oldest, FSM | 루프 Chunking, 지수 백오프, 안전 폴백 |
+| **런타임/IO** | 정수/고정소수점, CRTP 인라인, I/O 절대 금지 | Rate-limited 로깅, 통계 카운터 원자적 갱신 | 상세 텍스트 로깅(`printf`), NVS/SPI 플래시 기록 |
+| **워치독(WDT)** | 인터럽트 마스크 최소화 | 대기 타임아웃 명시, `taskYIELD()` 협력 양보 | 블록 분할 처리, 루프 내 명시적 WDT 피딩 |
+| **최우선 가치** | **결정론적 타이밍 (Timing Determinism)** | **처리량 및 시스템 안정성 (Throughput & Flow)** | **데이터 무결성 및 복구력 (Integrity & Safety)** |
+
 ---
 
 ## 2. Channel & Port Mapping

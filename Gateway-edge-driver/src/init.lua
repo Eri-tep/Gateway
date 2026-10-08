@@ -76,23 +76,116 @@ local function device_init(driver, device)
   -- ★ 자식 기기 전체 분기 가드: p_key가 존재하면 절대 부모 영역으로 fallthrough되지 않음
   local p_key = device.parent_assigned_child_key or ""
   if p_key ~= "" then
+    local CHILD_INIT_HANDLERS = {
+      doorphone = function(dev)
+        local cap_motion = capabilities.motionSensor
+        local comp_main = dev.profile.components["main"]
+        if comp_main then
+          dev:emit_component_event(comp_main, capabilities.switch.switch.off())
+          if cap_motion then
+            dev:emit_component_event(comp_main, cap_motion.motion.inactive())
+          end
+        end
+        local comp_lobby = dev.profile.components["lobby"]
+        if comp_lobby then
+          dev:emit_component_event(comp_lobby, capabilities.switch.switch.off())
+          if cap_motion then
+            dev:emit_component_event(comp_lobby, cap_motion.motion.inactive())
+          end
+        end
+      end,
+
+      outlet = function(dev)
+        local cur_month = os.date("%Y-%m")
+        local last_month = dev:get_field("last_energy_month")
+        local monthly_kwh = dev:get_field("monthly_energy_kwh") or 0.0
+
+        if last_month ~= cur_month then
+          monthly_kwh = 0.0
+          dev:set_field("monthly_energy_kwh", 0.0, { persist = true })
+          dev:set_field("last_energy_month", cur_month, { persist = true })
+        end
+
+        local kwh_val = math.floor(monthly_kwh * 1000 + 0.5) / 1000
+        dev:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
+      end,
+
+      thermostat = function(dev)
+        if dev:supports_capability_by_id(capabilities.switch.ID) then
+          local sw_ev = capabilities.switch.switch.off()
+          sw_ev.state_change = true
+          dev:emit_event(sw_ev)
+        end
+        local cap_away = capabilities["digituniverse06711.heatingAway"]
+        if cap_away and dev:supports_capability_by_id(cap_away.ID) then
+          local away_ev = cap_away.away("off")
+          away_ev.state_change = true
+          dev:emit_event(away_ev)
+        end
+        if dev:supports_capability_by_id(capabilities.thermostatMode.ID) then
+          dev:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
+        end
+      end,
+
+      aircon = function(dev)
+        dev:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "dry", "wind", "auto", "heat" }))
+      end,
+
+      fcu = function(dev)
+        local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
+        if cap_sp and dev:supports_capability_by_id("digituniverse06711.fcuSetpoint") then
+          local saved_sp = dev:get_field("last_fcu_setpoint") or 24
+          local ev = cap_sp.setpoint({ value = saved_sp, unit = "°C" })
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_mode = capabilities["digituniverse06711.fcuMode"]
+        if cap_mode and dev:supports_capability_by_id("digituniverse06711.fcuMode") then
+          local saved_mode = dev:get_field("last_fcu_mode") or "cool"
+          local ev = cap_mode.mode(saved_mode)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_fan = capabilities["digituniverse06711.fcuFanSpeed"]
+        if cap_fan and dev:supports_capability_by_id("digituniverse06711.fcuFanSpeed") then
+          local saved_fan = dev:get_field("last_fcu_fan") or "auto"
+          local ev = cap_fan.fanSpeed(saved_fan)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
+        if cap_osc and dev:supports_capability_by_id("digituniverse06711.fcuOscillation") then
+          local saved_osc = dev:get_field("last_fcu_osc") or "fixed"
+          local ev = cap_osc.oscillation(saved_osc)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_info = capabilities["digituniverse06711.fcuInfo"]
+        if cap_info and dev:supports_capability_by_id("digituniverse06711.fcuInfo") then
+          local saved_info = dev:get_field("last_fcu_info") or "정상"
+          local ev = cap_info.info(saved_info)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+      end,
+
+      elevator = function(dev)
+        local cap_hist = capabilities["digituniverse06711.history"]
+        if cap_hist then
+          local ev = cap_hist.history({ value = "대기 중" })
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+      end
+    }
+
     -- 1) 도어폰 초기화
     if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
-      local cap_motion = capabilities.motionSensor
-      local comp_main = device.profile.components["main"]
-      if comp_main then
-        device:emit_component_event(comp_main, capabilities.switch.switch.off())
-        if cap_motion then
-          device:emit_component_event(comp_main, cap_motion.motion.inactive())
-        end
-      end
-      local comp_lobby = device.profile.components["lobby"]
-      if comp_lobby then
-        device:emit_component_event(comp_lobby, capabilities.switch.switch.off())
-        if cap_motion then
-          device:emit_component_event(comp_lobby, cap_motion.motion.inactive())
-        end
-      end
+      CHILD_INIT_HANDLERS.doorphone(device)
       return
     end
 
@@ -103,94 +196,20 @@ local function device_init(driver, device)
     end
     device:set_field("ticker_registry", nil)
 
-    -- Outlet 초기화
     if device:supports_capability_by_id(capabilities.energyMeter.ID) then
-      local cur_month = os.date("%Y-%m")
-      local last_month = device:get_field("last_energy_month")
-      local monthly_kwh = device:get_field("monthly_energy_kwh") or 0.0
-
-      if last_month ~= cur_month then
-        monthly_kwh = 0.0
-        device:set_field("monthly_energy_kwh", 0.0, { persist = true })
-        device:set_field("last_energy_month", cur_month, { persist = true })
-      end
-
-      local kwh_val = math.floor(monthly_kwh * 1000 + 0.5) / 1000
-      device:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
+      CHILD_INIT_HANDLERS.outlet(device)
     end
-
-    -- Thermostat 초기화 (신규 switch + heatingAway 및 기존 모드 호환)
     if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
-      if device:supports_capability_by_id(capabilities.switch.ID) then
-        local sw_ev = capabilities.switch.switch.off()
-        sw_ev.state_change = true
-        device:emit_event(sw_ev)
-      end
-      local cap_away = capabilities["digituniverse06711.heatingAway"]
-      if cap_away and device:supports_capability_by_id(cap_away.ID) then
-        local away_ev = cap_away.away("off")
-        away_ev.state_change = true
-        device:emit_event(away_ev)
-      end
-      if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
-        device:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
-      end
+      CHILD_INIT_HANDLERS.thermostat(device)
     end
-
-    -- Air Conditioner 초기화
     if device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
-      device:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "dry", "wind", "auto", "heat" }))
+      CHILD_INIT_HANDLERS.aircon(device)
     end
-
-    -- FCU 자식 기기 초기화 (p_key = "dev_2c_<slot>_0" 패턴)
     if p_key:match("^dev_2c_") then
-      local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
-      if cap_sp and device:supports_capability_by_id("digituniverse06711.fcuSetpoint") then
-        local saved_sp = device:get_field("last_fcu_setpoint") or 24
-        local ev = cap_sp.setpoint({ value = saved_sp, unit = "°C" })
-        ev.state_change = true
-        device:emit_event(ev)
-      end
-
-      local cap_mode = capabilities["digituniverse06711.fcuMode"]
-      if cap_mode and device:supports_capability_by_id("digituniverse06711.fcuMode") then
-        local saved_mode = device:get_field("last_fcu_mode") or "cool"
-        local ev = cap_mode.mode(saved_mode)
-        ev.state_change = true
-        device:emit_event(ev)
-      end
-
-      local cap_fan = capabilities["digituniverse06711.fcuFanSpeed"]
-      if cap_fan and device:supports_capability_by_id("digituniverse06711.fcuFanSpeed") then
-        local saved_fan = device:get_field("last_fcu_fan") or "auto"
-        local ev = cap_fan.fanSpeed(saved_fan)
-        ev.state_change = true
-        device:emit_event(ev)
-      end
-
-      local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
-      if cap_osc and device:supports_capability_by_id("digituniverse06711.fcuOscillation") then
-        local saved_osc = device:get_field("last_fcu_osc") or "fixed"
-        local ev = cap_osc.oscillation(saved_osc)
-        ev.state_change = true
-        device:emit_event(ev)
-      end
-
-      local cap_info = capabilities["digituniverse06711.fcuInfo"]
-      if cap_info and device:supports_capability_by_id("digituniverse06711.fcuInfo") then
-        local saved_info = device:get_field("last_fcu_info") or "정상"
-        local ev = cap_info.info(saved_info)
-        ev.state_change = true
-        device:emit_event(ev)
-      end
+      CHILD_INIT_HANDLERS.fcu(device)
     end
-
-    -- Elevator 초기화
-    local cap_hist = capabilities["digituniverse06711.history"]
-    if cap_hist and p_key:match("^dev_34_") then
-      local ev = cap_hist.history({ value = "대기 중" })
-      ev.state_change = true
-      device:emit_event(ev)
+    if p_key:match("^dev_34_") then
+      CHILD_INIT_HANDLERS.elevator(device)
     end
 
     log.info(string.format("Child Device initialized successfully: %s", p_key))
