@@ -162,7 +162,7 @@ The `gateway-ultra` profile defines 6 independent components, each rendered as a
 ### 6.1 One-Liner Package & Deploy (Recommended)
 Package, assign channel, and install to hub in a single step:
 ```bash
-smartthings edge:drivers:package "/Users/eri/Library/CloudStorage/OneDrive-개인/Home/Gateway/Gateway-edge-driver" \
+smartthings edge:drivers:package "/Users/eri/Documents/Home/Gateway/Gateway-edge-driver" \
   --channel="5c5ac2ac-84fb-4783-82df-da58cc675f41" \
   --hub="b65b1792-8510-423f-b12d-00d7ff78b700"
 ```

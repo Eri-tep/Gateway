@@ -76,6 +76,8 @@ void Engine_InitQueues() {
   s_uart1_mutex = xSemaphoreCreateMutex();
   s_uart2_mutex = xSemaphoreCreateMutex();
   s_ctrl_queue_mutex = xSemaphoreCreateMutex();
+  assert(s_uart0_mutex != nullptr && s_uart1_mutex != nullptr &&
+         s_uart2_mutex != nullptr && s_ctrl_queue_mutex != nullptr);
 
   s_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
                                            s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
@@ -280,8 +282,11 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
         size_t idx = 0;
         while (idx < stream_len) {
           if (stream[idx] != stx) {
-            idx++;
-            continue;
+            const void *stx_ptr = memchr(&stream[idx], stx, stream_len - idx);
+            if (!stx_ptr) {
+              break;
+            }
+            idx = static_cast<const uint8_t *>(stx_ptr) - stream;
           }
 
           int len_res =
@@ -693,18 +698,13 @@ static uint32_t Ch2Ch3_DrainVirtualAckQueue(void *arg) {
     if (ctx->ack_q->dequeue(next_ack, next_due)) {
       SemaphoreHandle_t u_mux =
           (ctx->cfg->uart_num == UART_NUM_1) ? s_uart1_mutex : s_uart2_mutex;
-      if (u_mux) {
-        MutexLocker lock(u_mux, pdMS_TO_TICKS(100));
-        if (lock.isLocked()) {
-          uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
-                           next_ack.length);
-        } else {
-          ctx->stats->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-          System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
-        }
-      } else {
+      MutexLocker lock(u_mux, pdMS_TO_TICKS(100));
+      if (lock.isLocked()) {
         uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
                          next_ack.length);
+      } else {
+        ctx->stats->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
+        System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
       }
       System_TracePacket(ctx->cfg->channel_id, true, TraceType::ACK,
                             next_ack);

@@ -468,15 +468,29 @@ int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
   const uint8_t safe_max =
       (e.max_len >= safe_min && e.max_len <= 64) ? e.max_len : 64;
 
-  for (size_t l = safe_min; l <= safe_max; ++l) {
-    if (stx_idx + l > stream_len)
-      return 0; // 아직 덜 들어옴
-    if (stream[stx_idx + l - 1] == e.etx &&
-        checkFramingPure(std::span<const uint8_t>(&stream[stx_idx], l), e.stx, e.etx,
+  if (stx_idx + safe_min > stream_len)
+    return 0; // 최소 길이조차 아직 덜 들어옴
+
+  // Hardware-accelerated ETX search with multi-ETX fallback resilience
+  size_t cur_offset = stx_idx + safe_min - 1;
+  const size_t max_search_bound = std::min(stream_len, stx_idx + safe_max);
+
+  while (cur_offset < max_search_bound) {
+    const size_t remain = max_search_bound - cur_offset;
+    const void *hit = memchr(&stream[cur_offset], e.etx, remain);
+    if (!hit) {
+      break; // 검색 가능한 윈도우 내에 더 이상 ETX 없음
+    }
+
+    const size_t l = (static_cast<const uint8_t *>(hit) - &stream[stx_idx]) + 1;
+    if (checkFramingPure(std::span<const uint8_t>(&stream[stx_idx], l), e.stx, e.etx,
                          safe_min, safe_max, e.algo)) {
       return static_cast<int>(l);
     }
+    // 페이로드 내부 우연한 ETX 매칭이었으나 체크섬 불일치 -> 다음 바이트부터 계속 탐색
+    cur_offset = (static_cast<const uint8_t *>(hit) - stream) + 1;
   }
+
   return (stx_idx + safe_max <= stream_len) ? -1 : 0;
 }
 

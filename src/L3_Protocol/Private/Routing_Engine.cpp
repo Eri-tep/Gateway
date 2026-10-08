@@ -13,10 +13,12 @@
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/Bridge_CH.h"
+#include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
 
 #include <Arduino.h>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 namespace {
@@ -27,42 +29,97 @@ public:
 
 private:
   DeviceRouteEntry _entries[MAX_ROUTES]{};
-  size_t _count{0};
+  int8_t _lookup_map[256]{};
+  std::atomic<size_t> _count{0};
   mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 
 public:
+  DeviceRouteRegistry() noexcept {
+    memset(_lookup_map, -1, sizeof(_lookup_map));
+  }
+
   void recordRoute(uint8_t channel_id, int8_t slot_idx, uint8_t dev_id,
                    uint8_t sub1, uint8_t sub2) noexcept {
+    const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
+    const uint32_t now = millis();
+
     CriticalSectionLocker lock(&_mux);
-    for (size_t i = 0; i < _count; ++i) {
-      if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
-          _entries[i].sub2 == sub2) {
-        _entries[i].endpoint.channel_id = channel_id;
-        _entries[i].endpoint.slot_idx = slot_idx;
-        _entries[i].endpoint.last_seen_ms = millis();
+    const size_t cnt = _count.load(std::memory_order_relaxed);
+
+    size_t attempts = 0;
+    uint8_t cur_h = h;
+    while (attempts < MAX_ROUTES) {
+      int8_t idx = _lookup_map[cur_h];
+      if (idx == -1)
+        break;
+      if (idx >= 0 && static_cast<size_t>(idx) < cnt &&
+          _entries[idx].dev_id == dev_id && _entries[idx].sub1 == sub1 &&
+          _entries[idx].sub2 == sub2) {
+        _entries[idx].endpoint.channel_id = channel_id;
+        _entries[idx].endpoint.slot_idx = slot_idx;
+        _entries[idx].endpoint.last_seen_ms = now;
         return;
       }
+      cur_h = (cur_h + 1) & 0xFF;
+      attempts++;
     }
-    if (_count < MAX_ROUTES) {
-      size_t i = _count++;
-      _entries[i].dev_id = dev_id;
-      _entries[i].sub1 = sub1;
-      _entries[i].sub2 = sub2;
-      _entries[i].endpoint.channel_id = channel_id;
-      _entries[i].endpoint.slot_idx = slot_idx;
-      _entries[i].endpoint.last_seen_ms = millis();
+
+    if (cnt < MAX_ROUTES) {
+      size_t new_idx = cnt;
+      _count.store(cnt + 1, std::memory_order_relaxed);
+      _entries[new_idx].dev_id = dev_id;
+      _entries[new_idx].sub1 = sub1;
+      _entries[new_idx].sub2 = sub2;
+      _entries[new_idx].endpoint.channel_id = channel_id;
+      _entries[new_idx].endpoint.slot_idx = slot_idx;
+      _entries[new_idx].endpoint.last_seen_ms = now;
+
+      uint8_t map_h = h;
+      size_t map_att = 0;
+      while (_lookup_map[map_h] != -1 && map_att < 256) {
+        map_h = (map_h + 1) & 0xFF;
+        map_att++;
+      }
+      if (map_att < 256) {
+        _lookup_map[map_h] = static_cast<int8_t>(new_idx);
+      }
     }
   }
 
   [[nodiscard]] bool lookupRoute(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                  RouteEndpoint &out_ep) const noexcept {
+    const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
+
     CriticalSectionLocker lock(&_mux);
-    for (size_t i = 0; i < _count; ++i) {
-      if (_entries[i].dev_id == dev_id && _entries[i].sub1 == sub1 &&
-          _entries[i].sub2 == sub2) {
-        out_ep = _entries[i].endpoint;
+    const size_t cnt = _count.load(std::memory_order_relaxed);
+
+    // Fast-Path: Direct hit (O(1))
+    int8_t direct_idx = _lookup_map[h];
+    if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < cnt &&
+        _entries[direct_idx].dev_id == dev_id && _entries[direct_idx].sub1 == sub1 &&
+        _entries[direct_idx].sub2 == sub2) {
+      out_ep = _entries[direct_idx].endpoint;
+      return true;
+    }
+    if (direct_idx == -1) {
+      return false;
+    }
+
+    // Fallback: Open addressing collision loop
+    size_t attempts = 1;
+    uint8_t cur_h = (h + 1) & 0xFF;
+    while (attempts < MAX_ROUTES) {
+      int8_t idx = _lookup_map[cur_h];
+      if (idx == -1)
+        break;
+      if (idx >= 0 && static_cast<size_t>(idx) < cnt &&
+          _entries[idx].dev_id == dev_id && _entries[idx].sub1 == sub1 &&
+          _entries[idx].sub2 == sub2) {
+        out_ep = _entries[idx].endpoint;
         return true;
       }
+      cur_h = (cur_h + 1) & 0xFF;
+      attempts++;
     }
     return false;
   }
@@ -70,7 +127,7 @@ public:
   [[nodiscard]] size_t getRoutes(std::span<DeviceRouteEntry> out_span) const noexcept {
     if (out_span.empty()) return 0;
     CriticalSectionLocker lock(&_mux);
-    const size_t n = std::min(_count, out_span.size());
+    const size_t n = std::min(_count.load(std::memory_order_relaxed), out_span.size());
     for (size_t i = 0; i < n; i++) {
       out_span[i] = _entries[i];
     }
@@ -85,7 +142,8 @@ public:
 
   void clear() noexcept {
     CriticalSectionLocker lock(&_mux);
-    _count = 0;
+    _count.store(0, std::memory_order_relaxed);
+    memset(_lookup_map, -1, sizeof(_lookup_map));
     memset(_entries, 0, sizeof(_entries));
   }
 };

@@ -279,8 +279,11 @@ void demuxPacketStream(HubClientSlot *slot) {
   size_t loop_count = 0;
   while (p < slot->rx_len && ++loop_count < 256) {
     if (slot->rx_buf[p] != stx) {
-      p++;
-      continue;
+      const void *stx_ptr = memchr(&slot->rx_buf[p], stx, slot->rx_len - p);
+      if (!stx_ptr) {
+        break;
+      }
+      p = static_cast<const uint8_t *>(stx_ptr) - slot->rx_buf;
     }
 
     int len_res =
@@ -345,26 +348,26 @@ static void onBurstTimer(void *arg) {
   StaticPacket tx_pkt{};
   uint8_t slot = 0;
   uint32_t silence_req_ms = 20;
+  uint32_t last_tx = 0;
 
-  portENTER_CRITICAL(&s_burst_fsm.mux);
-  if (s_burst_fsm.remaining_count == 0) {
-    portEXIT_CRITICAL(&s_burst_fsm.mux);
-    return;
+  {
+    CriticalSectionLocker lock(&s_burst_fsm.mux);
+    if (s_burst_fsm.remaining_count == 0) {
+      return;
+    }
+    tx_pkt = s_burst_fsm.pkt;
+    slot = s_burst_fsm.target_slot;
+    silence_req_ms = s_burst_fsm.silence_ms;
+    last_tx = s_burst_fsm.last_tx_ms;
   }
-  tx_pkt = s_burst_fsm.pkt;
-  slot = s_burst_fsm.target_slot;
-  silence_req_ms = s_burst_fsm.silence_ms;
-  uint32_t last_tx = s_burst_fsm.last_tx_ms;
-  portEXIT_CRITICAL(&s_burst_fsm.mux);
 
   uint32_t last_rx = 0;
   {
     MutexLocker lock(s_ch5_mutex);
     const auto &slot_info = s_hub_slots[slot];
     if (!slot_info.enabled || slot_info.sock < 0 || !slot_info.is_connected) {
-      portENTER_CRITICAL(&s_burst_fsm.mux);
+      CriticalSectionLocker lock_burst(&s_burst_fsm.mux);
       s_burst_fsm.remaining_count = 0;
-      portEXIT_CRITICAL(&s_burst_fsm.mux);
       return;
     }
     last_rx = slot_info.last_rx_ms;
@@ -391,14 +394,17 @@ static void onBurstTimer(void *arg) {
   now = millis();
   System_TracePacket(5, true, sent ? TraceType::CTL : TraceType::DRP, tx_pkt);
 
-  portENTER_CRITICAL(&s_burst_fsm.mux);
-  s_burst_fsm.last_tx_ms = now;
-  if (s_burst_fsm.remaining_count > 0) {
-    s_burst_fsm.remaining_count--;
+  bool schedule_next = false;
+  uint32_t next_gap_ms = 20;
+  {
+    CriticalSectionLocker lock(&s_burst_fsm.mux);
+    s_burst_fsm.last_tx_ms = now;
+    if (s_burst_fsm.remaining_count > 0) {
+      s_burst_fsm.remaining_count--;
+    }
+    schedule_next = (s_burst_fsm.remaining_count > 0);
+    next_gap_ms = s_burst_fsm.silence_ms;
   }
-  bool schedule_next = (s_burst_fsm.remaining_count > 0);
-  uint32_t next_gap_ms = s_burst_fsm.silence_ms;
-  portEXIT_CRITICAL(&s_burst_fsm.mux);
 
   if (schedule_next) {
     esp_timer_start_once(s_burst_fsm.timer,
@@ -435,13 +441,14 @@ bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count,
     }
   }
 
-  portENTER_CRITICAL(&s_burst_fsm.mux);
-  s_burst_fsm.pkt = pkt;
-  s_burst_fsm.target_slot = slot_idx;
-  s_burst_fsm.remaining_count = count;
-  s_burst_fsm.silence_ms = silence_ms;
-  s_burst_fsm.last_tx_ms = 0;
-  portEXIT_CRITICAL(&s_burst_fsm.mux);
+  {
+    CriticalSectionLocker lock(&s_burst_fsm.mux);
+    s_burst_fsm.pkt = pkt;
+    s_burst_fsm.target_slot = slot_idx;
+    s_burst_fsm.remaining_count = count;
+    s_burst_fsm.silence_ms = silence_ms;
+    s_burst_fsm.last_tx_ms = 0;
+  }
 
   esp_timer_start_once(s_burst_fsm.timer, 1000);
   return true;
@@ -897,6 +904,7 @@ void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept {
 void Bridge_Init() {
   if (!s_ch5_mutex) {
     s_ch5_mutex = xSemaphoreCreateMutex();
+    assert(s_ch5_mutex != nullptr);
   }
   Ew11Manager::init();
   Hub_LoadConfig();

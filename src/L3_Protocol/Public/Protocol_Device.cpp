@@ -21,14 +21,47 @@ std::atomic<bool> s_dp_lobby_bell{false};
 std::atomic<uint32_t> s_dp_last_bell_ms{0};
 static std::atomic<uint32_t> s_cache_lock_timeouts{0};
 
+static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
+  return ControlTemplate_NormSub1(dev_id, sub1);
+}
+
+static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1,
+                                  uint8_t sub2) noexcept {
+  return Hash::deviceKey8(dev_id, sub1, sub2);
+}
+
+static inline void copyEntryBounded(DeviceStateEntry &dst,
+                                    const DeviceStateEntry &src) noexcept {
+  dst.dev_id = src.dev_id;
+  dst.sub1 = src.sub1;
+  dst.sub2 = src.sub2;
+  const uint8_t ack_len =
+      std::min<uint8_t>(src.last_ack_len, static_cast<uint8_t>(dst.last_ack_data.size()));
+  dst.last_ack_len = ack_len;
+  if (ack_len > 0) {
+    memcpy(dst.last_ack_data.data(), src.last_ack_data.data(), ack_len);
+  }
+  dst.last_target_temp = src.last_target_temp;
+  dst.last_current_temp = src.last_current_temp;
+  dst.last_updated_ms = src.last_updated_ms;
+  dst.last_stale_poll_ms = src.last_stale_poll_ms;
+  dst.timeout_count = src.timeout_count;
+  dst.is_online = src.is_online;
+}
+
 class DeviceRepository {
 private:
   static constexpr size_t MAX_DEVICES = 48;
   DeviceStateEntry cache[MAX_DEVICES]{};
   int8_t dev_lookup_map[256]{};
-  size_t device_count = 0;
+  std::atomic<size_t> _device_count{0};
   std::atomic<size_t> _online_count{0};
   mutable portMUX_TYPE _cache_mux = portMUX_INITIALIZER_UNLOCKED;
+
+  const DeviceStateEntry *findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
+                                           uint8_t sub2, uint8_t h) const noexcept;
+  DeviceStateEntry *findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
+                                     uint8_t sub2, uint8_t h) noexcept;
 
   const DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
                                        uint8_t sub2) const noexcept;
@@ -36,6 +69,9 @@ private:
                                  uint8_t sub2) noexcept;
 
 public:
+  DeviceStateEntry *findMutableFast(uint8_t dev_id, uint8_t norm_sub1,
+                                    uint8_t sub2, uint8_t h,
+                                    bool auto_create = false) noexcept;
   DeviceStateEntry *findMutable(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                 bool auto_create = false) noexcept;
   void initDevices();
@@ -74,40 +110,33 @@ static DeviceRepository s_device_repo;
 // Device State Repository & CH1 Control Pipeline
 // ============================================================================
 
-static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1,
-                                  uint8_t sub2) noexcept {
-  return static_cast<uint8_t>(dev_id + sub1 * 3 + sub2 * 7);
-}
-
-static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  return ControlTemplate_NormSub1(dev_id, sub1);
-}
-
-DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
-                                                uint8_t sub2,
-                                                bool auto_create) noexcept {
-  sub1 = Device_NormSub1(dev_id, sub1);
-  uint8_t h = Device_Hash(dev_id, sub1, sub2);
+DeviceStateEntry *
+DeviceRepository::findMutableFast(uint8_t dev_id, uint8_t norm_sub1,
+                                  uint8_t sub2, uint8_t h,
+                                  bool auto_create) noexcept {
   size_t attempts = 0;
+  uint8_t cur_h = h;
+  const size_t cnt = _device_count.load(std::memory_order_relaxed);
 
   while (attempts < MAX_DEVICES) {
-    int8_t idx = dev_lookup_map[h];
+    int8_t idx = dev_lookup_map[cur_h];
     if (idx == -1)
       break;
-    if (idx >= 0 && static_cast<size_t>(idx) < device_count &&
-        cache[idx].dev_id == dev_id && cache[idx].sub1 == sub1 &&
+    if (idx >= 0 && static_cast<size_t>(idx) < cnt &&
+        cache[idx].dev_id == dev_id && cache[idx].sub1 == norm_sub1 &&
         cache[idx].sub2 == sub2) {
       return &cache[idx];
     }
-    h = (h + 1) & 0xFF;
+    cur_h = (cur_h + 1) & 0xFF;
     attempts++;
   }
 
-  if (auto_create && device_count < MAX_DEVICES) {
-    size_t idx = device_count++;
+  if (auto_create && cnt < MAX_DEVICES) {
+    size_t idx = cnt;
+    _device_count.store(cnt + 1, std::memory_order_relaxed);
     auto &e = cache[idx];
     e.dev_id = dev_id;
-    e.sub1 = sub1;
+    e.sub1 = norm_sub1;
     e.sub2 = sub2;
     e.last_target_temp = 0;
     e.last_ack_len = 0;
@@ -117,7 +146,7 @@ DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
     e.is_online = false;
     memset(e.last_ack_data.data(), 0, sizeof(e.last_ack_data));
 
-    uint8_t map_h = Device_Hash(dev_id, sub1, sub2);
+    uint8_t map_h = h;
     size_t map_attempts = 0;
     while (dev_lookup_map[map_h] != -1 && map_attempts < 256) {
       map_h = (map_h + 1) & 0xFF;
@@ -132,16 +161,23 @@ DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
   return nullptr;
 }
 
-const DeviceStateEntry *
-DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
-                               uint8_t sub2) const noexcept {
+DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
+                                                uint8_t sub2,
+                                                bool auto_create) noexcept {
   sub1 = Device_NormSub1(dev_id, sub1);
-  uint8_t h = Device_Hash(dev_id, sub1, sub2);
+  const uint8_t h = Device_Hash(dev_id, sub1, sub2);
+  return findMutableFast(dev_id, sub1, sub2, h, auto_create);
+}
+
+const DeviceStateEntry *
+DeviceRepository::findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
+                                   uint8_t sub2, uint8_t h) const noexcept {
+  const size_t cnt = _device_count.load(std::memory_order_relaxed);
 
   // Fast-Path: Direct attempt 0 hit (O(1))
   int8_t direct_idx = dev_lookup_map[h];
-  if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < device_count &&
-      cache[direct_idx].dev_id == dev_id && cache[direct_idx].sub1 == sub1 &&
+  if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < cnt &&
+      cache[direct_idx].dev_id == dev_id && cache[direct_idx].sub1 == norm_sub1 &&
       cache[direct_idx].sub2 == sub2) {
     return &cache[direct_idx];
   }
@@ -156,8 +192,8 @@ DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
     int8_t idx = dev_lookup_map[h];
     if (idx == -1)
       break;
-    if (idx >= 0 && static_cast<size_t>(idx) < device_count &&
-        cache[idx].dev_id == dev_id && cache[idx].sub1 == sub1 &&
+    if (idx >= 0 && static_cast<size_t>(idx) < cnt &&
+        cache[idx].dev_id == dev_id && cache[idx].sub1 == norm_sub1 &&
         cache[idx].sub2 == sub2) {
       return &cache[idx];
     }
@@ -167,6 +203,20 @@ DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
   return nullptr;
 }
 
+DeviceStateEntry *
+DeviceRepository::findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
+                                   uint8_t sub2, uint8_t h) noexcept {
+  return findMutableFast(dev_id, norm_sub1, sub2, h, false);
+}
+
+const DeviceStateEntry *
+DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
+                               uint8_t sub2) const noexcept {
+  sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, sub1, sub2);
+  return findInternalFast(dev_id, sub1, sub2, h);
+}
+
 DeviceStateEntry *DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
                                                  uint8_t sub2) noexcept {
   return findMutable(dev_id, sub1, sub2, false);
@@ -174,20 +224,23 @@ DeviceStateEntry *DeviceRepository::findInternal(uint8_t dev_id, uint8_t sub1,
 
 bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                 DeviceStateEntry &out_copy) const noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
   CriticalSectionLocker lock(&_cache_mux);
-  const DeviceStateEntry *e = findInternal(dev_id, sub1, sub2);
+  const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
   if (!e)
     return false;
-  out_copy = *e;
+  copyEntryBounded(out_copy, *e);
   return true;
 }
 
 bool DeviceRepository::getSnapshot(size_t index,
                                    DeviceStateEntry &out_copy) const noexcept {
   CriticalSectionLocker lock(&_cache_mux);
-  if (index >= device_count)
+  if (index >= _device_count.load(std::memory_order_relaxed))
     return false;
-  out_copy = cache[index];
+  copyEntryBounded(out_copy, cache[index]);
   return true;
 }
 
@@ -197,19 +250,23 @@ size_t DeviceRepository::getSnapshotChunk(size_t start_idx,
   if (!out_buf || max_count == 0)
     return 0;
   CriticalSectionLocker lock(&_cache_mux);
-  if (start_idx >= device_count)
+  const size_t cnt = _device_count.load(std::memory_order_relaxed);
+  if (start_idx >= cnt)
     return 0;
-  size_t to_copy = std::min(max_count, device_count - start_idx);
+  size_t to_copy = std::min(max_count, cnt - start_idx);
   for (size_t i = 0; i < to_copy; ++i) {
-    out_buf[i] = cache[start_idx + i];
+    copyEntryBounded(out_buf[i], cache[start_idx + i]);
   }
   return to_copy;
 }
 
 bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                      uint8_t temp) noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
   CriticalSectionLocker lock(&_cache_mux);
-  auto *dev = findMutable(dev_id, sub1, sub2, false);
+  auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev) {
     dev->last_target_temp = temp;
     return true;
@@ -220,8 +277,11 @@ bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
                                       uint8_t sub2,
                                       StaticPacket &out) noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
   CriticalSectionLocker lock(&_cache_mux);
-  const auto *dev = findMutable(dev_id, sub1, sub2, false);
+  const auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev && dev->last_ack_len > 0) {
     const size_t copy_len = std::min({static_cast<size_t>(dev->last_ack_len),
                                       dev->last_ack_data.size(),
@@ -235,8 +295,12 @@ bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
 
 void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8_t room_temp,
                                     bool is_online, const uint8_t *raw_pkt, size_t raw_len) noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(Config::FCU::DEV_ID, slot_idx);
+  const uint8_t h = Device_Hash(Config::FCU::DEV_ID, norm_sub1, 0);
+  const uint32_t now = millis();
+
   CriticalSectionLocker lock(&_cache_mux);
-  DeviceStateEntry *dev = findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
+  DeviceStateEntry *dev = findMutableFast(Config::FCU::DEV_ID, norm_sub1, 0, h, true);
   if (!dev) return;
 
   dev->last_ack_len = static_cast<uint8_t>(std::min(raw_len, sizeof(dev->last_ack_data)));
@@ -245,7 +309,7 @@ void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8
   }
   dev->last_target_temp = target_temp;
   dev->last_current_temp = room_temp;
-  dev->last_updated_ms = millis();
+  dev->last_updated_ms = now;
 
   if (is_online && !dev->is_online) {
     _online_count.fetch_add(1, std::memory_order_relaxed);
@@ -257,8 +321,11 @@ void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8
 
 void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
                                           uint8_t sub2, uint32_t ms) noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
   CriticalSectionLocker lock(&_cache_mux);
-  auto *dev = findMutable(dev_id, sub1, sub2, false);
+  auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev) {
     dev->last_stale_poll_ms = ms;
   }
@@ -266,8 +333,7 @@ void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
 
 void DeviceRepository::setLastStalePollMsByIndex(size_t index,
                                                  uint32_t ms) noexcept {
-  CriticalSectionLocker lock(&_cache_mux);
-  if (index < device_count) {
+  if (index < _device_count.load(std::memory_order_relaxed)) {
     cache[index].last_stale_poll_ms = ms;
   }
 }
@@ -275,14 +341,14 @@ void DeviceRepository::setLastStalePollMsByIndex(size_t index,
 void DeviceRepository::initDevices() {
   CriticalSectionLocker lock(&_cache_mux);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
-  device_count = 0;
+  _device_count.store(0, std::memory_order_relaxed);
   _online_count.store(0, std::memory_order_relaxed);
 }
 
 void DeviceRepository::clear() {
   CriticalSectionLocker lock(&_cache_mux);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
-  device_count = 0;
+  _device_count.store(0, std::memory_order_relaxed);
   _online_count.store(0, std::memory_order_relaxed);
 }
 
@@ -298,6 +364,7 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
   out_res.should_broadcast = true;
   out_res.dev_id = 0x18;
   out_res.extra_count = 0;
+  const uint32_t now = millis();
 
   for (uint8_t r = 1; r <= 8; ++r) {
     size_t base = 8 + (r - 1) * 3;
@@ -309,11 +376,13 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
 
     uint8_t r_sub1 = 0x10 + r;
     int r_pwr = (r_state == 0x01) ? 1 : ((r_state == 0x07) ? 2 : 0);
+    const uint8_t r_norm_sub1 = Device_NormSub1(0x18, r_sub1);
+    const uint8_t r_h = Device_Hash(0x18, r_norm_sub1, 0);
     {
       CriticalSectionLocker lock(mux);
-      DeviceStateEntry *r_dev = repo.findMutable(0x18, r_sub1, 0, true);
+      DeviceStateEntry *r_dev = repo.findMutableFast(0x18, r_norm_sub1, 0, r_h, true);
       if (r_dev) {
-        r_dev->last_updated_ms = millis();
+        r_dev->last_updated_ms = now;
         r_dev->timeout_count = 0;
         r_dev->is_online = true;
         r_dev->last_current_temp = r_amb;
@@ -410,17 +479,21 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
   uint8_t prev_dir = 0;
   uint8_t prev_ho = 0;
 
+  // Precompute outside lock:
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+  const uint32_t now = millis();
+  const bool is_vent_mode_ack =
+      (dev_id == 0x2B && ack.length >= 6 && ack.data[5] == 0x43);
+  const size_t ack_len =
+      std::min(static_cast<size_t>(ack.length), sizeof(dev_snap.last_ack_data));
+
   {
     CriticalSectionLocker lock(&_cache_mux);
-    DeviceStateEntry *dev = findMutable(dev_id, sub1, sub2, true);
+    DeviceStateEntry *dev = findMutableFast(dev_id, norm_sub1, sub2, h, true);
     if (UNLIKELY(!dev)) {
       return res;
     }
-
-    // 현대통신 환기(0x2B) 운전 모드(0x43) 패킷의 경우 월패드 가상 응답(0x40
-    // 기본 쿼리 응답) 캐시를 덮어쓰지 않음
-    bool is_vent_mode_ack =
-        (dev_id == 0x2B && ack.length >= 6 && ack.data[5] == 0x43);
 
     // 엘리베이터(0x34) 이전 상태 백업: memcpy로 dev->last_ack_data를 덮어쓰기
     // 전에 반드시 수행
@@ -432,8 +505,6 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     }
 
     if (!is_vent_mode_ack) {
-      const size_t ack_len =
-          std::min(static_cast<size_t>(ack.length), dev->last_ack_data.size());
       ack_changed =
           (dev->last_ack_len != ack_len ||
            memcmp(dev->last_ack_data.data(), ack.data.data(), ack_len) != 0);
@@ -443,7 +514,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
       // 모드 패킷 수신 시 모드 상태 변경 여부 확인하여 브로드캐스트 트리거
       ack_changed = true;
     }
-    dev->last_updated_ms = millis();
+    dev->last_updated_ms = now;
     dev->timeout_count = 0;
     if (!dev->is_online) {
       dev->is_online = true;
@@ -451,7 +522,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     }
 
     if (ack_changed) {
-      dev_snap = *dev;
+      copyEntryBounded(dev_snap, *dev);
     }
   } // _cache_mux unlocked (최소 락 윈도우 보장)
 
@@ -466,7 +537,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
         if (ev_state_changed) {
           st.should_broadcast = true;
           CriticalSectionLocker lock(&_cache_mux);
-          auto *mdev = findMutable(dev_id, sub1, sub2, false);
+          auto *mdev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
           if (mdev) {
             mdev->last_current_temp = static_cast<uint8_t>(st.floor);
             mdev->last_target_temp = static_cast<uint8_t>(st.direction);
@@ -492,8 +563,11 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
 
 void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
                                             uint8_t sub2) {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
   CriticalSectionLocker lock(&_cache_mux);
-  auto *mdev = findMutable(dev_id, sub1, sub2, true);
+  auto *mdev = findMutableFast(dev_id, norm_sub1, sub2, h, true);
   if (mdev && mdev->is_online && ++mdev->timeout_count >= 3) {
     mdev->is_online = false;
     if (_online_count.load(std::memory_order_relaxed) > 0) {
@@ -503,8 +577,7 @@ void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
 }
 
 size_t DeviceRepository::count() const noexcept {
-  CriticalSectionLocker lock(&_cache_mux);
-  return device_count;
+  return _device_count.load(std::memory_order_relaxed);
 }
 
 size_t DeviceRepository::getOnlineCount() const noexcept {

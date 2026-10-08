@@ -213,5 +213,9 @@ namespace Hash {
   }
   return hash;
 }
+// 8-bit Device Key Hash for O(1) repository & router slot lookup
+[[nodiscard]] constexpr uint8_t deviceKey8(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+  return static_cast<uint8_t>(dev_id + sub1 * 3 + sub2 * 7);
+}
 } // namespace Hash
 
