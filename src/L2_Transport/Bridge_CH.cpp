@@ -569,10 +569,9 @@ void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
     uint8_t stx = slot->frame_stx;
     if (stx == 0)
       stx = PKT_STX;
-    size_t stx_pos = 0;
-    while (stx_pos < slot->rx_len && slot->rx_buf[stx_pos] != stx) {
-      stx_pos++;
-    }
+    const void *hit = memchr(slot->rx_buf, stx, slot->rx_len);
+    size_t stx_pos = hit ? static_cast<size_t>(static_cast<const uint8_t *>(hit) - slot->rx_buf)
+                         : slot->rx_len;
     consumeRxBuffer(slot, stx_pos);
   }
 

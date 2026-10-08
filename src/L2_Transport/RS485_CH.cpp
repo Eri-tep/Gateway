@@ -929,8 +929,11 @@ void Task_Ch4(void *pvParameters) {
       size_t p = 0;
       while (p < buf_len) {
         if (buf[p] != target_stx) {
-          p++;
-          continue;
+          const void *hit = memchr(&buf[p], target_stx, buf_len - p);
+          if (!hit) {
+            break;
+          }
+          p = static_cast<const uint8_t *>(hit) - buf;
         }
 
         bool frame_found = false;
@@ -950,11 +953,12 @@ void Task_Ch4(void *pvParameters) {
             break;
           }
         } else {
-          for (size_t i = p + 2; i < buf_len && (i - p + 1) <= 64; ++i) {
-            if (buf[i] == target_etx) {
+          const size_t search_limit = std::min(buf_len, p + 64);
+          if (search_limit > p + 2) {
+            const void *etx_hit = memchr(&buf[p + 2], target_etx, search_limit - (p + 2));
+            if (etx_hit) {
               frame_found = true;
-              found_len = (i - p) + 1;
-              break;
+              found_len = (static_cast<const uint8_t *>(etx_hit) - &buf[p]) + 1;
             }
           }
         }

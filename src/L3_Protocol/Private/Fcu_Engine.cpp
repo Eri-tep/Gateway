@@ -19,18 +19,30 @@ static const char *TAG = "FCU_PROTO";
 
 namespace ModbusRtu {
 
-uint16_t calcCrc16(std::span<const uint8_t> data) noexcept {
-  uint16_t crc = kModbusCrcInit;
-  for (uint8_t byte : data) {
-    crc ^= static_cast<uint16_t>(byte);
-    for (int i = 8; i != 0; i--) {
-      if ((crc & 0x0001) != 0) {
-        crc >>= 1;
-        crc ^= kModbusPolynomial;
+namespace {
+consteval auto makeCrc16Table() noexcept {
+  std::array<uint16_t, 256> table{};
+  for (uint16_t i = 0; i < 256; ++i) {
+    uint16_t crc = i;
+    for (int j = 0; j < 8; ++j) {
+      if ((crc & 1) != 0) {
+        crc = (crc >> 1) ^ kModbusPolynomial;
       } else {
         crc >>= 1;
       }
     }
+    table[i] = crc;
+  }
+  return table;
+}
+
+constexpr auto kModbusCrcTable = makeCrc16Table();
+} // namespace
+
+uint16_t calcCrc16(std::span<const uint8_t> data) noexcept {
+  uint16_t crc = kModbusCrcInit;
+  for (uint8_t byte : data) {
+    crc = (crc >> 8) ^ kModbusCrcTable[(crc ^ byte) & 0xFF];
   }
   return crc;
 }
@@ -267,8 +279,11 @@ size_t Fcu_HandleRxStream(uint8_t slot_idx,
 
   while (p < len) {
     if (buf[p] != 0x01) {
-      p++;
-      continue;
+      const void *hit = memchr(&buf[p], 0x01, len - p);
+      if (!hit) {
+        break;
+      }
+      p = static_cast<const uint8_t *>(hit) - buf;
     }
 
     size_t rem = len - p;
