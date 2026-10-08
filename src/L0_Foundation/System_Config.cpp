@@ -1,5 +1,6 @@
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Buffer.h"
+#include "L0_Foundation/System_Platform.h"
 #include <Arduino.h>
 #include <Preferences.h>
 #include <cstring>
@@ -14,6 +15,19 @@ static std::atomic<bool> s_config_dirty{false};
 static std::atomic<bool> s_frozen{false};
 static std::atomic<uint8_t> s_active_wallpad_profile{0};
 static std::mutex s_save_mutex;
+
+static std::atomic<uint32_t> s_nvs_write_errors{0};
+static std::atomic<uint32_t> s_nvs_last_sync_ms{0};
+
+void System_GetNvsStats(uint32_t &err_count, uint32_t &last_sync_ms) noexcept {
+  err_count = s_nvs_write_errors.load(std::memory_order_relaxed);
+  last_sync_ms = s_nvs_last_sync_ms.load(std::memory_order_relaxed);
+}
+
+void System_ResetNvsStats() noexcept {
+  s_nvs_write_errors.store(0, std::memory_order_relaxed);
+  s_nvs_last_sync_ms.store(0, std::memory_order_relaxed);
+}
 
 
 
@@ -113,55 +127,103 @@ void Config_Load() {
   auto &c = s_config;
 
   if (p_opened) {
-    c.uart_baud_rate = p.getULong("uart_baud", 9600);
-    c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
-    c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
-    c.doorphone_baud_rate =
-        p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
+    // 1. Try atomic sealed envelope first (Power-cut resilient)
+    RuntimeConfig env_cfg{};
+    if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
+      c = env_cfg;
+      ESP_LOGI("CONFIG", "Loaded atomic cfg_bin (CRC-32 verified)");
+    } else {
+      // 2. Fallback to individual legacy NVS keys
+      c.uart_baud_rate = p.getULong("uart_baud", 9600);
+      c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
+      c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
+      c.doorphone_baud_rate =
+          p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
 
-    c.wifi_ssid[0] = '\0';
-    p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
-    c.wifi_password[0] = '\0';
-    p.getString("wifi_pass", c.wifi_password, sizeof(c.wifi_password));
-    c.ap_ssid[0] = '\0';
-    p.getString("ap_ssid", c.ap_ssid, sizeof(c.ap_ssid));
-    c.ap_password[0] = '\0';
-    p.getString("ap_pass", c.ap_password, sizeof(c.ap_password));
-    c.telnet_pass_hash[0] = '\0';
-    p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
+      c.wifi_ssid[0] = '\0';
+      p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
+      c.wifi_password[0] = '\0';
+      p.getString("wifi_pass", c.wifi_password, sizeof(c.wifi_password));
+      c.ap_ssid[0] = '\0';
+      p.getString("ap_ssid", c.ap_ssid, sizeof(c.ap_ssid));
+      c.ap_password[0] = '\0';
+      p.getString("ap_pass", c.ap_password, sizeof(c.ap_password));
+      c.telnet_pass_hash[0] = '\0';
+      p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
 
-    c.uart_parity = p.getUChar("u_parity", 0);
-    c.uart_stop_bits = p.getUChar("u_sbits", 1);
-    c.uart_data_bits = p.getUChar("u_dbits", 8);
-    c.ch2_parity = p.getUChar("ch2_parity", 0);
-    c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
-    c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
-    c.ch3_parity = p.getUChar("ch3_parity", 0);
-    c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
-    c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
-    c.doorphone_data_bits =
-        p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
-    c.doorphone_parity =
-        p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
-    c.doorphone_stop_bits =
-        p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
-    c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
-    auto raw_prof = nvsReadPrimitive<uint8_t>(p, "w_prof");
-    if (!raw_prof && raw_prof.error() != ESP_ERR_NVS_NOT_FOUND) {
-      ESP_LOGW("CONFIG", "w_prof: %s, using default ADAPTIVE", esp_err_to_name(raw_prof.error()));
+      c.uart_parity = p.getUChar("u_parity", 0);
+      c.uart_stop_bits = p.getUChar("u_sbits", 1);
+      c.uart_data_bits = p.getUChar("u_dbits", 8);
+      c.ch2_parity = p.getUChar("ch2_parity", 0);
+      c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
+      c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
+      c.ch3_parity = p.getUChar("ch3_parity", 0);
+      c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
+      c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
+      c.doorphone_data_bits =
+          p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
+      c.doorphone_parity =
+          p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
+      c.doorphone_stop_bits =
+          p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
+      c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
+      auto raw_prof = nvsReadPrimitive<uint8_t>(p, "w_prof");
+      if (!raw_prof && raw_prof.error() != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW("CONFIG", "w_prof: %s, using default ADAPTIVE", esp_err_to_name(raw_prof.error()));
+      }
+      const auto prof = toEnum(raw_prof.value_or(0),
+                               WallpadProfileIndex::ADAPTIVE,
+                               WallpadProfileIndex::CUSTOM3);
+      if (raw_prof && !prof) {
+        ESP_LOGW("CONFIG", "w_prof out of range (%u), using default ADAPTIVE",
+                 static_cast<unsigned>(*raw_prof));
+      }
+      c.wallpad_profile = std::to_underlying(prof.value_or(WallpadProfileIndex::ADAPTIVE));
     }
-    const auto prof = toEnum(raw_prof.value_or(0),
-                             WallpadProfileIndex::ADAPTIVE,
-                             WallpadProfileIndex::CUSTOM3);
-    if (raw_prof && !prof) {
-      ESP_LOGW("CONFIG", "w_prof out of range (%u), using default ADAPTIVE",
-               static_cast<unsigned>(*raw_prof));
-    }
-    c.wallpad_profile = std::to_underlying(prof.value_or(WallpadProfileIndex::ADAPTIVE));
     s_active_wallpad_profile.store(c.wallpad_profile, std::memory_order_relaxed);
     p.end();
   } else {
     ESP_LOGW("CONFIG", "Failed to open NVS runtime-config (read-only); using defaults");
+  }
+
+  // Defensive Range Validation & Clamping (Pillar 2 Safe Fallback)
+  auto clampBaud = [](uint32_t baud, uint32_t def_val) -> uint32_t {
+    return (baud >= 1200 && baud <= 921600) ? baud : def_val;
+  };
+  c.uart_baud_rate = clampBaud(c.uart_baud_rate, 9600);
+  c.ch2_baud_rate = clampBaud(c.ch2_baud_rate, 9600);
+  c.ch3_baud_rate = clampBaud(c.ch3_baud_rate, 9600);
+  c.doorphone_baud_rate = clampBaud(c.doorphone_baud_rate, Config::Serial::DEFAULT_DOORPHONE_BAUD);
+
+  auto clampBits = [](uint8_t bits, uint8_t def_val) -> uint8_t {
+    return (bits >= 5 && bits <= 8) ? bits : def_val;
+  };
+  c.uart_data_bits = clampBits(c.uart_data_bits, 8);
+  c.ch2_data_bits = clampBits(c.ch2_data_bits, 8);
+  c.ch3_data_bits = clampBits(c.ch3_data_bits, 8);
+  c.doorphone_data_bits = clampBits(c.doorphone_data_bits, Config::Serial::DEFAULT_DOORPHONE_DATABITS);
+
+  auto clampParity = [](uint8_t par, uint8_t def_val) -> uint8_t {
+    return (par <= 2) ? par : def_val;
+  };
+  c.uart_parity = clampParity(c.uart_parity, 0);
+  c.ch2_parity = clampParity(c.ch2_parity, 0);
+  c.ch3_parity = clampParity(c.ch3_parity, 0);
+  c.doorphone_parity = clampParity(c.doorphone_parity, Config::Serial::DEFAULT_DOORPHONE_PARITY);
+
+  auto clampStop = [](uint8_t stop, uint8_t def_val) -> uint8_t {
+    return (stop >= 1 && stop <= 2) ? stop : def_val;
+  };
+  c.uart_stop_bits = clampStop(c.uart_stop_bits, 1);
+  c.ch2_stop_bits = clampStop(c.ch2_stop_bits, 1);
+  c.ch3_stop_bits = clampStop(c.ch3_stop_bits, 1);
+  c.doorphone_stop_bits = clampStop(c.doorphone_stop_bits, Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
+
+  if (c.wifi_connect_timeout_s < 5 || c.wifi_connect_timeout_s > 300) {
+    c.wifi_connect_timeout_s = 30;
+  }
+  if (c.wallpad_profile > kWallpadProfileMax) {
+    c.wallpad_profile = 0;
   }
 
   uint16_t mac_suffix = static_cast<uint16_t>(ESP.getEfuseMac() >> 32);
@@ -205,6 +267,8 @@ void Config_Save() {
   if (!s_config_dirty.load(std::memory_order_acquire))
     return;
 
+  std::lock_guard<std::mutex> save_lock(s_save_mutex);
+
   RuntimeConfig snapshot;
   {
     std::unique_lock lock(s_config_rw);
@@ -218,9 +282,20 @@ void Config_Save() {
   if (!p.begin("runtime-config", false)) {
     ESP_LOGE("CONFIG", "Failed to open NVS runtime-config for write; restoring dirty flag");
     s_config_dirty.store(true, std::memory_order_release);
+    s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
     return;
   }
 
+  // 1. Atomic sealed binary envelope write (Power-cut resilient)
+  if (!nvsPutEnv(p, "cfg_bin", snapshot)) {
+    ESP_LOGE("CONFIG", "Failed to write atomic cfg_bin envelope; restoring dirty flag");
+    s_config_dirty.store(true, std::memory_order_release);
+    s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
+    p.end();
+    return;
+  }
+
+  // 2. Backward compatibility individual key writes
   p.putULong("uart_baud", snapshot.uart_baud_rate);
   p.putULong("ch2_baud", snapshot.ch2_baud_rate);
   p.putULong("ch3_baud", snapshot.ch3_baud_rate);
@@ -247,6 +322,7 @@ void Config_Save() {
   p.putUChar("w_prof", snapshot.wallpad_profile);
 
   p.end();
+  s_nvs_last_sync_ms.store(millis(), std::memory_order_relaxed);
 }
 
 void Config_ResetDefaults() {
@@ -298,9 +374,14 @@ static RuntimeTimingConfig s_timing_config{};
 void TimingConfig_Load() {
   Preferences p;
   if (p.begin("timing_cfg", true)) {
-    s_timing_config.ch1_poll_interval_ms = p.getUShort("ch1_poll", 1000);
-    s_timing_config.ch2_cache_delay_ms = p.getUShort("ch2_del", 30);
-    s_timing_config.ch3_cache_delay_ms = p.getUShort("ch3_del", 240);
+    RuntimeTimingConfig env_timing{};
+    if (nvsGetEnv(p, "tm_bin", env_timing)) {
+      s_timing_config = env_timing;
+    } else {
+      s_timing_config.ch1_poll_interval_ms = p.getUShort("ch1_poll", 1000);
+      s_timing_config.ch2_cache_delay_ms = p.getUShort("ch2_del", 30);
+      s_timing_config.ch3_cache_delay_ms = p.getUShort("ch3_del", 240);
+    }
     p.end();
   } else {
     s_timing_config.ch1_poll_interval_ms = 1000;
@@ -327,15 +408,19 @@ void TimingConfig_Load() {
 void TimingConfig_Save() {
   Preferences p;
   if (p.begin("timing_cfg", false)) {
+    nvsPutEnv(p, "tm_bin", s_timing_config);
     p.putUShort("ch1_poll", s_timing_config.ch1_poll_interval_ms);
     p.putUShort("ch2_del", s_timing_config.ch2_cache_delay_ms);
     p.putUShort("ch3_del", s_timing_config.ch3_cache_delay_ms);
     p.end();
+    s_nvs_last_sync_ms.store(millis(), std::memory_order_relaxed);
     ::Serial.printf("[TIMING] Saved to NVS: CH1 Poll %u ms, CH2 Delay %u ms, "
                     "CH3 Delay %u ms\r\n",
                     s_timing_config.ch1_poll_interval_ms,
                     s_timing_config.ch2_cache_delay_ms,
                     s_timing_config.ch3_cache_delay_ms);
+  } else {
+    s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
@@ -381,11 +466,18 @@ bool Config_SaveWallpadProfile() noexcept {
   std::lock_guard<std::mutex> lock(s_save_mutex);
   Preferences p;
   if (!p.begin("runtime-config", false)) {
+    s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
     return false;
+  }
+  RuntimeConfig env_cfg;
+  if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
+    env_cfg.wallpad_profile = s_active_wallpad_profile.load(std::memory_order_relaxed);
+    nvsPutEnv(p, "cfg_bin", env_cfg);
   }
   p.putUChar("w_prof",
              s_active_wallpad_profile.load(std::memory_order_relaxed));
   p.end();
+  s_nvs_last_sync_ms.store(millis(), std::memory_order_relaxed);
   return true;
 }
 
@@ -420,7 +512,13 @@ bool Config_SaveStaged(const RuntimeConfig &cfg,
   std::lock_guard<std::mutex> lock(s_save_mutex);
   Preferences p;
   if (!p.begin("runtime-config", false)) {
+    s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
     return false;
+  }
+
+  // 1. Atomic sealed binary envelope write (Power-cut resilient)
+  if (!nvsPutEnv(p, "cfg_bin", cfg)) {
+    s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
   }
 
   if (cfg.uart_baud_rate != s_config.uart_baud_rate)
@@ -481,6 +579,7 @@ bool Config_SaveStaged(const RuntimeConfig &cfg,
 
   Preferences pt;
   if (pt.begin("timing_cfg", false)) {
+    nvsPutEnv(pt, "tm_bin", timing);
     if (timing.ch1_poll_interval_ms != s_timing_config.ch1_poll_interval_ms)
       pt.putUShort("ch1_poll", timing.ch1_poll_interval_ms);
     if (timing.ch2_cache_delay_ms != s_timing_config.ch2_cache_delay_ms)
@@ -490,6 +589,7 @@ bool Config_SaveStaged(const RuntimeConfig &cfg,
     pt.end();
   }
 
+  s_nvs_last_sync_ms.store(millis(), std::memory_order_relaxed);
   return true;
 }
 

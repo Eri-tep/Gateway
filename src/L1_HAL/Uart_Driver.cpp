@@ -149,17 +149,30 @@ void Uart_FlushHw(uart_port_t port) noexcept {
 
 // ── Utility (internal) ────────────────────────────────────────────────────────
 
+namespace {
+struct SwSerialConfigMap {
+  DataBits data_bits;
+  StopBits stop_bits;
+  Parity parity;
+  SoftwareSerialConfig cfg;
+};
+
+static constexpr SwSerialConfigMap kSwSerialTable[] = {
+    {DataBits::Seven, StopBits::One, Parity::Even, SWSERIAL_7E1},
+    {DataBits::Seven, StopBits::One, Parity::Odd,  SWSERIAL_7O1},
+    {DataBits::Eight, StopBits::One, Parity::Even, SWSERIAL_8E1},
+    {DataBits::Eight, StopBits::One, Parity::Odd,  SWSERIAL_8O1},
+    {DataBits::Eight, StopBits::One, Parity::None, SWSERIAL_8N1},
+    {DataBits::Eight, StopBits::Two, Parity::None, SWSERIAL_8N2},
+};
+} // namespace
+
 static SoftwareSerialConfig toSwSerialConfig(const UartFraming &f) noexcept {
-  if (f.data_bits == DataBits::Seven && f.stop_bits == StopBits::One) {
-    if (f.parity == Parity::Even) return SWSERIAL_7E1;
-    if (f.parity == Parity::Odd)  return SWSERIAL_7O1;
-  } else if (f.data_bits == DataBits::Eight) {
-    if (f.stop_bits == StopBits::One) {
-      if (f.parity == Parity::Even) return SWSERIAL_8E1;
-      if (f.parity == Parity::Odd)  return SWSERIAL_8O1;
-      return SWSERIAL_8N1;
-    } else if (f.stop_bits == StopBits::Two && f.parity == Parity::None) {
-      return SWSERIAL_8N2;
+  for (const auto &entry : kSwSerialTable) {
+    if (entry.data_bits == f.data_bits &&
+        entry.stop_bits == f.stop_bits &&
+        entry.parity == f.parity) {
+      return entry.cfg;
     }
   }
   return SWSERIAL_8N1;  // safe default

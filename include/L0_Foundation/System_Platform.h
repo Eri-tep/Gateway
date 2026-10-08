@@ -467,6 +467,10 @@ void System_ClearRebootLog() noexcept;
 [[nodiscard]] const char *System_ResetReasonToString(esp_reset_reason_t rr) noexcept;
 [[nodiscard]] uint32_t System_GetBootTimeMs() noexcept;
 
+// ── NVS Flash Storage Diagnostics (Cold Path Reliability) ───────────────────
+void System_GetNvsStats(uint32_t &err_count, uint32_t &last_sync_ms) noexcept;
+void System_ResetNvsStats() noexcept;
+
 // ── HTTP / Cloud Firmware OTA Engine ─────────────────────────────────────────
 void System_StartHttpOta(const char *url) noexcept;
 void System_GetHttpOtaSnapshot(HttpOtaSnapshot &out) noexcept;

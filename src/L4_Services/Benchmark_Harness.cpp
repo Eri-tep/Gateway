@@ -1093,76 +1093,96 @@ void cmdBench(CliContext &ctx) {
       }
     }
 
-    if (strcmp(phase_arg, "0") == 0) {
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r = Benchmark::RunPhase0_BaselineCalibration();
-        Benchmark::FormatReport(out, r);
-      });
-    } else if (strcmp(phase_arg, "1") == 0) {
-      uint32_t runs = (custom_runs > 0) ? custom_runs : 50000;
-      withScratchBuf(client, [runs](AppendBuf &out) {
-        Benchmark::BenchmarkReport r = Benchmark::RunPhase1_PrimitiveParser(runs);
-        Benchmark::FormatReport(out, r);
-      });
-    } else if (strcmp(phase_arg, "2") == 0) {
-      uint32_t runs = (custom_runs > 0) ? custom_runs : 50000;
-      withScratchBuf(client, [runs](AppendBuf &out) {
-        Benchmark::BenchmarkReport r = Benchmark::RunPhase2_CH1HotPathFlow(runs);
-        Benchmark::FormatReport(out, r);
-      });
-    } else if (strcmp(phase_arg, "3") == 0) {
-      uint32_t runs = (custom_runs > 0) ? custom_runs : 50000;
-      withScratchBuf(client, [runs](AppendBuf &out) {
-        Benchmark::BenchmarkReport r = Benchmark::RunPhase3_SyncAndAtomic(runs);
-        Benchmark::FormatReport(out, r);
-      });
-    } else if (strcmp(phase_arg, "4") == 0) {
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r = Benchmark::RunPhase4_CodegenDiagnostics();
-        Benchmark::FormatReport(out, r);
-      });
-    } else if (strcmp(phase_arg, "5") == 0) {
-      uint32_t runs = (custom_runs > 0) ? custom_runs : 50000;
-      withScratchBuf(client, [runs](AppendBuf &out) {
-        Benchmark::BenchmarkReport r = Benchmark::RunPhase5_RealWorkloadReplay(runs);
-        Benchmark::FormatReport(out, r);
-      });
-    } else if (strcmp(phase_arg, "all") == 0) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r0 = Benchmark::RunPhase0_BaselineCalibration();
-        Benchmark::FormatReport(out, r0);
-      });
-      vTaskDelay(pdMS_TO_TICKS(50));
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r1 = Benchmark::RunPhase1_PrimitiveParser(50000);
-        Benchmark::FormatReport(out, r1);
-      });
-      vTaskDelay(pdMS_TO_TICKS(50));
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r2 = Benchmark::RunPhase2_CH1HotPathFlow(50000);
-        Benchmark::FormatReport(out, r2);
-      });
-      vTaskDelay(pdMS_TO_TICKS(50));
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r3 = Benchmark::RunPhase3_SyncAndAtomic(50000);
-        Benchmark::FormatReport(out, r3);
-      });
-      vTaskDelay(pdMS_TO_TICKS(50));
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r4 = Benchmark::RunPhase4_CodegenDiagnostics();
-        Benchmark::FormatReport(out, r4);
-      });
-      vTaskDelay(pdMS_TO_TICKS(50));
-      withScratchBuf(client, [](AppendBuf &out) {
-        Benchmark::BenchmarkReport r5 = Benchmark::RunPhase5_RealWorkloadReplay(50000);
-        Benchmark::FormatReport(out, r5);
-      });
-    } else {
-      withScratchBuf(client, [](AppendBuf &out) {
-        out.append("Invalid phase. Valid options: 0, 1, 2, 3, 4, 5, all\r\n");
-      });
+    struct PhaseRunner {
+      const char *name;
+      void (*run)(int client, uint32_t runs);
+    };
+
+    static constexpr PhaseRunner kPhaseRunners[] = {
+        {"0", [](int client, uint32_t) {
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r = Benchmark::RunPhase0_BaselineCalibration();
+             Benchmark::FormatReport(out, r);
+           });
+         }},
+        {"1", [](int client, uint32_t runs) {
+           uint32_t r_cnt = (runs > 0) ? runs : 50000;
+           withScratchBuf(client, [r_cnt](AppendBuf &out) {
+             Benchmark::BenchmarkReport r = Benchmark::RunPhase1_PrimitiveParser(r_cnt);
+             Benchmark::FormatReport(out, r);
+           });
+         }},
+        {"2", [](int client, uint32_t runs) {
+           uint32_t r_cnt = (runs > 0) ? runs : 50000;
+           withScratchBuf(client, [r_cnt](AppendBuf &out) {
+             Benchmark::BenchmarkReport r = Benchmark::RunPhase2_CH1HotPathFlow(r_cnt);
+             Benchmark::FormatReport(out, r);
+           });
+         }},
+        {"3", [](int client, uint32_t runs) {
+           uint32_t r_cnt = (runs > 0) ? runs : 50000;
+           withScratchBuf(client, [r_cnt](AppendBuf &out) {
+             Benchmark::BenchmarkReport r = Benchmark::RunPhase3_SyncAndAtomic(r_cnt);
+             Benchmark::FormatReport(out, r);
+           });
+         }},
+        {"4", [](int client, uint32_t) {
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r = Benchmark::RunPhase4_CodegenDiagnostics();
+             Benchmark::FormatReport(out, r);
+           });
+         }},
+        {"5", [](int client, uint32_t runs) {
+           uint32_t r_cnt = (runs > 0) ? runs : 50000;
+           withScratchBuf(client, [r_cnt](AppendBuf &out) {
+             Benchmark::BenchmarkReport r = Benchmark::RunPhase5_RealWorkloadReplay(r_cnt);
+             Benchmark::FormatReport(out, r);
+           });
+         }},
+        {"all", [](int client, uint32_t) {
+           vTaskDelay(pdMS_TO_TICKS(50));
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r0 = Benchmark::RunPhase0_BaselineCalibration();
+             Benchmark::FormatReport(out, r0);
+           });
+           vTaskDelay(pdMS_TO_TICKS(50));
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r1 = Benchmark::RunPhase1_PrimitiveParser(50000);
+             Benchmark::FormatReport(out, r1);
+           });
+           vTaskDelay(pdMS_TO_TICKS(50));
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r2 = Benchmark::RunPhase2_CH1HotPathFlow(50000);
+             Benchmark::FormatReport(out, r2);
+           });
+           vTaskDelay(pdMS_TO_TICKS(50));
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r3 = Benchmark::RunPhase3_SyncAndAtomic(50000);
+             Benchmark::FormatReport(out, r3);
+           });
+           vTaskDelay(pdMS_TO_TICKS(50));
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r4 = Benchmark::RunPhase4_CodegenDiagnostics();
+             Benchmark::FormatReport(out, r4);
+           });
+           vTaskDelay(pdMS_TO_TICKS(50));
+           withScratchBuf(client, [](AppendBuf &out) {
+             Benchmark::BenchmarkReport r5 = Benchmark::RunPhase5_RealWorkloadReplay(50000);
+             Benchmark::FormatReport(out, r5);
+           });
+         }},
+    };
+
+    for (const auto &p : kPhaseRunners) {
+      if (strcmp(phase_arg, p.name) == 0) {
+        p.run(client, custom_runs);
+        return;
+      }
     }
+
+    withScratchBuf(client, [](AppendBuf &out) {
+      out.append("Invalid phase. Valid options: 0, 1, 2, 3, 4, 5, all\r\n");
+    });
     return;
   }
 

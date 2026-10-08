@@ -328,7 +328,12 @@ void printStats(int sock) {
   uint32_t telem_drops = 0, telem_hw = 0;
   Telemetry_GetStats(telem_drops, telem_hw);
 
+  uint32_t nvs_errs = 0, nvs_sync_ms = 0;
+  System_GetNvsStats(nvs_errs, nvs_sync_ms);
+
   out.appendFormat(
+      "%-55s %24u\r\n"
+      "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
@@ -346,7 +351,11 @@ void printStats(int sock) {
       "Telemetry Drops (Drop-Oldest)",
       static_cast<unsigned>(telem_drops),
       "Telemetry High-Watermark (Max 16)",
-      static_cast<unsigned>(telem_hw));
+      static_cast<unsigned>(telem_hw),
+      "NVS Write Errors (Power-Cut Guard)",
+      static_cast<unsigned>(nvs_errs),
+      "NVS Last Sync Elapsed (s)",
+      (nvs_sync_ms > 0) ? static_cast<unsigned>((millis() - nvs_sync_ms) / 1000) : 0);
 
   System_FormatTaskStacks(out, stack_snap);
 
@@ -372,6 +381,7 @@ void cmdStats(CliContext &ctx) {
       ProtocolDiag_ResetBridgeStats();
       ProtocolDiag_PollingResetHits();
       Telemetry_ResetStats();
+      System_ResetNvsStats();
       sendTelnetMsg(client, "All traffic statistics, hits, and metrics history "
                             "CLEARED to 0.\r\n");
       return;

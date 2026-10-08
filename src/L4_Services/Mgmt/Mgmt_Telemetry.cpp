@@ -206,6 +206,12 @@ static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
       ",\"telemetry\":{\"drop_count\":%u,\"high_watermark\":%u}",
       telem_drops, telem_hw);
 
+  uint32_t nvs_errs = 0, nvs_sync_ms = 0;
+  System_GetNvsStats(nvs_errs, nvs_sync_ms);
+  out.appendFormat(
+      ",\"nvs\":{\"write_errors\":%u,\"last_sync_s\":%u}",
+      nvs_errs, (nvs_sync_ms > 0) ? static_cast<unsigned>((millis() - nvs_sync_ms) / 1000) : 0);
+
   out.append("}}");
 }
 

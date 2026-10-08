@@ -822,9 +822,9 @@ void System_StartHttpOta(const char *url) {
   s_http_ota_state.progress_pct = 0;
   s_http_ota_state.last_error[0] = '\0';
 
-  // 5. OTA 전용 백그라운드 태스크 생성 (Core 1, 우선순위 10, 스택 12KB)
+  // 5. OTA 전용 백그라운드 태스크 생성 (Core 0 네트워크 코어, 최하위 우선순위 2, 스택 12KB)
   BaseType_t res = xTaskCreatePinnedToCore(Task_HttpOta, "HttpOtaTask", 12288,
-                                           s_ota_target_url, 10, nullptr, 1);
+                                           s_ota_target_url, 2, nullptr, 0);
 
   if (res != pdPASS) {
     ::Serial.printf("[OTA] Failed to create HttpOtaTask: %d\r\n", res);

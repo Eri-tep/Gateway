@@ -58,6 +58,9 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
     size_t snap_cnt = ProtocolDiag_GetPollingTargetCount();
     unsigned int display_idx = 1;
     for (size_t i = 0; i < snap_cnt; ++i) {
+      if ((i & 0x0F) == 0 && i > 0) {
+        taskYIELD();
+      }
       if (!ProtocolDiag_GetPollingEntry(i, tgt))
         continue;
       if (tgt.source_channels != 0 &&
@@ -119,6 +122,9 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
     FixedBuf<96> ack_hex;
     FixedBuf<8> no_s;
     for (size_t i = 0; i < total_count; ++i) {
+      if ((i & 0x0F) == 0 && i > 0) {
+        taskYIELD();
+      }
       DeviceStateEntry dev;
       if (!Device_GetSnapshot(i, dev) || dev.dev_id == 0)
         continue;

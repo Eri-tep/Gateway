@@ -1485,6 +1485,35 @@ void ControlTemplateRegistry::autoAssignGroupName(GroupControlTemplate &group) {
                                : DeviceClassToName(group.coverage.dev_class));
 }
 
+namespace {
+struct ClassNamePattern {
+  const char *pattern;
+  DeviceClass dev_class;
+  bool is_substring;
+};
+
+static constexpr ClassNamePattern kClassNameRules[] = {
+    {"Elevator", DeviceClass::MOMENTARY, false},
+    {"EV",       DeviceClass::MOMENTARY, false},
+    {"Outlet",   DeviceClass::OUTLET,    true},
+};
+
+static DeviceClass resolveDeviceClassFromName(const char *name) noexcept {
+  if (!name || !*name)
+    return DeviceClass::UNKNOWN;
+  for (const auto &rule : kClassNameRules) {
+    if (rule.is_substring) {
+      if (strcasestr(name, rule.pattern) != nullptr)
+        return rule.dev_class;
+    } else {
+      if (strcasecmp(name, rule.pattern) == 0)
+        return rule.dev_class;
+    }
+  }
+  return DeviceClass::UNKNOWN;
+}
+} // namespace
+
 bool ControlTemplateRegistry::setGroupName(uint8_t dev_id, const char *name) {
   if (dev_id == 0 || !name || !*name)
     return false;
@@ -1498,10 +1527,10 @@ bool ControlTemplateRegistry::setGroupName(uint8_t dev_id, const char *name) {
     if (g == &_groups[0] + _group_count)
       return false;
     setStr(g->group_name, name);
-    if (strcasecmp(name, "Elevator") == 0 || strcasecmp(name, "EV") == 0)
-      g->coverage.dev_class = DeviceClass::MOMENTARY;
-    else if (strcasestr(name, "Outlet"))
-      g->coverage.dev_class = DeviceClass::OUTLET;
+    const DeviceClass inferred_cls = resolveDeviceClassFromName(name);
+    if (inferred_cls != DeviceClass::UNKNOWN) {
+      g->coverage.dev_class = inferred_cls;
+    }
   }
   saveToNvs();
   return true;

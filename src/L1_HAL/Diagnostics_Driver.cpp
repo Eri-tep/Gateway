@@ -1062,12 +1062,18 @@ uint32_t Diag_GetChannelLastActivityMs(uint8_t ch) noexcept {
 }
 
 void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_t now_ms) noexcept {
-  if (to_state == 1) {
+  switch (to_state) {
+  case 1:
     s_ch1_state_metrics.vip_cnt.fetch_add(1, std::memory_order_relaxed);
-  } else if (to_state == 2) {
+    break;
+  case 2:
     s_ch1_state_metrics.normal_cnt.fetch_add(1, std::memory_order_relaxed);
-  } else if (to_state == 3) {
+    break;
+  case 3:
     s_ch1_state_metrics.poll_cnt.fetch_add(1, std::memory_order_relaxed);
+    break;
+  default:
+    break;
   }
   s_ch1_state_metrics.last_from_state.store(from_state, std::memory_order_relaxed);
   s_ch1_state_metrics.last_to_state.store(to_state, std::memory_order_relaxed);
