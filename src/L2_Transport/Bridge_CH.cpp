@@ -290,10 +290,10 @@ void demuxPacketStream(HubClientSlot *slot) {
         s_dispatcher.onExtractLength
             ? s_dispatcher.onExtractLength(slot->rx_buf, slot->rx_len, p)
             : 0;
-    if (len_res == 0)
+    if (len_res == 0) [[unlikely]]
       break;
 
-    if (len_res < 0) {
+    if (len_res < 0) [[unlikely]] {
       StaticPacket drp_pkt{5, 1};
       drp_pkt.data[0] = slot->rx_buf[p];
       System_TracePacket(5, false, TraceType::DRP, drp_pkt);
@@ -305,13 +305,13 @@ void demuxPacketStream(HubClientSlot *slot) {
     }
 
     uint8_t p_len = static_cast<uint8_t>(len_res);
-    if (p_len == 0) {
+    if (p_len == 0) [[unlikely]] {
       p++;
       continue;
     }
 
     if (s_dispatcher.onValidatePacket &&
-        !s_dispatcher.onValidatePacket(&slot->rx_buf[p], p_len)) {
+        !s_dispatcher.onValidatePacket(&slot->rx_buf[p], p_len)) [[unlikely]] {
       StaticPacket drp_pkt{5, p_len};
       std::copy(&slot->rx_buf[p], &slot->rx_buf[p + p_len],
                 drp_pkt.data.begin());

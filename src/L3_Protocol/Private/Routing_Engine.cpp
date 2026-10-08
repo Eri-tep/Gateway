@@ -97,7 +97,7 @@ public:
     int8_t direct_idx = _lookup_map[h];
     if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < cnt &&
         _entries[direct_idx].dev_id == dev_id && _entries[direct_idx].sub1 == sub1 &&
-        _entries[direct_idx].sub2 == sub2) {
+        _entries[direct_idx].sub2 == sub2) [[likely]] {
       out_ep = _entries[direct_idx].endpoint;
       return true;
     }

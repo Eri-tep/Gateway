@@ -90,7 +90,7 @@ parseStatusResponse(std::span<const uint8_t> data) noexcept {
 
   const uint16_t calc_crc = calcCrc16(frame.first<17>());
   const uint16_t pkt_crc = Endian::loadLe16(frame.subspan<17, 2>());
-  if (calc_crc != pkt_crc) {
+  if (calc_crc != pkt_crc) [[unlikely]] {
     return std::unexpected(ModbusParseError::CrcMismatch);
   }
 

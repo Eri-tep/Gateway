@@ -293,10 +293,10 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
               s_dispatcher.onExtractLength
                   ? s_dispatcher.onExtractLength(stream, stream_len, idx)
                   : -1;
-          if (len_res == 0) {
+          if (len_res == 0) [[unlikely]] {
             break;
           }
-          if (len_res < 0) {
+          if (len_res < 0) [[unlikely]] {
             idx++;
             continue;
           }
@@ -305,7 +305,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
           uint8_t *pkt = &stream[idx];
           std::span<const uint8_t> pkt_span(pkt, pkt_len);
           if (s_dispatcher.onValidatePacket &&
-              !s_dispatcher.onValidatePacket(pkt_span)) {
+              !s_dispatcher.onValidatePacket(pkt_span)) [[unlikely]] {
             uint8_t ch = (u_num == UART_NUM_0)   ? 1
                          : (u_num == UART_NUM_1) ? 2
                                                  : 3;

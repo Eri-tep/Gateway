@@ -326,11 +326,11 @@ size_t UniversalProtocolEngine::getActiveProfileKey(char *out,
 static inline bool checkFramingPure(std::span<const uint8_t> f, uint8_t stx,
                                     uint8_t etx, uint8_t min_len,
                                     uint8_t max_len, ChecksumAlgo algo) {
-  if (f.size() < min_len || f.size() > max_len || f.size() < 3)
+  if (f.size() < min_len || f.size() > max_len || f.size() < 3) [[unlikely]]
     return false;
-  if (f[0] != stx || f[f.size() - 1] != etx)
+  if (f[0] != stx || f[f.size() - 1] != etx) [[unlikely]]
     return false;
-  if (algo == ChecksumAlgo::NONE)
+  if (algo == ChecksumAlgo::NONE) [[unlikely]]
     return true;
   return AutoProbe_GetEngine().calculateChecksum(algo, f.data(), f.size()) ==
          f[f.size() - 2];
@@ -484,7 +484,7 @@ int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
 
     const size_t l = (static_cast<const uint8_t *>(hit) - &stream[stx_idx]) + 1;
     if (checkFramingPure(std::span<const uint8_t>(&stream[stx_idx], l), e.stx, e.etx,
-                         safe_min, safe_max, e.algo)) {
+                         safe_min, safe_max, e.algo)) [[likely]] {
       return static_cast<int>(l);
     }
     // 페이로드 내부 우연한 ETX 매칭이었으나 체크섬 불일치 -> 다음 바이트부터 계속 탐색

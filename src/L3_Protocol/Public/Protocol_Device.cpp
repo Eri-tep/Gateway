@@ -178,7 +178,7 @@ DeviceRepository::findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
   int8_t direct_idx = dev_lookup_map[h];
   if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < cnt &&
       cache[direct_idx].dev_id == dev_id && cache[direct_idx].sub1 == norm_sub1 &&
-      cache[direct_idx].sub2 == sub2) {
+      cache[direct_idx].sub2 == sub2) [[likely]] {
     return &cache[direct_idx];
   }
   if (direct_idx == -1) {
@@ -229,7 +229,7 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 
   CriticalSectionLocker lock(&_cache_mux);
   const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
-  if (!e)
+  if (!e) [[unlikely]]
     return false;
   copyEntryBounded(out_copy, *e);
   return true;
