@@ -187,10 +187,9 @@ bool Router_DispatchControl(StaticPacket &req,
   case ControlAction::TRANSMIT_LOCAL: {
     // Check if device is routed via EW11 (CH5)
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    auto *parser = WallpadParserFactory::getActiveParser();
-    if (parser && parser->extractDeviceKey(
-                      std::span<const uint8_t>(req.data.data(), req.length),
-                      dev_id, sub1, sub2)) {
+    if (Universal_GetEngine().extractDeviceKey(
+            std::span<const uint8_t>(req.data.data(), req.length),
+            dev_id, sub1, sub2)) {
       RouteEndpoint ep{1, -1, 0};
       if (Router_LookupRoute(dev_id, sub1, sub2, ep) &&
           ep.channel_id == 5 && ep.slot_idx >= 0 &&
@@ -206,10 +205,9 @@ bool Router_DispatchControl(StaticPacket &req,
 
   case ControlAction::FORWARD_CH5: {
     uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    auto *parser = WallpadParserFactory::getActiveParser();
-    if (parser && parser->extractDeviceKey(
-                      std::span<const uint8_t>(req.data.data(), req.length),
-                      dev_id, sub1, sub2)) {
+    if (Universal_GetEngine().extractDeviceKey(
+            std::span<const uint8_t>(req.data.data(), req.length),
+            dev_id, sub1, sub2)) {
       RouteEndpoint ep{5, -1, 0};
       if (Router_LookupRoute(dev_id, sub1, sub2, ep) &&
           ep.slot_idx >= 0 && ep.slot_idx < Config::TCP::MAX_EW11_SLOTS) {

@@ -125,12 +125,12 @@ public:
 };
 
 // ============================================================================
-// 4. WALLPAD PARSER FACTORY (COMPATIBILITY FACADE)
-// ============================================================================
+UniversalProtocolEngine &Universal_GetEngine() noexcept;
 
 class WallpadParserFactory {
 public:
   static void init();
+  [[deprecated("Use Universal_GetEngine() instead")]]
   static UniversalProtocolEngine *getActiveParser();
   static bool setProfile(uint8_t index);
 };

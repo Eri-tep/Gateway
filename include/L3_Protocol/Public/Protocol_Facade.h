@@ -138,6 +138,21 @@ struct BlueprintSnapshot {
   uint8_t qry_wattage_offset{0xFF};
 };
 
+struct ProtocolDiagnosticSnapshot {
+  char profile_summary[80]{0};
+  char vendor_name[32]{0};
+  char profile_key[16]{0};
+  uint32_t stale_poll_count{0};
+  size_t group_count{0};
+  size_t polling_active{0};
+  size_t polling_verified{0};
+  size_t polling_total{0};
+  uint8_t wc_source{0};
+  uint8_t wc_restored_count{0};
+};
+
+void ProtocolDiag_GetSnapshot(ProtocolDiagnosticSnapshot &out) noexcept;
+
 // ── Cache & NVS Persistence Facade ──────────────────────────────────────────
 void ProtocolDiag_WarmCacheSaveToNvs() noexcept;
 void ProtocolDiag_WarmCacheCheckNvsDebounce() noexcept;
@@ -149,7 +164,6 @@ void ProtocolDiag_PollingClear() noexcept;
 void ProtocolDiag_PollingSweepExpired(uint32_t threshold_ms) noexcept;
 size_t ProtocolDiag_GetPollingTargetCount() noexcept;
 bool ProtocolDiag_GetPollingEntry(size_t index, PollingEntrySnapshot &out_snap) noexcept;
-size_t ProtocolDiag_GetPollingTargetsSnapshot(PollingEntrySnapshot *out_array, size_t max_count) noexcept;
 void ProtocolDiag_PollingRegisterOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1,
                                          uint8_t sub2, const uint8_t *pkt_data,
                                          size_t pkt_len) noexcept;
@@ -202,20 +216,12 @@ bool ProtocolDiag_BuildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 size_t ProtocolDiag_GetGroupCount() noexcept;
 const char *ProtocolDiag_GetGroupName(uint8_t dev_id) noexcept;
 bool ProtocolDiag_GetBlueprintAt(size_t index, BlueprintSnapshot &out) noexcept;
-size_t ProtocolDiag_GetBlueprintsSnapshot(BlueprintSnapshot *out_array, size_t max_count) noexcept;
 bool ProtocolDiag_GetBlueprint(uint8_t dev_id, BlueprintSnapshot &out) noexcept;
 bool ProtocolDiag_SetGroupName(uint8_t dev_id, const char *name) noexcept;
 bool ProtocolDiag_SetGroupClass(uint8_t dev_id, DeviceClass cls, const char *name) noexcept;
 void ProtocolDiag_ResetGroup(uint8_t dev_id, bool all) noexcept;
 
-// ── Parser & Frame Decoding Helpers (for EW11 demux) ─────────────────────────
-uint8_t ProtocolDiag_GetActiveStx() noexcept;
-uint8_t ProtocolDiag_GetActiveEtx() noexcept;
-int ProtocolDiag_ExtractPacketLength(const uint8_t *buf, size_t len, size_t offset) noexcept;
-bool ProtocolDiag_ValidatePacket(std::span<const uint8_t> frame) noexcept;
-bool ProtocolDiag_ValidatePacket(const uint8_t *buf, size_t len) noexcept;
-bool ProtocolDiag_IsQueryPacket(std::span<const uint8_t> frame) noexcept;
-bool ProtocolDiag_IsQueryPacket(const uint8_t *buf, size_t len) noexcept;
+// ── Frame Checksum Helper (for RPC raw tests) ────────────────────────────────
 uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
 
 // ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────

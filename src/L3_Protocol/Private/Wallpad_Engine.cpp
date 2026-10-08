@@ -489,9 +489,13 @@ bool UniversalProtocolEngine::isAutoMode() const noexcept {
   return effectiveProfile().is_auto;
 }
 
+UniversalProtocolEngine &Universal_GetEngine() noexcept {
+  return s_universal_engine;
+}
+
 void WallpadParserFactory::init() { ProfileRepository::init(); }
 UniversalProtocolEngine *WallpadParserFactory::getActiveParser() {
-  return &s_universal_engine;
+  return &Universal_GetEngine();
 }
 bool WallpadParserFactory::setProfile(uint8_t index) {
   return ProfileRepository::setActiveProfileIndex(index);
@@ -1027,10 +1031,7 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
     out_pkt.length = static_cast<uint8_t>(copy_len);
     memcpy(out_pkt.data.data(), poll_raw_ptr, copy_len);
   } else {
-    auto *parser = WallpadParserFactory::getActiveParser();
-    if (parser) {
-      parser->buildQueryPacket(poll_dev_id, poll_sub1, poll_sub2, out_pkt);
-    }
+    Universal_GetEngine().buildQueryPacket(poll_dev_id, poll_sub1, poll_sub2, out_pkt);
   }
   return true;
 }
@@ -1050,16 +1051,13 @@ void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
 
   Device_ProcessBusPacket(ack);
 
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (parser) {
-    uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-    std::span<const uint8_t> ack_span(ack.data.data(), ack.length);
-    if (parser->extractDeviceKey(ack_span, dev_id, sub1, sub2)) {
-      if (channel_id == 1) {
-        Polling_GetRegistry().markVerified(dev_id, sub1, sub2);
-      }
-      Router_RecordRoute(channel_id, -1, dev_id, sub1, sub2);
+  uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
+  std::span<const uint8_t> ack_span(ack.data.data(), ack.length);
+  if (Universal_GetEngine().extractDeviceKey(ack_span, dev_id, sub1, sub2)) {
+    if (channel_id == 1 && (!matching_query || matching_query->length == 0)) {
+      Polling_GetRegistry().markVerified(dev_id, sub1, sub2);
     }
+    Router_RecordRoute(channel_id, -1, dev_id, sub1, sub2);
   }
 }
 
@@ -1074,15 +1072,13 @@ ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_a
 
   if (UNLIKELY(req.length < 5))
     return ControlAction::DROP;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (!parser)
-    return ControlAction::DROP;
+  auto &engine = Universal_GetEngine();
   std::span<const uint8_t> frame(req.data.data(), req.length);
 
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  const bool has_key = parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+  const bool has_key = engine.extractDeviceKey(frame, dev_id, sub1, sub2);
 
-  if (parser->isQueryPacket(frame)) {
+  if (engine.isQueryPacket(frame)) {
     virtual_ack_out.channel_id = req.channel_id;
     if (has_key && Device_CopyVirtualAck(dev_id, sub1, sub2, virtual_ack_out)) {
       return ControlAction::VIRTUAL_ACK_IMMEDIATE;
@@ -1094,7 +1090,7 @@ ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_a
   const bool has_grp =
       (has_key && dev_id != 0) && Control_GetRegistry().findGroup(dev_id, grp);
 
-  bool is_ctl = parser->isControlPacket(frame);
+  bool is_ctl = engine.isControlPacket(frame);
   if (!is_ctl && has_grp && grp.frame_len > 4 &&
       frame.size() >= grp.frame_len) {
     VendorProfileDescriptor desc;
@@ -1175,8 +1171,8 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
   }
 
   bool is_all_online = (online_devs >= active_tgts);
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (parser && parser->isAutoMode() &&
+  auto &engine = Universal_GetEngine();
+  if (engine.isAutoMode() &&
       !AutoProbe_GetEngine().isOffsetsLocked()) {
     is_all_online = (Polling_GetRegistry().verifiedCount() >= active_tgts);
   }
@@ -1190,7 +1186,7 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
       if (g_system_event_group) {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);
       }
-      if (parser && parser->isAutoMode() &&
+      if (engine.isAutoMode() &&
           !AutoProbe_GetEngine().isOffsetsLocked()) {
         AutoProbe_GetEngine().analyzeCacheMatrix();
       }
@@ -1218,13 +1214,12 @@ void Wallpad_ResetStalePollCount() noexcept {
 }
 
 uint8_t Wallpad_GetStx() noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->getStx() : PKT_STX;
+  return Universal_GetEngine().getStx();
 }
 
 bool Wallpad_IsAutoUnlocked() noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser && parser->isAutoMode() && !parser->isLocked();
+  auto &engine = Universal_GetEngine();
+  return engine.isAutoMode() && !engine.isLocked();
 }
 
 void Wallpad_FeedAutoFrame(std::span<const uint8_t> frame) noexcept {
@@ -1232,25 +1227,22 @@ void Wallpad_FeedAutoFrame(std::span<const uint8_t> frame) noexcept {
 }
 
 int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->extractPacketLength(stream, stream_len, stx_idx) : -1;
+  return Universal_GetEngine().extractPacketLength(stream, stream_len, stx_idx);
 }
 
 bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->validatePacket(frame) : false;
+  return Universal_GetEngine().validatePacket(frame);
 }
 
 bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
                                StaticPacket &virtual_ack_out) noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (!parser) return false;
+  auto &engine = Universal_GetEngine();
   std::span<const uint8_t> frame(req.data.data(), req.length);
-  if (!parser->isQueryPacket(frame)) {
+  if (!engine.isQueryPacket(frame)) {
     return false;
   }
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  parser->extractDeviceKey(frame, dev_id, sub1, sub2);
+  engine.extractDeviceKey(frame, dev_id, sub1, sub2);
   Polling_GetRegistry().registerOrTouch(channel_id, dev_id, sub1, sub2,
                                     req.data.data(), req.length);
   virtual_ack_out.channel_id = channel_id;
@@ -1556,12 +1548,10 @@ void DoorphoneController::onTimerCallback(void * /*arg*/) {
 void Wallpad_InitDecoupledHooks() noexcept {
   Device_RegisterParserHooks(
     [](std::span<const uint8_t> frame) noexcept -> bool {
-      auto *parser = WallpadParserFactory::getActiveParser();
-      return parser ? parser->isAckPacket(frame) : false;
+      return Universal_GetEngine().isAckPacket(frame);
     },
     [](std::span<const uint8_t> frame, uint8_t &dev_id, uint8_t &sub1, uint8_t &sub2) noexcept -> bool {
-      auto *parser = WallpadParserFactory::getActiveParser();
-      return parser ? parser->extractDeviceKey(frame, dev_id, sub1, sub2) : false;
+      return Universal_GetEngine().extractDeviceKey(frame, dev_id, sub1, sub2);
     }
   );
 
@@ -1827,6 +1817,5 @@ bool Wallpad_MatchDoorphoneLock(uint8_t stx, uint8_t etx, uint8_t len,
 }
 
 bool Wallpad_IsQueryPacket(std::span<const uint8_t> frame) noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->isQueryPacket(frame) : false;
+  return Universal_GetEngine().isQueryPacket(frame);
 }

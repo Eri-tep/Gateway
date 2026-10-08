@@ -211,7 +211,7 @@ void wallpadPrintStatus(AppendBuf &out) {
   rowf("Tail", "[CS] Checksum", tail_status, "Byte #[N-2] : %s",
        desc.checksum_algo_name);
   rowf("", "[ET] ETX", tail_status, "Byte #[N-1] : %02X",
-       ProtocolDiag_GetActiveEtx());
+       desc.etx);
   table.separator('-');
 
   const auto &cfg = Config_Get();

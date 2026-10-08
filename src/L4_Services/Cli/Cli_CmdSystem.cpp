@@ -211,7 +211,7 @@ void cmdWifi(CliContext &ctx) {
 
 namespace SystemCli {
 
-void printSystemOverview(AppendBuf &out, const SysSnapshot &sys) {
+void printSystemOverview(AppendBuf &out, const SysSnapshot &sys, const ProtocolDiagnosticSnapshot &diag_snap) {
   uint32_t ts = millis() / 1000;
   time_t now = time(nullptr);
   struct tm timeinfo;
@@ -265,9 +265,7 @@ void printSystemOverview(AppendBuf &out, const SysSnapshot &sys) {
                                                : "[POOR]";
 
   FixedBuf<80> wp_status_buf;
-  char profile_summary_buf[80] = "Unknown";
-  ProtocolDiag_GetProfileSummary(profile_summary_buf, sizeof(profile_summary_buf));
-  wp_status_buf.append(profile_summary_buf);
+  wp_status_buf.append(diag_snap.profile_summary);
 
   out.appendFormat(
       "\r\n==========================================================="
@@ -305,12 +303,15 @@ void printStats(int sock) {
   PktSnapshot pkt_snap;
   System_TakeSnapshot(sys_snap, hw_snap, stack_snap, pkt_snap);
 
+  ProtocolDiagnosticSnapshot diag_snap;
+  ProtocolDiag_GetSnapshot(diag_snap);
+
   char *scratch = Cli_GetScratchBuffer();
   size_t scratch_sz = Cli_GetScratchBufferSize();
   scratch[0] = '\0';
   AppendBuf out{scratch, scratch_sz};
 
-  printSystemOverview(out, sys_snap);
+  printSystemOverview(out, sys_snap, diag_snap);
 
   Fmt::FormatHwMetrics(out, hw_snap);
   Fmt::FormatNetworkStats(out, pkt_snap);
@@ -336,7 +337,7 @@ void printStats(int sock) {
       "Normal Controls (Wallpad)",
       static_cast<unsigned>(norm_cnt),
       "Stale Emerg Polls",
-      static_cast<unsigned>(ProtocolDiag_GetStalePollCount()));
+      static_cast<unsigned>(diag_snap.stale_poll_count));
 
   System_FormatTaskStacks(out, stack_snap);
 

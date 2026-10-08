@@ -66,15 +66,16 @@ static void serializeSysMetrics(AppendBuf &out, uint8_t c0, uint8_t c1,
 
 static void serializeProfileAndTiming(
     AppendBuf &out, const ProfileInfoSnapshot &active_prof,
-    const AutoProbingDescriptorSnapshot &auto_desc, const char *wc_src, size_t total_devs,
+    const AutoProbingDescriptorSnapshot &auto_desc,
+    const ProtocolDiagnosticSnapshot &diag_snap,
+    const char *wc_src, size_t total_devs,
     size_t online_devs, size_t stale_devs, uint32_t ch2_rx,
     uint32_t ch2_uncached) {
-  char cat_match_buf[64] = "None";
-  ProtocolDiag_GetActiveVendorName(cat_match_buf, sizeof(cat_match_buf));
+  const char *cat_match_buf = diag_snap.vendor_name[0] ? diag_snap.vendor_name : "None";
 
   char bp_buf[64];
   snprintf(bp_buf, sizeof(bp_buf), "%u Groups",
-           static_cast<unsigned>(ProtocolDiag_GetGroupCount()));
+           static_cast<unsigned>(diag_snap.group_count));
 
   const uint8_t active_profile_idx = Config_GetWallpadProfile();
   bool fully_locked = (active_profile_idx != 0) ||
@@ -217,13 +218,12 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
   ProtocolDiag_GetProfileInfo(Config_GetWallpadProfile(), active_prof);
   AutoProbingDescriptorSnapshot auto_desc{};
   ProtocolDiag_GetAutoProbingDescriptor(auto_desc);
-
-  uint8_t wc_source = 0, wc_count = 0;
-  ProtocolDiag_GetWarmCacheStatus(wc_source, wc_count);
+  ProtocolDiagnosticSnapshot diag_snap{};
+  ProtocolDiag_GetSnapshot(diag_snap);
   const char *wc_src =
-      (wc_source == 1)
+      (diag_snap.wc_source == 1)
           ? "RTC_SRAM"
-          : (wc_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
+          : (diag_snap.wc_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
   size_t total_devs = Device_GetCount();
   size_t online_devs = Device_GetOnlineCount();
   size_t stale_devs =
@@ -272,7 +272,7 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
 
   serializeSysMetrics(out, c0, c1, temp_c, rssi, uptime_s, free_heap_kb,
                       min_free_heap_kb, ntp_synced);
-  serializeProfileAndTiming(out, active_prof, auto_desc, wc_src, total_devs,
+  serializeProfileAndTiming(out, active_prof, auto_desc, diag_snap, wc_src, total_devs,
                             online_devs, stale_devs, ch2_rx, ch2_uncached);
 
   out.appendFormat("\"channels\":{\"ch1\":{\"rx\":%u,\"tx\":%u,\"crc_err\":%u,"

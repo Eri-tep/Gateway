@@ -26,21 +26,19 @@ static void formatSources(uint8_t src_mask, AppendBuf &buf) {
 
 void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
   ProtocolDiag_PollingSweepExpired(Config::Timing::STALE_DEVICE_THRESHOLD_MS);
-  size_t tgt_active = 0, tgt_verified = 0, tgt_total = 0;
-  ProtocolDiag_GetPollingStats(tgt_active, tgt_verified, tgt_total);
-  uint8_t wc_source = 0, wc_count = 0;
-  ProtocolDiag_GetWarmCacheStatus(wc_source, wc_count);
-  const char *wc_src_str = (wc_source == 1)   ? "RTC SRAM"
-                           : (wc_source == 2) ? "NVS Flash"
-                                              : "Cold Start";
+  ProtocolDiagnosticSnapshot diag_snap;
+  ProtocolDiag_GetSnapshot(diag_snap);
+  const char *wc_src_str = (diag_snap.wc_source == 1)   ? "RTC SRAM"
+                           : (diag_snap.wc_source == 2) ? "NVS Flash"
+                                                        : "Cold Start";
 
   CliFmt::PrintBoxHeader(out,
                          "[1ST-TIER CACHE] DYNAMIC POLLING TARGET REGISTRY");
 
   CliFmt::PrintBoxSubtitlef(
       out, "Active Targets: %zu | Tracked: %zu | Warm Cache: %s (%u)",
-      tgt_active, tgt_total, wc_src_str,
-      static_cast<unsigned>(wc_count));
+      diag_snap.polling_active, diag_snap.polling_total, wc_src_str,
+      static_cast<unsigned>(diag_snap.wc_restored_count));
 
   static constexpr Column TIER1_COLS[] = {
       {"No", 3, Align::CENTER, Align::CENTER},
@@ -53,7 +51,7 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
 
   constexpr uint8_t ALLOWED_MASK = (1 << 2) | (1 << 3) | (1 << 5);
 
-  if (tgt_total == 0) {
+  if (diag_snap.polling_total == 0) {
     table.empty("(No polling targets registered yet. Waiting for queries...)");
   } else {
     PollingEntrySnapshot tgt;

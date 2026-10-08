@@ -68,19 +68,6 @@ bool ProtocolDiag_GetPollingEntry(size_t index, PollingEntrySnapshot &snap) noex
   return true;
 }
 
-size_t ProtocolDiag_GetPollingTargetsSnapshot(PollingEntrySnapshot *out_array, size_t max_count) noexcept {
-  if (!out_array || max_count == 0)
-    return 0;
-  size_t total = Polling_GetRegistry().totalCount();
-  size_t written = 0;
-  for (size_t i = 0; i < total && written < max_count; ++i) {
-    if (ProtocolDiag_GetPollingEntry(i, out_array[written])) {
-      written++;
-    }
-  }
-  return written;
-}
-
 void ProtocolDiag_PollingRegisterOrTouch(uint8_t ch, uint8_t dev_id, uint8_t sub1,
                                          uint8_t sub2, const uint8_t *pkt_data,
                                          size_t pkt_len) noexcept {
@@ -205,10 +192,7 @@ bool ProtocolDiag_ExtractDeviceKey(std::span<const uint8_t> frame,
                                    uint8_t &out_sub2) noexcept {
   if (frame.size() < 5)
     return false;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (!parser)
-    return false;
-  return parser->extractDeviceKey(frame, out_dev_id, out_sub1, out_sub2);
+  return Universal_GetEngine().extractDeviceKey(frame, out_dev_id, out_sub1, out_sub2);
 }
 
 bool ProtocolDiag_ExtractDeviceKey(const uint8_t *data, size_t len,
@@ -223,24 +207,17 @@ bool ProtocolDiag_ExtractDeviceKey(const uint8_t *data, size_t len,
 void ProtocolDiag_GetActiveVendorName(char *out_buf, size_t max_len) noexcept {
   if (!out_buf || max_len == 0)
     return;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (parser) {
-    parser->getVendorName(out_buf, max_len);
-  } else {
-    snprintf(out_buf, max_len, "Unknown");
-  }
+  Universal_GetEngine().getVendorName(out_buf, max_len);
 }
 
 void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
   if (!out_buf || max_len == 0)
     return;
 
-  auto *active = WallpadParserFactory::getActiveParser();
+  auto &active = Universal_GetEngine();
   auto desc = AutoProbe_GetEngine().getDescriptor();
   char vendor_name_buf[64] = "Unknown";
-  if (active) {
-    active->getVendorName(vendor_name_buf, sizeof(vendor_name_buf));
-  }
+  active.getVendorName(vendor_name_buf, sizeof(vendor_name_buf));
   const char *catalog_vendor = vendor_name_buf;
 
   if (Config_GetWallpadProfile() == 0) {
@@ -266,12 +243,21 @@ void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
 void ProtocolDiag_GetActiveProfileKey(char *out_buf, size_t max_len) noexcept {
   if (!out_buf || max_len == 0)
     return;
-  auto *active = WallpadParserFactory::getActiveParser();
-  if (active) {
-    active->getActiveProfileKey(out_buf, max_len);
-  } else {
-    snprintf(out_buf, max_len, "Standard");
-  }
+  Universal_GetEngine().getActiveProfileKey(out_buf, max_len);
+}
+
+void ProtocolDiag_GetSnapshot(ProtocolDiagnosticSnapshot &out) noexcept {
+  ProtocolDiag_GetProfileSummary(out.profile_summary, sizeof(out.profile_summary));
+  Universal_GetEngine().getVendorName(out.vendor_name, sizeof(out.vendor_name));
+  Universal_GetEngine().getActiveProfileKey(out.profile_key, sizeof(out.profile_key));
+  out.stale_poll_count = Wallpad_GetStalePollCount();
+  out.group_count = Control_GetRegistry().getGroupCount();
+  out.polling_active = Polling_GetRegistry().activeCount();
+  out.polling_verified = Polling_GetRegistry().verifiedCount();
+  out.polling_total = Polling_GetRegistry().totalCount();
+  auto st = WarmCache_GetStatus();
+  out.wc_source = st.source;
+  out.wc_restored_count = st.restored_count;
 }
 
 bool ProtocolDiag_GetCatalogMatch(char *vendor_buf, size_t v_len, size_t &device_count) noexcept {
@@ -468,20 +454,6 @@ bool ProtocolDiag_GetBlueprintAt(size_t index, BlueprintSnapshot &out) noexcept 
   return true;
 }
 
-size_t ProtocolDiag_GetBlueprintsSnapshot(BlueprintSnapshot *out_array, size_t max_count) noexcept {
-  if (!out_array || max_count == 0)
-    return 0;
-  const size_t total = Control_GetRegistry().getGroupCount();
-  const size_t out_cnt = std::min(total, max_count);
-  for (size_t i = 0; i < out_cnt; ++i) {
-    GroupControlTemplate grp{};
-    if (Control_GetRegistry().getGroupByIndex(i, grp)) {
-      CopyTemplateToSnapshot(grp, out_array[i]);
-    }
-  }
-  return out_cnt;
-}
-
 bool ProtocolDiag_GetBlueprint(uint8_t dev_id, BlueprintSnapshot &out) noexcept {
   GroupControlTemplate grp{};
   if (!Control_GetRegistry().findGroup(dev_id, grp))
@@ -502,52 +474,10 @@ void ProtocolDiag_ResetGroup(uint8_t dev_id, bool all) noexcept {
   Control_GetRegistry().resetGroup(dev_id, all);
 }
 
-uint8_t ProtocolDiag_GetActiveStx() noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->getStx() : 0xF7;
-}
-
-uint8_t ProtocolDiag_GetActiveEtx() noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->getEtx() : 0xEE;
-}
-
-int ProtocolDiag_ExtractPacketLength(const uint8_t *buf, size_t len, size_t offset) noexcept {
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->extractPacketLength(buf, len, offset) : -1;
-}
-
-bool ProtocolDiag_ValidatePacket(std::span<const uint8_t> frame) noexcept {
-  if (frame.empty())
-    return false;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->validatePacket(frame) : false;
-}
-
-bool ProtocolDiag_ValidatePacket(const uint8_t *buf, size_t len) noexcept {
-  if (!buf)
-    return false;
-  return ProtocolDiag_ValidatePacket(std::span<const uint8_t>(buf, len));
-}
-
-bool ProtocolDiag_IsQueryPacket(std::span<const uint8_t> frame) noexcept {
-  if (frame.empty())
-    return false;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->isQueryPacket(frame) : false;
-}
-
-bool ProtocolDiag_IsQueryPacket(const uint8_t *buf, size_t len) noexcept {
-  if (!buf)
-    return false;
-  return ProtocolDiag_IsQueryPacket(std::span<const uint8_t>(buf, len));
-}
-
 uint8_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept {
   if (!data || len == 0)
     return 0;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  return parser ? parser->calculateChecksum(data, len) : 0;
+  return Universal_GetEngine().calculateChecksum(data, len);
 }
 
 // ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
@@ -581,11 +511,15 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onTimeout = Wallpad_HandlePollTimeout;
   dispatcher.onDispatchControl = Router_DispatchControl;
   dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
-  dispatcher.onGetStx = Wallpad_GetStx;
+  dispatcher.onGetStx = []() noexcept { return Universal_GetEngine().getStx(); };
   dispatcher.onIsAutoUnlocked = Wallpad_IsAutoUnlocked;
   dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
-  dispatcher.onExtractLength = Wallpad_ExtractLength;
-  dispatcher.onValidatePacket = Wallpad_ValidatePacket;
+  dispatcher.onExtractLength = [](const uint8_t *s, size_t len, size_t idx) noexcept {
+    return Universal_GetEngine().extractPacketLength(s, len, idx);
+  };
+  dispatcher.onValidatePacket = [](std::span<const uint8_t> f) noexcept {
+    return Universal_GetEngine().validatePacket(f);
+  };
   dispatcher.onHandleSubBusQuery = Wallpad_HandleSubBusQuery;
   dispatcher.onFeedControlFrame = Wallpad_FeedControlFrame;
   dispatcher.onDoorphonePacket = Wallpad_HandleDoorphonePacket;
@@ -593,7 +527,9 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onMatchDoorphoneLock = Wallpad_MatchDoorphoneLock;
   dispatcher.onDoorphoneGetLockedFraming = Wallpad_DoorphoneGetLockedFraming;
   dispatcher.onDoorphoneFrameDetected = Wallpad_DoorphoneFrameDetected;
-  dispatcher.onIsQueryPacket = Wallpad_IsQueryPacket;
+  dispatcher.onIsQueryPacket = [](std::span<const uint8_t> f) noexcept {
+    return Universal_GetEngine().isQueryPacket(f);
+  };
 }
 
 void Protocol_DoorphoneInit() noexcept {
@@ -646,9 +582,14 @@ static void Protocol_OnBridgePacketReceived(uint8_t slot_idx, const StaticPacket
 }
 
 void Protocol_BindBridgeDispatcher(Bridge_PacketDispatcher &dispatcher) noexcept {
-  dispatcher.onGetStx = Wallpad_GetStx;
-  dispatcher.onExtractLength = ProtocolDiag_ExtractPacketLength;
-  dispatcher.onValidatePacket = ProtocolDiag_ValidatePacket;
+  dispatcher.onGetStx = []() noexcept { return Universal_GetEngine().getStx(); };
+  dispatcher.onExtractLength = [](const uint8_t *s, size_t len, size_t idx) noexcept {
+    return Universal_GetEngine().extractPacketLength(s, len, idx);
+  };
+  dispatcher.onValidatePacket = [](const uint8_t *data, size_t len) noexcept {
+    if (!data || len == 0) return false;
+    return Universal_GetEngine().validatePacket(std::span<const uint8_t>(data, len));
+  };
   dispatcher.onPacketReceived = Protocol_OnBridgePacketReceived;
 }
 

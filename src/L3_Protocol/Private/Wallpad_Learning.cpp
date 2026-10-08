@@ -1855,9 +1855,7 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
   GroupControlTemplate grp{};
   if (!findGroup(dev_id, grp) || grp.frame_len < 5)
     return false;
-  auto *parser = WallpadParserFactory::getActiveParser();
-  if (!parser)
-    return false;
+  auto &parser = Universal_GetEngine();
 
   const size_t act_idx = std::to_underlying(action);
   if (act_idx >= std::size(kActionBuilders))
@@ -1885,8 +1883,8 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
 
   if (out.length >= 3) {
     out.data[out.length - 2] =
-        parser->calculateChecksum(out.data.data(), out.length);
-    out.data[out.length - 1] = parser->getEtx();
+        parser.calculateChecksum(out.data.data(), out.length);
+    out.data[out.length - 1] = parser.getEtx();
   }
   return true;
 }
