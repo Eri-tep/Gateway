@@ -60,7 +60,6 @@ static QueueSetHandle_t s_ch1_queue_set = nullptr;
 static QueueHandle_t s_uart0_event_queue = nullptr, s_uart1_event_queue = nullptr,
                      s_uart2_event_queue = nullptr;
 static QueueHandle_t s_ch4_passthrough_queue = nullptr;
-static SemaphoreHandle_t s_ctrl_queue_mutex = nullptr;
 static SemaphoreHandle_t s_uart0_mutex = nullptr, s_uart1_mutex = nullptr,
                          s_uart2_mutex = nullptr;
 
@@ -75,9 +74,8 @@ void Engine_InitQueues() {
   s_uart0_mutex = xSemaphoreCreateMutex();
   s_uart1_mutex = xSemaphoreCreateMutex();
   s_uart2_mutex = xSemaphoreCreateMutex();
-  s_ctrl_queue_mutex = xSemaphoreCreateMutex();
   assert(s_uart0_mutex != nullptr && s_uart1_mutex != nullptr &&
-         s_uart2_mutex != nullptr && s_ctrl_queue_mutex != nullptr);
+         s_uart2_mutex != nullptr);
 
   s_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
                                            s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
@@ -95,34 +93,15 @@ void Engine_InitQueues() {
 
 CoreDumpInfo g_coredump_info;
 
-constexpr TickType_t kQueueLockTimeout = pdMS_TO_TICKS(10);
-
-bool Queue_EnqueueDropHead(QueueHandle_t queue,
-                           const StaticPacket &packet) noexcept {
-  if (UNLIKELY(!queue))
-    return false;
-  MutexLocker lock(s_ctrl_queue_mutex, kQueueLockTimeout);
-  if (!lock.isLocked()) {
-    Diag_RecordChannelLockTimeout(1);
-    return false;
-  }
-  if (xQueueSend(queue, &packet, 0) == pdTRUE)
-    return true;
-  StaticPacket dummy;
-  xQueueReceive(queue, &dummy, 0);
-  return (xQueueSend(queue, &packet, 0) == pdTRUE);
-}
-
 bool Queue_EnqueueDropTail(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
   if (UNLIKELY(!queue))
     return false;
-  MutexLocker lock(s_ctrl_queue_mutex, kQueueLockTimeout);
-  if (!lock.isLocked()) {
-    Diag_RecordChannelLockTimeout(1);
-    return false;
+  if (xQueueSend(queue, &packet, 0) == pdTRUE) {
+    return true;
   }
-  return (xQueueSend(queue, &packet, 0) == pdTRUE);
+  Diag_RecordChannelQueueFull(1);
+  return false;
 }
 
 // ── RS-485 Channel TX Enqueue (canonical L2 → internal queue bridge) ─────────
@@ -410,10 +389,8 @@ void Ch1_WaitBusIdle(uint32_t silence_ms) {
     constexpr uint32_t kGuardIntervalMs = 35;
     if (now_tx - last_tx < kGuardIntervalMs) {
       uint32_t rem_tx = kGuardIntervalMs - (now_tx - last_tx);
-      if (rem_tx >= 2) {
+      if (rem_tx > 0) {
         vTaskDelay(pdMS_TO_TICKS(rem_tx));
-      } else if (rem_tx > 0) {
-        delayMicroseconds(rem_tx * 1000);
       }
     }
   }
@@ -424,10 +401,8 @@ void Ch1_WaitBusIdle(uint32_t silence_ms) {
 
   if (now_ms - last_act < silence_ms) {
     uint32_t rem_ms = silence_ms - (now_ms - last_act);
-    if (rem_ms >= 2) {
+    if (rem_ms > 0) {
       vTaskDelay(pdMS_TO_TICKS(rem_ms));
-    } else if (rem_ms > 0) {
-      delayMicroseconds(rem_ms * 1000);
     }
   }
 }

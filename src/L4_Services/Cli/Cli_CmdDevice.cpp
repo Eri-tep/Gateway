@@ -438,11 +438,13 @@ void cmdCtl(CliContext &ctx) {
            return;
          }
          const char *arg = a.get(2);
-         if (strcasecmp(arg, "all") == 0) {
+         switch (Hash::fnv1a32_ci_rt(arg)) {
+         case Hash::fnv1a32_ci("all"):
            ProtocolDiag_ResetGroup(0, true);
            sendTelnetMsg(s, "[OK] All control blueprints reset & "
                             "re-synthesized from catalog specs.\r\n");
-         } else {
+           break;
+         default: {
            char *endp = nullptr;
            uint8_t dev_id = static_cast<uint8_t>(strtoul(arg, &endp, 0));
            if (endp == arg || dev_id == 0) {
@@ -457,6 +459,8 @@ void cmdCtl(CliContext &ctx) {
                           "[OK] Control template for DevID 0x%02X action slots "
                           "reset completed.\r\n",
                           dev_id);
+           break;
+         }
          }
        }},
       {nullptr, "reset all", "Factory wipe & re-inject blueprints from catalog",

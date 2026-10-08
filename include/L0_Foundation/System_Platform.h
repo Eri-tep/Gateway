@@ -388,6 +388,7 @@ struct ChanStats {
   uint32_t timeouts{0};
   uint32_t lock_timeouts{0};
   uint32_t uncached_pkts{0};
+  uint32_t queue_full{0};
   uint32_t last_activity_ms{0};
 };
 
@@ -468,7 +469,8 @@ void System_ClearRebootLog() noexcept;
 [[nodiscard]] uint32_t System_GetBootTimeMs() noexcept;
 
 // ── NVS Flash Storage Diagnostics (Cold Path Reliability) ───────────────────
-void System_GetNvsStats(uint32_t &err_count, uint32_t &last_sync_ms) noexcept;
+void System_GetNvsStats(uint32_t &err_count, uint32_t &last_sync_ms,
+                        uint32_t *last_duration_ms = nullptr) noexcept;
 void System_ResetNvsStats() noexcept;
 
 // ── HTTP / Cloud Firmware OTA Engine ─────────────────────────────────────────

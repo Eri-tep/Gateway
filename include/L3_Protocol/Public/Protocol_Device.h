@@ -22,7 +22,7 @@
 //     | s_uart0_mutex      | SemaphoreHandle_t | L2    | CH1 UART0 half-duplex TX/RX      |
 //     | s_uart1_mutex      | SemaphoreHandle_t | L2    | CH2 UART1 half-duplex TX/RX      |
 //     | s_uart2_mutex      | SemaphoreHandle_t | L2    | CH3 UART2 half-duplex TX/RX      |
-//     | s_ctrl_queue_mutex | SemaphoreHandle_t | L2    | CH1 Control Packet FIFO Queue    |
+//     | (Queue Internal)   | portMUX_TYPE      | L2    | CH1 Control FIFO (FreeRTOS Native)|
 //     | s_ch5_mutex        | SemaphoreHandle_t | L2    | CH5 Modbus RTU FCU half-duplex   |
 //     | _cache_mutex       | StaticSemaphore_t | L3    | Device Registry 48 slots cache   |
 //     | _mutex             | StaticSemaphore_t | L3    | Control Registry learned specs   |

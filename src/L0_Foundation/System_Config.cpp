@@ -18,15 +18,24 @@ static std::mutex s_save_mutex;
 
 static std::atomic<uint32_t> s_nvs_write_errors{0};
 static std::atomic<uint32_t> s_nvs_last_sync_ms{0};
+static std::atomic<uint32_t> s_nvs_last_duration_ms{0};
+static uint8_t s_active_bank{0};
+static RuntimeConfig s_persisted_config{};
+static bool s_has_persisted_config{false};
 
-void System_GetNvsStats(uint32_t &err_count, uint32_t &last_sync_ms) noexcept {
+void System_GetNvsStats(uint32_t &err_count, uint32_t &last_sync_ms,
+                        uint32_t *last_duration_ms) noexcept {
   err_count = s_nvs_write_errors.load(std::memory_order_relaxed);
   last_sync_ms = s_nvs_last_sync_ms.load(std::memory_order_relaxed);
+  if (last_duration_ms) {
+    *last_duration_ms = s_nvs_last_duration_ms.load(std::memory_order_relaxed);
+  }
 }
 
 void System_ResetNvsStats() noexcept {
   s_nvs_write_errors.store(0, std::memory_order_relaxed);
   s_nvs_last_sync_ms.store(0, std::memory_order_relaxed);
+  s_nvs_last_duration_ms.store(0, std::memory_order_relaxed);
 }
 
 
@@ -127,12 +136,32 @@ void Config_Load() {
   auto &c = s_config;
 
   if (p_opened) {
-    // 1. Try atomic sealed envelope first (Power-cut resilient)
+    // 1. Try atomic sealed A/B Ping-Pong envelope first (Power-cut resilient)
     RuntimeConfig env_cfg{};
-    if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
+    const uint8_t active_bank = p.getUChar("cfg_act", 0);
+    const char *primary_key = (active_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
+    const char *secondary_key = (active_bank == 1) ? "cfg_bin_0" : "cfg_bin_1";
+
+    bool loaded = false;
+    if (nvsGetEnv(p, primary_key, env_cfg)) {
       c = env_cfg;
-      ESP_LOGI("CONFIG", "Loaded atomic cfg_bin (CRC-32 verified)");
-    } else {
+      s_active_bank = active_bank;
+      loaded = true;
+      ESP_LOGI("CONFIG", "Loaded atomic A/B bank %u (CRC-32 verified)", active_bank);
+    } else if (nvsGetEnv(p, secondary_key, env_cfg)) {
+      c = env_cfg;
+      s_active_bank = (active_bank == 1) ? 0 : 1;
+      loaded = true;
+      ESP_LOGW("CONFIG", "Primary bank %u corrupted; recovered from alternate bank %u (CRC-32 verified)",
+               active_bank, s_active_bank);
+    } else if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
+      c = env_cfg;
+      s_active_bank = 0;
+      loaded = true;
+      ESP_LOGI("CONFIG", "Loaded legacy cfg_bin (CRC-32 verified)");
+    }
+
+    if (!loaded) {
       // 2. Fallback to individual legacy NVS keys
       c.uart_baud_rate = p.getULong("uart_baud", 9600);
       c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
@@ -261,6 +290,9 @@ void Config_Load() {
     System_Sha256ToHex(DEFAULT_TELNET_PASS, c.telnet_pass_hash);
 #endif
   }
+
+  s_persisted_config = c;
+  s_has_persisted_config = true;
 }
 
 void Config_Save() {
@@ -286,42 +318,80 @@ void Config_Save() {
     return;
   }
 
-  // 1. Atomic sealed binary envelope write (Power-cut resilient)
-  if (!nvsPutEnv(p, "cfg_bin", snapshot)) {
-    ESP_LOGE("CONFIG", "Failed to write atomic cfg_bin envelope; restoring dirty flag");
+  const uint32_t t0 = millis();
+
+  // 1. A/B Ping-Pong Atomic sealed binary envelope write (Power-cut resilient)
+  const uint8_t target_bank = (s_active_bank == 0) ? 1 : 0;
+  const char *target_key = (target_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
+
+  if (!nvsPutEnv(p, target_key, snapshot)) {
+    ESP_LOGE("CONFIG", "Failed to write atomic %s envelope; restoring dirty flag", target_key);
     s_config_dirty.store(true, std::memory_order_release);
     s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
     p.end();
     return;
   }
 
-  // 2. Backward compatibility individual key writes
-  p.putULong("uart_baud", snapshot.uart_baud_rate);
-  p.putULong("ch2_baud", snapshot.ch2_baud_rate);
-  p.putULong("ch3_baud", snapshot.ch3_baud_rate);
-  p.putULong("door_baud", snapshot.doorphone_baud_rate);
-  p.putString("wifi_ssid", snapshot.wifi_ssid);
-  p.putString("wifi_pass", snapshot.wifi_password);
-  p.putString("ap_ssid", snapshot.ap_ssid);
-  p.putString("ap_pass", snapshot.ap_password);
-  p.putString("telnet_hash", snapshot.telnet_pass_hash);
+  p.putUChar("cfg_act", target_bank);
+  s_active_bank = target_bank;
 
-  p.putUChar("u_parity", snapshot.uart_parity);
-  p.putUChar("u_sbits", snapshot.uart_stop_bits);
-  p.putUChar("u_dbits", snapshot.uart_data_bits);
-  p.putUChar("ch2_parity", snapshot.ch2_parity);
-  p.putUChar("ch2_sbits", snapshot.ch2_stop_bits);
-  p.putUChar("ch2_dbits", snapshot.ch2_data_bits);
-  p.putUChar("ch3_parity", snapshot.ch3_parity);
-  p.putUChar("ch3_sbits", snapshot.ch3_stop_bits);
-  p.putUChar("ch3_dbits", snapshot.ch3_data_bits);
-  p.putUChar("d_dbits", snapshot.doorphone_data_bits);
-  p.putUChar("d_parity", snapshot.doorphone_parity);
-  p.putUChar("d_sbits", snapshot.doorphone_stop_bits);
-  p.putUShort("w_tout", snapshot.wifi_connect_timeout_s);
-  p.putUChar("w_prof", snapshot.wallpad_profile);
+  // 2. Backward compatibility Delta Write (only write keys that actually changed)
+  if (!s_has_persisted_config || snapshot.uart_baud_rate != s_persisted_config.uart_baud_rate)
+    p.putULong("uart_baud", snapshot.uart_baud_rate);
+  if (!s_has_persisted_config || snapshot.ch2_baud_rate != s_persisted_config.ch2_baud_rate)
+    p.putULong("ch2_baud", snapshot.ch2_baud_rate);
+  if (!s_has_persisted_config || snapshot.ch3_baud_rate != s_persisted_config.ch3_baud_rate)
+    p.putULong("ch3_baud", snapshot.ch3_baud_rate);
+  if (!s_has_persisted_config || snapshot.doorphone_baud_rate != s_persisted_config.doorphone_baud_rate)
+    p.putULong("door_baud", snapshot.doorphone_baud_rate);
+
+  if (!s_has_persisted_config || strncmp(snapshot.wifi_ssid, s_persisted_config.wifi_ssid, sizeof(snapshot.wifi_ssid)) != 0)
+    p.putString("wifi_ssid", snapshot.wifi_ssid);
+  if (!s_has_persisted_config || strncmp(snapshot.wifi_password, s_persisted_config.wifi_password, sizeof(snapshot.wifi_password)) != 0)
+    p.putString("wifi_pass", snapshot.wifi_password);
+  if (!s_has_persisted_config || strncmp(snapshot.ap_ssid, s_persisted_config.ap_ssid, sizeof(snapshot.ap_ssid)) != 0)
+    p.putString("ap_ssid", snapshot.ap_ssid);
+  if (!s_has_persisted_config || strncmp(snapshot.ap_password, s_persisted_config.ap_password, sizeof(snapshot.ap_password)) != 0)
+    p.putString("ap_pass", snapshot.ap_password);
+  if (!s_has_persisted_config || strncmp(snapshot.telnet_pass_hash, s_persisted_config.telnet_pass_hash, sizeof(snapshot.telnet_pass_hash)) != 0)
+    p.putString("telnet_hash", snapshot.telnet_pass_hash);
+
+  if (!s_has_persisted_config || snapshot.uart_parity != s_persisted_config.uart_parity)
+    p.putUChar("u_parity", snapshot.uart_parity);
+  if (!s_has_persisted_config || snapshot.uart_stop_bits != s_persisted_config.uart_stop_bits)
+    p.putUChar("u_sbits", snapshot.uart_stop_bits);
+  if (!s_has_persisted_config || snapshot.uart_data_bits != s_persisted_config.uart_data_bits)
+    p.putUChar("u_dbits", snapshot.uart_data_bits);
+  if (!s_has_persisted_config || snapshot.ch2_parity != s_persisted_config.ch2_parity)
+    p.putUChar("ch2_parity", snapshot.ch2_parity);
+  if (!s_has_persisted_config || snapshot.ch2_stop_bits != s_persisted_config.ch2_stop_bits)
+    p.putUChar("ch2_sbits", snapshot.ch2_stop_bits);
+  if (!s_has_persisted_config || snapshot.ch2_data_bits != s_persisted_config.ch2_data_bits)
+    p.putUChar("ch2_dbits", snapshot.ch2_data_bits);
+  if (!s_has_persisted_config || snapshot.ch3_parity != s_persisted_config.ch3_parity)
+    p.putUChar("ch3_parity", snapshot.ch3_parity);
+  if (!s_has_persisted_config || snapshot.ch3_stop_bits != s_persisted_config.ch3_stop_bits)
+    p.putUChar("ch3_sbits", snapshot.ch3_stop_bits);
+  if (!s_has_persisted_config || snapshot.ch3_data_bits != s_persisted_config.ch3_data_bits)
+    p.putUChar("ch3_dbits", snapshot.ch3_data_bits);
+  if (!s_has_persisted_config || snapshot.doorphone_data_bits != s_persisted_config.doorphone_data_bits)
+    p.putUChar("d_dbits", snapshot.doorphone_data_bits);
+  if (!s_has_persisted_config || snapshot.doorphone_parity != s_persisted_config.doorphone_parity)
+    p.putUChar("d_parity", snapshot.doorphone_parity);
+  if (!s_has_persisted_config || snapshot.doorphone_stop_bits != s_persisted_config.doorphone_stop_bits)
+    p.putUChar("d_sbits", snapshot.doorphone_stop_bits);
+  if (!s_has_persisted_config || snapshot.wifi_connect_timeout_s != s_persisted_config.wifi_connect_timeout_s)
+    p.putUShort("w_tout", snapshot.wifi_connect_timeout_s);
+  if (!s_has_persisted_config || snapshot.wallpad_profile != s_persisted_config.wallpad_profile)
+    p.putUChar("w_prof", snapshot.wallpad_profile);
 
   p.end();
+
+  s_persisted_config = snapshot;
+  s_has_persisted_config = true;
+
+  const uint32_t dur = millis() - t0;
+  s_nvs_last_duration_ms.store(dur, std::memory_order_relaxed);
   s_nvs_last_sync_ms.store(millis(), std::memory_order_relaxed);
 }
 
@@ -469,15 +539,30 @@ bool Config_SaveWallpadProfile() noexcept {
     s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
-  RuntimeConfig env_cfg;
-  if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
-    env_cfg.wallpad_profile = s_active_wallpad_profile.load(std::memory_order_relaxed);
-    nvsPutEnv(p, "cfg_bin", env_cfg);
+  const uint32_t t0 = millis();
+  RuntimeConfig env_cfg{};
+  const uint8_t active_bank = p.getUChar("cfg_act", 0);
+  const char *primary_key = (active_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
+  if (!nvsGetEnv(p, primary_key, env_cfg)) {
+    nvsGetEnv(p, "cfg_bin", env_cfg);
+  }
+  env_cfg.wallpad_profile = s_active_wallpad_profile.load(std::memory_order_relaxed);
+
+  const uint8_t target_bank = (active_bank == 0) ? 1 : 0;
+  const char *target_key = (target_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
+  if (nvsPutEnv(p, target_key, env_cfg)) {
+    p.putUChar("cfg_act", target_bank);
+    s_active_bank = target_bank;
   }
   p.putUChar("w_prof",
              s_active_wallpad_profile.load(std::memory_order_relaxed));
   p.end();
+
+  const uint32_t dur = millis() - t0;
+  s_nvs_last_duration_ms.store(dur, std::memory_order_relaxed);
   s_nvs_last_sync_ms.store(millis(), std::memory_order_relaxed);
+  s_persisted_config = env_cfg;
+  s_has_persisted_config = true;
   return true;
 }
 
@@ -516,9 +601,17 @@ bool Config_SaveStaged(const RuntimeConfig &cfg,
     return false;
   }
 
-  // 1. Atomic sealed binary envelope write (Power-cut resilient)
-  if (!nvsPutEnv(p, "cfg_bin", cfg)) {
+  const uint32_t t0 = millis();
+
+  // 1. Atomic sealed A/B binary envelope write (Power-cut resilient)
+  const uint8_t target_bank = (s_active_bank == 0) ? 1 : 0;
+  const char *target_key = (target_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
+
+  if (!nvsPutEnv(p, target_key, cfg)) {
     s_nvs_write_errors.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    p.putUChar("cfg_act", target_bank);
+    s_active_bank = target_bank;
   }
 
   if (cfg.uart_baud_rate != s_config.uart_baud_rate)
@@ -589,7 +682,11 @@ bool Config_SaveStaged(const RuntimeConfig &cfg,
     pt.end();
   }
 
+  const uint32_t dur = millis() - t0;
+  s_nvs_last_duration_ms.store(dur, std::memory_order_relaxed);
   s_nvs_last_sync_ms.store(millis(), std::memory_order_relaxed);
+  s_persisted_config = cfg;
+  s_has_persisted_config = true;
   return true;
 }
 

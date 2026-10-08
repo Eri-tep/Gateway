@@ -38,6 +38,79 @@ local function get_gateway_ip_port(driver)
   return ip, port
 end
 
+local function parse_child_key(key)
+  if not key then return nil end
+  local hex_id, s1, s2 = key:match("^dev_([0-9A-Fa-f]+)_(%d+)_(%d+)$")
+  if hex_id and s1 and s2 then
+    return tonumber(hex_id, 16), tonumber(s1), tonumber(s2)
+  end
+  return nil
+end
+
+local function resolve_child_class(d_id, p_key, device)
+  if d_id == 0x2C then return "fcu" end
+  if p_key:match("^dev_28_") or (device and device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID)) then
+    return "thermostat"
+  end
+  if p_key:match("^dev_34_") or (device and device:supports_capability_by_id(capabilities.momentary.ID)) then
+    return "momentary"
+  end
+  if (device and device:supports_capability_by_id(capabilities.energyMeter.ID)) or (d_id == 0x33 or d_id == 0x39) then
+    return "outlet"
+  end
+  local cap_vent = capabilities["digituniverse06711.ventmode"]
+  if device and cap_vent and device:supports_capability_by_id(cap_vent.ID) then
+    return "vent"
+  end
+  return "switch"
+end
+
+local CHILD_REFRESH_DISPATCH = {
+  thermostat = function(driver, device)
+    local cap_away = capabilities["digituniverse06711.heatingAway"]
+    if cap_away and device:supports_capability_by_id(cap_away.ID) then
+      local cur_away = device:get_latest_state("main", cap_away.ID, cap_away.away.NAME) or "off"
+      local away_ev = cap_away.away(cur_away)
+      away_ev.state_change = true
+      device:emit_event(away_ev)
+    end
+    if device:supports_capability_by_id(capabilities.switch.ID) then
+      local cur_sw = device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) or "off"
+      local sw_ev = (cur_sw == "on") and capabilities.switch.switch.on() or capabilities.switch.switch.off()
+      sw_ev.state_change = true
+      device:emit_event(sw_ev)
+    end
+    if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
+      local ev = capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" })
+      ev.state_change = true
+      device:emit_event(ev)
+    end
+  end,
+
+  outlet = function(driver, device)
+    if device:supports_capability_by_id(capabilities.energyMeter.ID) then
+      local m_kwh = device:get_field("monthly_energy_kwh") or 0.0
+      if m_kwh > 2.0 then
+        device:set_field("monthly_energy_kwh", 0.0, { persist = true })
+        device:emit_event(capabilities.energyMeter.energy({ value = 0.0, unit = "kWh" }))
+        log.info(string.format("🧹 [OUTLET] Cleared contaminated monthly energy (%.3f -> 0.0 kWh)", m_kwh))
+      end
+    end
+  end,
+
+  momentary = function(driver, device)
+    local cap_hist = capabilities["digituniverse06711.history"]
+    if cap_hist then
+      local ev_active = device:get_field("ev_active")
+      if not ev_active then
+        local ev = cap_hist.history({ value = "대기" })
+        ev.state_change = true
+        device:emit_event(ev)
+      end
+    end
+  end,
+}
+
 local function refresh_telemetry(driver, device)
   local main_gw = nil
   for _, d in ipairs(driver:get_devices()) do
@@ -63,47 +136,11 @@ function CommandHandlers.handle_refresh(driver, device, command)
 
   -- 자식 기기 새로고침 처리
   if p_key:match("^dev_") then
-    -- 난방인 경우 스위치, 외출 모드, 희망온도 갱신
-    if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
-      local cap_away = capabilities["digituniverse06711.heatingAway"]
-      if cap_away and device:supports_capability_by_id(cap_away.ID) then
-        local cur_away = device:get_latest_state("main", cap_away.ID, cap_away.away.NAME) or "off"
-        local away_ev = cap_away.away(cur_away)
-        away_ev.state_change = true
-        device:emit_event(away_ev)
-      end
-      if device:supports_capability_by_id(capabilities.switch.ID) then
-        local cur_sw = device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) or "off"
-        local sw_ev = (cur_sw == "on") and capabilities.switch.switch.on() or capabilities.switch.switch.off()
-        sw_ev.state_change = true
-        device:emit_event(sw_ev)
-      end
-      if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
-        local ev = capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" })
-        ev.state_change = true
-        device:emit_event(ev)
-      end
-    end
-
-    -- 콘센트인 경우 과거 오염된 누적 전력량 클리어 (비정상 수치 리셋)
-    if device:supports_capability_by_id(capabilities.energyMeter.ID) then
-      local m_kwh = device:get_field("monthly_energy_kwh") or 0.0
-      if m_kwh > 2.0 then
-        device:set_field("monthly_energy_kwh", 0.0, { persist = true })
-        device:emit_event(capabilities.energyMeter.energy({ value = 0.0, unit = "kWh" }))
-        log.info(string.format("🧹 [OUTLET] Cleared contaminated monthly energy (%.3f -> 0.0 kWh)", m_kwh))
-      end
-    end
-
-    -- 엘리베이터인 경우 대기/상태 복원
-    local cap_hist = capabilities["digituniverse06711.history"]
-    if cap_hist and p_key:match("^dev_34_") then
-      local ev_active = device:get_field("ev_active")
-      if not ev_active then
-        local ev = cap_hist.history({ value = "대기" })
-        ev.state_change = true
-        device:emit_event(ev)
-      end
+    local d_id, s1, s2 = parse_child_key(p_key)
+    local cls = resolve_child_class(d_id, p_key, device)
+    local refresh_fn = CHILD_REFRESH_DISPATCH[cls]
+    if refresh_fn then
+      refresh_fn(driver, device)
     end
 
     -- 게이트웨이에서 최신 실제 기기 상태 조회하여 즉시 동기화
@@ -612,14 +649,6 @@ end
 -- 동적 자식 기기(Child Devices) 제어 핸들러 (스위치/난방/환기/가스/엘리베이터)
 -- ============================================================================
 
-local function parse_child_key(key)
-  if not key then return nil end
-  local hex_id, s1, s2 = key:match("^dev_([0-9A-Fa-f]+)_(%d+)_(%d+)$")
-  if hex_id and s1 and s2 then
-    return tonumber(hex_id, 16), tonumber(s1), tonumber(s2)
-  end
-  return nil
-end
 
 local function handle_momentary_switch_on(device, ip, port, d_id, s1, s2)
   device:set_field("ev_active", true)
@@ -645,21 +674,6 @@ local function handle_momentary_switch_off(device)
     h_evt.state_change = true
     device:emit_event(h_evt)
   end
-end
-
-local function resolve_child_class(d_id, p_key, device)
-  if d_id == 0x2C then return "fcu" end
-  if p_key:match("^dev_28_") or (device and device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID)) then
-    return "thermostat"
-  end
-  if p_key:match("^dev_34_") or (device and device:supports_capability_by_id(capabilities.momentary.ID)) then
-    return "momentary"
-  end
-  local cap_vent = capabilities["digituniverse06711.ventmode"]
-  if device and cap_vent and device:supports_capability_by_id(cap_vent.ID) then
-    return "vent"
-  end
-  return "switch"
 end
 
 local CHILD_SWITCH_ON_DISPATCH = {
@@ -734,6 +748,10 @@ local CHILD_SWITCH_ON_DISPATCH = {
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
   end,
 
+  outlet = function(driver, device, d_id, s1, s2, ip, port)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
+  end,
+
   switch = function(driver, device, d_id, s1, s2, ip, port)
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 1)
   end,
@@ -764,10 +782,41 @@ local CHILD_SWITCH_OFF_DISPATCH = {
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
   end,
 
+  outlet = function(driver, device, d_id, s1, s2, ip, port)
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
+  end,
+
   switch = function(driver, device, d_id, s1, s2, ip, port)
     gateway_client.device_control(ip, port, d_id, s1, s2, "power", 0)
   end,
 }
+
+local AWAY_CMD_DISPATCH = {
+  ["on"] = function(_) return true end,
+  ["off"] = function(_) return false end,
+  ["toggle"] = function(device)
+    local cap_away = capabilities["digituniverse06711.heatingAway"]
+    local cur_state = "off"
+    if cap_away then
+      cur_state = device:get_latest_state("main", cap_away.ID, cap_away.away.NAME) or "off"
+    end
+    return cur_state == "off"
+  end,
+}
+
+local function resolve_away_state(device, command)
+  local cmd_name = (command and command.command) or ""
+  local handler = AWAY_CMD_DISPATCH[cmd_name]
+  if handler then
+    return handler(device)
+  end
+  local raw_away = (command and command.args and command.args.away)
+  if not raw_away and command and command.positional_args and #command.positional_args > 0 then
+    raw_away = command.positional_args[1]
+  end
+  local away_str = tostring(raw_away or "off"):lower()
+  return (away_str == "on" or away_str == "true")
+end
 
 function CommandHandlers.handle_child_switch_on(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
@@ -802,26 +851,7 @@ function CommandHandlers.handle_child_set_heating_away(driver, device, command)
   if not d_id then return end
 
   local cmd_name = (command and command.command) or ""
-  local is_on = false
-  if cmd_name == "on" then
-    is_on = true
-  elseif cmd_name == "off" then
-    is_on = false
-  elseif cmd_name == "toggle" then
-    local cap_away = capabilities["digituniverse06711.heatingAway"]
-    local cur_state = "off"
-    if cap_away then
-      cur_state = device:get_latest_state("main", cap_away.ID, cap_away.away.NAME) or "off"
-    end
-    is_on = (cur_state == "off")
-  else
-    local raw_away = (command.args and command.args.away)
-    if not raw_away and command.positional_args and #command.positional_args > 0 then
-      raw_away = command.positional_args[1]
-    end
-    local away_str = tostring(raw_away or "off"):lower()
-    is_on = (away_str == "on" or away_str == "true")
-  end
+  local is_on = resolve_away_state(device, command)
 
   local pwr = is_on and 2 or 1
   local ip, port = get_gateway_ip_port(driver)

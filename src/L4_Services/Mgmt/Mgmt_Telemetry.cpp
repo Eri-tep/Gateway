@@ -64,13 +64,21 @@ static void serializeSysMetrics(AppendBuf &out, uint8_t c0, uint8_t c1,
                    ota_snap.last_error);
 }
 
-static void serializeProfileAndTiming(
-    AppendBuf &out, const ProfileInfoSnapshot &active_prof,
-    const AutoProbingDescriptorSnapshot &auto_desc,
-    const ProtocolDiagnosticSnapshot &diag_snap,
-    const char *wc_src, size_t total_devs,
+[[gnu::noinline]] static void serializeProfileAndTiming(
+    AppendBuf &out, size_t total_devs,
     size_t online_devs, size_t stale_devs, uint32_t ch2_rx,
     uint32_t ch2_uncached) {
+  ProfileInfoSnapshot active_prof{};
+  ProtocolDiag_GetProfileInfo(Config_GetWallpadProfile(), active_prof);
+  AutoProbingDescriptorSnapshot auto_desc{};
+  ProtocolDiag_GetAutoProbingDescriptor(auto_desc);
+  ProtocolDiagnosticSnapshot diag_snap{};
+  ProtocolDiag_GetSnapshot(diag_snap);
+  const char *wc_src =
+      (diag_snap.wc_source == 1)
+          ? "RTC_SRAM"
+          : (diag_snap.wc_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
+
   const char *cat_match_buf = diag_snap.vendor_name[0] ? diag_snap.vendor_name : "None";
 
   char bp_buf[64];
@@ -226,16 +234,6 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
       heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) / 1024;
   bool ntp_synced = (time(nullptr) > 1672531200);
 
-  ProfileInfoSnapshot active_prof{};
-  ProtocolDiag_GetProfileInfo(Config_GetWallpadProfile(), active_prof);
-  AutoProbingDescriptorSnapshot auto_desc{};
-  ProtocolDiag_GetAutoProbingDescriptor(auto_desc);
-  ProtocolDiagnosticSnapshot diag_snap{};
-  ProtocolDiag_GetSnapshot(diag_snap);
-  const char *wc_src =
-      (diag_snap.wc_source == 1)
-          ? "RTC_SRAM"
-          : (diag_snap.wc_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
   size_t total_devs = Device_GetCount();
   size_t online_devs = Device_GetOnlineCount();
   size_t stale_devs =
@@ -248,6 +246,7 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
   uint32_t ch1_tx = pkt_snap.ch1.tx_pkts;
   uint32_t ch1_crc = pkt_snap.ch1.crc_errors;
   uint32_t ch1_tout = pkt_snap.ch1.timeouts;
+  uint32_t ch1_qfull = pkt_snap.ch1.queue_full;
 
   uint32_t ch2_rx = pkt_snap.ch2.rx_pkts;
   uint32_t ch2_tx = pkt_snap.ch2.tx_pkts;
@@ -284,17 +283,16 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
 
   serializeSysMetrics(out, c0, c1, temp_c, rssi, uptime_s, free_heap_kb,
                       min_free_heap_kb, ntp_synced);
-  serializeProfileAndTiming(out, active_prof, auto_desc, diag_snap, wc_src, total_devs,
-                            online_devs, stale_devs, ch2_rx, ch2_uncached);
+  serializeProfileAndTiming(out, total_devs, online_devs, stale_devs, ch2_rx, ch2_uncached);
 
   out.appendFormat("\"channels\":{\"ch1\":{\"rx\":%u,\"tx\":%u,\"crc_err\":%u,"
-                   "\"timeout\":%u,\"crc_rate\":%.2f},"
+                   "\"timeout\":%u,\"q_full\":%u,\"crc_rate\":%.2f},"
                    "\"ch2\":{\"rx\":%u,\"tx\":%u,\"uncached\":%u},"
                    "\"ch3\":{\"rx\":%u,\"tx\":%u,\"uncached\":%u},"
                    "\"ch4\":{\"rx\":%u,\"tx\":%u,\"inv\":%u},"
                    "\"ch5\":{\"rx\":%u,\"tx\":%u,\"dropped\":%u},"
                    "\"ch6\":{\"rx\":%u,\"tx\":%u}},",
-                   ch1_rx, ch1_tx, ch1_crc, ch1_tout, crc_rate, ch2_rx, ch2_tx,
+                   ch1_rx, ch1_tx, ch1_crc, ch1_tout, ch1_qfull, crc_rate, ch2_rx, ch2_tx,
                    ch2_uncached, ch3_rx, ch3_tx, ch3_uncached, ch4_rx, ch4_tx,
                    ch4_inv, ch5_rx, ch5_tx, ch5_drp, ch6_rx, ch6_tx);
 

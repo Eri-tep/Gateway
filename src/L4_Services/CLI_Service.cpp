@@ -559,13 +559,19 @@ static void dispatchCommand(CliContext &ctx) {
 static inline bool consumeIac(TelnetManager::TelnetSession *sess, uint8_t c) {
   switch (sess->iacState) {
   case IacState::GOT_IAC:
-    if (c == TelnetCmd::WILL || c == TelnetCmd::WONT || c == TelnetCmd::DO ||
-        c == TelnetCmd::DONT) {
+    switch (c) {
+    case TelnetCmd::WILL:
+    case TelnetCmd::WONT:
+    case TelnetCmd::DO:
+    case TelnetCmd::DONT:
       sess->iacState = IacState::GOT_OPTION;
-    } else if (c == TelnetCmd::SB) {
+      break;
+    case TelnetCmd::SB:
       sess->iacState = IacState::IN_SUBNEG;
-    } else {
+      break;
+    default:
       sess->iacState = IacState::NORMAL;
+      break;
     }
     return true;
 

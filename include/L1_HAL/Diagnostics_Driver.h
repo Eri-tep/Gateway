@@ -90,6 +90,7 @@ struct SingleChannelStats {
   std::atomic<uint32_t> timeouts{0};
   std::atomic<uint32_t> lock_timeouts{0};
   std::atomic<uint32_t> uncached_pkts{0};
+  std::atomic<uint32_t> queue_full{0};
   std::atomic<uint32_t> last_activity_ms{0};
 
   void reset() {
@@ -100,6 +101,7 @@ struct SingleChannelStats {
     timeouts.store(0, std::memory_order_relaxed);
     lock_timeouts.store(0, std::memory_order_relaxed);
     uncached_pkts.store(0, std::memory_order_relaxed);
+    queue_full.store(0, std::memory_order_relaxed);
     last_activity_ms.store(0, std::memory_order_relaxed);
   }
 };
@@ -202,6 +204,7 @@ inline ChanStats SingleChannelToSnapshot(const SingleChannelStats &s) noexcept {
   out.timeouts = s.timeouts.load(std::memory_order_relaxed);
   out.lock_timeouts = s.lock_timeouts.load(std::memory_order_relaxed);
   out.uncached_pkts = s.uncached_pkts.load(std::memory_order_relaxed);
+  out.queue_full = s.queue_full.load(std::memory_order_relaxed);
   out.last_activity_ms = s.last_activity_ms.load(std::memory_order_relaxed);
   return out;
 }
@@ -290,6 +293,7 @@ void Diag_RecordChannelTx(uint8_t ch) noexcept;
 void Diag_RecordChannelRx(uint8_t ch) noexcept;
 void Diag_RecordChannelTimeout(uint8_t ch) noexcept;
 void Diag_RecordChannelLockTimeout(uint8_t ch) noexcept;
+void Diag_RecordChannelQueueFull(uint8_t ch) noexcept;
 void Diag_RecordChannelInvalidFrame(uint8_t ch) noexcept;
 void Diag_RecordChannelCrcError(uint8_t ch) noexcept;
 void Diag_RecordChannelActivity(uint8_t ch, uint32_t now_ms) noexcept;

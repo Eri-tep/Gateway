@@ -493,41 +493,50 @@ void cmdTrace(CliContext &ctx) {
 
   auto &tracer = CLI_GetTracer();
 
-  if (strcasecmp(sub, "off") == 0) {
+  switch (Hash::fnv1a32_ci_rt(sub)) {
+  case Hash::fnv1a32_ci("off"):
     tracer.setTrace(false);
     sendTelnetMsg(sock, "Packet trace DISABLED.\r\n");
     return;
-  }
-
-  tracer.setClient(sock);
-  tracer.setTrace(true);
-
-  switch (Hash::fnv1a32_ci_rt(sub)) {
   case Hash::fnv1a32_ci("on"):
+    tracer.setClient(sock);
+    tracer.setTrace(true);
     tracer.setFilter(TraceType::ALL);
     sendTelnetMsg(sock, "Packet trace ENABLED: ALL packets.\r\n");
     return;
   case Hash::fnv1a32_ci("ctl"):
+    tracer.setClient(sock);
+    tracer.setTrace(true);
     tracer.setFilter(TraceType::CTL);
     sendTelnetMsg(sock, "Packet trace ENABLED: CONTROL packets only.\r\n");
     return;
   case Hash::fnv1a32_ci("ack"):
+    tracer.setClient(sock);
+    tracer.setTrace(true);
     tracer.setFilter(TraceType::ACK);
     sendTelnetMsg(sock, "Packet trace ENABLED: ACK/Response packets only.\r\n");
     return;
   case Hash::fnv1a32_ci("pol"):
+    tracer.setClient(sock);
+    tracer.setTrace(true);
     tracer.setFilter(TraceType::QRY);
     sendTelnetMsg(sock, "Packet trace ENABLED: Polling queries only.\r\n");
     return;
   case Hash::fnv1a32_ci("rmt"):
+    tracer.setClient(sock);
+    tracer.setTrace(true);
     tracer.setFilter(TraceType::RMT);
     sendTelnetMsg(sock, "Packet trace ENABLED: Doorphone packets only.\r\n");
     return;
   case Hash::fnv1a32_ci("drp"):
+    tracer.setClient(sock);
+    tracer.setTrace(true);
     tracer.setFilter(TraceType::DRP);
     sendTelnetMsg(sock, "Packet trace ENABLED: Dropped packets only.\r\n");
     return;
   default:
+    tracer.setClient(sock);
+    tracer.setTrace(true);
     break;
   }
 

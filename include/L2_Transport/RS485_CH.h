@@ -102,8 +102,6 @@ public:
   }
 };
 
-[[nodiscard]] bool Queue_EnqueueDropHead(QueueHandle_t queue,
-                                         const StaticPacket &packet) noexcept;
 [[nodiscard]] bool Queue_EnqueueDropTail(QueueHandle_t queue,
                                          const StaticPacket &packet) noexcept;
 

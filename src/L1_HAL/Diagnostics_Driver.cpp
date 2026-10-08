@@ -1044,6 +1044,10 @@ void Diag_RecordChannelLockTimeout(uint8_t ch) noexcept {
   if (auto *s = Diag_GetChannelStats(ch)) s->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
 }
 
+void Diag_RecordChannelQueueFull(uint8_t ch) noexcept {
+  if (auto *s = Diag_GetChannelStats(ch)) s->queue_full.fetch_add(1, std::memory_order_relaxed);
+}
+
 void Diag_RecordChannelInvalidFrame(uint8_t ch) noexcept {
   if (auto *s = Diag_GetChannelStats(ch)) s->invalid_frames.fetch_add(1, std::memory_order_relaxed);
 }

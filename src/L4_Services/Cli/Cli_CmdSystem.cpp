@@ -328,10 +328,11 @@ void printStats(int sock) {
   uint32_t telem_drops = 0, telem_hw = 0;
   Telemetry_GetStats(telem_drops, telem_hw);
 
-  uint32_t nvs_errs = 0, nvs_sync_ms = 0;
-  System_GetNvsStats(nvs_errs, nvs_sync_ms);
+  uint32_t nvs_errs = 0, nvs_sync_ms = 0, nvs_dur_ms = 0;
+  System_GetNvsStats(nvs_errs, nvs_sync_ms, &nvs_dur_ms);
 
   out.appendFormat(
+      "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
       "%-55s %24u\r\n"
@@ -354,6 +355,8 @@ void printStats(int sock) {
       static_cast<unsigned>(telem_hw),
       "NVS Write Errors (Power-Cut Guard)",
       static_cast<unsigned>(nvs_errs),
+      "NVS Last Write Latency (ms)",
+      static_cast<unsigned>(nvs_dur_ms),
       "NVS Last Sync Elapsed (s)",
       (nvs_sync_ms > 0) ? static_cast<unsigned>((millis() - nvs_sync_ms) / 1000) : 0);
 
@@ -513,6 +516,9 @@ void cmdLogView(CliContext &ctx) {
                no_buf.reset();
                no_buf.appendFormat("#%u", static_cast<unsigned>(i + 1));
                table.row({no_buf.c_str(), time_buf.c_str(), entry.reason, up_buf.c_str()});
+               if ((i + 1) % 5 == 0) {
+                 taskYIELD();
+               }
              }
            }
            table.end('-');
@@ -855,9 +861,9 @@ void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt) {
 
 void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   out.append(DIV80);
-  out.appendFormat("%-10s %10s %12s %15s %10s %9s %8s\r\n", "Channel",
+  out.appendFormat("%-10s %10s %12s %15s %10s %9s %8s %7s\r\n", "Channel",
                    "RX Pkts", "TX Pkts", "CRC Err", "Inv Frm", "Timeouts",
-                   "Uncache");
+                   "Uncache", "QFull");
   out.append(DIV80);
 
   const char *rs_n[] = {"CH#1_IoT", "CH#2_WP#1", "CH#3_WP#2", "CH#4_WP#3"};
@@ -868,12 +874,13 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
     r_str.reset();
     r_str.appendFormat("%u (%.2f%%)", static_cast<unsigned>(crc),
                        rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
-    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", rs_n[i],
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u %7u\r\n", rs_n[i],
                      static_cast<unsigned>(rx),
                      static_cast<unsigned>(rs_st[i]->tx_pkts), r_str.c_str(),
                      static_cast<unsigned>(rs_st[i]->invalid_frames),
                      static_cast<unsigned>(rs_st[i]->timeouts),
-                     static_cast<unsigned>(rs_st[i]->uncached_pkts));
+                     static_cast<unsigned>(rs_st[i]->uncached_pkts),
+                     static_cast<unsigned>(rs_st[i]->queue_full));
   }
 
   FixedBuf<16> chan_name;
@@ -893,13 +900,14 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
     r_str.appendFormat("%u (%.2f%%)", static_cast<unsigned>(crc),
                        rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
 
-    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", chan_name.c_str(),
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u %7u\r\n", chan_name.c_str(),
                      static_cast<unsigned>(slot.rx_pkts),
                      static_cast<unsigned>(slot.tx_pkts),
                      r_str.c_str(),
                      static_cast<unsigned>(slot.invalid_frames),
                      static_cast<unsigned>(slot.timeouts),
-                     static_cast<unsigned>(slot.uncached_pkts));
+                     static_cast<unsigned>(slot.uncached_pkts),
+                     static_cast<unsigned>(slot.dropped_pkts));
   }
 }
 
