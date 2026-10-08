@@ -101,13 +101,6 @@ public:
   uint8_t calculateChecksum(ChecksumAlgo algo, const uint8_t *data,
                             size_t len) const;
   static const char *getAlgoName(ChecksumAlgo algo);
-
-  using OnlineCountFn = size_t (*)();
-  using DeviceAckLookupFn = bool (*)(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                     uint8_t *out_buf, size_t max_len, size_t *out_len);
-  using UpdateFromBusFn = void (*)(StaticPacket &ack);
-  static void setDeviceHooks(OnlineCountFn count_fn, DeviceAckLookupFn lookup_fn,
-                             UpdateFromBusFn update_fn);
 };
 
 AutoProbingEngine &AutoProbe_GetEngine() noexcept;
@@ -336,9 +329,6 @@ public:
   bool buildControlPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                           ControlActionType action, int value,
                           StaticPacket &out) const;
-
-  using DeviceUnitCountFn = size_t (*)(uint8_t dev_id);
-  static void setDeviceUnitCountProvider(DeviceUnitCountFn fn);
 
   void applyProfile(const struct WallpadProfile *profile);
   void matchAndInject(const struct AutoProbeDescriptor &ad);

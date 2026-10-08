@@ -232,8 +232,6 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
                                  uint8_t &poll_sub1, uint8_t &poll_sub2) noexcept;
 void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
                              const StaticPacket *matching_query) noexcept;
-void Wallpad_HandlePollTimeout(uint8_t poll_dev_id, uint8_t poll_sub1,
-                               uint8_t poll_sub2) noexcept;
 
 ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_ack_out,
                                       bool &out_unidir) noexcept;
@@ -246,14 +244,11 @@ uint32_t Wallpad_GetStalePollCount() noexcept;
 void Wallpad_ResetStalePollCount() noexcept;
 
 uint8_t Wallpad_GetStx() noexcept;
-bool Wallpad_IsAutoUnlocked() noexcept;
-void Wallpad_FeedAutoFrame(std::span<const uint8_t> frame) noexcept;
 int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept;
 bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept;
 
 bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
                                StaticPacket &virtual_ack_out) noexcept;
-void Wallpad_FeedControlFrame(std::span<const uint8_t> frame) noexcept;
 
 // ── Doorphone (CH4) Handling & FSM ──────────────────────────────────────────
 struct FramingTracker {
@@ -298,9 +293,6 @@ void Wallpad_DoorphoneClearNvs(const char *nvs_ns) noexcept;
 void Wallpad_DoorphoneRestoreNvs(const char *nvs_ns) noexcept;
 void Wallpad_DoorphoneSaveNvs(const char *nvs_ns) noexcept;
 void Wallpad_DoorphoneOnProfileChanged(uint8_t old_idx, uint8_t new_idx) noexcept;
-
-using DoorphoneTxHandler = void (*)(const StaticPacket &pkt) noexcept;
-void Wallpad_DoorphoneRegisterTxHandler(DoorphoneTxHandler handler) noexcept;
 
 void Wallpad_HandleDoorphonePacket(const StaticPacket &packet) noexcept;
 void Wallpad_ResetDoorphoneBellState() noexcept;

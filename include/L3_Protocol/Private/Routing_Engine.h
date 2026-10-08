@@ -69,11 +69,7 @@ void Router_ClearRoutes() noexcept;
 [[nodiscard]] bool Router_EnqueueDownlink(uint8_t channel_id,
                                            const StaticPacket &pkt) noexcept;
 
-// ── CH5 Forward Handler Subscription API ────────────────────────────────────
-using Ch5ForwardHandler = bool (*)(uint8_t slot_idx, const StaticPacket &pkt,
-                                    bool burst) noexcept;
-
-void Router_RegisterCh5ForwardHandler(Ch5ForwardHandler handler) noexcept;
+// ── CH5 Forward Direct API ──────────────────────────────────────────────────
 bool Router_ForwardToCh5(uint8_t slot_idx, const StaticPacket &pkt,
                          bool burst) noexcept;
 

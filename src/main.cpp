@@ -212,20 +212,11 @@ static void Boot_RestoreConfigAndState() {
   Protocol_DoorphoneRestoreNvs(dp_ns);
 }
 
-static bool HandleRemoteControl(StaticPacket &req,
-                                StaticPacket &out_ack) noexcept {
-  return Protocol_DispatchControl(req, out_ack);
-}
-
 static void Boot_InitSubsystems() {
   // ── Mediator: Wire L4 Services Decoupled Event Listeners ──
   Device_RegisterStateListener(Mgmt_BroadcastDeviceResult);
   Device_RegisterDoorphoneListener(Mgmt_BroadcastDoorphoneEvent);
-  Protocol_RegisterBridgeForwardHandler(Bridge_ForwardPacket);
-
   Device_RegisterElevatorListener(Mgmt_BroadcastElevatorEvent);
-
-  Remote_RegisterControlHandler(HandleRemoteControl);
 
   // ── Register L3 Protocol Dispatcher SPI into L2 RS-485 Engine ──
   RS485_PacketDispatcher rs485_dispatcher{};

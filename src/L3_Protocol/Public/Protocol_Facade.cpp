@@ -508,12 +508,17 @@ void ProtocolDiag_ResetBridgeStats() noexcept {
 void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onBuildPoll = Wallpad_BuildNextPollPacket;
   dispatcher.onBusPacket = Wallpad_HandleBusPacket;
-  dispatcher.onTimeout = Wallpad_HandlePollTimeout;
+  dispatcher.onTimeout = Device_HandlePollingTimeout;
   dispatcher.onDispatchControl = Router_DispatchControl;
   dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
   dispatcher.onGetStx = []() noexcept { return Universal_GetEngine().getStx(); };
-  dispatcher.onIsAutoUnlocked = Wallpad_IsAutoUnlocked;
-  dispatcher.onFeedAutoFrame = Wallpad_FeedAutoFrame;
+  dispatcher.onIsAutoUnlocked = []() noexcept {
+    auto &e = Universal_GetEngine();
+    return e.isAutoMode() && !e.isLocked();
+  };
+  dispatcher.onFeedAutoFrame = [](std::span<const uint8_t> f) noexcept {
+    AutoProbe_GetEngine().feedFrame(f);
+  };
   dispatcher.onExtractLength = [](const uint8_t *s, size_t len, size_t idx) noexcept {
     return Universal_GetEngine().extractPacketLength(s, len, idx);
   };
@@ -521,7 +526,9 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
     return Universal_GetEngine().validatePacket(f);
   };
   dispatcher.onHandleSubBusQuery = Wallpad_HandleSubBusQuery;
-  dispatcher.onFeedControlFrame = Wallpad_FeedControlFrame;
+  dispatcher.onFeedControlFrame = [](std::span<const uint8_t> f) noexcept {
+    AutoProbe_GetEngine().feedControlFrame(f);
+  };
   dispatcher.onDoorphonePacket = Wallpad_HandleDoorphonePacket;
   dispatcher.onDoorphoneReset = Wallpad_ResetDoorphoneBellState;
   dispatcher.onMatchDoorphoneLock = Wallpad_MatchDoorphoneLock;
@@ -632,9 +639,5 @@ size_t Protocol_GetRoutes(DeviceRouteSnapshot *out_buf, size_t max_count) noexce
 
 bool Protocol_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept {
   return Router_DispatchControl(req, virtual_ack_out);
-}
-
-void Protocol_RegisterBridgeForwardHandler(BridgeForwardHandler handler) noexcept {
-  Router_RegisterCh5ForwardHandler(handler);
 }
 

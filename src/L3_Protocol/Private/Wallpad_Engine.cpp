@@ -1061,11 +1061,6 @@ void Wallpad_HandleBusPacket(uint8_t channel_id, const StaticPacket &ack_pkt,
   }
 }
 
-void Wallpad_HandlePollTimeout(uint8_t poll_dev_id, uint8_t poll_sub1,
-                               uint8_t poll_sub2) noexcept {
-  Device_HandlePollingTimeout(poll_dev_id, poll_sub1, poll_sub2);
-}
-
 ControlAction Wallpad_EvaluateControl(StaticPacket &req, StaticPacket &virtual_ack_out,
                                       bool &out_unidir) noexcept {
   out_unidir = false;
@@ -1217,15 +1212,6 @@ uint8_t Wallpad_GetStx() noexcept {
   return Universal_GetEngine().getStx();
 }
 
-bool Wallpad_IsAutoUnlocked() noexcept {
-  auto &engine = Universal_GetEngine();
-  return engine.isAutoMode() && !engine.isLocked();
-}
-
-void Wallpad_FeedAutoFrame(std::span<const uint8_t> frame) noexcept {
-  AutoProbe_GetEngine().feedFrame(frame);
-}
-
 int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
   return Universal_GetEngine().extractPacketLength(stream, stream_len, stx_idx);
 }
@@ -1247,10 +1233,6 @@ bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,
                                     req.data.data(), req.length);
   virtual_ack_out.channel_id = channel_id;
   return Device_CopyVirtualAck(dev_id, sub1, sub2, virtual_ack_out);
-}
-
-void Wallpad_FeedControlFrame(std::span<const uint8_t> frame) noexcept {
-  AutoProbe_GetEngine().feedControlFrame(frame);
 }
 
 // ── FramingTracker Implementation (L3) ───────────────────────────────────────
@@ -1439,7 +1421,6 @@ struct DoorphoneState {
 
 static DoorphoneState s_doorphone_state{};
 static FramingTracker s_doorphone_tracker{};
-static DoorphoneTxHandler s_dp_tx_handler = nullptr;
 
 class DoorphoneController {
 public:
@@ -1557,37 +1538,6 @@ void Wallpad_InitDecoupledHooks() noexcept {
 
   Device_RegisterStateDecoder(ControlTemplate_DecodeByDevId);
   Device_RegisterNormSub1Hook(ControlTemplate_NormSub1);
-
-  ControlTemplateRegistry::setDeviceUnitCountProvider([](uint8_t dev_id) -> size_t {
-    size_t units = 0;
-    for (size_t i = 0; i < Device_GetCount() && units < 2; ++i) {
-      DeviceStateEntry snap{};
-      if (Device_GetSnapshot(i, snap) && snap.dev_id == dev_id)
-        ++units;
-    }
-    return units;
-  });
-
-  AutoProbingEngine::setDeviceHooks(
-    []() -> size_t {
-      return Device_GetOnlineCount();
-    },
-    [](uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-       uint8_t *out_buf, size_t max_len, size_t *out_len) -> bool {
-      if (!out_buf || !out_len || max_len == 0) return false;
-      DeviceStateEntry snap{};
-      if (Device_FindCopy(dev_id, sub1, sub2, snap) && snap.is_online && snap.last_ack_len >= 4) {
-        size_t c_len = std::min(static_cast<size_t>(snap.last_ack_len), max_len);
-        memcpy(out_buf, snap.last_ack_data.data(), c_len);
-        *out_len = c_len;
-        return true;
-      }
-      return false;
-    },
-    [](StaticPacket &ack) {
-      Device_ProcessBusPacket(ack);
-    }
-  );
 }
 
 bool Wallpad_DoorphoneOpen(bool is_lobby) noexcept {
@@ -1717,10 +1667,6 @@ void Wallpad_DoorphoneOnProfileChanged(uint8_t old_idx, uint8_t new_idx) noexcep
     s_doorphone_tracker.reset();
     s_doorphone_tracker.restoreFromNvs(new_ns, "DOORPHONE");
   }
-}
-
-void Wallpad_DoorphoneRegisterTxHandler(DoorphoneTxHandler handler) noexcept {
-  s_dp_tx_handler = handler;
 }
 
 const DoorphoneSpec *Wallpad_MatchDoorphone(uint8_t stx, uint8_t etx, uint8_t len) noexcept {

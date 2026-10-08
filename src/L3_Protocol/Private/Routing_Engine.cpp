@@ -12,6 +12,7 @@
 #include "L3_Protocol/Private/Routing_Engine.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L2_Transport/RS485_CH.h"
+#include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Config.h"
 
 #include <Arduino.h>
@@ -152,22 +153,11 @@ bool Router_EnqueueDownlink(uint8_t channel_id,
   }
 }
 
-// ── Ch5 Forward Handler Implementation ──────────────────────────────────────
-
-namespace {
-Ch5ForwardHandler s_ch5_forwarder = nullptr;
-} // namespace
-
-void Router_RegisterCh5ForwardHandler(Ch5ForwardHandler handler) noexcept {
-  s_ch5_forwarder = handler;
-}
+// ── Ch5 Forward Direct Implementation ───────────────────────────────────────
 
 bool Router_ForwardToCh5(uint8_t slot_idx, const StaticPacket &pkt,
                          bool burst) noexcept {
-  if (s_ch5_forwarder) {
-    return s_ch5_forwarder(slot_idx, pkt, burst);
-  }
-  return false;
+  return Bridge_ForwardPacket(slot_idx, pkt, burst);
 }
 
 // ── Canonical L3 Central Ingress & Orchestration Implementations ────────────

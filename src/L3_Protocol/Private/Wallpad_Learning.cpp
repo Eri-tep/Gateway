@@ -5,6 +5,7 @@
 
 #include "L3_Protocol/Private/Wallpad_Learning.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
+#include "L3_Protocol/Public/Protocol_Device.h"
 #include "L0_Foundation/System_Buffer.h"
 
 #include <Arduino.h>
@@ -24,21 +25,6 @@
 // ============================================================================
 // WallpadProtocol: Level 3 Wallpad Profiles, Protocol Engine & Probing Cache
 // ============================================================================
-
-
-
-static AutoProbingEngine::OnlineCountFn s_online_count_fn{nullptr};
-static AutoProbingEngine::DeviceAckLookupFn s_lookup_fn{nullptr};
-static AutoProbingEngine::UpdateFromBusFn s_update_from_bus_fn{nullptr};
-
-
-void AutoProbingEngine::setDeviceHooks(OnlineCountFn count_fn,
-                                       DeviceAckLookupFn lookup_fn,
-                                       UpdateFromBusFn update_fn) {
-  s_online_count_fn = count_fn;
-  s_lookup_fn = lookup_fn;
-  s_update_from_bus_fn = update_fn;
-}
 
 static AutoProbingEngine s_auto_probing_engine;
 
@@ -436,7 +422,7 @@ static int16_t s_work_map[256];
 // Strict: Task_Ch1 exclusive path.
 // ----------------------------------------------------------------------------
 bool AutoProbingEngine::analyzeCacheMatrix() {
-  const size_t online_dev_count = s_online_count_fn ? s_online_count_fn() : 0;
+  const size_t online_dev_count = Device_GetOnlineCount();
   if (Polling_GetRegistry().ackedCount() < 2 && online_dev_count < 2)
     return false;
 
@@ -451,21 +437,21 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (!Polling_GetRegistry().getEntry(i, t) || !t.is_active ||
         t.raw_query_len < 4 ||
         !(t.source_channels & kWallpadChMask)) // 월패드(CH2/CH3) 유래만 분석
-      continue;
+        continue;
 
     const uint8_t *ack = nullptr;
     size_t ack_len = 0;
     if (t.raw_ack_len >= 4) {
       ack = t.raw_ack_data.data();
       ack_len = t.raw_ack_len;
-    } else if (s_lookup_fn) {
-      size_t dev_ack_len = 0;
-      if (s_lookup_fn(t.dev_id, t.sub1, t.sub2,
-                      s_matrix_pairs[pair_count].r.data.data(),
-                      s_matrix_pairs[pair_count].r.data.size(),
-                      &dev_ack_len)) {
+    } else {
+      DeviceStateEntry snap{};
+      if (Device_FindCopy(t.dev_id, t.sub1, t.sub2, snap) && snap.is_online && snap.last_ack_len >= 4) {
+        size_t c_len = std::min(static_cast<size_t>(snap.last_ack_len),
+                                s_matrix_pairs[pair_count].r.data.size());
+        memcpy(s_matrix_pairs[pair_count].r.data.data(), snap.last_ack_data.data(), c_len);
         ack = s_matrix_pairs[pair_count].r.data.data();
-        ack_len = dev_ack_len;
+        ack_len = c_len;
       }
     }
     if (!ack)
@@ -793,9 +779,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
         ack_pkt.channel_id = 1;
         ack_pkt.length = t.raw_ack_len;
         memcpy(ack_pkt.data.data(), t.raw_ack_data.data(), t.raw_ack_len);
-        if (s_update_from_bus_fn) {
-          s_update_from_bus_fn(ack_pkt);
-        }
+        Device_ProcessBusPacket(ack_pkt);
       }
     }
   }
@@ -1414,12 +1398,6 @@ GroupControlTemplate *insertSorted(GroupControlTemplate *arr, size_t &count,
 
 } // namespace
 
-static ControlTemplateRegistry::DeviceUnitCountFn s_device_unit_count_fn{nullptr};
-
-void ControlTemplateRegistry::setDeviceUnitCountProvider(DeviceUnitCountFn fn) {
-  s_device_unit_count_fn = fn;
-}
-
 ControlTemplateRegistry::ControlTemplateRegistry() {
   _mutex = xSemaphoreCreateMutexStatic(&_mutex_storage);
   _nvs_mutex = xSemaphoreCreateMutexStatic(&_nvs_mutex_storage);
@@ -1868,8 +1846,14 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
             out.data.begin());
 
   // 단일 유닛 기기는 학습된 sub1 을 사용
-  const size_t units =
-      s_device_unit_count_fn ? s_device_unit_count_fn(dev_id) : 1;
+  size_t units = 0;
+  for (size_t i = 0; i < Device_GetCount() && units < 2; ++i) {
+    DeviceStateEntry snap{};
+    if (Device_GetSnapshot(i, snap) && snap.dev_id == dev_id)
+      ++units;
+  }
+  if (units == 0)
+    units = 1;
   const uint8_t actual_sub1 = (units <= 1 && grp.ctl_sub1_override != 0xFF)
                                   ? grp.ctl_sub1_override
                                   : sub1;

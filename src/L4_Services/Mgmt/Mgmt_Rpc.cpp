@@ -699,14 +699,9 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     return;
   }
 
-  if (!Remote_GetControlHandler()) {
-    sendRpcResponse(sock, req_id, "error", "Engine control handler not ready");
-    return;
-  }
-
   req.channel_id = 6;
   StaticPacket dummy{};
-  Remote_GetControlHandler()(req, dummy);
+  (void)Protocol_DispatchControl(req, dummy);
 
   if (act == ControlActionType::SET_TEMP) {
     Device_SetTargetTemp(
@@ -732,7 +727,7 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     uint8_t cs = ProtocolDiag_CalculateChecksum(qry_req.data.data(), 11);
     qry_req.data[9] = cs ? cs : 0x84;
     qry_req.data[10] = 0xEE;
-    Remote_GetControlHandler()(qry_req, dummy);
+    (void)Protocol_DispatchControl(qry_req, dummy);
   }
 
   sendRpcResponse(sock, req_id, "ok");

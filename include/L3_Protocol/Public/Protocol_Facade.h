@@ -271,10 +271,7 @@ struct DeviceRouteSnapshot {
 void Protocol_ClearRoutes() noexcept;
 [[nodiscard]] size_t Protocol_GetRoutes(DeviceRouteSnapshot *out_buf, size_t max_count) noexcept;
 
-// ── Control Dispatch & Bridge Forwarding Facade (L4 / Mediator → L3) ─────────
-using BridgeForwardHandler = bool (*)(uint8_t slot_idx, const StaticPacket &pkt, bool burst) noexcept;
-
+// ── Control Dispatch Facade (L4 / Mediator → L3) ─────────────────────────────
 [[nodiscard]] bool Protocol_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept;
-void Protocol_RegisterBridgeForwardHandler(BridgeForwardHandler handler) noexcept;
 
 

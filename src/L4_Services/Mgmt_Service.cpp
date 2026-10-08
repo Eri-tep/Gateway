@@ -35,7 +35,6 @@ void Remote_StartWifiFallbackTest(const char *prev_ssid, const char *prev_pass) 
 }
 static MgmtSession s_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
 static SemaphoreHandle_t s_mgmt_mutex = nullptr;
-static DeviceControlHandler s_control_handler = nullptr;
 static int s_mgmt_server_fd = -1;
 static uint32_t s_chk_ms = 0, s_met_ms = 0, s_tcp_ms = 0;
 static uint32_t s_last_sta_retry_ms = 0;
@@ -45,11 +44,6 @@ constexpr uint32_t kMaxStaRetryIntervalMs = 60000;
 
 MgmtSession *Remote_GetSessions() { return s_mgmt_sessions; }
 SemaphoreHandle_t Remote_GetSessionMutex() { return s_mgmt_mutex; }
-DeviceControlHandler Remote_GetControlHandler() { return s_control_handler; }
-
-void Remote_RegisterControlHandler(DeviceControlHandler handler) noexcept {
-  s_control_handler = handler;
-}
 
 IPAddress Remote_GetClientIp(int sock) {
   struct sockaddr_in peer;
