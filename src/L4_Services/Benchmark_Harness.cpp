@@ -13,6 +13,7 @@
 #include "L0_Foundation/System_Platform.h"
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
+#include "L0_Foundation/Lockless_RingBuffer.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
@@ -27,6 +28,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 
 #include <atomic>
 #include <cstring>
@@ -264,8 +266,21 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
   std::span<const uint8_t> span_pkt(GOLDEN_QUERY, sizeof(GOLDEN_QUERY));
   std::atomic<uint32_t> test_atomic{0};
 
-  // Warm-up (pre-heat instruction cache & Flash MMU XIP)
-  for (uint32_t i = 0; i < 200; ++i) {
+  // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
+  uint32_t cold_t0 = esp_cpu_get_cycle_count();
+  (void)calculateChecksumDirect(ChecksumAlgo::XOR_NO_STX, span_pkt.data(), span_pkt.size());
+  (void)Universal_GetEngine().calculateChecksum(span_pkt);
+  benchSpanCalc(span_pkt);
+  benchPtrLenCalc(GOLDEN_QUERY, sizeof(GOLDEN_QUERY));
+  (void)benchExpectedRet(GOLDEN_QUERY[3]);
+  uint8_t cold_bv = 0;
+  benchBoolRet(GOLDEN_QUERY[3], cold_bv);
+  test_atomic.fetch_add(1, std::memory_order_relaxed);
+  uint32_t cold_t1 = esp_cpu_get_cycle_count();
+  r.cold_start_cycles = static_cast<uint32_t>(cold_t1 - cold_t0);
+
+  // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP)
+  for (uint32_t i = 0; i < 1000; ++i) {
     (void)calculateChecksumDirect(ChecksumAlgo::XOR_NO_STX, span_pkt.data(), span_pkt.size());
     (void)Universal_GetEngine().calculateChecksum(span_pkt);
     benchSpanCalc(span_pkt);
@@ -274,6 +289,12 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
     uint8_t bv = 0;
     benchBoolRet(GOLDEN_QUERY[3], bv);
     test_atomic.fetch_add(1, std::memory_order_relaxed);
+
+    if ((i & 0x01FF) == 0) {
+      esp_task_wdt_reset();
+      System_FeedWdt(Config::Task::WDT_ID_TELNET);
+      taskYIELD();
+    }
   }
 
   uint64_t sum_cs = 0, sum_cs_dir = 0, sum_span = 0, sum_ptr = 0, sum_exp = 0, sum_bool = 0;
@@ -350,6 +371,11 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
     if (diff > max_c) max_c = diff;
     HistRecord(diff);
 
+    // Outlier capture (diff > 3000 cyc, Top-N Min-Replacement)
+    if (diff > 3000) {
+      RecordOutlier(r, i, diff, GOLDEN_QUERY[3], GOLDEN_QUERY[4]);
+    }
+
     if ((i & 0x03FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
@@ -375,6 +401,9 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
   r.phase1.atomic_seq_cst_cycles = static_cast<uint32_t>(sum_seq / iterations);
 
   r.jitter = HistCompute(iterations, min_c, max_c, total_cycles);
+  FinalizeOutliers(r);
+  r.warm_steady_cycles = r.jitter.mean_cycles;
+  r.cold_warm_delta_cycles = static_cast<int32_t>(r.cold_start_cycles) - static_cast<int32_t>(r.warm_steady_cycles);
   CaptureSafetyPost(r.safety);
   return r;
 }
@@ -399,8 +428,17 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   std::span<const uint8_t> sp(GOLDEN_QUERY, sizeof(GOLDEN_QUERY));
   portMUX_TYPE *cache_mux = DeviceBenchmark::getMuxHandle();
 
-  // Warm-up (pre-heat instruction cache & Flash MMU XIP for all pipeline stages)
-  for (uint32_t i = 0; i < 200; ++i) {
+  // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
+  uint32_t cold_t0 = esp_cpu_get_cycle_count();
+  (void)Wallpad_ExtractLength(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+  (void)Wallpad_ValidatePacket(sp);
+  DeviceStateEntry cold_dummy;
+  (void)Device_FindCopy(0x18, 0x01, 0x00, cold_dummy);
+  uint32_t cold_t1 = esp_cpu_get_cycle_count();
+  r.cold_start_cycles = static_cast<uint32_t>(cold_t1 - cold_t0);
+
+  // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP for all pipeline stages)
+  for (uint32_t i = 0; i < 1000; ++i) {
     (void)Wallpad_ExtractLength(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     (void)Wallpad_ValidatePacket(sp);
     DeviceStateEntry dummy;
@@ -417,12 +455,19 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     (void)benchSpanCalc(sp);
     (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
     std::memcpy(s_null_sink, GOLDEN_ACK, sizeof(GOLDEN_ACK));
+
+    if ((i & 0x01FF) == 0) {
+      esp_task_wdt_reset();
+      System_FeedWdt(Config::Task::WDT_ID_TELNET);
+      taskYIELD();
+    }
   }
 
   uint64_t sum_framing = 0, sum_validate = 0, sum_full_find = 0;
   uint64_t sum_mutex = 0, sum_pure_lookup = 0, sum_hit = 0, sum_miss = 0;
   uint64_t sum_copy = 0, sum_ptr = 0, sum_span_param = 0;
   uint64_t sum_route = 0, sum_dispatch = 0;
+  uint64_t sum_dedup_hit = 0, sum_dedup_delta = 0;
   uint64_t total_cycles = 0;
   uint32_t min_c = UINT32_MAX, max_c = 0;
 
@@ -433,7 +478,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
     // 1. Framing
     uint32_t t0 = esp_cpu_get_cycle_count();
-    int ext_len = Wallpad_ExtractLength(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+    uint8_t ext_len = Wallpad_ExtractLength(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     uint32_t t1 = esp_cpu_get_cycle_count();
     sum_framing += static_cast<uint32_t>(t1 - t0);
 
@@ -499,6 +544,21 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     t1 = esp_cpu_get_cycle_count();
     sum_span_param += static_cast<uint32_t>(t1 - t0);
 
+    // 2-I. Warm Path Shadow State Deduplication Hit (Identical state -> No delta emit)
+    t0 = esp_cpu_get_cycle_count();
+    DeviceStateEntry snap_dedup;
+    bool dedup_hit = Device_FindCopy(0x18, 0x01, 0x00, snap_dedup);
+    bool is_delta = (snap_dedup.last_target_temp != 22);
+    t1 = esp_cpu_get_cycle_count();
+    sum_dedup_hit += static_cast<uint32_t>(t1 - t0);
+
+    // 2-J. Warm Path Shadow State Delta Emit (State changed -> Event emission branch)
+    t0 = esp_cpu_get_cycle_count();
+    snap_dedup.last_target_temp = 23;
+    bool delta_emitted = (snap_dedup.last_target_temp != 22);
+    t1 = esp_cpu_get_cycle_count();
+    sum_dedup_delta += static_cast<uint32_t>(t1 - t0);
+
     // 4. Routing Table Lookup
     t0 = esp_cpu_get_cycle_count();
     uint8_t ch = Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
@@ -513,11 +573,12 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
     s_observable_sink += (ext_len ^ (valid ? 1 : 0) ^ (found_full ? 2 : 0) ^
                           n_sub ^ (hit_ok ? 4 : 0) ^ (miss_ok ? 8 : 0) ^
-                          (direct_exists ? 16 : 0) ^ sp_res ^ ch);
+                          (direct_exists ? 16 : 0) ^ sp_res ^ ch ^
+                          (dedup_hit ? 32 : 0) ^ (is_delta ? 64 : 0) ^ (delta_emitted ? 128 : 0));
 
     uint32_t loop_end = esp_cpu_get_cycle_count();
     uint32_t loop_diff = static_cast<uint32_t>(loop_end - loop_start);
-    if (loop_diff > probe_oh * 12) loop_diff -= (probe_oh * 12);
+    if (loop_diff > probe_oh * 14) loop_diff -= (probe_oh * 14);
     else loop_diff = 1;
 
     total_cycles += loop_diff;
@@ -554,6 +615,8 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   r.phase2.copy_snapshot_cycles = static_cast<uint32_t>(sum_copy / iterations);
   r.phase2.direct_ptr_cycles = static_cast<uint32_t>(sum_ptr / iterations);
   r.phase2.span_vs_ptr_cycles = static_cast<uint32_t>(sum_span_param / iterations);
+  r.phase2.shadow_dedup_hit_cycles = static_cast<uint32_t>(sum_dedup_hit / iterations);
+  r.phase2.shadow_dedup_delta_cycles = static_cast<uint32_t>(sum_dedup_delta / iterations);
   r.phase2.route_lookup_cycles = static_cast<uint32_t>(sum_route / iterations);
   r.phase2.dispatch_build_cycles = static_cast<uint32_t>(sum_dispatch / iterations);
 
@@ -568,6 +631,8 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
                               r.phase2.copy_snapshot_cycles +
                               r.phase2.direct_ptr_cycles +
                               r.phase2.span_vs_ptr_cycles +
+                              r.phase2.shadow_dedup_hit_cycles +
+                              r.phase2.shadow_dedup_delta_cycles +
                               r.phase2.route_lookup_cycles +
                               r.phase2.dispatch_build_cycles;
   uint64_t mean_measured_loop = total_cycles / iterations;
@@ -577,6 +642,8 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
   r.jitter = HistCompute(iterations, min_c, max_c, total_cycles);
   FinalizeOutliers(r);
+  r.warm_steady_cycles = r.jitter.mean_cycles;
+  r.cold_warm_delta_cycles = static_cast<int32_t>(r.cold_start_cycles) - static_cast<int32_t>(r.warm_steady_cycles);
   CaptureSafetyPost(r.safety);
   return r;
 }
@@ -623,12 +690,27 @@ BenchmarkReport RunPhase3_SyncAndAtomic(uint32_t iterations) noexcept {
   std::atomic<uint32_t> local_atomic{0};
   portMUX_TYPE local_mux = portMUX_INITIALIZER_UNLOCKED;
 
-  // Warm-up
-  for (uint32_t i = 0; i < 200; ++i) {
+  // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
+  uint32_t cold_t0 = esp_cpu_get_cycle_count();
+  portENTER_CRITICAL(&local_mux);
+  s_observable_sink = s_observable_sink + 1;
+  portEXIT_CRITICAL(&local_mux);
+  local_atomic.fetch_add(1, std::memory_order_relaxed);
+  uint32_t cold_t1 = esp_cpu_get_cycle_count();
+  r.cold_start_cycles = static_cast<uint32_t>(cold_t1 - cold_t0);
+
+  // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP)
+  for (uint32_t i = 0; i < 1000; ++i) {
     portENTER_CRITICAL(&local_mux);
     s_observable_sink = s_observable_sink + 1;
     portEXIT_CRITICAL(&local_mux);
     local_atomic.fetch_add(1, std::memory_order_relaxed);
+
+    if ((i & 0x01FF) == 0) {
+      esp_task_wdt_reset();
+      System_FeedWdt(Config::Task::WDT_ID_TELNET);
+      taskYIELD();
+    }
   }
 
   uint64_t sum_uncontended_lock = 0, sum_uncontended_atomic = 0;
@@ -655,6 +737,56 @@ BenchmarkReport RunPhase3_SyncAndAtomic(uint32_t iterations) noexcept {
   r.phase3.uncontended_lock_cycles = static_cast<uint32_t>(sum_uncontended_lock / 5000);
   r.phase3.uncontended_atomic_cycles = static_cast<uint32_t>(sum_uncontended_atomic / 5000);
   r.phase3.max_hold_cycles = max_hold;
+
+  // 3-D: Warm Path FreeRTOS Queue Push/Pop vs Direct Lockless RingBuffer
+  StaticQueue_t q_buffer;
+  uint8_t q_storage[8 * sizeof(uint32_t)];
+  QueueHandle_t test_q = xQueueCreateStatic(8, sizeof(uint32_t), q_storage, &q_buffer);
+
+  uint64_t sum_q_cycles = 0;
+  for (uint32_t i = 0; i < 5000; ++i) {
+    uint32_t val = i;
+    uint32_t t0 = esp_cpu_get_cycle_count();
+    xQueueSend(test_q, &val, 0);
+    uint32_t out_val = 0;
+    xQueueReceive(test_q, &out_val, 0);
+    uint32_t t1 = esp_cpu_get_cycle_count();
+    sum_q_cycles += static_cast<uint32_t>(t1 - t0);
+  }
+  r.phase3.queue_push_pop_cycles = static_cast<uint32_t>(sum_q_cycles / 5000);
+
+  // Lockless SPSC RingBuffer (Foundation::LocklessSpscRingBuffer class)
+  uint64_t sum_ring_cycles = 0;
+  Foundation::LocklessSpscRingBuffer<uint32_t, 8> ring_buf;
+  for (uint32_t i = 0; i < 5000; ++i) {
+    uint32_t t0 = esp_cpu_get_cycle_count();
+    (void)ring_buf.push(i);
+    uint32_t v = 0;
+    (void)ring_buf.pop(v);
+    uint32_t t1 = esp_cpu_get_cycle_count();
+    sum_ring_cycles += static_cast<uint32_t>(t1 - t0);
+    s_observable_sink += v;
+  }
+  r.phase3.ringbuf_push_pop_cycles = static_cast<uint32_t>(sum_ring_cycles / 5000);
+
+  // 3-E: Warm Path Backpressure Drop-Tail Simulation (Full Queue rejection with zero timeout)
+  for (uint32_t k = 0; k < 8; ++k) {
+    xQueueSend(test_q, &k, 0);
+  }
+  uint64_t sum_bp_drop = 0;
+  for (uint32_t i = 0; i < 5000; ++i) {
+    uint32_t drop_val = 0xFF;
+    uint32_t t0 = esp_cpu_get_cycle_count();
+    BaseType_t sent = xQueueSend(test_q, &drop_val, 0);
+    if (sent != pdTRUE) {
+      s_observable_sink = s_observable_sink + 1;
+    }
+    uint32_t t1 = esp_cpu_get_cycle_count();
+    sum_bp_drop += static_cast<uint32_t>(t1 - t0);
+  }
+  uint32_t dummy_drain = 0;
+  while (xQueueReceive(test_q, &dummy_drain, 0) == pdTRUE) {}
+  r.phase3.backpressure_drop_cycles = static_cast<uint32_t>(sum_bp_drop / 5000);
 
   // 3-B: Launch Core 1 SMP Contender Task
   s_smp_shared_atomic.store(0, std::memory_order_relaxed);
@@ -699,6 +831,11 @@ BenchmarkReport RunPhase3_SyncAndAtomic(uint32_t iterations) noexcept {
     if (diff > max_c) max_c = diff;
     HistRecord(diff);
 
+    // Outlier capture (diff > 3000 cyc, Top-N Min-Replacement)
+    if (diff > 3000) {
+      RecordOutlier(r, i, diff, 0x33, 0x00);
+    }
+
     if ((i & 0x03FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
@@ -722,6 +859,9 @@ BenchmarkReport RunPhase3_SyncAndAtomic(uint32_t iterations) noexcept {
   r.phase3.realistic_smp_cycles = r.phase3.smp_spinlock_contended_cycles;
 
   r.jitter = HistCompute(iterations, min_c, max_c, total_cycles);
+  FinalizeOutliers(r);
+  r.warm_steady_cycles = r.jitter.mean_cycles;
+  r.cold_warm_delta_cycles = static_cast<int32_t>(r.cold_start_cycles) - static_cast<int32_t>(r.warm_steady_cycles);
   CaptureSafetyPost(r.safety);
   return r;
 }
@@ -779,13 +919,29 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
   DeviceBenchmark::registerMockDevice(0x1B, 0x01, 0x00);
   DeviceBenchmark::registerMockDevice(0x2B, 0x01, 0x00);
 
-  // Warm-up (pre-heat instruction cache & Flash MMU XIP)
-  for (uint32_t w = 0; w < 200; ++w) {
+  // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
+  uint32_t cold_t0 = esp_cpu_get_cycle_count();
+  Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
+  DeviceStateEntry cold_dummy;
+  (void)Device_FindCopy(0x18, 0x01, 0x00, cold_dummy);
+  Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
+  (void)Device_FindCopy(0x88, 0x88, 0x88, cold_dummy);
+  uint32_t cold_t1 = esp_cpu_get_cycle_count();
+  r.cold_start_cycles = static_cast<uint32_t>(cold_t1 - cold_t0);
+
+  // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP)
+  for (uint32_t w = 0; w < 1000; ++w) {
     Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
     DeviceStateEntry dummy;
     (void)Device_FindCopy(0x18, 0x01, 0x00, dummy);
     Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
     (void)Device_FindCopy(0x88, 0x88, 0x88, dummy);
+
+    if ((w & 0x01FF) == 0) {
+      esp_task_wdt_reset();
+      System_FeedWdt(Config::Task::WDT_ID_TELNET);
+      taskYIELD();
+    }
   }
 
   uint64_t sum_a = 0, sum_b = 0, sum_c = 0;
@@ -841,6 +997,11 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
     if (diff > max_c) max_c = diff;
     HistRecord(diff);
 
+    // Outlier capture (diff > 4000 cyc, Top-N Min-Replacement)
+    if (diff > 4000) {
+      RecordOutlier(r, i, diff, mix_pkt[3], mix_pkt[4]);
+    }
+
     if ((i & 0x03FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
@@ -869,6 +1030,9 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
       (static_cast<float>(r.phase5.workload_b_mixed_cycles) * 20.0f) / 2400000.0f;
 
   r.jitter = HistCompute(iterations, min_c, max_c, total_cycles);
+  FinalizeOutliers(r);
+  r.warm_steady_cycles = r.jitter.mean_cycles;
+  r.cold_warm_delta_cycles = static_cast<int32_t>(r.cold_start_cycles) - static_cast<int32_t>(r.warm_steady_cycles);
   CaptureSafetyPost(r.safety);
   return r;
 }
@@ -886,6 +1050,14 @@ void FormatReport(AppendBuf &out, const BenchmarkReport &r) noexcept {
                      r.iterations, r.total_duration_us, r.throughput_pps);
     out.appendFormat("Probe Overhead  : %u cycles (~%.2f ns)\r\n",
                      s_probe_overhead_cycles, s_probe_overhead_cycles * 4.167f);
+    if (r.cold_start_cycles > 0) {
+      out.appendFormat("Cold-Start (1st): %6u cycles (%.2f us) | Warm-Steady: %6u cycles (%.2f us)\r\n",
+                       r.cold_start_cycles, r.cold_start_cycles / 240.0f,
+                       r.warm_steady_cycles, r.warm_steady_cycles / 240.0f);
+      out.appendFormat("Cache Miss Delta: %+6d cycles (%+.2f us) [%s]\r\n",
+                       r.cold_warm_delta_cycles, r.cold_warm_delta_cycles / 240.0f,
+                       (r.cold_warm_delta_cycles >= 0) ? "Cold Miss Penalty" : "Even");
+    }
   }
 
   // Phase 0: Calibration Breakdown
@@ -949,6 +1121,10 @@ void FormatReport(AppendBuf &out, const BenchmarkReport &r) noexcept {
                      r.phase2.direct_ptr_cycles, r.phase2.direct_ptr_cycles / 240.0f);
     out.appendFormat("2-H. Span vs Pointer Passing   : %6u cycles (%5.2f us)\r\n",
                      r.phase2.span_vs_ptr_cycles, r.phase2.span_vs_ptr_cycles / 240.0f);
+    out.appendFormat("2-I. Shadow Dedup Hit (No-Delta): %6u cycles (%5.2f us)\r\n",
+                     r.phase2.shadow_dedup_hit_cycles, r.phase2.shadow_dedup_hit_cycles / 240.0f);
+    out.appendFormat("2-J. Shadow Delta Emit (Update) : %6u cycles (%5.2f us)\r\n",
+                     r.phase2.shadow_dedup_delta_cycles, r.phase2.shadow_dedup_delta_cycles / 240.0f);
     out.append(CliFmt::BOX80_DASH);
     out.appendFormat("Pipeline Stream Framing        : %6u cycles (%5.2f us)\r\n",
                      r.phase2.stream_framing_cycles, r.phase2.stream_framing_cycles / 240.0f);
@@ -979,6 +1155,12 @@ void FormatReport(AppendBuf &out, const BenchmarkReport &r) noexcept {
                      r.phase3.realistic_smp_cycles, r.phase3.realistic_smp_cycles / 240.0f);
     out.appendFormat("     Max Critical Section Hold Time  : %6u cycles (%.2f us)\r\n",
                      r.phase3.max_hold_cycles, r.phase3.max_hold_cycles / 240.0f);
+    out.appendFormat("3-D. Warm Path FreeRTOS Queue Push/Pop: %5u cycles (%.2f us)\r\n",
+                     r.phase3.queue_push_pop_cycles, r.phase3.queue_push_pop_cycles / 240.0f);
+    out.appendFormat("     Lockless RingBuffer Push/Pop    : %6u cycles (%.2f us)\r\n",
+                     r.phase3.ringbuf_push_pop_cycles, r.phase3.ringbuf_push_pop_cycles / 240.0f);
+    out.appendFormat("3-E. Warm Path Backpressure Drop-Tail : %5u cycles (%.2f us)\r\n",
+                     r.phase3.backpressure_drop_cycles, r.phase3.backpressure_drop_cycles / 240.0f);
   }
 
   // Phase 4: Codegen & Footprint

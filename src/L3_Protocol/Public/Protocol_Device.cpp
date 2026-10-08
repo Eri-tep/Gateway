@@ -8,6 +8,8 @@
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L3_Protocol/Private/Wallpad_Learning.h"
 #include "L2_Transport/Bridge_CH.h"
+#include "L0_Foundation/Lockless_RingBuffer.h"
+#include "L0_Foundation/System_Platform.h"
 
 #include <Arduino.h>
 #include <algorithm>
@@ -681,10 +683,9 @@ bool Device_CopyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 // ── Telemetry Event Queue Implementation ──────────────────────────────────────
 
 namespace {
-constexpr size_t TELEMETRY_QUEUE_LEN = 16;
-static StaticQueue_t s_telemetry_queue_struct;
-static uint8_t s_telemetry_queue_storage[TELEMETRY_QUEUE_LEN * sizeof(TelemetryItem)];
-static QueueHandle_t s_telemetry_queue = nullptr;
+constexpr size_t TELEMETRY_QUEUE_LEN = 32;
+static Foundation::LocklessSpscRingBuffer<TelemetryItem, TELEMETRY_QUEUE_LEN> s_telemetry_ring;
+static portMUX_TYPE s_telemetry_producer_mux = portMUX_INITIALIZER_UNLOCKED;
 static std::atomic<uint32_t> s_telemetry_drop_count{0};
 static std::atomic<uint32_t> s_telemetry_high_watermark{0};
 
@@ -692,32 +693,21 @@ static uint32_t s_last_broadcast_ms = 0;
 static uint8_t s_last_broadcast_dev = 0;
 static uint8_t s_last_broadcast_sub1 = 0;
 static uint8_t s_last_broadcast_sub2 = 0;
-
-QueueHandle_t GetTelemetryQueue() noexcept {
-  if (UNLIKELY(!s_telemetry_queue)) {
-    s_telemetry_queue = xQueueCreateStatic(
-        TELEMETRY_QUEUE_LEN,
-        sizeof(TelemetryItem),
-        s_telemetry_queue_storage,
-        &s_telemetry_queue_struct);
-  }
-  return s_telemetry_queue;
-}
 } // namespace
 
 bool Telemetry_Enqueue(const TelemetryItem &item) noexcept {
-  QueueHandle_t q = GetTelemetryQueue();
-  if (UNLIKELY(!q)) return false;
-
-  // Drop-Oldest backpressure: keep newest telemetry event on burst
-  if (xQueueSend(q, &item, 0) != pdTRUE) {
-    TelemetryItem discarded{};
-    xQueueReceive(q, &discarded, 0);
-    s_telemetry_drop_count.fetch_add(1, std::memory_order_relaxed);
-    xQueueSend(q, &item, 0);
+  bool pushed = false;
+  {
+    CriticalSectionLocker lock(s_telemetry_producer_mux);
+    pushed = s_telemetry_ring.push(item);
   }
 
-  const uint32_t waiting = static_cast<uint32_t>(uxQueueMessagesWaiting(q));
+  if (UNLIKELY(!pushed)) {
+    s_telemetry_drop_count.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  const uint32_t waiting = static_cast<uint32_t>(s_telemetry_ring.size());
   uint32_t cur_hw = s_telemetry_high_watermark.load(std::memory_order_relaxed);
   while (waiting > cur_hw &&
          !s_telemetry_high_watermark.compare_exchange_weak(cur_hw, waiting, std::memory_order_relaxed)) {
@@ -726,8 +716,7 @@ bool Telemetry_Enqueue(const TelemetryItem &item) noexcept {
 }
 
 bool Telemetry_Dequeue(TelemetryItem &out_item) noexcept {
-  QueueHandle_t q = GetTelemetryQueue();
-  return q ? (xQueueReceive(q, &out_item, 0) == pdTRUE) : false;
+  return s_telemetry_ring.pop(out_item);
 }
 
 void Telemetry_GetStats(uint32_t &drop_count, uint32_t &high_watermark) noexcept {

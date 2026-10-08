@@ -106,6 +106,8 @@ struct Phase2CatalogDecompMetrics {
   uint32_t route_lookup_cycles{0};   // Ingress route lookup
   uint32_t dispatch_build_cycles{0}; // Downlink build
   uint32_t unaccounted_cycles{0};    // Wall-clock vs pipeline cycles delta
+  uint32_t shadow_dedup_hit_cycles{0};   // 2-I: Warm Path Shadow State Dedup Hit (no delta)
+  uint32_t shadow_dedup_delta_cycles{0}; // 2-J: Warm Path Shadow State Delta Emit
 };
 
 // ── Phase 3: Synchronization & Realistic SMP Dual-Core Contention ─────────────
@@ -117,6 +119,9 @@ struct Phase3SmpSyncMetrics {
   uint32_t realistic_smp_cycles{0};          // 3-C: Real shared object contention
   uint32_t max_hold_cycles{0};
   uint32_t contention_count{0};
+  uint32_t queue_push_pop_cycles{0};         // 3-D: Warm Path FreeRTOS Queue Push/Pop
+  uint32_t ringbuf_push_pop_cycles{0};       // 3-D: Lockless RingBuffer Push/Pop
+  uint32_t backpressure_drop_cycles{0};      // 3-E: Warm Path Backpressure Drop-Tail
 };
 
 // ── Phase 4: Code Generation & Memory Footprint ───────────────────────────────
@@ -143,6 +148,9 @@ struct BenchmarkReport {
   uint32_t iterations{0};
   uint32_t total_duration_us{0};
   uint32_t throughput_pps{0};
+  uint32_t cold_start_cycles{0};      // Pillar 3: 1st Cold-start iteration cycles
+  uint32_t warm_steady_cycles{0};     // Pillar 3: Steady-state cached cycles
+  int32_t  cold_warm_delta_cycles{0}; // Cache miss penalty (Cold - Warm)
   SystemSafetyMetrics safety;
   JitterDistribution jitter;
 
