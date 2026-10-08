@@ -58,5 +58,11 @@ void Bridge_RegisterDispatcher(const Bridge_PacketDispatcher &dispatcher) noexce
 using BridgeRxCallback = size_t (*)(uint8_t slot_idx, std::span<const uint8_t> stream) noexcept;
 using BridgeTickCallback = void (*)(uint32_t now_ms) noexcept;
 
+struct BridgeSlotDriver {
+  BridgeRxCallback onRxStream{nullptr};
+  BridgeTickCallback onTick{nullptr};
+};
+
+void Bridge_RegisterSlotDriver(uint8_t slot_idx, const BridgeSlotDriver &driver) noexcept;
 void Bridge_RegisterSlotRxCallback(BridgeRxCallback cb) noexcept;
 void Bridge_RegisterSlotTickCallback(BridgeTickCallback cb) noexcept;

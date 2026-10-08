@@ -185,3 +185,33 @@ template <size_t N> struct FixedBuf : public AppendBuf {
     }
   }
 };
+
+namespace Hash {
+// 32-bit FNV-1a case-insensitive compile-time hash
+[[nodiscard]] constexpr uint32_t fnv1a32_ci(std::string_view s) noexcept {
+  uint32_t hash = 0x811c9dc5u;
+  for (char c : s) {
+    uint8_t lc = (c >= 'A' && c <= 'Z') ? static_cast<uint8_t>(c + ('a' - 'A'))
+                                        : static_cast<uint8_t>(c);
+    hash ^= lc;
+    hash *= 0x01000193u;
+  }
+  return hash;
+}
+
+// 32-bit FNV-1a case-insensitive runtime hash
+[[nodiscard]] inline uint32_t fnv1a32_ci_rt(const char *s) noexcept {
+  uint32_t hash = 0x811c9dc5u;
+  if (!s)
+    return hash;
+  while (*s) {
+    char c = *s++;
+    uint8_t lc = (c >= 'A' && c <= 'Z') ? static_cast<uint8_t>(c + ('a' - 'A'))
+                                        : static_cast<uint8_t>(c);
+    hash ^= lc;
+    hash *= 0x01000193u;
+  }
+  return hash;
+}
+} // namespace Hash
+

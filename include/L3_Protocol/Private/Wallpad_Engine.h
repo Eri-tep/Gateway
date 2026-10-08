@@ -277,7 +277,6 @@ struct FramingTracker {
 
 void Wallpad_DoorphoneInit() noexcept;
 bool Wallpad_DoorphoneOpen(bool is_lobby = false) noexcept;
-void Wallpad_InitDecoupledHooks() noexcept;
 bool Wallpad_DoorphoneStartSequence(uint8_t stx, uint8_t etx, uint8_t op_call,
                                     uint8_t op_open, uint8_t op_end) noexcept;
 void Wallpad_DoorphoneCancel() noexcept;

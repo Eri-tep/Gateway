@@ -345,6 +345,7 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
   s_http_ota_state.last_error[0] = '\0';
 
   // 사전 등록된 정리 훅 실행 (소켓 일시 해제 및 lwIP pcb + 수신 버퍼 힙 확보)
+  System_TriggerLifecycle(SystemLifecycleEvent::PRE_OTA);
   if (s_pre_ota_hook) {
     s_pre_ota_hook();
   }

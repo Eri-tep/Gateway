@@ -35,6 +35,15 @@
 static RS485_PacketDispatcher s_dispatcher{};
 
 void RS485_RegisterDispatcher(const RS485_PacketDispatcher &dispatcher) noexcept {
+  assert(dispatcher.onBuildPoll != nullptr);
+  assert(dispatcher.onBusPacket != nullptr);
+  assert(dispatcher.onTimeout != nullptr);
+  assert(dispatcher.onDispatchControl != nullptr);
+  assert(dispatcher.onGetPollIntervalMs != nullptr);
+  assert(dispatcher.onGetStx != nullptr);
+  assert(dispatcher.onExtractLength != nullptr);
+  assert(dispatcher.onValidatePacket != nullptr);
+  assert(dispatcher.onIsQueryPacket != nullptr);
   s_dispatcher = dispatcher;
 }
 
@@ -617,9 +626,7 @@ void Task_Ch1(void *pvParameters) {
       }
     }
 
-    const uint32_t poll_interval = s_dispatcher.onGetPollIntervalMs
-                                       ? s_dispatcher.onGetPollIntervalMs()
-                                       : 1000;
+    const uint32_t poll_interval = s_dispatcher.onGetPollIntervalMs();
 
     uint32_t now = millis();
     uint32_t rem_ms = (now < next_poll_due_ms) ? (next_poll_due_ms - now) : 0;
@@ -643,9 +650,7 @@ void Task_Ch1(void *pvParameters) {
     if (activated == s_ch1_control_queue && s_ch1_control_queue &&
         xQueueReceive(s_ch1_control_queue, &ctrlPacket, 0) == pdTRUE) {
       std::span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
-      bool is_query = s_dispatcher.onIsQueryPacket
-                          ? s_dispatcher.onIsQueryPacket(frame)
-                          : false;
+      bool is_query = s_dispatcher.onIsQueryPacket(frame);
 
       Ch1_SetState(current_state,
                    is_query ? Ch1State::POLL_DEVICE : Ch1State::NORMAL_CONTROL);

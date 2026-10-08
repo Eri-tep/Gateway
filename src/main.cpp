@@ -213,11 +213,6 @@ static void Boot_RestoreConfigAndState() {
 }
 
 static void Boot_InitSubsystems() {
-  // ── Mediator: Wire L4 Services Decoupled Event Listeners ──
-  Device_RegisterStateListener(Mgmt_BroadcastDeviceResult);
-  Device_RegisterDoorphoneListener(Mgmt_BroadcastDoorphoneEvent);
-  Device_RegisterElevatorListener(Mgmt_BroadcastElevatorEvent);
-
   // ── Register L3 Protocol Dispatcher SPI into L2 RS-485 Engine ──
   RS485_PacketDispatcher rs485_dispatcher{};
   Protocol_BindDispatcher(rs485_dispatcher);

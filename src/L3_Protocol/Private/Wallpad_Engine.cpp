@@ -1526,20 +1526,6 @@ void DoorphoneController::onTimerCallback(void * /*arg*/) {
 
 } // namespace
 
-void Wallpad_InitDecoupledHooks() noexcept {
-  Device_RegisterParserHooks(
-    [](std::span<const uint8_t> frame) noexcept -> bool {
-      return Universal_GetEngine().isAckPacket(frame);
-    },
-    [](std::span<const uint8_t> frame, uint8_t &dev_id, uint8_t &sub1, uint8_t &sub2) noexcept -> bool {
-      return Universal_GetEngine().extractDeviceKey(frame, dev_id, sub1, sub2);
-    }
-  );
-
-  Device_RegisterStateDecoder(ControlTemplate_DecodeByDevId);
-  Device_RegisterNormSub1Hook(ControlTemplate_NormSub1);
-}
-
 bool Wallpad_DoorphoneOpen(bool is_lobby) noexcept {
   FramingStatus dp_status = FramingStatus::WAITING;
   uint8_t dp_stx = 0;
@@ -1580,8 +1566,6 @@ bool Wallpad_DoorphoneOpen(bool is_lobby) noexcept {
 
 void Wallpad_DoorphoneInit() noexcept {
   s_doorphone_controller.init();
-  Device_RegisterDoorphoneOpenHandler(Wallpad_DoorphoneOpen);
-  Wallpad_InitDecoupledHooks();
   ProfileRepository::addProfileChangeListener(Wallpad_DoorphoneOnProfileChanged);
   Control_GetRegistry().init();
 }

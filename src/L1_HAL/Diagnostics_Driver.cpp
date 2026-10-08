@@ -53,9 +53,6 @@ void Diag_SetPendingRebootReason(const char *reason) noexcept {
 
 // ── Unified System Trace Sink & Shutdown Hooks ──
 static SystemTraceSink s_trace_sink{};
-constexpr size_t MAX_SHUTDOWN_HOOKS = 4;
-static ShutdownHook s_shutdown_hooks[MAX_SHUTDOWN_HOOKS]{nullptr};
-static std::atomic<size_t> s_shutdown_hook_count{0};
 
 void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept {
   s_trace_sink = sink;
@@ -63,13 +60,38 @@ void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept {
   System_RegisterTracePacketSink(sink.trace_packet);
 }
 
-void System_RegisterShutdownHook(ShutdownHook hook) noexcept {
+constexpr size_t MAX_LIFECYCLE_HOOKS = 8;
+struct LifecycleEntry {
+  SystemLifecycleEvent evt;
+  SystemLifecycleHookFn hook;
+};
+static LifecycleEntry s_lifecycle_hooks[MAX_LIFECYCLE_HOOKS]{};
+static std::atomic<size_t> s_lifecycle_hook_count{0};
+
+void System_RegisterLifecycleHook(SystemLifecycleEvent evt,
+                                  SystemLifecycleHookFn hook) noexcept {
   if (!hook)
     return;
-  size_t idx = s_shutdown_hook_count.fetch_add(1, std::memory_order_relaxed);
-  if (idx < MAX_SHUTDOWN_HOOKS) {
-    s_shutdown_hooks[idx] = hook;
+  size_t idx = s_lifecycle_hook_count.fetch_add(1, std::memory_order_relaxed);
+  if (idx < MAX_LIFECYCLE_HOOKS) {
+    s_lifecycle_hooks[idx] = {evt, hook};
   }
+}
+
+void System_TriggerLifecycle(SystemLifecycleEvent evt) noexcept {
+  size_t count = s_lifecycle_hook_count.load(std::memory_order_acquire);
+  if (count > MAX_LIFECYCLE_HOOKS) {
+    count = MAX_LIFECYCLE_HOOKS;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (s_lifecycle_hooks[i].evt == evt && s_lifecycle_hooks[i].hook) {
+      s_lifecycle_hooks[i].hook();
+    }
+  }
+}
+
+void System_RegisterShutdownHook(ShutdownHook hook) noexcept {
+  System_RegisterLifecycleHook(SystemLifecycleEvent::PRE_SHUTDOWN, hook);
 }
 
 // ── Task Identifier & Handles (Encapsulated) ──
@@ -114,6 +136,10 @@ static RTC_NOINIT_ATTR uint32_t s_rtc_last_alive_ms[Config::Task::TASK_COUNT];
 static RTC_NOINIT_ATTR uint32_t s_rtc_rescue_magic;
 static RTC_NOINIT_ATTR uint32_t s_rtc_crash_counter;
 static RTC_NOINIT_ATTR uint32_t s_rtc_clean_restart_magic;
+
+extern "C" void Diagnostics_FeedWdt(size_t index) noexcept {
+  s_wdt_monitor.feed(index);
+}
 
 static void Diagnostics_FeedWdtImpl(size_t index) noexcept {
   s_wdt_monitor.feed(index);
@@ -196,15 +222,7 @@ void System_Restart(const char *reason) {
   if (reason && strlen(reason) > 0) {
     LogManager::writeRebootLog(reason);
   }
-  size_t count = s_shutdown_hook_count.load(std::memory_order_acquire);
-  if (count > MAX_SHUTDOWN_HOOKS) {
-    count = MAX_SHUTDOWN_HOOKS;
-  }
-  for (size_t i = 0; i < count; ++i) {
-    if (s_shutdown_hooks[i]) {
-      s_shutdown_hooks[i]();
-    }
-  }
+  System_TriggerLifecycle(SystemLifecycleEvent::PRE_SHUTDOWN);
 
   uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(50));
   uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50));

@@ -1106,7 +1106,7 @@ void Task_Telnet(void *pvParameters) {
   sink.trace_msg = [](const char *msg) { s_telnet_tracer.trace(msg); };
   System_RegisterTraceSink(sink);
 
-  System_RegisterShutdownHook([]() {
+  System_RegisterShutdownHook([]() noexcept {
     s_telnet_tracer.setTrace(false);
     s_telnet_tracer.setClient(-1);
     s_telnet_manager.shutdownForReboot();

@@ -11,6 +11,7 @@ static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <esp_core_dump.h>
 #include <lwip/sockets.h>
 
@@ -426,22 +427,19 @@ static void HandleRpc_SetWifiMode(int sock, long req_id, const char *json_str,
                                   const IPAddress & /*client_ip*/) {
   char mode_buf[16] = {0};
   if (findJsonStringValue(json_str, "mode", mode_buf, sizeof(mode_buf))) {
-    struct WifiModeMap {
-      const char *name;
-      wifi_mode_t mode;
-    };
-    static constexpr WifiModeMap kWifiModeTable[] = {
-        {"AP", WIFI_AP},
-        {"AP_STA", WIFI_AP_STA},
-        {"AP+STA", WIFI_AP_STA},
-        {"STA", WIFI_STA},
-    };
     wifi_mode_t target_mode = WIFI_STA;
-    for (const auto &entry : kWifiModeTable) {
-      if (strcasecmp(mode_buf, entry.name) == 0) {
-        target_mode = entry.mode;
-        break;
-      }
+    switch (Hash::fnv1a32_ci_rt(mode_buf)) {
+    case Hash::fnv1a32_ci("AP"):
+      target_mode = WIFI_AP;
+      break;
+    case Hash::fnv1a32_ci("AP_STA"):
+    case Hash::fnv1a32_ci("AP+STA"):
+      target_mode = WIFI_AP_STA;
+      break;
+    case Hash::fnv1a32_ci("STA"):
+    default:
+      target_mode = WIFI_STA;
+      break;
     }
 
     WiFi.mode(target_mode);
@@ -649,34 +647,38 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
     return;
   }
 
-  struct ActionEntry {
-    const char *name;
-    ControlActionType type;
-  };
-  static constexpr ActionEntry kActionTable[] = {
-      {"power", ControlActionType::POWER},
-      {"pwr", ControlActionType::POWER},
-      {"set_temp", ControlActionType::SET_TEMP},
-      {"temp", ControlActionType::SET_TEMP},
-      {"fan_speed", ControlActionType::FAN_SPEED},
-      {"spd", ControlActionType::FAN_SPEED},
-      {"valve_close", ControlActionType::VALVE_CLOSE},
-      {"cls", ControlActionType::VALVE_CLOSE},
-      {"momentary", ControlActionType::MOMENTARY_TRIGGER},
-      {"mom", ControlActionType::MOMENTARY_TRIGGER},
-      {"vent_mode", ControlActionType::VENT_MODE},
-      {"vnt", ControlActionType::VENT_MODE},
-      {"mode", ControlActionType::VENT_MODE},
-      {"ac_mode", ControlActionType::VENT_MODE},
-  };
-
   ControlActionType act = ControlActionType::UNKNOWN;
   if (act_str[0] != '\0') {
-    for (const auto &entry : kActionTable) {
-      if (strcasecmp(act_str, entry.name) == 0) {
-        act = entry.type;
-        break;
-      }
+    switch (Hash::fnv1a32_ci_rt(act_str)) {
+    case Hash::fnv1a32_ci("power"):
+    case Hash::fnv1a32_ci("pwr"):
+      act = ControlActionType::POWER;
+      break;
+    case Hash::fnv1a32_ci("set_temp"):
+    case Hash::fnv1a32_ci("temp"):
+      act = ControlActionType::SET_TEMP;
+      break;
+    case Hash::fnv1a32_ci("fan_speed"):
+    case Hash::fnv1a32_ci("spd"):
+      act = ControlActionType::FAN_SPEED;
+      break;
+    case Hash::fnv1a32_ci("valve_close"):
+    case Hash::fnv1a32_ci("cls"):
+      act = ControlActionType::VALVE_CLOSE;
+      break;
+    case Hash::fnv1a32_ci("momentary"):
+    case Hash::fnv1a32_ci("mom"):
+      act = ControlActionType::MOMENTARY_TRIGGER;
+      break;
+    case Hash::fnv1a32_ci("vent_mode"):
+    case Hash::fnv1a32_ci("vnt"):
+    case Hash::fnv1a32_ci("mode"):
+    case Hash::fnv1a32_ci("ac_mode"):
+      act = ControlActionType::VENT_MODE;
+      break;
+    default:
+      act = ControlActionType::UNKNOWN;
+      break;
     }
   }
 
@@ -733,44 +735,16 @@ static void HandleRpc_DeviceControl(int sock, long req_id, const char *json_str,
   sendRpcResponse(sock, req_id, "ok");
 }
 
-// ── Table-Driven Dispatcher ──
+// ── Hash-Driven O(1) RPC Dispatcher (FNV-1a 32-bit Jump Table) ──
 
 using RpcHandlerFunc = void (*)(int sock, long req_id, const char *json_str,
                                 const IPAddress &client_ip);
 
-struct RpcEntry {
-  const char *cmd;
-  RpcHandlerFunc handler;
-  bool is_dangerous;
-};
-
-static const RpcEntry kRpcDispatchTable[] = {
-    {"get_telemetry", HandleRpc_GetTelemetry, false},
-    {"set_profile", HandleRpc_SetProfile, true},
-    {"save_auto_to_slot", HandleRpc_SaveAutoToSlot, true},
-    {"set_timing", HandleRpc_SetTiming, true},
-    {"cache_sync", HandleRpc_CacheSync, true},
-    {"ping", HandleRpc_Ping, false},
-    {"cache_purge_rescan", HandleRpc_CachePurgeRescan, true},
-    {"wallpad_reset", HandleRpc_WallpadReset, true},
-    {"clear_coredump", HandleRpc_ClearCoredump, true},
-    {"clear_reboot_logs", HandleRpc_ClearRebootLogs, true},
-    {"wifi_scan", HandleRpc_WifiScan, false},
-    {"start_ota", HandleRpc_StartOta, true},
-    {"system_reboot", HandleRpc_SystemReboot, true},
-    {"set_wifi_mode", HandleRpc_SetWifiMode, false},
-    {"set_wifi", HandleRpc_SetWifi, true},
-    {"set_uart", HandleRpc_SetUart, true},
-    {"doorphone_action", HandleRpc_DoorphoneAction, true},
-    {"set_ew11", HandleRpc_SetEw11, false},
-    {"get_devices", HandleRpc_GetDevices, false},
-    {"gd", HandleRpc_GetDevices, false},
-    {"get_locked_devices", HandleRpc_GetDevices, false},
-    {"gld", HandleRpc_GetDevices, false},
-    {"device_control", HandleRpc_DeviceControl, true},
-    {"ctl", HandleRpc_DeviceControl, true},
-    {"control", HandleRpc_DeviceControl, true},
-};
+// 32-bit FNV-1a Hash aliases from L0 Foundation (System_Buffer.h)
+using Hash::fnv1a32_ci;
+using Hash::fnv1a32_ci_rt;
+static constexpr auto fnv1a_32_ci = Hash::fnv1a32_ci;
+static inline auto fnv1a_32_ci_rt = Hash::fnv1a32_ci_rt;
 
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   if (sock < 0 || !json_str)
@@ -787,38 +761,139 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     return;
   }
 
-  long req_id = findJsonIntValue(json_str, "id", -1);
-  IPAddress client_ip = Remote_GetClientIp(sock);
+  const long req_id = findJsonIntValue(json_str, "id", -1);
+  const IPAddress client_ip = Remote_GetClientIp(sock);
+  const uint32_t cmd_hash = fnv1a_32_ci_rt(cmd);
 
-  // SmartThings Edge Driver가 주기적으로 telemetry 요청 시 허브 IP 자동 학습 및 Lock-in
-  if (strcasecmp(cmd, "get_telemetry") == 0 &&
-      client_ip != IPAddress(0, 0, 0, 0)) {
-    if (s_trusted_hub_ip == IPAddress(0, 0, 0, 0)) {
+  RpcHandlerFunc handler = nullptr;
+  bool is_dangerous = false;
+
+  switch (cmd_hash) {
+  case fnv1a_32_ci("get_telemetry"):
+    // SmartThings Edge Driver가 주기적으로 telemetry 요청 시 허브 IP 자동 학습 및 Lock-in
+    if (client_ip != IPAddress(0, 0, 0, 0) &&
+        s_trusted_hub_ip == IPAddress(0, 0, 0, 0)) {
       s_trusted_hub_ip = client_ip;
       ESP_LOGI("NET", "[RPC] Trusted Hub IP locked to %s",
                s_trusted_hub_ip.toString().c_str());
     }
+    handler = HandleRpc_GetTelemetry;
+    break;
+
+  case fnv1a_32_ci("ping"):
+    handler = HandleRpc_Ping;
+    break;
+
+  case fnv1a_32_ci("wifi_scan"):
+    handler = HandleRpc_WifiScan;
+    break;
+
+  case fnv1a_32_ci("set_wifi_mode"):
+    handler = HandleRpc_SetWifiMode;
+    break;
+
+  case fnv1a_32_ci("set_ew11"):
+    handler = HandleRpc_SetEw11;
+    break;
+
+  case fnv1a_32_ci("get_devices"):
+  case fnv1a_32_ci("gd"):
+  case fnv1a_32_ci("get_locked_devices"):
+  case fnv1a_32_ci("gld"):
+    handler = HandleRpc_GetDevices;
+    break;
+
+  // ── Dangerous Commands (Require Trusted Hub Verification) ──
+  case fnv1a_32_ci("set_profile"):
+    handler = HandleRpc_SetProfile;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("save_auto_to_slot"):
+    handler = HandleRpc_SaveAutoToSlot;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("set_timing"):
+    handler = HandleRpc_SetTiming;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("cache_sync"):
+    handler = HandleRpc_CacheSync;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("cache_purge_rescan"):
+    handler = HandleRpc_CachePurgeRescan;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("wallpad_reset"):
+    handler = HandleRpc_WallpadReset;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("clear_coredump"):
+    handler = HandleRpc_ClearCoredump;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("clear_reboot_logs"):
+    handler = HandleRpc_ClearRebootLogs;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("start_ota"):
+    handler = HandleRpc_StartOta;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("system_reboot"):
+    handler = HandleRpc_SystemReboot;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("set_wifi"):
+    handler = HandleRpc_SetWifi;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("set_uart"):
+    handler = HandleRpc_SetUart;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("doorphone_action"):
+    handler = HandleRpc_DoorphoneAction;
+    is_dangerous = true;
+    break;
+
+  case fnv1a_32_ci("device_control"):
+  case fnv1a_32_ci("ctl"):
+  case fnv1a_32_ci("control"):
+    handler = HandleRpc_DeviceControl;
+    is_dangerous = true;
+    break;
+
+  default:
+    sendRpcResponse(sock, req_id, "error", "Unknown command");
+    return;
   }
 
-  for (const auto &entry : kRpcDispatchTable) {
-    if (strcasecmp(cmd, entry.cmd) == 0) {
-      if (entry.is_dangerous) {
-        // 보안 검증:
-        // 1) 아직 허브가 등록되지 않은 상태(0.0.0.0)에서는 위험 명령 원천 거부 (부팅 직후 바이패스 차단)
-        // 2) 등록된 허브 IP와 불일치하는 제3자의 위험 명령 차단 (탈취 및 임의 조작 방어)
-        if (s_trusted_hub_ip == IPAddress(0, 0, 0, 0) ||
-            client_ip != s_trusted_hub_ip) {
-          sendRpcResponse(sock, req_id, "error",
-                          "403 Access Denied: Unauthorized client IP");
-          return;
-        }
-      }
-      entry.handler(sock, req_id, json_str, client_ip);
+  if (is_dangerous) {
+    // 보안 검증:
+    // 1) 아직 허브가 등록되지 않은 상태(0.0.0.0)에서는 위험 명령 원천 거부 (부팅 직후 바이패스 차단)
+    // 2) 등록된 허브 IP와 불일치하는 제3자의 위험 명령 차단 (탈취 및 임의 조작 방어)
+    if (s_trusted_hub_ip == IPAddress(0, 0, 0, 0) ||
+        client_ip != s_trusted_hub_ip) {
+      sendRpcResponse(sock, req_id, "error",
+                      "403 Access Denied: Unauthorized client IP");
       return;
     }
   }
 
-  sendRpcResponse(sock, req_id, "error", "Unknown command");
+  handler(sock, req_id, json_str, client_ip);
 }
 
 void Mgmt_Data(MgmtSession *s, std::span<const uint8_t> data) {

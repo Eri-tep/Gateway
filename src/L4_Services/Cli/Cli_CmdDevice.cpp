@@ -338,34 +338,47 @@ static void ctlHandleClass(int sock, int argc, const Args &args) {
     uint8_t dev_id = static_cast<uint8_t>(strtoul(args.get(2), nullptr, 0));
     const char *cls_str = args.get(3);
     const char *custom_name = (argc >= 4) ? args.get(4) : nullptr;
-    struct DeviceClassEntry {
-      const char *key;
-      DeviceClass cls;
-      const char *def_name;
-    };
-    static constexpr DeviceClassEntry kDeviceClassTable[] = {
-        {"light", DeviceClass::SWITCH, "Light"},
-        {"switch", DeviceClass::SWITCH, "Light"},
-        {"outlet", DeviceClass::SWITCH, "Outlet"},
-        {"vent", DeviceClass::VENT, "Vent"},
-        {"fan", DeviceClass::VENT, "Vent"},
-        {"thermo", DeviceClass::THERMOSTAT, "Thermo"},
-        {"thermostat", DeviceClass::THERMOSTAT, "Thermo"},
-        {"heat", DeviceClass::THERMOSTAT, "Thermo"},
-        {"gas", DeviceClass::GAS, "Gas"},
-        {"aircon", DeviceClass::AIRCON, "Aircon"},
-        {"ac", DeviceClass::AIRCON, "Aircon"},
-        {"ev", DeviceClass::MOMENTARY, "Elevator"},
-        {"elevator", DeviceClass::MOMENTARY, "Elevator"},
-    };
     DeviceClass cls = DeviceClass::UNKNOWN;
     const char *def_name = cls_str;
-    for (const auto &entry : kDeviceClassTable) {
-      if (strcasecmp(cls_str, entry.key) == 0) {
-        cls = entry.cls;
-        def_name = entry.def_name;
-        break;
-      }
+
+    switch (Hash::fnv1a32_ci_rt(cls_str)) {
+    case Hash::fnv1a32_ci("light"):
+    case Hash::fnv1a32_ci("switch"):
+      cls = DeviceClass::SWITCH;
+      def_name = "Light";
+      break;
+    case Hash::fnv1a32_ci("outlet"):
+      cls = DeviceClass::SWITCH;
+      def_name = "Outlet";
+      break;
+    case Hash::fnv1a32_ci("vent"):
+    case Hash::fnv1a32_ci("fan"):
+      cls = DeviceClass::VENT;
+      def_name = "Vent";
+      break;
+    case Hash::fnv1a32_ci("thermo"):
+    case Hash::fnv1a32_ci("thermostat"):
+    case Hash::fnv1a32_ci("heat"):
+      cls = DeviceClass::THERMOSTAT;
+      def_name = "Thermo";
+      break;
+    case Hash::fnv1a32_ci("gas"):
+      cls = DeviceClass::GAS;
+      def_name = "Gas";
+      break;
+    case Hash::fnv1a32_ci("aircon"):
+    case Hash::fnv1a32_ci("ac"):
+      cls = DeviceClass::AIRCON;
+      def_name = "Aircon";
+      break;
+    case Hash::fnv1a32_ci("ev"):
+    case Hash::fnv1a32_ci("elevator"):
+      cls = DeviceClass::MOMENTARY;
+      def_name = "Elevator";
+      break;
+    default:
+      cls = DeviceClass::UNKNOWN;
+      break;
     }
     if (dev_id == 0 || cls == DeviceClass::UNKNOWN) {
       sendTelnetMsg(sock,

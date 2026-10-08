@@ -306,16 +306,28 @@ bool Device_SetTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                           uint8_t sub2,
                                           StaticPacket &out_pkt) noexcept;
 
-// ── L4 State Change Listener Subscription API ────────────────────────────────
-using DeviceStateListener    = void (*)(const DeviceUpdateResult &res) noexcept;
-using DoorphoneEventListener = void (*)(bool front_bell, bool lobby_bell) noexcept;
-using ElevatorEventListener  = void (*)(uint8_t sub1, uint8_t sub2, uint8_t floor,
-                                       uint8_t ho, uint8_t power,
-                                       bool is_arrival) noexcept;
+// ── Telemetry Event Queue (L3 Domain Event Stream) ───────────────────────────
+enum class TelemetryEventType : uint8_t {
+  DEVICE_RESULT,
+  DOORPHONE,
+  ELEVATOR
+};
 
-void Device_RegisterStateListener(DeviceStateListener listener) noexcept;
-void Device_RegisterDoorphoneListener(DoorphoneEventListener listener) noexcept;
-void Device_RegisterElevatorListener(ElevatorEventListener listener) noexcept;
+struct TelemetryItem {
+  TelemetryEventType type{TelemetryEventType::DEVICE_RESULT};
+  DeviceUpdateResult device_res{};
+  uint8_t sub1{0};
+  uint8_t sub2{0};
+  uint8_t floor{0};
+  uint8_t ho{0};
+  uint8_t power{0};
+  bool is_arrival{false};
+  bool front_bell{false};
+  bool lobby_bell{false};
+};
+
+bool Telemetry_Enqueue(const TelemetryItem &item) noexcept;
+[[nodiscard]] bool Telemetry_Dequeue(TelemetryItem &out_item) noexcept;
 
 /// Process incoming bus ACK packet: updates SSOT cache and dispatches to registered listener.
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept;
@@ -327,18 +339,6 @@ void Device_NotifyDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept;
 void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
                                 uint8_t ho, uint8_t power,
                                 bool is_arrival) noexcept;
-
-// ── L3 Decoupled Protocol Parser & Decoder Registration API ──────────────────
-using DeviceAckPacketCheckFn = bool (*)(std::span<const uint8_t> frame) noexcept;
-using DeviceKeyExtractorFn   = bool (*)(std::span<const uint8_t> frame, uint8_t &dev_id, uint8_t &sub1, uint8_t &sub2) noexcept;
-using DeviceStateDecoderFn   = bool (*)(uint8_t dev_id, const StaticPacket &ack, const DeviceStateEntry *dev, DecodedDeviceState &out) noexcept;
-using DeviceNormSub1Fn       = uint8_t (*)(uint8_t dev_id, uint8_t sub1) noexcept;
-using DoorphoneOpenHandler   = bool (*)(bool is_lobby) noexcept;
-
-void Device_RegisterParserHooks(DeviceAckPacketCheckFn ack_check, DeviceKeyExtractorFn key_extract) noexcept;
-void Device_RegisterStateDecoder(DeviceStateDecoderFn fn) noexcept;
-void Device_RegisterNormSub1Hook(DeviceNormSub1Fn fn) noexcept;
-void Device_RegisterDoorphoneOpenHandler(DoorphoneOpenHandler handler) noexcept;
 
 // ── L4 Doorphone Control & State Facade API ──────────────────────────────────
 [[nodiscard]] bool Device_DoorphoneOpen(bool is_lobby = false) noexcept;

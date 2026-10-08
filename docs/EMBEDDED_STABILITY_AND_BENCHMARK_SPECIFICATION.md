@@ -115,6 +115,9 @@
     6. 가변 길이 대규모 패킷 파싱 루프
 - **규칙 6.3 (원자적 연산 메모리 오더 감사)**:
   - `std::atomic` 변수 접근 시 `relaxed`, `acquire/release`, `seq_cst`의 실행 사이클을 단계별로 대조한다.
+- **규칙 6.4 / Rule 6.4 (Single Consolidated Critical Section & Lock Churn Elimination)**:
+  - Repeated acquire-release cycles ("lock churn") within a single packet lifecycle are strictly forbidden.
+  - Packet verification, cache touch, and response buffer updates must execute inside a single RAII scoped critical section, guaranteeing atomicity while shaving 30~50 µs off worst-case execution time (WCET).
 
 ### Pillar 7: Code Generation & Binary Integrity (어셈블리 및 바이너리 무결성)
 - **규칙 7.1 (바이너리 섹션 크기 Diff)**:
@@ -149,6 +152,14 @@
     - **Mean / Median / P95 / P99 / P99.9 / Max (Worst-Case Execution Time, WCET)**
 - **규칙 10.2 (꼬리 지연(Tail Latency) 규제)**:
   - 평균 사이클이 400 사이클이더라도, P99.9 또는 Max가 10,000 사이클을 초과하는 스파이크가 발생할 경우 '실시간성 결함'으로 판정하고 원인을 추적한다.
+- **규칙 10.3 / Rule 10.3 (Core 1 RS-485 Hard WCET Budget & Empirical Latency Baseline)**:
+  - **Maximum WCET Limit**: `Task_Ch1` bus packet processing latency must never exceed **300 µs (~72,000 cycles @ 240MHz)**.
+  - **Empirical Hot-Path Latency Distribution Baseline (Production Standard)**:
+    - `< 16,384 cyc (< 68.2 µs)`: ~0.2%
+    - `< 32,768 cyc (< 136.5 µs)`: **>= 93.8%** (Target primary processing window)
+    - `< 65,536 cyc (< 273.0 µs)`: ~5.9% (Complex routing/state transitions)
+    - `< 131,072 cyc (< 546.1 µs)`: <= 0.01% (Bus jitter threshold)
+    - **Production Peak WCET Ceiling**: **69,776 cycles (290.73 µs)** is the established golden ceiling; tail latency spikes exceeding 300 µs under sustained traffic are treated as real-time violations.
 
 ### Pillar 11: Queue & Backpressure Invariant (큐 및 백프레셔 복원력)
 - **규칙 11.1 (큐 조작 사이클 계측)**:

@@ -53,8 +53,7 @@ static int s_ew11_server_fds[Config::TCP::MAX_EW11_SLOTS] = {-1, -1, -1, -1,
                                                              -1};
 
 static Bridge_PacketDispatcher s_dispatcher{};
-static BridgeRxCallback s_slot_rx_cb = nullptr;
-static BridgeTickCallback s_slot_tick_cb = nullptr;
+static BridgeSlotDriver s_slot_drivers[Config::TCP::MAX_EW11_SLOTS]{};
 
 static void Hub_LoadConfig();
 static void Hub_SaveConfig();
@@ -65,12 +64,23 @@ void Bridge_RegisterDispatcher(
   s_dispatcher = dispatcher;
 }
 
+void Bridge_RegisterSlotDriver(uint8_t slot_idx,
+                               const BridgeSlotDriver &driver) noexcept {
+  if (slot_idx < Config::TCP::MAX_EW11_SLOTS) {
+    s_slot_drivers[slot_idx] = driver;
+  }
+}
+
 void Bridge_RegisterSlotRxCallback(BridgeRxCallback cb) noexcept {
-  s_slot_rx_cb = cb;
+  for (size_t i = 1; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
+    s_slot_drivers[i].onRxStream = cb;
+  }
 }
 
 void Bridge_RegisterSlotTickCallback(BridgeTickCallback cb) noexcept {
-  s_slot_tick_cb = cb;
+  for (size_t i = 1; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
+    s_slot_drivers[i].onTick = cb;
+  }
 }
 
 bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) {
@@ -440,13 +450,15 @@ bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count,
 void processStream(int slot_idx, HubClientSlot *slot) {
   if (!slot)
     return;
-  if (slot_idx == 0) {
-    demuxPacketStream(slot);
-  } else if (s_slot_rx_cb) {
+  if (slot_idx > 0 && slot_idx < static_cast<int>(Config::TCP::MAX_EW11_SLOTS) &&
+      s_slot_drivers[slot_idx].onRxStream) {
     size_t consumed =
-        s_slot_rx_cb(static_cast<uint8_t>(slot_idx),
-                     std::span<const uint8_t>(slot->rx_buf, slot->rx_len));
+        s_slot_drivers[slot_idx].onRxStream(
+            static_cast<uint8_t>(slot_idx),
+            std::span<const uint8_t>(slot->rx_buf, slot->rx_len));
     consumeRxBuffer(slot, consumed);
+  } else if (slot_idx == 0) {
+    demuxPacketStream(slot);
   }
 }
 
@@ -874,8 +886,10 @@ void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept {
   }
 
   if (!ota_now) {
-    if (s_slot_tick_cb) {
-      s_slot_tick_cb(now_ms);
+    for (size_t i = 1; i < Config::TCP::MAX_EW11_SLOTS; ++i) {
+      if (s_slot_drivers[i].onTick) {
+        s_slot_drivers[i].onTick(now_ms);
+      }
     }
   }
 }

@@ -37,7 +37,6 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id = -1);
 void Mgmt_SerializeDevices(AppendBuf &out, long req_id = -1);
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str);
 
-void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept;
 void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                DeviceClass dev_class, int power,
                                int target_temp = 0, int current_temp = 0,
@@ -45,10 +44,6 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                float power_w = 0.0f, int floor = 0,
                                int direction = 0, int ho = 0,
                                int vent_mode = 1);
-void Mgmt_BroadcastDeviceResult(const DeviceUpdateResult &res) noexcept;
-void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
-                                 uint8_t ho, uint8_t power,
-                                 bool is_arrival) noexcept;
 void Mgmt_BroadcastDevicesUpdated();
 void Mgmt_BroadcastRawJson(const char *json_payload);
 void Mgmt_DrainTelemetryQueue() noexcept;

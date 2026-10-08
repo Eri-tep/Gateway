@@ -5,6 +5,8 @@
 
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Private/Fcu_Engine.h"
+#include "L3_Protocol/Private/Wallpad_Engine.h"
+#include "L3_Protocol/Private/Wallpad_Learning.h"
 #include "L2_Transport/Bridge_CH.h"
 
 #include <Arduino.h>
@@ -13,12 +15,6 @@
 #include <cstring>
 
 namespace {
-
-DeviceAckPacketCheckFn s_ack_packet_check = nullptr;
-DeviceKeyExtractorFn s_key_extractor = nullptr;
-DeviceStateDecoderFn s_state_decoder = nullptr;
-DeviceNormSub1Fn s_norm_sub1_fn = nullptr;
-DoorphoneOpenHandler s_dp_open_handler = nullptr;
 
 std::atomic<bool> s_dp_front_bell{false};
 std::atomic<bool> s_dp_lobby_bell{false};
@@ -84,7 +80,7 @@ static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1,
 }
 
 static inline uint8_t Device_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  return s_norm_sub1_fn ? s_norm_sub1_fn(dev_id, sub1) : sub1;
+  return ControlTemplate_NormSub1(dev_id, sub1);
 }
 
 DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
@@ -384,14 +380,14 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     return res;
   }
 
-  if (!s_ack_packet_check ||
-      !s_ack_packet_check(std::span<const uint8_t>(ack.data.data(), ack.length)))
+  if (!Universal_GetEngine().isAckPacket(
+          std::span<const uint8_t>(ack.data.data(), ack.length)))
     return res;
 
   uint8_t dev_id = 0, sub1 = 0, sub2 = 0;
-  if (!s_key_extractor ||
-      !s_key_extractor(std::span<const uint8_t>(ack.data.data(), ack.length),
-                       dev_id, sub1, sub2)) {
+  if (!Universal_GetEngine().extractDeviceKey(
+          std::span<const uint8_t>(ack.data.data(), ack.length), dev_id, sub1,
+          sub2)) {
     return res;
   }
 
@@ -462,7 +458,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
   res.updated = true;
 
   if (ack_changed) {
-    bool has_decoded = s_state_decoder && s_state_decoder(dev_id, ack, &dev_snap, st);
+    bool has_decoded = ControlTemplate_DecodeByDevId(dev_id, ack, &dev_snap, st);
     if (has_decoded) {
       if (dev_id == 0x34) {
         bool ev_state_changed = (st.power != prev_pwr) ||
@@ -609,38 +605,57 @@ bool Device_CopyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   return s_device_repo.copyVirtualAck(dev_id, sub1, sub2, out_pkt);
 }
 
-// ── Listener Subscription Implementation ──────────────────────────────────────
+// ── Telemetry Event Queue Implementation ──────────────────────────────────────
 
 namespace {
-DeviceStateListener s_dev_listener = nullptr;
-DoorphoneEventListener s_doorphone_listener = nullptr;
-ElevatorEventListener s_elevator_listener = nullptr;
+constexpr size_t TELEMETRY_QUEUE_LEN = 16;
+static StaticQueue_t s_telemetry_queue_struct;
+static uint8_t s_telemetry_queue_storage[TELEMETRY_QUEUE_LEN * sizeof(TelemetryItem)];
+static QueueHandle_t s_telemetry_queue = nullptr;
+
+QueueHandle_t GetTelemetryQueue() noexcept {
+  if (UNLIKELY(!s_telemetry_queue)) {
+    s_telemetry_queue = xQueueCreateStatic(
+        TELEMETRY_QUEUE_LEN,
+        sizeof(TelemetryItem),
+        s_telemetry_queue_storage,
+        &s_telemetry_queue_struct);
+  }
+  return s_telemetry_queue;
+}
 } // namespace
 
-void Device_RegisterStateListener(DeviceStateListener listener) noexcept {
-  s_dev_listener = listener;
+bool Telemetry_Enqueue(const TelemetryItem &item) noexcept {
+  QueueHandle_t q = GetTelemetryQueue();
+  return q ? (xQueueSend(q, &item, 0) == pdTRUE) : false;
 }
 
-void Device_RegisterDoorphoneListener(DoorphoneEventListener listener) noexcept {
-  s_doorphone_listener = listener;
-}
-
-void Device_RegisterElevatorListener(ElevatorEventListener listener) noexcept {
-  s_elevator_listener = listener;
+bool Telemetry_Dequeue(TelemetryItem &out_item) noexcept {
+  QueueHandle_t q = GetTelemetryQueue();
+  return q ? (xQueueReceive(q, &out_item, 0) == pdTRUE) : false;
 }
 
 void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
                                 uint8_t ho, uint8_t power,
                                 bool is_arrival) noexcept {
-  if (s_elevator_listener) {
-    s_elevator_listener(sub1, sub2, floor, ho, power, is_arrival);
-  }
+  TelemetryItem item{};
+  item.type = TelemetryEventType::ELEVATOR;
+  item.sub1 = sub1;
+  item.sub2 = sub2;
+  item.floor = floor;
+  item.ho = ho;
+  item.power = power;
+  item.is_arrival = is_arrival;
+  Telemetry_Enqueue(item);
 }
 
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept {
   DeviceUpdateResult res = s_device_repo.updateFromBus(ack_pkt);
-  if (s_dev_listener) {
-    s_dev_listener(res);
+  if (res.should_broadcast) {
+    TelemetryItem item{};
+    item.type = TelemetryEventType::DEVICE_RESULT;
+    item.device_res = res;
+    Telemetry_Enqueue(item);
   }
 }
 
@@ -650,9 +665,11 @@ void Device_NotifyDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
   if (front_bell || lobby_bell) {
     s_dp_last_bell_ms.store(millis(), std::memory_order_release);
   }
-  if (s_doorphone_listener) {
-    s_doorphone_listener(front_bell, lobby_bell);
-  }
+  TelemetryItem item{};
+  item.type = TelemetryEventType::DOORPHONE;
+  item.front_bell = front_bell;
+  item.lobby_bell = lobby_bell;
+  Telemetry_Enqueue(item);
 }
 
 void Device_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
@@ -663,32 +680,14 @@ void Device_DoorphoneGetState(bool &out_front_bell, bool &out_lobby_bell,
 }
 
 bool Device_DoorphoneOpen(bool is_lobby) noexcept {
-  return s_dp_open_handler ? s_dp_open_handler(is_lobby) : false;
-}
-
-void Device_RegisterParserHooks(DeviceAckPacketCheckFn ack_check,
-                                DeviceKeyExtractorFn key_extract) noexcept {
-  s_ack_packet_check = ack_check;
-  s_key_extractor = key_extract;
-}
-
-void Device_RegisterStateDecoder(DeviceStateDecoderFn fn) noexcept {
-  s_state_decoder = fn;
-}
-
-void Device_RegisterNormSub1Hook(DeviceNormSub1Fn fn) noexcept {
-  s_norm_sub1_fn = fn;
-}
-
-void Device_RegisterDoorphoneOpenHandler(DoorphoneOpenHandler handler) noexcept {
-  s_dp_open_handler = handler;
+  return Wallpad_DoorphoneOpen(is_lobby);
 }
 
 bool Device_DecodeState(uint8_t dev_id,
                         const StaticPacket &ack,
                         const DeviceStateEntry *dev,
                         DecodedDeviceState &out) noexcept {
-  return s_state_decoder ? s_state_decoder(dev_id, ack, dev, out) : false;
+  return ControlTemplate_DecodeByDevId(dev_id, ack, dev, out);
 }
 
 // ── FCU (Air Conditioner) Domain Public Implementation ────────────────────────

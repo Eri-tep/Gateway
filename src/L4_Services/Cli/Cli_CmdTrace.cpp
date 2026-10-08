@@ -502,29 +502,36 @@ void cmdTrace(CliContext &ctx) {
   tracer.setClient(sock);
   tracer.setTrace(true);
 
-  struct TraceFilterDef {
-    std::string_view key;
-    TraceType type;
-    const char *desc;
-  };
-  static constexpr TraceFilterDef kTraceFilters[] = {
-      {"on", TraceType::ALL, "ALL packets"},
-      {"ctl", TraceType::CTL, "CONTROL packets only"},
-      {"ack", TraceType::ACK, "ACK/Response packets only"},
-      {"pol", TraceType::QRY, "Polling queries only"},
-      {"rmt", TraceType::RMT, "Doorphone packets only"},
-      {"drp", TraceType::DRP, "Dropped packets only"},
-  };
+  switch (Hash::fnv1a32_ci_rt(sub)) {
+  case Hash::fnv1a32_ci("on"):
+    tracer.setFilter(TraceType::ALL);
+    sendTelnetMsg(sock, "Packet trace ENABLED: ALL packets.\r\n");
+    return;
+  case Hash::fnv1a32_ci("ctl"):
+    tracer.setFilter(TraceType::CTL);
+    sendTelnetMsg(sock, "Packet trace ENABLED: CONTROL packets only.\r\n");
+    return;
+  case Hash::fnv1a32_ci("ack"):
+    tracer.setFilter(TraceType::ACK);
+    sendTelnetMsg(sock, "Packet trace ENABLED: ACK/Response packets only.\r\n");
+    return;
+  case Hash::fnv1a32_ci("pol"):
+    tracer.setFilter(TraceType::QRY);
+    sendTelnetMsg(sock, "Packet trace ENABLED: Polling queries only.\r\n");
+    return;
+  case Hash::fnv1a32_ci("rmt"):
+    tracer.setFilter(TraceType::RMT);
+    sendTelnetMsg(sock, "Packet trace ENABLED: Doorphone packets only.\r\n");
+    return;
+  case Hash::fnv1a32_ci("drp"):
+    tracer.setFilter(TraceType::DRP);
+    sendTelnetMsg(sock, "Packet trace ENABLED: Dropped packets only.\r\n");
+    return;
+  default:
+    break;
+  }
 
   std::string_view sub_sv(sub);
-
-  for (const auto &f : kTraceFilters) {
-    if (f.key == sub_sv || strcasecmp(sub, f.key.data()) == 0) {
-      tracer.setFilter(f.type);
-      sendTelnetMsgf(sock, "Packet trace ENABLED: %s.\r\n", f.desc);
-      return;
-    }
-  }
 
   // Channel filter: "ch <1-6>" or "ch<1-6>"
   bool is_ch_prefix = (sub_sv.rfind("ch", 0) == 0 || sub_sv.rfind("CH", 0) == 0);

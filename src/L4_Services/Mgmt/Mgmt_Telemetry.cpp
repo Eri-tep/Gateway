@@ -445,55 +445,6 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
 
   out.appendFormat("],\"count\":%u}\n", static_cast<unsigned>(locked_count));
 }
-namespace {
-
-enum class TelemetryEventType : uint8_t {
-  DEVICE_RESULT,
-  DOORPHONE,
-  ELEVATOR
-};
-
-struct TelemetryItem {
-  TelemetryEventType type{TelemetryEventType::DEVICE_RESULT};
-  DeviceUpdateResult device_res{};
-  uint8_t sub1{0};
-  uint8_t sub2{0};
-  uint8_t floor{0};
-  uint8_t ho{0};
-  uint8_t power{0};
-  bool is_arrival{false};
-  bool front_bell{false};
-  bool lobby_bell{false};
-};
-
-constexpr size_t TELEMETRY_QUEUE_LEN = 16;
-static StaticQueue_t s_telemetry_queue_struct;
-static uint8_t s_telemetry_queue_storage[TELEMETRY_QUEUE_LEN * sizeof(TelemetryItem)];
-static QueueHandle_t s_telemetry_queue = nullptr;
-
-QueueHandle_t GetTelemetryQueue() noexcept {
-  if (UNLIKELY(!s_telemetry_queue)) {
-    s_telemetry_queue = xQueueCreateStatic(
-        TELEMETRY_QUEUE_LEN,
-        sizeof(TelemetryItem),
-        s_telemetry_queue_storage,
-        &s_telemetry_queue_struct);
-  }
-  return s_telemetry_queue;
-}
-
-} // namespace
-
-void Mgmt_BroadcastDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept {
-  QueueHandle_t q = GetTelemetryQueue();
-  if (q) {
-    TelemetryItem item{};
-    item.type = TelemetryEventType::DOORPHONE;
-    item.front_bell = front_bell;
-    item.lobby_bell = lobby_bell;
-    xQueueSend(q, &item, 0);
-  }
-}
 
 namespace {
 
@@ -578,43 +529,9 @@ void Mgmt_BroadcastDeviceState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   }
 }
 
-void Mgmt_BroadcastDeviceResult(const DeviceUpdateResult &res) noexcept {
-  if (!res.should_broadcast)
-    return;
-
-  QueueHandle_t q = GetTelemetryQueue();
-  if (q) {
-    TelemetryItem item{};
-    item.type = TelemetryEventType::DEVICE_RESULT;
-    item.device_res = res;
-    xQueueSend(q, &item, 0);
-  }
-}
-
-void Mgmt_BroadcastElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
-                                 uint8_t ho, uint8_t power,
-                                 bool is_arrival) noexcept {
-  QueueHandle_t q = GetTelemetryQueue();
-  if (q) {
-    TelemetryItem item{};
-    item.type = TelemetryEventType::ELEVATOR;
-    item.sub1 = sub1;
-    item.sub2 = sub2;
-    item.floor = floor;
-    item.ho = ho;
-    item.power = power;
-    item.is_arrival = is_arrival;
-    xQueueSend(q, &item, 0);
-  }
-}
-
 void Mgmt_DrainTelemetryQueue() noexcept {
-  QueueHandle_t q = GetTelemetryQueue();
-  if (!q)
-    return;
-
-  TelemetryItem item;
-  while (xQueueReceive(q, &item, 0) == pdTRUE) {
+  TelemetryItem item{};
+  while (Telemetry_Dequeue(item)) {
     switch (item.type) {
     case TelemetryEventType::DEVICE_RESULT: {
       const auto &res = item.device_res;

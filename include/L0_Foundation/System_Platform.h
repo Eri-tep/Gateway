@@ -303,8 +303,19 @@ struct SystemTraceSink {
   SystemTracePacketFn trace_packet{nullptr};
   SystemTraceMessageFn trace_msg{nullptr};
 };
-using ShutdownHookFn = void (*)();
+using ShutdownHookFn = void (*)() noexcept;
 using ShutdownHook = ShutdownHookFn;
+
+enum class SystemLifecycleEvent : uint8_t {
+  PRE_SHUTDOWN,
+  PRE_OTA,
+  POST_OTA,
+  PANIC
+};
+using SystemLifecycleHookFn = void (*)() noexcept;
+
+void System_RegisterLifecycleHook(SystemLifecycleEvent evt, SystemLifecycleHookFn hook) noexcept;
+void System_TriggerLifecycle(SystemLifecycleEvent evt) noexcept;
 
 void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept;
 void System_RegisterShutdownHook(ShutdownHookFn hook) noexcept;

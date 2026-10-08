@@ -65,6 +65,8 @@ bool Telnet_IsAllowedIP(IPAddress ip) {
 }
 
 // ── Watchdog Feeding Hook Bridge ──────────────────────────────────────────────
+extern "C" __attribute__((weak)) void Diagnostics_FeedWdt(size_t index) noexcept;
+
 static std::atomic<WdtFeedHook> s_wdt_feed_hook{nullptr};
 
 void System_RegisterWdtHook(WdtFeedHook hook) noexcept {
@@ -72,7 +74,11 @@ void System_RegisterWdtHook(WdtFeedHook hook) noexcept {
 }
 
 void System_FeedWdt(size_t index) noexcept {
-  auto hook = s_wdt_feed_hook.load(std::memory_order_acquire);
+  if (Diagnostics_FeedWdt) {
+    Diagnostics_FeedWdt(index);
+    return;
+  }
+  auto hook = s_wdt_feed_hook.load(std::memory_order_relaxed);
   if (hook) {
     hook(index);
   }
