@@ -51,6 +51,10 @@ static inline void copyEntryDirectSeqlock(DeviceStateEntry &dst,
     const size_t copy_bytes = (ack_len + 3) & ~0x03;
     std::memcpy(dst.last_ack_data.data(), src.last_ack_data.data(), copy_bytes);
   }
+
+  // Compiler barrier & acquire fence: guarantee all loads complete before Seqlock read_retry
+  asm volatile("" ::: "memory");
+  std::atomic_thread_fence(std::memory_order_acquire);
 }
 
 class DeviceRepository {

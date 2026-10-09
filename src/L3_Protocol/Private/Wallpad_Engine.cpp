@@ -341,21 +341,21 @@ static inline bool checkFramingPure(std::span<const uint8_t> f, uint8_t stx,
 
 std::expected<std::span<const uint8_t>, UniversalProtocolEngine::FrameValidationError>
 UniversalProtocolEngine::validateFrame(std::span<const uint8_t> frame) const noexcept {
-  if (frame.size() < 3 || frame.size() > 64)
+  if (frame.size() < 3 || frame.size() > 64) [[unlikely]]
     return std::unexpected(FrameValidationError::InvalidLength);
 
   const EffProfile &e = effectiveProfile();
-  if (e.is_auto && !AutoProbe_GetEngine().isLocked()) {
+  if (e.is_auto && !AutoProbe_GetEngine().isLocked()) [[unlikely]] {
     AutoProbe_GetEngine().feedFrame(frame); // 학습 후 갱신된 값으로 재계산
     Wallpad_InvalidateProfileCache();
   }
 
-  if (frame.size() < e.min_len || frame.size() > e.max_len)
+  if (frame.size() < e.min_len || frame.size() > e.max_len) [[unlikely]]
     return std::unexpected(FrameValidationError::InvalidLength);
-  if (frame[0] != e.stx || frame[frame.size() - 1] != e.etx)
+  if (frame[0] != e.stx || frame[frame.size() - 1] != e.etx) [[unlikely]]
     return std::unexpected(FrameValidationError::HeaderMismatch);
   if (e.algo != ChecksumAlgo::NONE &&
-      calculateChecksumDirect(e.algo, frame.data(), frame.size()) != frame[frame.size() - 2])
+      calculateChecksumDirect(e.algo, frame.data(), frame.size()) != frame[frame.size() - 2]) [[unlikely]]
     return std::unexpected(FrameValidationError::ChecksumMismatch);
 
   return frame;

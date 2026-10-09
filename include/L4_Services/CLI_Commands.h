@@ -217,8 +217,9 @@ void setConfig(int sock, const char *key, const char *value);
 // ── Unified Command Table Definition ────────────────────────────────────────
 struct CommandDef {
   const char *name;
-  const char *help;
   void (*handler)(CliContext &ctx);
+  uint8_t min_args;
+  const char *help;
 };
 
 extern const CommandDef kConsoleCmds[];

@@ -71,26 +71,29 @@ static void write(int sock, const char *data, size_t len) noexcept {
     return;
   }
 
-  if (s_telnet_tx_sem &&
-      xSemaphoreTake(s_telnet_tx_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
-    size_t sent = 0;
-    uint8_t retries = 0;
-    while (sent < len && retries < 10) {
-      const size_t to_send = std::min<size_t>(len - sent, 512);
-      const int r = send(sock, data + sent, to_send, MSG_DONTWAIT);
-      if (r > 0) {
-        sent += static_cast<size_t>(r);
-        retries = 0;
-        continue;
-      }
-      if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        ++retries;
-        vTaskDelay(pdMS_TO_TICKS(1));
-        continue;
-      }
-      break;
+  if (!s_telnet_tx_sem)
+    return;
+
+  MutexLocker lock(s_telnet_tx_sem, pdMS_TO_TICKS(100));
+  if (!lock.isLocked())
+    return;
+
+  size_t sent = 0;
+  uint8_t retries = 0;
+  while (sent < len && retries < 10) {
+    const size_t to_send = std::min<size_t>(len - sent, 512);
+    const int r = send(sock, data + sent, to_send, MSG_DONTWAIT);
+    if (r > 0) {
+      sent += static_cast<size_t>(r);
+      retries = 0;
+      continue;
     }
-    xSemaphoreGive(s_telnet_tx_sem);
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      ++retries;
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+    break;
   }
   System_FeedWdt(5);
 }
@@ -503,50 +506,87 @@ void withScratchBufInternal(int sock, std::function<void(AppendBuf &)> fn) {
 // Top-Level Unified Command Table Dispatch Definition
 // ============================================================================
 
-const CommandDef kConsoleCmds[] = {
-    {"stats", "Show real-time HW metrics & traffic stats [clear]",
-     SystemCli::cmdStats},
-    {"devs", "Show device registry & cache [1|2|all|clear]",
-     WallpadCli::cmdDevs},
-    {"wifi", "Manage WiFi connection [status|scan|connect|disconnect]",
-     WifiCli::cmdWifi},
-    {"trace", "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]",
-     WallpadCli::cmdTrace},
-    {"wallpad",
-     "Wallpad protocol & auto-probing "
-     "[status|list|set|save|delete|auto|reset|simulate]",
-     WallpadCli::cmdWallpad},
-    {"ctl", "Device control blueprints [table|<dev_id>|name|class|reset]",
-     WallpadCli::cmdCtl},
-    {"config", "View or modify runtime configuration [set|reset]",
-     ConfigCli::cmdConfig},
-    {"save", "Save current runtime configuration to NVS flash",
-     ConfigCli::cmdSave},
-    {"ew11", "CH5 EW11 hub sockets & FCU [list|set|frame|reset|enable|disable]",
-     ConfigCli::cmdEw11},
-    {"routes", "Show dynamic device ingress routing table [clear]",
-     ConfigCli::cmdRoutes},
-    {"logview",
-     "Persistent reboot history & crash logs [list|<1-20>|last|clear]",
-     SystemCli::cmdLogView},
-    {"coredump", "Show crash core dump summary or erase partition [clear]",
-     SystemCli::cmdCoreDump},
-    {"ota", "Dual-partition OTA & rollback [status|rollback|validate|cloud]",
-     SystemCli::cmdOta},
-    {"reboot", "Perform hardware system reboot with safe shutdown",
-     SystemCli::cmdReboot},
-    {"q", "Stop active packet tracing (shortcut for 'trace off')",
-     WallpadCli::cmdStop},
-    {"exit", "Disconnect current Telnet CLI session", TelnetManager::cmdExit},
+constexpr CommandDef kConsoleCmds[] = {
 #if defined(BENCHMARK_BUILD)
-    {"bench", "ESP32-S3 cycle-accurate benchmark harness [run|health]",
-     BenchmarkCli::cmdBench},
+    {"bench", BenchmarkCli::cmdBench, 0,
+     "ESP32-S3 cycle-accurate benchmark harness [run|health]"},
 #endif
-    {"help", "Display comprehensive command reference and usage examples",
-     SystemCli::cmdHelp}};
+    {"config", ConfigCli::cmdConfig, 0,
+     "View or modify runtime configuration [set|reset]"},
+    {"coredump", SystemCli::cmdCoreDump, 0,
+     "Show crash core dump summary or erase partition [clear]"},
+    {"ctl", WallpadCli::cmdCtl, 0,
+     "Device control blueprints [table|<dev_id>|name|class|reset]"},
+    {"devs", WallpadCli::cmdDevs, 0,
+     "Show device registry & cache [1|2|all|clear]"},
+    {"ew11", ConfigCli::cmdEw11, 0,
+     "CH5 EW11 hub sockets & FCU [list|set|frame|reset|enable|disable]"},
+    {"exit", TelnetManager::cmdExit, 0,
+     "Disconnect current Telnet CLI session"},
+    {"help", SystemCli::cmdHelp, 0,
+     "Display comprehensive command reference and usage examples"},
+    {"logview", SystemCli::cmdLogView, 0,
+     "Persistent reboot history & crash logs [list|<1-20>|last|clear]"},
+    {"ota", SystemCli::cmdOta, 0,
+     "Dual-partition OTA & rollback [status|rollback|validate|cloud]"},
+    {"q", WallpadCli::cmdStop, 0,
+     "Stop active packet tracing (shortcut for 'trace off')"},
+    {"reboot", SystemCli::cmdReboot, 0,
+     "Perform hardware system reboot with safe shutdown"},
+    {"routes", ConfigCli::cmdRoutes, 0,
+     "Show dynamic device ingress routing table [clear]"},
+    {"save", ConfigCli::cmdSave, 0,
+     "Save current runtime configuration to NVS flash"},
+    {"stats", SystemCli::cmdStats, 0,
+     "Show real-time HW metrics & traffic stats [clear]"},
+    {"trace", WallpadCli::cmdTrace, 0,
+     "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]"},
+    {"wallpad", WallpadCli::cmdWallpad, 0,
+     "Wallpad protocol & auto-probing [status|list|set|save|delete|auto|reset|simulate]"},
+    {"wifi", WifiCli::cmdWifi, 0,
+     "Manage WiFi connection [status|scan|connect|disconnect]"},
+};
 
 constexpr size_t kConsoleCmdsCount = std::size(kConsoleCmds);
 static_assert(kConsoleCmdsCount > 0, "kConsoleCmds table cannot be empty");
+
+constexpr int constexpr_strcmp(const char *s1, const char *s2) noexcept {
+  while (*s1 && (*s1 == *s2)) {
+    s1++;
+    s2++;
+  }
+  return static_cast<unsigned char>(*s1) - static_cast<unsigned char>(*s2);
+}
+
+template <size_t N>
+constexpr bool isTableSorted(const CommandDef (&table)[N]) noexcept {
+  for (size_t i = 1; i < N; ++i) {
+    if (constexpr_strcmp(table[i - 1].name, table[i].name) >= 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static_assert(isTableSorted(kConsoleCmds), "kConsoleCmds must be sorted alphabetically by name");
+
+static const CommandDef *findCommand(const char *cmd) noexcept {
+  if (!cmd || !*cmd)
+    return nullptr;
+  int low = 0;
+  int high = static_cast<int>(kConsoleCmdsCount) - 1;
+  while (low <= high) {
+    int mid = low + (high - low) / 2;
+    int cmp = strcasecmp(cmd, kConsoleCmds[mid].name);
+    if (cmp == 0)
+      return &kConsoleCmds[mid];
+    if (cmp < 0)
+      high = mid - 1;
+    else
+      low = mid + 1;
+  }
+  return nullptr;
+}
 
 static void dispatchCommand(CliContext &ctx) {
   if (ctx.args.argc == 0)
@@ -556,13 +596,16 @@ static void dispatchCommand(CliContext &ctx) {
     SystemCli::cmdHelp(ctx);
     return;
   }
-  for (size_t i = 0; i < kConsoleCmdsCount; ++i) {
-    if (strcasecmp(cmd, kConsoleCmds[i].name) == 0) {
-      kConsoleCmds[i].handler(ctx);
-      return;
-    }
+  const CommandDef *entry = findCommand(cmd);
+  if (!entry) {
+    ctx.out.printf("Unknown command: '%s'. Type 'help' for usage.\r\n", cmd);
+    return;
   }
-  ctx.out.printf("Unknown command: '%s'. Type 'help' for usage.\r\n", cmd);
+  if (ctx.args.argc - 1 < entry->min_args) {
+    ctx.out.printf("Usage: %s %s\r\n", entry->name, entry->help);
+    return;
+  }
+  entry->handler(ctx);
 }
 
 static inline bool consumeIac(TelnetManager::TelnetSession *sess, uint8_t c) {
@@ -708,43 +751,44 @@ static void handleAuthenticatedInput(TelnetManager::TelnetSession *session,
                                      uint8_t c) {
   // ── Enter: execute command & record history ──
   if (c == '\r' || c == '\n') {
-    if (session->lineLen > 0) {
-      session->lineBuf[session->lineLen] = '\0';
-      session->addHistory(session->lineBuf);
-      session->browse_idx = -1;
-
-      s_telnet_tracer.pause();
-      sendTelnetMsg(session->sock, "\r\n");
-
-      Args args;
-      char *p = session->lineBuf;
-      while (*p && args.argc < 8) {
-        while (*p && isspace((unsigned char)*p))
-          ++p;
-        if (!*p)
-          break;
-        args.argv[args.argc++] = p;
-        while (*p && !isspace((unsigned char)*p))
-          ++p;
-        if (*p) {
-          *p = '\0';
-          ++p;
-        }
-      }
-
-      if (args.argc > 0) {
-        CliWriter writer(session->sock);
-        CliContext ctx{*session, session->sock, args, writer};
-        dispatchCommand(ctx);
-      }
-      session->lineLen = 0;
-      sendTelnetMsg(session->sock, "\r\n> ");
-      s_telnet_tracer.resume();
-    } else {
+    if (session->lineLen == 0) {
       if (c == '\r') {
         sendTelnetMsg(session->sock, "\r\n> ");
       }
+      return;
     }
+
+    session->lineBuf[session->lineLen] = '\0';
+    session->addHistory(session->lineBuf);
+    session->browse_idx = -1;
+
+    s_telnet_tracer.pause();
+    sendTelnetMsg(session->sock, "\r\n");
+
+    Args args;
+    char *p = session->lineBuf;
+    while (*p && args.argc < 8) {
+      while (*p && isspace((unsigned char)*p))
+        ++p;
+      if (!*p)
+        break;
+      args.argv[args.argc++] = p;
+      while (*p && !isspace((unsigned char)*p))
+        ++p;
+      if (*p) {
+        *p = '\0';
+        ++p;
+      }
+    }
+
+    if (args.argc > 0) {
+      CliWriter writer(session->sock);
+      CliContext ctx{*session, session->sock, args, writer};
+      dispatchCommand(ctx);
+    }
+    session->lineLen = 0;
+    sendTelnetMsg(session->sock, "\r\n> ");
+    s_telnet_tracer.resume();
     return;
   }
 

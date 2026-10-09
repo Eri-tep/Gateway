@@ -932,7 +932,7 @@ static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
   Diag_RecordChannelRx(4);
 }
 
-static inline void Ch4_DropInvalidFrame(const uint8_t *data, size_t len) {
+[[gnu::cold, gnu::noinline]] static void Ch4_DropInvalidFrame(const uint8_t *data, size_t len) {
   StaticPacket drp_pkt{4, static_cast<uint8_t>(std::min<size_t>(len, 16))};
   memcpy(drp_pkt.data.data(), data, drp_pkt.length);
   System_TracePacket(4, false, TraceType::DRP, drp_pkt);

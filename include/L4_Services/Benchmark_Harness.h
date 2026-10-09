@@ -109,6 +109,9 @@ struct Phase2CatalogDecompMetrics {
   uint32_t unaccounted_cycles{0};    // Wall-clock vs pipeline cycles delta
   uint32_t shadow_dedup_hit_cycles{0};   // 2-I: Warm Path Shadow State Dedup Hit (no delta)
   uint32_t shadow_dedup_delta_cycles{0}; // 2-J: Warm Path Shadow State Delta Emit
+  uint32_t device_exists_cycles{0};       // 2-K: Device_Exists (Bool probe)
+  uint32_t device_metadata_cycles{0};     // 2-L: Device_GetMetadata (12B header)
+  uint32_t device_packed_state_cycles{0}; // 2-M: Device_GetPackedState (8B state)
   uint32_t e2e_pure_pipeline_cycles{0};  // Pure E2E 1-probe pipeline latency (probe overhead eliminated)
 };
 

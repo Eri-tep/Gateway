@@ -545,6 +545,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   uint64_t sum_copy = 0, sum_ptr = 0, sum_span_param = 0;
   uint64_t sum_route = 0, sum_dispatch = 0;
   uint64_t sum_dedup_hit = 0, sum_dedup_delta = 0;
+  uint64_t sum_exists = 0, sum_meta = 0, sum_packed = 0;
   uint64_t sum_pure_e2e = 0;
   uint64_t total_cycles = 0;
   uint32_t min_c = UINT32_MAX, max_c = 0;
@@ -639,6 +640,26 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     t1 = esp_cpu_get_cycle_count();
     sum_dedup_delta += static_cast<uint32_t>(t1 - t0);
 
+    // 2-K. Public Device_Exists (Bool probe)
+    t0 = esp_cpu_get_cycle_count();
+    bool exists_ok = Device_Exists(0x18, 0x01, 0x00);
+    t1 = esp_cpu_get_cycle_count();
+    sum_exists += static_cast<uint32_t>(t1 - t0);
+
+    // 2-L. Public Device_GetMetadata (12B Header copy)
+    t0 = esp_cpu_get_cycle_count();
+    DeviceMetadata meta_res{};
+    bool meta_ok = Device_GetMetadata(0x18, 0x01, 0x00, meta_res);
+    t1 = esp_cpu_get_cycle_count();
+    sum_meta += static_cast<uint32_t>(t1 - t0);
+
+    // 2-M. Public Device_GetPackedState (8B State copy)
+    t0 = esp_cpu_get_cycle_count();
+    uint64_t state_packed = 0;
+    bool packed_ok = Device_GetPackedState(0x18, 0x01, 0x00, state_packed);
+    t1 = esp_cpu_get_cycle_count();
+    sum_packed += static_cast<uint32_t>(t1 - t0);
+
     // 4. Routing Table Lookup
     t0 = esp_cpu_get_cycle_count();
     uint8_t ch = Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
@@ -654,11 +675,13 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     s_observable_sink += (ext_len ^ (valid ? 1 : 0) ^ (found_full ? 2 : 0) ^
                           n_sub ^ (hit_ok ? 4 : 0) ^ (miss_ok ? 8 : 0) ^
                           (direct_exists ? 16 : 0) ^ sp_res ^ ch ^
-                          (dedup_hit ? 32 : 0) ^ (is_delta ? 64 : 0) ^ (delta_emitted ? 128 : 0));
+                          (dedup_hit ? 32 : 0) ^ (is_delta ? 64 : 0) ^ (delta_emitted ? 128 : 0) ^
+                          (exists_ok ? 256 : 0) ^ (meta_ok ? meta_res.dev_id : 0) ^
+                          (packed_ok ? static_cast<uint32_t>(state_packed) : 0));
 
     uint32_t loop_end = esp_cpu_get_cycle_count();
     uint32_t loop_diff = static_cast<uint32_t>(loop_end - loop_start);
-    if (loop_diff > probe_oh * 13) loop_diff -= (probe_oh * 13);
+    if (loop_diff > probe_oh * 16) loop_diff -= (probe_oh * 16);
     else loop_diff = 1;
 
     total_cycles += loop_diff;
@@ -700,6 +723,9 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   r.phase2.span_vs_ptr_cycles = static_cast<uint32_t>(sum_span_param / iterations);
   r.phase2.shadow_dedup_hit_cycles = static_cast<uint32_t>(sum_dedup_hit / iterations);
   r.phase2.shadow_dedup_delta_cycles = static_cast<uint32_t>(sum_dedup_delta / iterations);
+  r.phase2.device_exists_cycles = static_cast<uint32_t>(sum_exists / iterations);
+  r.phase2.device_metadata_cycles = static_cast<uint32_t>(sum_meta / iterations);
+  r.phase2.device_packed_state_cycles = static_cast<uint32_t>(sum_packed / iterations);
   r.phase2.route_lookup_cycles = static_cast<uint32_t>(sum_route / iterations);
   r.phase2.dispatch_build_cycles = static_cast<uint32_t>(sum_dispatch / iterations);
   // ── Dedicated Isolated Pure E2E Verification Block (5,000 runs) ───────────
@@ -736,6 +762,9 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
                               r.phase2.span_vs_ptr_cycles +
                               r.phase2.shadow_dedup_hit_cycles +
                               r.phase2.shadow_dedup_delta_cycles +
+                              r.phase2.device_exists_cycles +
+                              r.phase2.device_metadata_cycles +
+                              r.phase2.device_packed_state_cycles +
                               r.phase2.route_lookup_cycles +
                               r.phase2.dispatch_build_cycles;
   uint64_t mean_measured_loop = total_cycles / iterations;
@@ -1252,6 +1281,12 @@ void FormatReport(AppendBuf &out, const BenchmarkReport &r) noexcept {
                      r.phase2.shadow_dedup_hit_cycles, r.phase2.shadow_dedup_hit_cycles / 240.0f);
     out.appendFormat("2-J. Shadow Delta Emit (Update) : %6u cycles (%5.2f us)\r\n",
                      r.phase2.shadow_dedup_delta_cycles, r.phase2.shadow_dedup_delta_cycles / 240.0f);
+    out.appendFormat("2-K. Public Device_Exists (Bool): %6u cycles (%5.2f us)\r\n",
+                     r.phase2.device_exists_cycles, r.phase2.device_exists_cycles / 240.0f);
+    out.appendFormat("2-L. Device_GetMetadata (12B)   : %6u cycles (%5.2f us)\r\n",
+                     r.phase2.device_metadata_cycles, r.phase2.device_metadata_cycles / 240.0f);
+    out.appendFormat("2-M. Device_GetPackedState (8B) : %6u cycles (%5.2f us)\r\n",
+                     r.phase2.device_packed_state_cycles, r.phase2.device_packed_state_cycles / 240.0f);
     out.append(CliFmt::BOX80_DASH);
     out.appendFormat("Pipeline Stream Framing        : %6u cycles (%5.2f us)\r\n",
                      r.phase2.stream_framing_cycles, r.phase2.stream_framing_cycles / 240.0f);
