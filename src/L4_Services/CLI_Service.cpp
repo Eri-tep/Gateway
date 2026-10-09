@@ -66,6 +66,11 @@ static void write(int sock, const char *data, size_t len) noexcept {
   if (!valid(sock, data, len))
     return;
 
+  // Bulkhead Protection: Free Heap이 64KB 안전 마진 미만이면 비핵심 텔넷 출력 즉시 드랍-테일
+  if (esp_get_free_heap_size() < 65536) {
+    return;
+  }
+
   if (s_telnet_tx_sem &&
       xSemaphoreTake(s_telnet_tx_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
     size_t sent = 0;
@@ -846,6 +851,8 @@ void TelnetManager::onClientConnect(int new_sock,
   fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
   int nodelay = 1;
   setsockopt(new_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+  int sndbuf = 4096; // 4 KB Bounded Buffer (Bulkhead)
+  setsockopt(new_sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
   int emptySlot = -1;
   {

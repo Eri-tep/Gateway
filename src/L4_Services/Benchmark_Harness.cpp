@@ -598,6 +598,9 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
+      if ((i % 10000) == 0 && i > 0) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
     }
   }
 
@@ -1009,6 +1012,9 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
+      if ((i % 10000) == 0 && i > 0) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
     }
   }
 

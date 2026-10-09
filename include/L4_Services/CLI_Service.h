@@ -259,7 +259,7 @@ struct TracePacketEntry {
 
 class TelnetTracer {
 private:
-  static constexpr size_t RING_CAP = 64;
+  static constexpr size_t RING_CAP = 32;
   static constexpr size_t RING_MASK = RING_CAP - 1;
 
   struct TraceSlot {

@@ -132,7 +132,7 @@ struct RtcWarmCache {
   uint32_t magic; // 0x57415243 ('WARC')
   uint8_t count;
   uint8_t reserved[3];
-  RtcWarmCacheEntry entries[48];
+  RtcWarmCacheEntry entries[32];
   uint32_t crc32;
 };
 
@@ -154,7 +154,7 @@ void WarmCache_CheckNvsDebounce();
 
 class PollingTargetRegistry {
 public:
-  static constexpr size_t MAX_TARGETS = 48;
+  static constexpr size_t MAX_TARGETS = 32;
 
   struct PollingCandidate {
     uint8_t dev_id{0};

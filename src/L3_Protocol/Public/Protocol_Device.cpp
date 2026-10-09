@@ -714,7 +714,7 @@ bool Device_CopyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 // ── Telemetry Event Queue Implementation ──────────────────────────────────────
 
 namespace {
-constexpr size_t TELEMETRY_QUEUE_LEN = 32;
+constexpr size_t TELEMETRY_QUEUE_LEN = 16;
 static Foundation::SpinlockMpscRingBuffer<TelemetryItem, TELEMETRY_QUEUE_LEN> s_telemetry_queue;
 static std::atomic<uint32_t> s_telemetry_drop_count{0};
 static std::atomic<uint32_t> s_telemetry_high_watermark{0};
