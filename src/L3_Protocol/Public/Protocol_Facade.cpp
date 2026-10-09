@@ -564,14 +564,12 @@ static void Protocol_OnBridgePacketReceived(uint8_t slot_idx, const StaticPacket
         uint8_t new_pwr = (pkt.data[8] == 0x06) ? 1 : 0;
         uint8_t prev = s_last_elev_pwr.exchange(new_pwr, std::memory_order_acq_rel);
         if (prev != new_pwr) {
-          ESP_LOGI("ProtocolDiag", "[CH5] Elevator State Changed -> Power: %u", new_pwr);
           Device_NotifyElevatorEvent(sub1, sub2, 15, 0, new_pwr, false);
         }
       } else {
         if (pkt.length == 13 && pkt.data[4] == 0x01 && pkt.data[8] == 0x01) {
           uint8_t floor = pkt.data[9];
           uint8_t ho = pkt.data[10];
-          ESP_LOGI("ProtocolDiag", "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor, ho);
           Device_NotifyElevatorEvent(sub1, sub2, floor, ho, 0, true);
         }
       }

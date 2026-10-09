@@ -26,6 +26,7 @@ namespace {
 
 // DRAM-allocated 256-byte direct lock-free route cache (Cache-line aligned)
 alignas(64) static std::atomic<uint8_t> s_fast_route_cache[256];
+static std::atomic<uint32_t> s_seqlock_retry_count{0};
 
 class DeviceRouteRegistry {
 public:
@@ -50,6 +51,19 @@ public:
                    uint8_t sub1, uint8_t sub2) noexcept {
     const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
     const uint32_t now = millis();
+
+    // Fast-path: optimistic check without Seqlock write lock
+    const size_t cnt_snap = _count.load(std::memory_order_relaxed);
+    int8_t direct_idx = _lookup_map[h];
+    if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < cnt_snap &&
+        _entries[direct_idx].dev_id == dev_id && _entries[direct_idx].sub1 == sub1 &&
+        _entries[direct_idx].sub2 == sub2) [[likely]] {
+      if (_entries[direct_idx].endpoint.channel_id == channel_id &&
+          _entries[direct_idx].endpoint.slot_idx == slot_idx) [[likely]] {
+        _entries[direct_idx].endpoint.last_seen_ms = now;
+        return;
+      }
+    }
 
     Gateway::Foundation::CriticalSeqWriterGuard lock(&_mux, _seqlock);
     const size_t cnt = _count.load(std::memory_order_relaxed);
@@ -100,6 +114,9 @@ public:
 
     constexpr size_t MAX_RETRIES = 8;
     for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+      if (retry > 0) [[unlikely]] {
+        s_seqlock_retry_count.fetch_add(1, std::memory_order_relaxed);
+      }
       const uint32_t seq = _seqlock.read_begin();
       const size_t cnt = _count.load(std::memory_order_relaxed);
 
@@ -238,6 +255,10 @@ bool Router_LookupRoute(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 
 void Router_ClearRoutes() noexcept {
   s_route_registry.clear();
+}
+
+uint32_t Router_GetSeqlockRetryCount() noexcept {
+  return s_seqlock_retry_count.load(std::memory_order_relaxed);
 }
 
 // ── Router_GetRoutes ──────────────────────────────────────────────────────────

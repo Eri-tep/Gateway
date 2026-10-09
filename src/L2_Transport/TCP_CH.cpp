@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "L2_Transport/TCP_CH.h"
+#include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 
@@ -53,14 +54,15 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
     }
 
     int act = 0;
-    struct timeval tv = {0, 2000}; // 2ms responsive non-blocking cadence
+    const bool has_clients = Bridge_HasActiveClients();
+    struct timeval tv = has_clients ? (struct timeval){0, 2000} : (struct timeval){0, 20000};
     if (max_fd >= 0) [[likely]] {
       act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
       if (ota_now) [[unlikely]] {
         vTaskDelay(pdMS_TO_TICKS(10));
       }
     } else {
-      vTaskDelay(pdMS_TO_TICKS(2));
+      vTaskDelay(pdMS_TO_TICKS(has_clients ? 2 : 20));
     }
 
     esp_task_wdt_reset();

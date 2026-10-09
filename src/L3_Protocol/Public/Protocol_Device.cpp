@@ -39,12 +39,7 @@ static_assert(sizeof(DeviceStateEntry) % sizeof(uint32_t) == 0,
 
 static inline void copyEntryDirectSeqlock(DeviceStateEntry &dst,
                                           const DeviceStateEntry &src) noexcept {
-  dst.last_updated_ms = src.last_updated_ms;
-  dst.last_stale_poll_ms = src.last_stale_poll_ms;
-  dst.dev_id = src.dev_id;
-  dst.sub1 = src.sub1;
-  dst.sub2 = src.sub2;
-  dst.is_online = src.is_online;
+  static_cast<DeviceMetadata &>(dst) = static_cast<const DeviceMetadata &>(src);
   dst.shadow_packed_state = src.shadow_packed_state;
   dst.last_target_temp = src.last_target_temp;
   dst.last_current_temp = src.last_current_temp;
@@ -53,14 +48,8 @@ static inline void copyEntryDirectSeqlock(DeviceStateEntry &dst,
   const uint8_t ack_len = std::min<uint8_t>(src.last_ack_len, 64);
   dst.last_ack_len = ack_len;
   if (ack_len > 0) {
-    const volatile uint32_t *src_p =
-        reinterpret_cast<const volatile uint32_t *>(src.last_ack_data.data());
-    uint32_t *dst_p =
-        reinterpret_cast<uint32_t *>(dst.last_ack_data.data());
-    const size_t words = (ack_len + 3) / 4;
-    for (size_t i = 0; i < words; ++i) {
-      dst_p[i] = src_p[i];
-    }
+    const size_t copy_bytes = (ack_len + 3) & ~0x03;
+    std::memcpy(dst.last_ack_data.data(), src.last_ack_data.data(), copy_bytes);
   }
 }
 

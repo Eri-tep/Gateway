@@ -66,6 +66,7 @@ static QueueSetHandle_t s_ch1_queue_set = nullptr;
 static QueueHandle_t s_uart0_event_queue = nullptr, s_uart1_event_queue = nullptr,
                      s_uart2_event_queue = nullptr;
 static QueueHandle_t s_ch4_passthrough_queue = nullptr;
+static std::atomic<uint8_t> s_ch4_pending{0};
 static SemaphoreHandle_t s_uart0_mutex = nullptr, s_uart1_mutex = nullptr,
                          s_uart2_mutex = nullptr;
 
@@ -84,6 +85,7 @@ void Engine_InitQueues() {
          s_uart2_mutex != nullptr);
 
   s_ch1_control_pending.store(0, std::memory_order_relaxed);
+  s_ch4_pending.store(0, std::memory_order_relaxed);
   s_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
                                            s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
   s_ch1_vip_sem = xSemaphoreCreateCountingStatic(Config::Queue::POOL_SIZE_VIP, 0,
@@ -145,11 +147,41 @@ bool Engine_EnqueueCh1(const StaticPacket &pkt, bool vip) noexcept {
 bool Engine_EnqueueCh4Pass(const StaticPacket &pkt) noexcept {
   if (UNLIKELY(!s_ch4_passthrough_queue))
     return false;
-  return (xQueueSend(s_ch4_passthrough_queue, &pkt, 0) == pdTRUE);
+  if (s_ch4_pending.load(std::memory_order_relaxed) >= Config::Queue::POOL_SIZE_CH4_PASS) [[unlikely]] {
+    Diag_RecordChannelQueueFull(4);
+    return false;
+  }
+  if (xQueueSend(s_ch4_passthrough_queue, &pkt, 0) == pdTRUE) {
+    s_ch4_pending.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  Diag_RecordChannelQueueFull(4);
+  return false;
 }
 
 void RS485_EnqueueCh4Passthrough(const StaticPacket &pkt) noexcept {
   Engine_EnqueueCh4Pass(pkt);
+}
+
+static void TraceThrottledWarn(const char *msg, uint32_t &last_ms,
+                               std::atomic<uint32_t> &suppressed_count,
+                               uint32_t interval_ms = 5000) noexcept {
+  const uint32_t now = millis();
+  if (TimeUtils::isElapsed(last_ms, interval_ms)) {
+    last_ms = now;
+    const uint32_t supp = suppressed_count.exchange(0, std::memory_order_relaxed);
+    if (supp > 0) {
+      char buf[128];
+      snprintf(buf, sizeof(buf), "%s (Suppressed %u times)\r\n", msg, supp);
+      System_TraceMessage(buf);
+    } else {
+      char buf[128];
+      snprintf(buf, sizeof(buf), "%s\r\n", msg);
+      System_TraceMessage(buf);
+    }
+  } else {
+    suppressed_count.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 // ============================================================================
@@ -528,8 +560,10 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     }
   } else {
     Diag_RecordChannelTimeout(1);
-    System_TraceMessage(
-        "[WARN] Device did not ACK control packet in time.\r\n");
+    static uint32_t s_warn_ctrl_ack_ms = 0;
+    static std::atomic<uint32_t> s_supp_ctrl_ack{0};
+    TraceThrottledWarn("[WARN] Device did not ACK control packet in time.",
+                       s_warn_ctrl_ack_ms, s_supp_ctrl_ack);
   }
 }
 
@@ -572,7 +606,10 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       MutexLocker lock(s_uart0_mutex, kUartLockTimeout);
       if (!lock.isLocked()) {
         Diag_RecordChannelLockTimeout(1);
-        System_TraceMessage("[WARN] UART0 mutex timeout on poll\r\n");
+        static uint32_t s_warn_poll_mux_ms = 0;
+        static std::atomic<uint32_t> s_supp_poll_mux{0};
+        TraceThrottledWarn("[WARN] UART0 mutex timeout on poll",
+                           s_warn_poll_mux_ms, s_supp_poll_mux);
         return;
       }
 
@@ -669,11 +706,15 @@ void Task_Ch1(void *pvParameters) {
     uint32_t rem_ms = (now < next_poll_due_ms) ? (next_poll_due_ms - now) : 0;
     TickType_t wait_ticks = (rem_ms > 0) ? pdMS_TO_TICKS(rem_ms) : 1;
 
+    const bool work_pending = (!s_ch1_vip_ringbuf.empty() ||
+                               s_ch1_control_pending.load(std::memory_order_relaxed) > 0);
     QueueSetMemberHandle_t activated = nullptr;
     if (s_ch1_queue_set) {
-      activated = xQueueSelectFromSet(s_ch1_queue_set, wait_ticks);
+      activated = xQueueSelectFromSet(s_ch1_queue_set, work_pending ? 0 : wait_ticks);
     } else {
-      vTaskDelay(wait_ticks);
+      if (!work_pending) {
+        vTaskDelay(wait_ticks);
+      }
     }
 
     if (s_ch1_vip_ringbuf.pop(ctrlPacket)) {
@@ -718,7 +759,7 @@ void Task_Ch1(void *pvParameters) {
 // ============================================================================
 
 struct TaskAckPollContext {
-  TimestampedPacketQueue<8> *ack_q;
+  TimestampedPacketQueue<8, false> *ack_q;
   const WallpadChannelConfig *cfg;
   SingleChannelStats *stats;
   SemaphoreHandle_t uart_mutex;
@@ -739,7 +780,10 @@ static uint32_t Ch2Ch3_DrainVirtualAckQueue(void *arg) {
                        next_ack.length);
     } else {
       ctx->stats->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
-      System_TraceMessage("[WARN] UART mutex timeout on virtual ACK\r\n");
+      static uint32_t s_warn_vack_mux_ms = 0;
+      static std::atomic<uint32_t> s_supp_vack_mux{0};
+      TraceThrottledWarn("[WARN] UART mutex timeout on virtual ACK",
+                         s_warn_vack_mux_ms, s_supp_vack_mux);
     }
     System_TracePacket(ctx->cfg->channel_id, true, TraceType::ACK,
                        next_ack);
@@ -767,7 +811,7 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
   }
 
   Uart_FlushChannelInput(cfg->uart_num);
-  TimestampedPacketQueue<8> ack_queue;
+  TimestampedPacketQueue<8, false> ack_queue;
 
   if (g_system_event_group) {
     xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
@@ -808,8 +852,11 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
         uint32_t target_due = millis() + delay_ms;
         if (!ack_queue.enqueue(virtual_ack, target_due)) [[unlikely]] {
           stats->uncached_pkts.fetch_add(1, std::memory_order_relaxed);
-          System_TraceMessage("[WARN] Wallpad virtual ACK queue overflow, "
-                              "packet dropped.\r\n");
+          Diag_RecordChannelQueueFull(cfg->channel_id);
+          static uint32_t s_warn_vack_q_ms = 0;
+          static std::atomic<uint32_t> s_supp_vack_q{0};
+          TraceThrottledWarn("[WARN] Wallpad virtual ACK queue overflow, packet dropped.",
+                             s_warn_vack_q_ms, s_supp_vack_q);
         }
       } else {
         if (s_dispatcher.onFeedControlFrame) [[unlikely]] {
@@ -953,16 +1000,35 @@ void Task_Ch4(void *pvParameters) {
       uint8_t temp[32];
       const int to_read = std::min(avail, static_cast<int>(sizeof(temp)));
       const int read_bytes = Uart_ReadSwSerial(temp, to_read);
-      for (int i = 0; i < read_bytes; ++i) {
-        if (buf_len < sizeof(buf)) {
-          buf[buf_len++] = temp[i];
-        } else {
-          memmove(buf, buf + 1, buf_len - 1);
-          buf[buf_len - 1] = temp[i];
-        }
-      }
       if (read_bytes > 0) {
         last_byte_ms = now;
+        if (buf_len + read_bytes > sizeof(buf)) {
+          uint8_t t_stx = 0, t_etx = 0, t_len = 0;
+          bool locked = s_dispatcher.onDoorphoneGetLockedFraming &&
+                        s_dispatcher.onDoorphoneGetLockedFraming(t_stx, t_etx, t_len);
+          if (locked && buf_len > 0) {
+            const void *hit = memchr(buf, t_stx, buf_len);
+            if (!hit) {
+              buf_len = 0;
+            } else {
+              size_t first_stx = static_cast<const uint8_t *>(hit) - buf;
+              if (first_stx > 0) {
+                memmove(buf, buf + first_stx, buf_len - first_stx);
+                buf_len -= first_stx;
+              } else {
+                memmove(buf, buf + 1, buf_len - 1);
+                buf_len -= 1;
+              }
+            }
+          } else {
+            const size_t overflow = (buf_len + read_bytes) - sizeof(buf);
+            memmove(buf, buf + overflow, buf_len - overflow);
+            buf_len -= overflow;
+          }
+        }
+        const size_t to_copy = std::min<size_t>(read_bytes, sizeof(buf) - buf_len);
+        memcpy(&buf[buf_len], temp, to_copy);
+        buf_len += to_copy;
       }
     }
 
@@ -1085,6 +1151,9 @@ void Task_Ch4(void *pvParameters) {
 
     if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx,
                       pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+      if (s_ch4_pending.load(std::memory_order_relaxed) > 0) {
+        s_ch4_pending.fetch_sub(1, std::memory_order_relaxed);
+      }
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
     }
   }

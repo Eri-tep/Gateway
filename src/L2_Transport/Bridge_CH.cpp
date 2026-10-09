@@ -8,6 +8,7 @@
 
 #include <Preferences.h>
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -51,6 +52,33 @@ static HubClientSlot s_hub_slots[Config::TCP::MAX_EW11_SLOTS];
 static SemaphoreHandle_t s_ch5_mutex = nullptr;
 static int s_ew11_server_fds[Config::TCP::MAX_EW11_SLOTS] = {-1, -1, -1, -1,
                                                              -1};
+static std::atomic<int> s_hub_active_socks[Config::TCP::MAX_EW11_SLOTS]{-1, -1, -1, -1, -1};
+
+static inline void SetActiveSock(size_t slot, int fd) noexcept {
+  if (slot < Config::TCP::MAX_EW11_SLOTS) {
+    s_hub_active_socks[slot].store(fd, std::memory_order_release);
+  }
+}
+
+static inline void InvalidateAndCloseSock(HubClientSlot &slot, size_t slot_idx) noexcept {
+  SetActiveSock(slot_idx, -1);
+  if (slot.sock >= 0) {
+    int old_fd = slot.sock;
+    slot.sock = -1;
+    slot.is_connected = false;
+    slot.rx_len = 0;
+    close(old_fd);
+  }
+}
+
+bool Bridge_HasActiveClients() noexcept {
+  for (size_t s = 0; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
+    if (s_hub_active_socks[s].load(std::memory_order_relaxed) >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static Bridge_PacketDispatcher s_dispatcher{};
 static BridgeSlotDriver s_slot_drivers[Config::TCP::MAX_EW11_SLOTS]{};
@@ -525,12 +553,13 @@ int Hub_AcceptClient(int slot_idx, int server_fd) {
   configureClientSocket(new_sock);
 
   if (slot.sock >= 0) {
-    close(slot.sock);
+    InvalidateAndCloseSock(slot, slot_idx);
   }
   slot.sock = new_sock;
   slot.is_connected = true;
   slot.rx_len = 0;
   slot.last_rx_ms = millis();
+  SetActiveSock(slot_idx, new_sock);
   if (slot.target_ip[0] == '\0') {
     strncpy(slot.target_ip, client_ip_str, sizeof(slot.target_ip) - 1);
     slot.target_ip[sizeof(slot.target_ip) - 1] = '\0';
@@ -754,11 +783,7 @@ void Bridge_PopulateFds(fd_set &readfds, fd_set &errorfds,
 
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
     add_fd(s_ew11_server_fds[s]);
-  }
-
-  MutexLocker lock(s_ch5_mutex);
-  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-    add_fd(s_hub_slots[s].sock);
+    add_fd(s_hub_active_socks[s].load(std::memory_order_relaxed));
   }
 }
 
@@ -788,10 +813,7 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
           continue;
 
         if (FD_ISSET(slot.sock, &errorfds)) {
-          close(slot.sock);
-          slot.sock = -1;
-          slot.is_connected = false;
-          slot.rx_len = 0;
+          InvalidateAndCloseSock(slot, s);
           ESP_LOGW("EW11", "[CH5] Slot %d (%s) socket error detected. Closed.",
                    s, slot.name);
           continue;
@@ -810,10 +832,7 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
           } else {
             if (r == 0 ||
                 (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-              close(slot.sock);
-              slot.sock = -1;
-              slot.is_connected = false;
-              slot.rx_len = 0;
+              InvalidateAndCloseSock(slot, s);
             }
           }
         }
@@ -916,12 +935,14 @@ void Bridge_Init() {
     s_hub_slots[s].sock = -1;
     s_hub_slots[s].is_connected = false;
     s_hub_slots[s].rx_len = 0;
+    SetActiveSock(s, -1);
   }
 }
 
 void Bridge_ShutdownSockets() noexcept {
   MutexLocker lock(s_ch5_mutex);
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+    SetActiveSock(s, -1);
     if (s_hub_slots[s].sock >= 0) {
       close(s_hub_slots[s].sock);
       s_hub_slots[s].sock = -1;

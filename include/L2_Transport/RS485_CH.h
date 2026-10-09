@@ -35,7 +35,7 @@ struct TimestampedPacket {
   StaticPacket pkt;
 };
 
-template <size_t Capacity = 8> class TimestampedPacketQueue {
+template <size_t Capacity = 8, bool ThreadSafe = true> class TimestampedPacketQueue {
 private:
   TimestampedPacket _elements[Capacity]{};
   size_t _head = 0;
@@ -45,55 +45,102 @@ private:
 
 public:
   bool enqueue(const StaticPacket &pkt, uint32_t due_ms) noexcept {
-    CriticalSectionLocker lock(&_mux);
-    if (_size >= Capacity) {
-      return false;
+    if constexpr (ThreadSafe) {
+      CriticalSectionLocker lock(&_mux);
+      if (_size >= Capacity) {
+        return false;
+      }
+      _elements[_tail] = {due_ms, pkt};
+      _tail = (_tail + 1) % Capacity;
+      _size++;
+      return true;
+    } else {
+      if (_size >= Capacity) {
+        return false;
+      }
+      _elements[_tail] = {due_ms, pkt};
+      _tail = (_tail + 1) % Capacity;
+      _size++;
+      return true;
     }
-    _elements[_tail] = {due_ms, pkt};
-    _tail = (_tail + 1) % Capacity;
-    _size++;
-    return true;
   }
 
   bool dequeue(StaticPacket &out_pkt, uint32_t &out_due_ms) noexcept {
-    CriticalSectionLocker lock(&_mux);
-    if (_size == 0) {
-      return false;
+    if constexpr (ThreadSafe) {
+      CriticalSectionLocker lock(&_mux);
+      if (_size == 0) {
+        return false;
+      }
+      out_due_ms = _elements[_head].due_ms;
+      out_pkt = _elements[_head].pkt;
+      _head = (_head + 1) % Capacity;
+      _size--;
+      return true;
+    } else {
+      if (_size == 0) {
+        return false;
+      }
+      out_due_ms = _elements[_head].due_ms;
+      out_pkt = _elements[_head].pkt;
+      _head = (_head + 1) % Capacity;
+      _size--;
+      return true;
     }
-    out_due_ms = _elements[_head].due_ms;
-    out_pkt = _elements[_head].pkt;
-    _head = (_head + 1) % Capacity;
-    _size--;
-    return true;
   }
 
   bool dequeueIfDue(uint32_t now, StaticPacket &out_pkt) noexcept {
-    CriticalSectionLocker lock(&_mux);
-    if (_size == 0 || now < _elements[_head].due_ms) {
-      return false;
+    if constexpr (ThreadSafe) {
+      CriticalSectionLocker lock(&_mux);
+      if (_size == 0 || now < _elements[_head].due_ms) {
+        return false;
+      }
+      out_pkt = _elements[_head].pkt;
+      _head = (_head + 1) % Capacity;
+      _size--;
+      return true;
+    } else {
+      if (_size == 0 || now < _elements[_head].due_ms) {
+        return false;
+      }
+      out_pkt = _elements[_head].pkt;
+      _head = (_head + 1) % Capacity;
+      _size--;
+      return true;
     }
-    out_pkt = _elements[_head].pkt;
-    _head = (_head + 1) % Capacity;
-    _size--;
-    return true;
   }
 
   [[nodiscard]] std::optional<uint32_t> getNextDueMs() const noexcept {
-    CriticalSectionLocker lock(const_cast<portMUX_TYPE *>(&_mux));
-    if (_size == 0) {
-      return std::nullopt;
+    if constexpr (ThreadSafe) {
+      CriticalSectionLocker lock(const_cast<portMUX_TYPE *>(&_mux));
+      if (_size == 0) {
+        return std::nullopt;
+      }
+      return _elements[_head].due_ms;
+    } else {
+      if (_size == 0) {
+        return std::nullopt;
+      }
+      return _elements[_head].due_ms;
     }
-    return _elements[_head].due_ms;
   }
 
   bool peek(StaticPacket &out_pkt, uint32_t &out_due_ms) noexcept {
-    CriticalSectionLocker lock(&_mux);
-    if (_size == 0) {
-      return false;
+    if constexpr (ThreadSafe) {
+      CriticalSectionLocker lock(&_mux);
+      if (_size == 0) {
+        return false;
+      }
+      out_due_ms = _elements[_head].due_ms;
+      out_pkt = _elements[_head].pkt;
+      return true;
+    } else {
+      if (_size == 0) {
+        return false;
+      }
+      out_due_ms = _elements[_head].due_ms;
+      out_pkt = _elements[_head].pkt;
+      return true;
     }
-    out_due_ms = _elements[_head].due_ms;
-    out_pkt = _elements[_head].pkt;
-    return true;
   }
 
   size_t size() const noexcept {

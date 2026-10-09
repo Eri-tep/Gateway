@@ -151,13 +151,16 @@ static JitterDistribution MeasureIsolatedOnCore1(F &&workload, uint32_t sample_r
     uint64_t total = 0;
     HistReset();
 
-    // Pre-warm 100 runs on Core 1
-    for (uint32_t w = 0; w < 100; ++w) {
+    // Pre-warm 1,000 runs on Core 1 to ensure 100% L1 cache & Flash XIP MMU residency
+    for (uint32_t w = 0; w < 1000; ++w) {
       (*c->fn)();
     }
 
     uint32_t probe_oh = (s_probe_overhead_cycles > 0) ? s_probe_overhead_cycles : 1;
     for (uint32_t i = 0; i < c->runs; ++i) {
+      if (i > 0 && (i & 0x07FF) == 0) {
+        esp_task_wdt_reset();
+      }
       uint32_t t0 = esp_cpu_get_cycle_count();
       (*c->fn)();
       uint32_t t1 = esp_cpu_get_cycle_count();
@@ -169,11 +172,6 @@ static JitterDistribution MeasureIsolatedOnCore1(F &&workload, uint32_t sample_r
       if (diff < min_c) min_c = diff;
       if (diff > max_c) max_c = diff;
       HistRecord(diff);
-
-      if ((i & 0x03FF) == 0) {
-        esp_task_wdt_reset();
-        taskYIELD();
-      }
     }
     c->result = HistCompute(c->runs, min_c, max_c, total);
     s_core1_bench_done.store(true, std::memory_order_release);
@@ -209,6 +207,10 @@ uint32_t MeasureSelfOverhead() noexcept {
 
 void Initialize() noexcept {
   MeasureSelfOverhead();
+  (void)Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+  DeviceStateEntry dummy;
+  (void)Device_FindCopy(0x18, 0x01, 0x00, dummy);
+  (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
 }
 
 static void CaptureSafetyPre(SystemSafetyMetrics &s) noexcept {
@@ -356,7 +358,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
     benchBoolRet(GOLDEN_QUERY[3], bv);
     test_atomic.fetch_add(1, std::memory_order_relaxed);
 
-    if ((i & 0x01FF) == 0) {
+    if (i > 0 && (i & 0x01FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
@@ -442,7 +444,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
       RecordOutlier(r, i, diff, GOLDEN_QUERY[3], GOLDEN_QUERY[4]);
     }
 
-    if ((i & 0x03FF) == 0) {
+    if (i > 0 && (i & 0x03FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
@@ -531,7 +533,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
     std::memcpy(s_null_sink, GOLDEN_ACK, sizeof(GOLDEN_ACK));
 
-    if ((i & 0x01FF) == 0) {
+    if (i > 0 && (i & 0x01FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
@@ -669,11 +671,11 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
       RecordOutlier(r, i, loop_diff, GOLDEN_QUERY[3], GOLDEN_QUERY[4]);
     }
 
-    if ((i & 0x0FFF) == 0) {
+    if (i > 0 && (i & 0x0FFF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
-      if ((i % 20000) == 0 && i > 0) {
+      if ((i % 20000) == 0) {
         vTaskDelay(pdMS_TO_TICKS(1));
       }
     }
@@ -817,7 +819,7 @@ BenchmarkReport RunPhase3_SyncAndAtomic(uint32_t iterations) noexcept {
     portEXIT_CRITICAL(&local_mux);
     local_atomic.fetch_add(1, std::memory_order_relaxed);
 
-    if ((i & 0x01FF) == 0) {
+    if (i > 0 && (i & 0x01FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
@@ -1124,11 +1126,11 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
       RecordOutlier(r, i, diff, mix_pkt[3], mix_pkt[4]);
     }
 
-    if ((i & 0x03FF) == 0) {
+    if (i > 0 && (i & 0x03FF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
-      if ((i % 10000) == 0 && i > 0) {
+      if ((i % 10000) == 0) {
         vTaskDelay(pdMS_TO_TICKS(1));
       }
     }

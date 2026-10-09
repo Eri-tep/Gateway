@@ -63,6 +63,9 @@ void Router_RecordRoute(uint8_t channel_id, int8_t slot_idx,
 /// Clear all registered routes (called on profile change / factory reset).
 void Router_ClearRoutes() noexcept;
 
+/// Diagnostic: Get the number of Seqlock retries occurred during route lookups.
+[[nodiscard]] uint32_t Router_GetSeqlockRetryCount() noexcept;
+
 /// Copy all route entries into caller-supplied buffer for inspection/export.
 /// Returns number of entries copied.
 [[nodiscard]] size_t Router_GetRoutes(std::span<DeviceRouteEntry> out_buf) noexcept;

@@ -40,6 +40,7 @@ void Bridge_ShutdownSockets() noexcept;
 void Bridge_PopulateFds(fd_set &readfds, fd_set &errorfds, int &max_fd) noexcept;
 void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds, bool ota_now) noexcept;
 void Bridge_Tick(bool ota_now, uint32_t now_ms) noexcept;
+bool Bridge_HasActiveClients() noexcept;
 
 bool Bridge_ForwardPacket(uint8_t slot_idx, const StaticPacket &pkt,
                           bool burst) noexcept;
