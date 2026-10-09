@@ -15,6 +15,7 @@
 #include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
+#include "L0_Foundation/Seqlock.h"
 
 #include <Arduino.h>
 #include <algorithm>
@@ -35,6 +36,7 @@ private:
   int8_t _lookup_map[256]{};
   std::atomic<size_t> _count{0};
   mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+  mutable Gateway::Foundation::SequenceLock _seqlock;
 
 public:
   DeviceRouteRegistry() noexcept {
@@ -49,7 +51,7 @@ public:
     const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
     const uint32_t now = millis();
 
-    CriticalSectionLocker lock(&_mux);
+    Gateway::Foundation::CriticalSeqWriterGuard lock(&_mux, _seqlock);
     const size_t cnt = _count.load(std::memory_order_relaxed);
 
     size_t attempts = 0;
@@ -96,10 +98,60 @@ public:
                                  RouteEndpoint &out_ep) const noexcept {
     const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
 
+    constexpr size_t MAX_RETRIES = 8;
+    for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+      const uint32_t seq = _seqlock.read_begin();
+      const size_t cnt = _count.load(std::memory_order_relaxed);
+
+      // Fast-Path: Direct hit (O(1))
+      int8_t direct_idx = _lookup_map[h];
+      if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < cnt &&
+          _entries[direct_idx].dev_id == dev_id && _entries[direct_idx].sub1 == sub1 &&
+          _entries[direct_idx].sub2 == sub2) [[likely]] {
+        const RouteEndpoint ep = _entries[direct_idx].endpoint;
+        if (!_seqlock.read_retry(seq)) [[likely]] {
+          out_ep = ep;
+          return true;
+        }
+        continue;
+      }
+      if (direct_idx == -1) {
+        if (_seqlock.read_retry(seq))
+          continue;
+        return false;
+      }
+
+      // Fallback: Open addressing collision loop
+      bool found = false;
+      RouteEndpoint ep{};
+      size_t attempts = 1;
+      uint8_t cur_h = (h + 1) & 0xFF;
+      while (attempts < MAX_ROUTES) {
+        int8_t idx = _lookup_map[cur_h];
+        if (idx == -1)
+          break;
+        if (idx >= 0 && static_cast<size_t>(idx) < cnt &&
+            _entries[idx].dev_id == dev_id && _entries[idx].sub1 == sub1 &&
+            _entries[idx].sub2 == sub2) {
+          ep = _entries[idx].endpoint;
+          found = true;
+          break;
+        }
+        cur_h = (cur_h + 1) & 0xFF;
+        attempts++;
+      }
+
+      if (!_seqlock.read_retry(seq)) [[likely]] {
+        if (found) {
+          out_ep = ep;
+        }
+        return found;
+      }
+    }
+
+    // High Contention Fallback
     CriticalSectionLocker lock(&_mux);
     const size_t cnt = _count.load(std::memory_order_relaxed);
-
-    // Fast-Path: Direct hit (O(1))
     int8_t direct_idx = _lookup_map[h];
     if (direct_idx >= 0 && static_cast<size_t>(direct_idx) < cnt &&
         _entries[direct_idx].dev_id == dev_id && _entries[direct_idx].sub1 == sub1 &&
@@ -110,8 +162,6 @@ public:
     if (direct_idx == -1) {
       return false;
     }
-
-    // Fallback: Open addressing collision loop
     size_t attempts = 1;
     uint8_t cur_h = (h + 1) & 0xFF;
     while (attempts < MAX_ROUTES) {
@@ -147,7 +197,7 @@ public:
   }
 
   void clear() noexcept {
-    CriticalSectionLocker lock(&_mux);
+    Gateway::Foundation::CriticalSeqWriterGuard lock(&_mux, _seqlock);
     _count.store(0, std::memory_order_relaxed);
     memset(_lookup_map, -1, sizeof(_lookup_map));
     memset(_entries, 0, sizeof(_entries));

@@ -19,11 +19,34 @@ void FormatHex(std::span<const uint8_t> data, std::span<char> out) noexcept {
   if (out.empty())
     return;
   size_t idx = 0;
-  for (size_t k = 0; k < data.size() && idx + 3 < out.size(); ++k) {
+  size_t k = 0;
+  const size_t data_len = data.size();
+
+  // SWAR 4-Byte Chunk Processing: 4 bytes in -> 12 characters out
+  while (k + 4 <= data_len && idx + 13 <= out.size()) {
+    alignas(4) char chunk[12];
+    const auto &h0 = HexLUT::LUT[data[k]];
+    const auto &h1 = HexLUT::LUT[data[k + 1]];
+    const auto &h2 = HexLUT::LUT[data[k + 2]];
+    const auto &h3 = HexLUT::LUT[data[k + 3]];
+
+    chunk[0] = h0[0]; chunk[1] = h0[1]; chunk[2] = ' ';
+    chunk[3] = h1[0]; chunk[4] = h1[1]; chunk[5] = ' ';
+    chunk[6] = h2[0]; chunk[7] = h2[1]; chunk[8] = ' ';
+    chunk[9] = h3[0]; chunk[10] = h3[1]; chunk[11] = ' ';
+
+    memcpy(&out[idx], chunk, 12);
+    idx += 12;
+    k += 4;
+  }
+
+  // Remainder tail processing (1~3 bytes)
+  while (k < data_len && idx + 3 < out.size()) {
     const auto &hex_chars = HexLUT::LUT[data[k]];
     out[idx++] = hex_chars[0];
     out[idx++] = hex_chars[1];
     out[idx++] = ' ';
+    k++;
   }
   out[idx] = '\0';
 }

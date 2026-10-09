@@ -7,6 +7,7 @@
 #include "L3_Protocol/Private/Wallpad_Engine.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L0_Foundation/System_Buffer.h"
+#include "L0_Foundation/Seqlock.h"
 
 #include <Arduino.h>
 #include <Preferences.h>
@@ -1363,6 +1364,7 @@ struct NormSub1Rule {
 static NormSub1Rule s_norm_rules[ControlTemplateRegistry::MAX_GROUPS]{};
 static size_t s_norm_rule_count{0};
 static portMUX_TYPE s_norm_rules_mux = portMUX_INITIALIZER_UNLOCKED;
+static Gateway::Foundation::SequenceLock s_norm_rules_seqlock;
 } // namespace
 
 void ControlTemplateRegistry::rebuildNormSub1LutLocked() noexcept {
@@ -1382,12 +1384,13 @@ void ControlTemplateRegistry::rebuildNormSub1LutLocked() noexcept {
       }
     }
   }
-  taskENTER_CRITICAL(&s_norm_rules_mux);
-  for (size_t i = 0; i < next_count; ++i) {
-    s_norm_rules[i] = next_rules[i];
+  {
+    Gateway::Foundation::CriticalSeqWriterGuard lock(&s_norm_rules_mux, s_norm_rules_seqlock);
+    for (size_t i = 0; i < next_count; ++i) {
+      s_norm_rules[i] = next_rules[i];
+    }
+    s_norm_rule_count = next_count;
   }
-  s_norm_rule_count = next_count;
-  taskEXIT_CRITICAL(&s_norm_rules_mux);
 }
 
 void ControlTemplateRegistry::clear() {
@@ -2305,16 +2308,31 @@ bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
 }
 
 uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  // Read-mostly derived cache (0-Lock, 0-Copy, O(1) integer comparison)
+  // Read-mostly derived cache with Seqlock optimistic read (Thread-safe, 0-Copy, O(1))
   // Max 8 elements (typically 1~2 active rules for HVAC). Rebuilt exclusively in cold path.
-  const size_t count = s_norm_rule_count;
-  for (size_t i = 0; i < count; ++i) {
-    if (s_norm_rules[i].dev_id == dev_id) {
-      if (sub1 == s_norm_rules[i].temp_sub1 || sub1 == s_norm_rules[i].speed_sub1) {
-        return s_norm_rules[i].power_sub1;
+  constexpr size_t MAX_RETRIES = 4;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = s_norm_rules_seqlock.read_begin();
+    const size_t count = s_norm_rule_count;
+    for (size_t i = 0; i < count; ++i) {
+      if (s_norm_rules[i].dev_id == dev_id) {
+        if (sub1 == s_norm_rules[i].temp_sub1 || sub1 == s_norm_rules[i].speed_sub1) {
+          uint8_t pwr = s_norm_rules[i].power_sub1;
+          if (!s_norm_rules_seqlock.read_retry(seq)) [[likely]] {
+            return pwr;
+          }
+          goto retry_loop;
+        }
+        if (!s_norm_rules_seqlock.read_retry(seq)) [[likely]] {
+          return sub1;
+        }
+        goto retry_loop;
       }
+    }
+    if (!s_norm_rules_seqlock.read_retry(seq)) [[likely]] {
       return sub1;
     }
+  retry_loop:;
   }
   return sub1;
 }

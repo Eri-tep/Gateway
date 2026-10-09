@@ -321,7 +321,7 @@ $$\text{Architecture} = \begin{cases} \text{Legacy (구형 34B 브로드캐스�
 
 ## 부록 C. 파서 구현 레퍼런스 (Parser Reference)
 
-본 부록은 펌웨어(C++17) 및 SmartThings Edge Driver(Lua 5.3) 파서 구현 시 표준으로 채택하는 핵심 알고리즘 의사코드(Pseudocode)입니다.
+본 부록은 펌웨어(C++23) 및 SmartThings Edge Driver(Lua 5.3) 파서 구현 시 표준으로 채택하는 핵심 알고리즘 의사코드(Pseudocode)입니다.
 
 ### C.1 패킷 무결성 및 체크섬 검증
 ```text
@@ -337,6 +337,8 @@ function VerifyPacket(packet, length):
 
     return (calculated_cs == packet[length - 2])
 ```
+> [!NOTE] **C++23 프로덕션 펌웨어 SWAR 가속**:
+> 게이트웨이 펌웨어(`src/L3_Protocol/`)에서는 상기 스칼라 루프 의사코드와 수학적으로 100% 동일한 결과를 보장하면서, 32비트 워드 청크(`uint32_t`) 단위 병렬 XOR 연산을 수행하는 **SWAR(SIMD Within A Register)** 체크섬 연산 파이프라인을 채택하여 패킷 검증 사이클을 최소화합니다.
 
 ### C.2 신구 세대 및 가변 길이 파싱 분기
 ```text

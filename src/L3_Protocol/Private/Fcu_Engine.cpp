@@ -20,8 +20,15 @@ static const char *TAG = "FCU_PROTO";
 namespace ModbusRtu {
 
 namespace {
-consteval auto makeCrc16Table() noexcept {
-  std::array<uint16_t, 256> table{};
+struct Slice4Tables {
+  std::array<uint16_t, 256> t0{};
+  std::array<uint16_t, 256> t1{};
+  std::array<uint16_t, 256> t2{};
+  std::array<uint16_t, 256> t3{};
+};
+
+consteval Slice4Tables makeSlice4Tables() noexcept {
+  Slice4Tables s{};
   for (uint16_t i = 0; i < 256; ++i) {
     uint16_t crc = i;
     for (int j = 0; j < 8; ++j) {
@@ -31,18 +38,57 @@ consteval auto makeCrc16Table() noexcept {
         crc >>= 1;
       }
     }
-    table[i] = crc;
+    s.t0[i] = crc;
   }
-  return table;
+  for (uint16_t i = 0; i < 256; ++i) {
+    s.t1[i] = (s.t0[i] >> 8) ^ s.t0[s.t0[i] & 0xFF];
+    s.t2[i] = (s.t1[i] >> 8) ^ s.t0[s.t1[i] & 0xFF];
+    s.t3[i] = (s.t2[i] >> 8) ^ s.t0[s.t2[i] & 0xFF];
+  }
+  return s;
 }
 
-constexpr auto kModbusCrcTable = makeCrc16Table();
+constexpr auto kSliceTables = makeSlice4Tables();
+
+// Compile-time Golden Vector Check (0x01, 0x03, 0x00, 0x00, 0x00, 0x07 -> 0x0804)
+static_assert([] {
+  constexpr uint8_t test_pkt[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07};
+  uint16_t crc = kModbusCrcInit;
+  for (uint8_t b : test_pkt) {
+    crc = (crc >> 8) ^ kSliceTables.t0[(crc ^ b) & 0xFF];
+  }
+  uint16_t fast_crc = kModbusCrcInit;
+  fast_crc = kSliceTables.t3[(fast_crc ^ test_pkt[0]) & 0xFF] ^
+             kSliceTables.t2[((fast_crc >> 8) ^ test_pkt[1]) & 0xFF] ^
+             kSliceTables.t1[test_pkt[2]] ^
+             kSliceTables.t0[test_pkt[3]];
+  fast_crc = (fast_crc >> 8) ^ kSliceTables.t0[(fast_crc ^ test_pkt[4]) & 0xFF];
+  fast_crc = (fast_crc >> 8) ^ kSliceTables.t0[(fast_crc ^ test_pkt[5]) & 0xFF];
+  return crc == 0x0804 && fast_crc == 0x0804;
+}(), "Modbus CRC-16 Slice-by-4 golden vector validation failed");
 } // namespace
 
 uint16_t calcCrc16(std::span<const uint8_t> data) noexcept {
   uint16_t crc = kModbusCrcInit;
-  for (uint8_t byte : data) {
-    crc = (crc >> 8) ^ kModbusCrcTable[(crc ^ byte) & 0xFF];
+  size_t i = 0;
+  const size_t len = data.size();
+
+  while (i + 4 <= len) {
+    const uint8_t b0 = data[i];
+    const uint8_t b1 = data[i + 1];
+    const uint8_t b2 = data[i + 2];
+    const uint8_t b3 = data[i + 3];
+
+    crc = kSliceTables.t3[(crc ^ b0) & 0xFF] ^
+          kSliceTables.t2[((crc >> 8) ^ b1) & 0xFF] ^
+          kSliceTables.t1[b2] ^
+          kSliceTables.t0[b3];
+    i += 4;
+  }
+
+  while (i < len) {
+    crc = (crc >> 8) ^ kSliceTables.t0[(crc ^ data[i]) & 0xFF];
+    i++;
   }
   return crc;
 }
