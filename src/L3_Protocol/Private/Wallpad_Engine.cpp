@@ -912,7 +912,7 @@ void ProfileRepository::resetAllToDefaults() {
 namespace {
 
 int Wallpad_ScoreCandidate(const PollingTargetRegistry::PollingCandidate &tgt,
-                           const DeviceStateEntry *cached_dev) noexcept {
+                           const DeviceMetadata *cached_meta) noexcept {
   // CH5 (EW11 TCP) 소속 타겟(FCU 모드버스, 엘리베이터 등)은 CH1 물리 버스 폴링에서 원천 배제
   if ((tgt.source_channels != 0 && !(tgt.source_channels & kWallpadChMask)) ||
       (tgt.source_channels & (1 << 5)) ||
@@ -924,16 +924,16 @@ int Wallpad_ScoreCandidate(const PollingTargetRegistry::PollingCandidate &tgt,
       ep.channel_id == 5) {
     return 999;
   }
-  if (!cached_dev) {
+  if (!cached_meta) {
     return 1;
   }
-  if (cached_dev->last_updated_ms == 0) {
+  if (cached_meta->last_updated_ms == 0) {
     return 1;
   }
-  if (cached_dev->is_online) {
+  if (cached_meta->is_online) {
     return 2;
   }
-  if (TimeUtils::isElapsed(cached_dev->last_stale_poll_ms,
+  if (TimeUtils::isElapsed(cached_meta->last_stale_poll_ms,
                            Config::Timing::CH1_STALE_POLL_INTERVAL_MS)) {
     return 3;
   }
@@ -982,9 +982,9 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
     for (size_t i = 0; i < active_cnt; i++) {
       size_t idx = (s_current_dev_idx + i) % active_cnt;
       const auto &tgt = candidates[idx];
-      DeviceStateEntry cached_dev_snap{};
-      bool has_cached = Device_FindCopy(tgt.dev_id, tgt.sub1, tgt.sub2, cached_dev_snap);
-      int score = Wallpad_ScoreCandidate(tgt, has_cached ? &cached_dev_snap : nullptr);
+      DeviceMetadata cached_meta{};
+      bool has_cached = Device_GetMetadata(tgt.dev_id, tgt.sub1, tgt.sub2, cached_meta);
+      int score = Wallpad_ScoreCandidate(tgt, has_cached ? &cached_meta : nullptr);
 
       if (score <= 3) {
         chosen_idx = idx;
@@ -1015,20 +1015,20 @@ bool Wallpad_BuildNextPollPacket(StaticPacket &out_pkt, uint8_t &poll_dev_id,
     size_t dev_cnt = Device_GetCount();
     if (dev_cnt > 0) {
       size_t idx = s_current_dev_idx % dev_cnt;
-      DeviceStateEntry dev_snap{};
-      bool has_dev = Device_GetAtCopy(idx, dev_snap);
+      DeviceMetadata dev_meta{};
+      bool has_dev = Device_GetAtMetadata(idx, dev_meta);
       s_current_dev_idx = (idx + 1) % dev_cnt;
-      if (has_dev && dev_snap.dev_id != Config::FCU::DEV_ID &&
-          (dev_snap.is_online || dev_snap.last_updated_ms == 0 ||
-           TimeUtils::isElapsed(dev_snap.last_stale_poll_ms,
+      if (has_dev && dev_meta.dev_id != Config::FCU::DEV_ID &&
+          (dev_meta.is_online || dev_meta.last_updated_ms == 0 ||
+           TimeUtils::isElapsed(dev_meta.last_stale_poll_ms,
                                 Config::Timing::CH1_STALE_POLL_INTERVAL_MS))) {
         RouteEndpoint ep;
-        if (!Router_LookupRoute(dev_snap.dev_id, dev_snap.sub1, dev_snap.sub2, ep) ||
+        if (!Router_LookupRoute(dev_meta.dev_id, dev_meta.sub1, dev_meta.sub2, ep) ||
             ep.channel_id != 5) {
-          poll_dev_id = dev_snap.dev_id;
-          poll_sub1 = dev_snap.sub1;
-          poll_sub2 = dev_snap.sub2;
-          if (!dev_snap.is_online)
+          poll_dev_id = dev_meta.dev_id;
+          poll_sub1 = dev_meta.sub1;
+          poll_sub2 = dev_meta.sub2;
+          if (!dev_meta.is_online)
             Device_SetLastStalePollMsByIndex(idx, now);
           target_selected = true;
         }

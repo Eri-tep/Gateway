@@ -11,6 +11,7 @@
 #include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/Lockless_RingBuffer.h"
 #include "L0_Foundation/System_Platform.h"
+#include "L0_Foundation/Seqlock.h"
 
 #include <Arduino.h>
 #include <algorithm>
@@ -60,6 +61,7 @@ private:
   std::atomic<size_t> _device_count{0};
   std::atomic<size_t> _online_count{0};
   mutable portMUX_TYPE _cache_mux = portMUX_INITIALIZER_UNLOCKED;
+  mutable Gateway::Foundation::SequenceLock _seqlock;
 
   const DeviceStateEntry *findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
                                            uint8_t sub2, uint8_t h) const noexcept;
@@ -83,8 +85,12 @@ public:
                               DeviceStateEntry &out_copy) const noexcept;
   [[nodiscard]] bool getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                     uint64_t &out_packed) const noexcept;
+  [[nodiscard]] bool getMetadata(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                 DeviceMetadata &out_meta) const noexcept;
   [[nodiscard]] bool getSnapshot(size_t index,
                                  DeviceStateEntry &out_copy) const noexcept;
+  [[nodiscard]] bool getAtMetadata(size_t index,
+                                   DeviceMetadata &out_meta) const noexcept;
   [[nodiscard]] size_t getSnapshotChunk(size_t start_idx,
                                         DeviceStateEntry *out_buf,
                                         size_t max_count) const noexcept;
@@ -103,6 +109,7 @@ public:
                     bool is_online, const uint8_t *raw_pkt, size_t raw_len) noexcept;
 #if defined(BENCHMARK_BUILD)
   [[nodiscard]] portMUX_TYPE *getMux() const noexcept { return &_cache_mux; }
+  [[nodiscard]] Gateway::Foundation::SequenceLock &getSeqlock() const noexcept { return _seqlock; }
 #endif
 };
 
@@ -232,6 +239,21 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
 
+  constexpr size_t MAX_RETRIES = 8;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = _seqlock.read_begin();
+    const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
+    if (!e) [[unlikely]] {
+      if (_seqlock.read_retry(seq))
+        continue;
+      return false;
+    }
+    copyEntryBounded(out_copy, *e);
+    if (!_seqlock.read_retry(seq)) [[likely]] {
+      return true;
+    }
+  }
+
   CriticalSectionLocker lock(&_cache_mux);
   const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
   if (!e) [[unlikely]]
@@ -241,9 +263,25 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 }
 
 bool DeviceRepository::getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                                uint64_t &out_packed) const noexcept {
+                                      uint64_t &out_packed) const noexcept {
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
+  constexpr size_t MAX_RETRIES = 8;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = _seqlock.read_begin();
+    const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
+    if (!e) [[unlikely]] {
+      if (_seqlock.read_retry(seq))
+        continue;
+      return false;
+    }
+    const uint64_t packed = e->shadow_packed_state;
+    if (!_seqlock.read_retry(seq)) [[likely]] {
+      out_packed = packed;
+      return true;
+    }
+  }
 
   CriticalSectionLocker lock(&_cache_mux);
   const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
@@ -253,12 +291,79 @@ bool DeviceRepository::getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2
   return true;
 }
 
+bool DeviceRepository::getMetadata(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                   DeviceMetadata &out_meta) const noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
+  constexpr size_t MAX_RETRIES = 8;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = _seqlock.read_begin();
+    const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
+    if (!e) [[unlikely]] {
+      if (_seqlock.read_retry(seq))
+        continue;
+      return false;
+    }
+    const DeviceMetadata meta = *static_cast<const DeviceMetadata*>(e);
+    if (!_seqlock.read_retry(seq)) [[likely]] {
+      out_meta = meta;
+      return true;
+    }
+  }
+
+  CriticalSectionLocker lock(&_cache_mux);
+  const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
+  if (!e) [[unlikely]]
+    return false;
+  out_meta = *static_cast<const DeviceMetadata*>(e);
+  return true;
+}
+
 bool DeviceRepository::getSnapshot(size_t index,
                                    DeviceStateEntry &out_copy) const noexcept {
+  constexpr size_t MAX_RETRIES = 8;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = _seqlock.read_begin();
+    if (index >= _device_count.load(std::memory_order_relaxed)) {
+      if (_seqlock.read_retry(seq))
+        continue;
+      return false;
+    }
+    copyEntryBounded(out_copy, cache[index]);
+    if (!_seqlock.read_retry(seq)) [[likely]] {
+      return true;
+    }
+  }
+
   CriticalSectionLocker lock(&_cache_mux);
   if (index >= _device_count.load(std::memory_order_relaxed))
     return false;
   copyEntryBounded(out_copy, cache[index]);
+  return true;
+}
+
+bool DeviceRepository::getAtMetadata(size_t index,
+                                     DeviceMetadata &out_meta) const noexcept {
+  constexpr size_t MAX_RETRIES = 8;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = _seqlock.read_begin();
+    if (index >= _device_count.load(std::memory_order_relaxed)) {
+      if (_seqlock.read_retry(seq))
+        continue;
+      return false;
+    }
+    const DeviceMetadata meta = static_cast<const DeviceMetadata&>(cache[index]);
+    if (!_seqlock.read_retry(seq)) [[likely]] {
+      out_meta = meta;
+      return true;
+    }
+  }
+
+  CriticalSectionLocker lock(&_cache_mux);
+  if (index >= _device_count.load(std::memory_order_relaxed))
+    return false;
+  out_meta = static_cast<const DeviceMetadata&>(cache[index]);
   return true;
 }
 
@@ -283,7 +388,7 @@ bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
 
-  CriticalSectionLocker lock(&_cache_mux);
+  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
   auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev) {
     dev->last_target_temp = temp;
@@ -297,6 +402,27 @@ bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
                                       StaticPacket &out) noexcept {
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
+  constexpr size_t MAX_RETRIES = 8;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = _seqlock.read_begin();
+    const auto *dev = findInternalFast(dev_id, norm_sub1, sub2, h);
+    if (!dev || dev->last_ack_len == 0) {
+      if (_seqlock.read_retry(seq))
+        continue;
+      return false;
+    }
+    const size_t copy_len = std::min({static_cast<size_t>(dev->last_ack_len),
+                                      dev->last_ack_data.size(),
+                                      out.data.size()});
+    std::array<uint8_t, 64> temp_data;
+    memcpy(temp_data.data(), dev->last_ack_data.data(), copy_len);
+    if (!_seqlock.read_retry(seq)) [[likely]] {
+      out.length = static_cast<uint8_t>(copy_len);
+      memcpy(out.data.data(), temp_data.data(), copy_len);
+      return true;
+    }
+  }
 
   CriticalSectionLocker lock(&_cache_mux);
   const auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
@@ -317,7 +443,7 @@ void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8
   const uint8_t h = Device_Hash(Config::FCU::DEV_ID, norm_sub1, 0);
   const uint32_t now = millis();
 
-  CriticalSectionLocker lock(&_cache_mux);
+  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
   DeviceStateEntry *dev = findMutableFast(Config::FCU::DEV_ID, norm_sub1, 0, h, true);
   if (!dev) return;
 
@@ -342,7 +468,7 @@ void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
 
-  CriticalSectionLocker lock(&_cache_mux);
+  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
   auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev) {
     dev->last_stale_poll_ms = ms;
@@ -352,19 +478,22 @@ void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
 void DeviceRepository::setLastStalePollMsByIndex(size_t index,
                                                  uint32_t ms) noexcept {
   if (index < _device_count.load(std::memory_order_relaxed)) {
-    cache[index].last_stale_poll_ms = ms;
+    Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+    if (index < _device_count.load(std::memory_order_relaxed)) {
+      cache[index].last_stale_poll_ms = ms;
+    }
   }
 }
 
 void DeviceRepository::initDevices() {
-  CriticalSectionLocker lock(&_cache_mux);
+  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   _device_count.store(0, std::memory_order_relaxed);
   _online_count.store(0, std::memory_order_relaxed);
 }
 
 void DeviceRepository::clear() {
-  CriticalSectionLocker lock(&_cache_mux);
+  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   _device_count.store(0, std::memory_order_relaxed);
   _online_count.store(0, std::memory_order_relaxed);
@@ -374,6 +503,7 @@ namespace {
 static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
                                             const StaticPacket &ack,
                                             portMUX_TYPE &mux,
+                                            Gateway::Foundation::SequenceLock &seq,
                                             DeviceUpdateResult &out_res) {
   if (ack.length != 34 || ack.data[3] != 0x18 || ack.data[4] != 0x04)
     return false;
@@ -397,7 +527,7 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
     const uint8_t r_norm_sub1 = Device_NormSub1(0x18, r_sub1);
     const uint8_t r_h = Device_Hash(0x18, r_norm_sub1, 0);
     {
-      CriticalSectionLocker lock(mux);
+      Gateway::Foundation::CriticalSeqWriterGuard lock(mux, seq);
       DeviceStateEntry *r_dev = repo.findMutableFast(0x18, r_norm_sub1, 0, r_h, true);
       if (r_dev) {
         r_dev->last_updated_ms = now;
@@ -463,7 +593,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
 
   // 구형(Legacy) 34B 난방 브로드캐스트 처리 (Packet[1]==0x22 && Dev==0x18 &&
   // Opcode==0x04)
-  if (handleLegacyThermostatBroadcast(*this, ack, _cache_mux, res)) {
+  if (handleLegacyThermostatBroadcast(*this, ack, _cache_mux, _seqlock, res)) {
     return res;
   }
 
@@ -507,7 +637,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
       std::min(static_cast<size_t>(ack.length), sizeof(dev_snap.last_ack_data));
 
   {
-    CriticalSectionLocker lock(&_cache_mux);
+    Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
     DeviceStateEntry *dev = findMutableFast(dev_id, norm_sub1, sub2, h, true);
     if (UNLIKELY(!dev)) {
       return res;
@@ -564,7 +694,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
                                 (st.direction != prev_dir) || (st.ho != prev_ho);
         if (ev_state_changed) {
           st.should_broadcast = true;
-          CriticalSectionLocker lock(&_cache_mux);
+          Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
           auto *mdev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
           if (mdev) {
             mdev->last_current_temp = static_cast<uint8_t>(st.floor);
@@ -594,7 +724,7 @@ void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
 
-  CriticalSectionLocker lock(&_cache_mux);
+  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
   auto *mdev = findMutableFast(dev_id, norm_sub1, sub2, h, true);
   if (mdev && mdev->is_online && ++mdev->timeout_count >= 3) {
     mdev->is_online = false;
@@ -665,8 +795,17 @@ bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   return s_device_repo.getPackedState(dev_id, sub1, sub2, out_packed);
 }
 
+bool Device_GetMetadata(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                        DeviceMetadata &out_meta) noexcept {
+  return s_device_repo.getMetadata(dev_id, sub1, sub2, out_meta);
+}
+
 bool Device_GetAtCopy(size_t index, DeviceStateEntry &out_copy) noexcept {
   return s_device_repo.getSnapshot(index, out_copy);
+}
+
+bool Device_GetAtMetadata(size_t index, DeviceMetadata &out_meta) noexcept {
+  return s_device_repo.getAtMetadata(index, out_meta);
 }
 
 void Device_RegisterFcu(uint8_t slot_idx) noexcept {
@@ -926,7 +1065,7 @@ portMUX_TYPE *getMuxHandle() noexcept {
 }
 
 void registerMockDevice(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
-  CriticalSectionLocker lock(s_device_repo.getMux());
+  Gateway::Foundation::CriticalSeqWriterGuard lock(s_device_repo.getMux(), s_device_repo.getSeqlock());
   DeviceStateEntry *dev = s_device_repo.findMutable(dev_id, sub1, sub2, true);
   if (dev) {
     dev->is_online = true;

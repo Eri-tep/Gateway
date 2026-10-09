@@ -184,18 +184,25 @@ struct DeviceKey {
   }
 };
 
-struct DeviceStateEntry {
-  uint8_t dev_id;
-  uint8_t sub1, sub2;
+/// Canonical device metadata header for hot-path candidate scoring and poll routing (zero 64B payload copy).
+struct DeviceMetadata {
+  uint32_t last_updated_ms{0};
+  mutable uint32_t last_stale_poll_ms{0};
+  uint8_t dev_id{0};
+  uint8_t sub1{0};
+  uint8_t sub2{0};
+  bool is_online{false};
+};
+static_assert(std::is_trivially_copyable_v<DeviceMetadata>,
+              "DeviceMetadata must be trivially copyable");
+
+struct DeviceStateEntry : public DeviceMetadata {
   uint64_t shadow_packed_state{0}; ///< 64-bit packed state fingerprint
-  std::array<uint8_t, 64> last_ack_data;
+  std::array<uint8_t, 64> last_ack_data{};
   uint8_t last_ack_len{0};
   uint8_t last_target_temp{0};
   uint8_t last_current_temp{0};
-  uint32_t last_updated_ms{0};
-  mutable uint32_t last_stale_poll_ms{0};
   uint8_t timeout_count{0};
-  bool is_online{false};
 
   [[nodiscard]] bool isStale() const noexcept {
     return last_updated_ms > 0 &&
@@ -228,6 +235,8 @@ struct DeviceStateEntry {
 
 static_assert(std::is_trivially_copyable_v<DeviceStateEntry>,
               "DeviceStateEntry must be trivially copyable");
+
+using DeviceMetaFast = DeviceMetadata;
 
 struct DeviceUpdateResult {
   bool updated{false};
@@ -295,9 +304,23 @@ void Device_Clear() noexcept;
 [[nodiscard]] bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                          uint64_t &out_packed) noexcept;
 
-/// Get copy of device entry at index (thread-safe copy).
-[[nodiscard]] bool Device_GetAtCopy(size_t index,
-                                    DeviceStateEntry &out_copy) noexcept;
+/// Fast lightweight metadata query (thread-safe, zero 64B array copy).
+[[nodiscard]] bool Device_GetMetadata(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                                      DeviceMetadata &out_meta) noexcept;
+
+/// Fast lightweight metadata query by index (thread-safe, zero 64B array copy).
+[[nodiscard]] bool Device_GetAtMetadata(size_t index,
+                                        DeviceMetadata &out_meta) noexcept;
+
+inline bool Device_GetMetaFast(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+                               DeviceMetadata &out_meta) noexcept {
+  return Device_GetMetadata(dev_id, sub1, sub2, out_meta);
+}
+
+inline bool Device_GetAtMetaFast(size_t index,
+                                 DeviceMetadata &out_meta) noexcept {
+  return Device_GetAtMetadata(index, out_meta);
+}
 
 /// Register FCU sub-device slot into repository cache.
 void Device_RegisterFcu(uint8_t slot_idx) noexcept;

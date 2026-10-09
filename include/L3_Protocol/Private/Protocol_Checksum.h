@@ -36,26 +36,50 @@ inline constexpr uint16_t kChecksumInvalid = 0x0100;
 
 constexpr uint8_t calcXorAll(const uint8_t *p, size_t end) noexcept {
   uint8_t r = 0;
-  for (size_t i = 0; i < end; ++i) r ^= p[i];
+  size_t i = 0;
+  for (; i + 4 <= end; i += 4) {
+    const uint32_t chunk = static_cast<uint32_t>(p[i]) |
+                           (static_cast<uint32_t>(p[i + 1]) << 8) |
+                           (static_cast<uint32_t>(p[i + 2]) << 16) |
+                           (static_cast<uint32_t>(p[i + 3]) << 24);
+    r ^= static_cast<uint8_t>(chunk ^ (chunk >> 8) ^ (chunk >> 16) ^ (chunk >> 24));
+  }
+  for (; i < end; ++i) r ^= p[i];
   return r;
 }
 
 constexpr uint8_t calcXorNoStx(const uint8_t *p, size_t end) noexcept {
   uint8_t r = 0;
-  for (size_t i = 1; i < end; ++i) r ^= p[i];
+  size_t i = 1;
+  for (; i + 4 <= end; i += 4) {
+    const uint32_t chunk = static_cast<uint32_t>(p[i]) |
+                           (static_cast<uint32_t>(p[i + 1]) << 8) |
+                           (static_cast<uint32_t>(p[i + 2]) << 16) |
+                           (static_cast<uint32_t>(p[i + 3]) << 24);
+    r ^= static_cast<uint8_t>(chunk ^ (chunk >> 8) ^ (chunk >> 16) ^ (chunk >> 24));
+  }
+  for (; i < end; ++i) r ^= p[i];
   return r;
 }
 
 constexpr uint8_t calcSumAll(const uint8_t *p, size_t end) noexcept {
-  uint8_t r = 0;
-  for (size_t i = 0; i < end; ++i) r += p[i];
-  return r;
+  uint32_t sum = 0;
+  size_t i = 0;
+  for (; i + 4 <= end; i += 4) {
+    sum += static_cast<uint32_t>(p[i]) + p[i + 1] + p[i + 2] + p[i + 3];
+  }
+  for (; i < end; ++i) sum += p[i];
+  return static_cast<uint8_t>(sum);
 }
 
 constexpr uint8_t calcSumNoStx(const uint8_t *p, size_t end) noexcept {
-  uint8_t r = 0;
-  for (size_t i = 1; i < end; ++i) r += p[i];
-  return r;
+  uint32_t sum = 0;
+  size_t i = 1;
+  for (; i + 4 <= end; i += 4) {
+    sum += static_cast<uint32_t>(p[i]) + p[i + 1] + p[i + 2] + p[i + 3];
+  }
+  for (; i < end; ++i) sum += p[i];
+  return static_cast<uint8_t>(sum);
 }
 
 constexpr uint8_t calcTwosComp(const uint8_t *p, size_t end) noexcept {
