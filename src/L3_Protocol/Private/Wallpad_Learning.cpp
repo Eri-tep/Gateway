@@ -181,7 +181,9 @@ void AutoProbingEngine::feedFrame(std::span<const uint8_t> f) {
       if (ok) {
         _desc.matched_packets++;
         _consecutive_mismatches = 0;
-      } else if (++_consecutive_mismatches >= 5) { // 5연속 불일치 → 재학습
+        return;
+      }
+      if (++_consecutive_mismatches >= 5) { // 5연속 불일치 → 재학습
         _desc.is_locked = false;
         _desc.opcodes_locked = false;
         _desc.matched_packets = 0;
@@ -490,10 +492,7 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
       swap_i = int(i);
       swap_j = int(j);
       const size_t ci = qBits(i).count(), cj = qBits(j).count();
-      if (ci == 1 && cj > 1) {
-        master_gw_idx = int(i);
-        promoted_dev_idx = int(j);
-      } else if (cj == 1 && ci > 1) {
+      if (cj == 1 && ci > 1) {
         master_gw_idx = int(j);
         promoted_dev_idx = int(i);
       } else {
@@ -533,7 +532,9 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (qBits(k).count() == 1) {
       if (master_gw_idx < 0)
         master_gw_idx = int(k);
-    } else if (promoted_dev_idx >= 0) {
+      continue;
+    }
+    if (promoted_dev_idx >= 0) {
       std::fill(std::begin(s_work_map), std::end(s_work_map), int16_t(-1));
       bool pure = true;
       size_t keys = 0;
@@ -652,10 +653,13 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     }
     if (dev_type_idx >= 0)
       _desc.dev_id_offset = uint8_t(dev_type_idx);
-    if (sub_cmd_idx >= 0)
+    if (sub_cmd_idx >= 0) {
       _desc.sub1_offset = uint8_t(sub_cmd_idx);
-    else if (sub_id_idx >= 0)
-      _desc.sub1_offset = uint8_t(sub_id_idx);
+    } else {
+      if (sub_id_idx >= 0) {
+        _desc.sub1_offset = uint8_t(sub_id_idx);
+      }
+    }
     if (sub_id_idx >= 0)
       _desc.sub2_offset = uint8_t(sub_id_idx);
 
@@ -669,8 +673,10 @@ bool AutoProbingEngine::analyzeCacheMatrix() {
     if (master_gw_idx >= 0) {
       _desc.gw_addr_offset = uint8_t(master_gw_idx);
       _desc.gw_addr = s_matrix_pairs[0].q.data[master_gw_idx];
-    } else if (!_desc.is_swapped_addr && dev_type_idx >= 0) {
-      _desc.gw_addr_offset = _desc.dev_id_offset;
+    } else {
+      if (!_desc.is_swapped_addr && dev_type_idx >= 0) {
+        _desc.gw_addr_offset = _desc.dev_id_offset;
+      }
     }
 
     if (min_len >= 5 && min_len <= 64)
@@ -984,14 +990,16 @@ void PollingTargetRegistry::registerOrTouch(uint8_t ch, uint8_t dev_id,
         hit->sub1 = sub1;
         hit->sub2 = sub2;
       }
-    } else if (_count < MAX_TARGETS) {
-      e = &_entries[_count++];
-      *e = PollingTargetEntry{}; // 이전 슬롯의 ACK/잔여값 제거
-      e->dev_id = dev_id;
-      e->sub1 = sub1;
-      e->sub2 = sub2;
-      e->hit_count = 1;
-      is_new_entry = true;
+    } else {
+      if (_count < MAX_TARGETS) {
+        e = &_entries[_count++];
+        *e = PollingTargetEntry{}; // 이전 슬롯의 ACK/잔여값 제거
+        e->dev_id = dev_id;
+        e->sub1 = sub1;
+        e->sub2 = sub2;
+        e->hit_count = 1;
+        is_new_entry = true;
+      }
     }
 
     if (e) {
@@ -1362,10 +1370,11 @@ struct NormSub1Rule {
 };
 
 static NormSub1Rule s_norm_rules[ControlTemplateRegistry::MAX_GROUPS]{};
-static size_t s_norm_rule_count{0};
 static portMUX_TYPE s_norm_rules_mux = portMUX_INITIALIZER_UNLOCKED;
 static Gateway::Foundation::SequenceLock s_norm_rules_seqlock;
 } // namespace
+
+std::atomic<uint8_t> s_norm_rule_count{0};
 
 void ControlTemplateRegistry::rebuildNormSub1LutLocked() noexcept {
   NormSub1Rule next_rules[MAX_GROUPS]{};
@@ -1389,7 +1398,7 @@ void ControlTemplateRegistry::rebuildNormSub1LutLocked() noexcept {
     for (size_t i = 0; i < next_count; ++i) {
       s_norm_rules[i] = next_rules[i];
     }
-    s_norm_rule_count = next_count;
+    s_norm_rule_count.store(static_cast<uint8_t>(next_count), std::memory_order_release);
   }
 }
 
@@ -1579,16 +1588,17 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
                   GroupControlTemplate{});
         _group_count = 0;
         modified = true;
-      } else if (GroupControlTemplate *g =
-                     std::find_if(begin, end,
-                                  [&](const GroupControlTemplate &x) {
-                                    return x.dev_id == dev_id;
-                                  });
-                 g != end) {
-        std::move(g + 1, end, g);
-        *(end - 1) = GroupControlTemplate{};
-        --_group_count;
-        modified = true;
+      } else {
+        GroupControlTemplate *g =
+            std::find_if(begin, end, [&](const GroupControlTemplate &x) {
+              return x.dev_id == dev_id;
+            });
+        if (g != end) {
+          std::move(g + 1, end, g);
+          *(end - 1) = GroupControlTemplate{};
+          --_group_count;
+          modified = true;
+        }
       }
     } else {
       for (GroupControlTemplate *g = begin; g != end; ++g) {
@@ -2154,7 +2164,9 @@ static void decodeMomentary(const GroupControlTemplate &grp,
             ? ((ack.data[8] == 0x06) ? 1 : 0)
             : ((dev && dev->last_ack_len > 0) ? (dev->last_ack_data[0] & 0x01)
                                               : 0);
-  } else if (ack.length >= 6) {
+    return;
+  }
+  if (ack.length >= 6) {
     out.floor = constrain(static_cast<int>(ack.data[5]), 1, 60);
     out.direction = (ack.length >= 7) ? ack.data[6] : 0;
   }
@@ -2307,13 +2319,13 @@ bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
   return true;
 }
 
-uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
+uint8_t ControlTemplate_NormSub1_Slow(uint8_t dev_id, uint8_t sub1) noexcept {
   // Read-mostly derived cache with Seqlock optimistic read (Thread-safe, 0-Copy, O(1))
   // Max 8 elements (typically 1~2 active rules for HVAC). Rebuilt exclusively in cold path.
   constexpr size_t MAX_RETRIES = 4;
   for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
     const uint32_t seq = s_norm_rules_seqlock.read_begin();
-    const size_t count = s_norm_rule_count;
+    const size_t count = s_norm_rule_count.load(std::memory_order_relaxed);
     for (size_t i = 0; i < count; ++i) {
       if (s_norm_rules[i].dev_id == dev_id) {
         if (sub1 == s_norm_rules[i].temp_sub1 || sub1 == s_norm_rules[i].speed_sub1) {

@@ -288,17 +288,21 @@ void printConfigHelp(int sock) {
     FixedBuf<24> range_buf;
     for (size_t i = 0; i < PARAM_COUNT; ++i) {
       const auto &p = PARAM_TABLE[i];
-      range_buf.reset();
-      if (p.type <= PARAM_UCHAR ||
-          (p.type >= PARAM_TIMING_CH1 && p.type <= PARAM_TIMING_CH3)) {
-        range_buf.appendFormat("%lu ~ %lu",
-                               (unsigned long)p.minVal, (unsigned long)p.maxVal);
-      } else if (p.type >= PARAM_FRAMING_CH1 && p.type <= PARAM_FRAMING_CH4) {
-        range_buf.append("8N1,8E1,8O1,8N2");
-      } else {
+      auto fmt_range = [&]() {
+        if (p.type <= PARAM_UCHAR ||
+            (p.type >= PARAM_TIMING_CH1 && p.type <= PARAM_TIMING_CH3)) {
+          range_buf.appendFormat("%lu ~ %lu",
+                                 (unsigned long)p.minVal, (unsigned long)p.maxVal);
+          return;
+        }
+        if (p.type >= PARAM_FRAMING_CH1 && p.type <= PARAM_FRAMING_CH4) {
+          range_buf.append("8N1,8E1,8O1,8N2");
+          return;
+        }
         range_buf.append(
             (p.type == PARAM_PASS_HASH) ? "string (raw)" : "string");
-      }
+      };
+      fmt_range();
       table.row({p.name, range_buf.c_str(), p.desc});
     }
 
@@ -674,12 +678,18 @@ void cmdEw11(CliContext &ctx) {
                strcmp(tok, "none") == 0) {
              ip_str =
                  (strcmp(tok, "-") == 0 || strcmp(tok, "none") == 0) ? "" : tok;
-           } else if (port == default_port &&
-                      CliFmt::ParseInt(tok, v, 1, 65535)) {
+             continue;
+           }
+           if (port == default_port &&
+               CliFmt::ParseInt(tok, v, 1, 65535)) {
              port = static_cast<uint16_t>(v);
-           } else if (!name_str && !isdigit(tok[0])) {
+             continue;
+           }
+           if (!name_str && !isdigit(tok[0])) {
              name_str = tok;
-           } else if (CliFmt::ParseInt(tok, v, 0, 1)) {
+             continue;
+           }
+           if (CliFmt::ParseInt(tok, v, 0, 1)) {
              enabled = (v != 0);
            }
          }

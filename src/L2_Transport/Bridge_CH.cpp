@@ -807,12 +807,14 @@ void Bridge_ProcessEvents(fd_set &readfds, fd_set &errorfds,
               std::copy(temp_buf, temp_buf + r, pending[pending_count].buf);
               pending_count++;
             }
-          } else if (r == 0 ||
-                     (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-            close(slot.sock);
-            slot.sock = -1;
-            slot.is_connected = false;
-            slot.rx_len = 0;
+          } else {
+            if (r == 0 ||
+                (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+              close(slot.sock);
+              slot.sock = -1;
+              slot.is_connected = false;
+              slot.rx_len = 0;
+            }
           }
         }
       }

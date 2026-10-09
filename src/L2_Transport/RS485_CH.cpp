@@ -61,6 +61,7 @@ static StaticSemaphore_t s_ch1_vip_sem_buf;
 static SemaphoreHandle_t s_ch1_vip_sem = nullptr;
 
 static QueueHandle_t s_ch1_control_queue = nullptr;
+static std::atomic<uint8_t> s_ch1_control_pending{0};
 static QueueSetHandle_t s_ch1_queue_set = nullptr;
 static QueueHandle_t s_uart0_event_queue = nullptr, s_uart1_event_queue = nullptr,
                      s_uart2_event_queue = nullptr;
@@ -82,6 +83,7 @@ void Engine_InitQueues() {
   assert(s_uart0_mutex != nullptr && s_uart1_mutex != nullptr &&
          s_uart2_mutex != nullptr);
 
+  s_ch1_control_pending.store(0, std::memory_order_relaxed);
   s_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
                                            s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
   s_ch1_vip_sem = xSemaphoreCreateCountingStatic(Config::Queue::POOL_SIZE_VIP, 0,
@@ -104,7 +106,16 @@ bool Queue_EnqueueDropTail(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
   if (UNLIKELY(!queue))
     return false;
+  if (queue == s_ch1_control_queue) {
+    if (s_ch1_control_pending.load(std::memory_order_relaxed) >= Config::Queue::POOL_SIZE_CONTROL) [[unlikely]] {
+      Diag_RecordChannelQueueFull(1);
+      return false;
+    }
+  }
   if (xQueueSend(queue, &packet, 0) == pdTRUE) {
+    if (queue == s_ch1_control_queue) {
+      s_ch1_control_pending.fetch_add(1, std::memory_order_relaxed);
+    }
     return true;
   }
   Diag_RecordChannelQueueFull(1);
@@ -115,6 +126,10 @@ bool Queue_EnqueueDropTail(QueueHandle_t queue,
 
 bool Engine_EnqueueCh1(const StaticPacket &pkt, bool vip) noexcept {
   if (vip) {
+    if (s_ch1_vip_ringbuf.full()) [[unlikely]] {
+      Diag_RecordChannelQueueFull(1);
+      return false;
+    }
     if (s_ch1_vip_ringbuf.push(pkt)) {
       if (s_ch1_vip_sem) {
         xSemaphoreGive(s_ch1_vip_sem);
@@ -344,12 +359,18 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
     if (evt_q) {
       uart_event_t evt;
       if (xQueueReceive(evt_q, &evt, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
-        if (evt.type == UART_DATA) {
+        switch (evt.type) {
+        case UART_DATA:
           received_new_bytes = Uart_DrainToStreamBuffer(
               u_num, stream, stream_len, max_stream_buf, last_rx_ms);
-        } else if (evt.type == UART_FIFO_OVF || evt.type == UART_BUFFER_FULL) {
+          break;
+        case UART_FIFO_OVF:
+        case UART_BUFFER_FULL:
           Uart_FlushChannelInput(u_num);
           xQueueReset(evt_q);
+          break;
+        default:
+          break;
         }
       }
     } else {
@@ -384,6 +405,10 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
 bool RS485_EnqueueControl(const StaticPacket &pkt, bool vip) noexcept {
   if (vip) {
+    if (s_ch1_vip_ringbuf.full()) [[unlikely]] {
+      Diag_RecordChannelQueueFull(1);
+      return false;
+    }
     if (s_ch1_vip_ringbuf.push(pkt)) {
       if (s_ch1_vip_sem) {
         xSemaphoreGive(s_ch1_vip_sem);
@@ -623,12 +648,18 @@ void Task_Ch1(void *pvParameters) {
 
     uart_event_t u_evt;
     while (xQueueReceive(s_uart0_event_queue, (void *)&u_evt, 0) == pdTRUE) {
-      if (u_evt.type == UART_FIFO_OVF || u_evt.type == UART_BUFFER_FULL) {
+      switch (u_evt.type) {
+      case UART_FIFO_OVF:
+      case UART_BUFFER_FULL:
         Diag_RecordChannelInvalidFrame(1);
         Uart_FlushChannelInput(UART_NUM_0);
-      } else if (u_evt.type == UART_PARITY_ERR ||
-                 u_evt.type == UART_FRAME_ERR) {
+        break;
+      case UART_PARITY_ERR:
+      case UART_FRAME_ERR:
         Diag_RecordChannelCrcError(1);
+        break;
+      default:
+        break;
       }
     }
 
@@ -653,12 +684,16 @@ void Task_Ch1(void *pvParameters) {
       Ch1_HandleCtrl(ctrlPacket);
       Ch1_SetState(current_state, Ch1State::IDLE);
       continue; // VIP 처리 완료 후 다음 루프로 즉시 재평가
-    } else if (activated == s_ch1_vip_sem && s_ch1_vip_sem) {
+    }
+    if (activated == s_ch1_vip_sem && s_ch1_vip_sem) {
       xSemaphoreTake(s_ch1_vip_sem, 0);
     }
 
     if (activated == s_ch1_control_queue && s_ch1_control_queue &&
         xQueueReceive(s_ch1_control_queue, &ctrlPacket, 0) == pdTRUE) {
+      if (s_ch1_control_pending.load(std::memory_order_relaxed) > 0) {
+        s_ch1_control_pending.fetch_sub(1, std::memory_order_relaxed);
+      }
       std::span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
       bool is_query = s_dispatcher.onIsQueryPacket(frame);
 

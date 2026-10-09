@@ -14,12 +14,10 @@ void wallpadPrintStatus(AppendBuf &out) {
   ProtocolDiag_GetPollingStats(active_targets, verified_targets, total_targets);
   size_t online_devs = Device_GetOnlineCount();
 
-  const char *phase_str = "Phase 1/3 (Framing Probing)";
-  if (desc.is_manual || desc.offsets_locked) {
-    phase_str = "Phase 3/3: Fully Locked";
-  } else if (desc.is_locked) {
-    phase_str = "Phase 2/3: Cache Syncing";
-  }
+  const char *phase_str = (desc.is_manual || desc.offsets_locked)
+                              ? "Phase 3/3: Fully Locked"
+                              : (desc.is_locked ? "Phase 2/3: Cache Syncing"
+                                                : "Phase 1/3 (Framing Probing)");
 
   CliFmt::PrintBoxHeader(out, "WALLPAD PROTOCOL AUTO-PROBING ENGINE STATUS");
   char prof_key_buf[16] = "Standard";
@@ -71,14 +69,15 @@ void wallpadPrintStatus(AppendBuf &out) {
   auto print_row = [&](const char *f, const char *p, const char *v,
                        const char *s) {
     char clean_s[16] = {0};
-    if (s && s[0] == '[' && s[strlen(s) - 1] == ']') {
+    if (s) {
       size_t slen = strlen(s);
-      if (slen >= 2 && slen - 2 < sizeof(clean_s)) {
-        strncpy(clean_s, s + 1, slen - 2);
-        clean_s[slen - 2] = '\0';
+      if (slen >= 2 && s[0] == '[' && s[slen - 1] == ']') {
+        size_t copylen = std::min(slen - 2, sizeof(clean_s) - 1);
+        memcpy(clean_s, s + 1, copylen);
+        clean_s[copylen] = '\0';
+      } else {
+        strncpy(clean_s, s, sizeof(clean_s) - 1);
       }
-    } else if (s) {
-      strncpy(clean_s, s, sizeof(clean_s) - 1);
     }
     table.row({f ? f : "", p ? p : "", v ? v : "", clean_s});
   };
@@ -243,12 +242,14 @@ void wallpadPrintStatus(AppendBuf &out) {
 
   if (dp_status == FramingStatus::WAITING) {
     print_row("Doorphone (CH4)", "Framing", "-- .. --", dp_status_str);
-  } else if (cur_dp_len > 0) {
-    rowf("Doorphone (CH4)", "Framing", dp_status_str, "%02X .. %02X (%u Bytes)",
-         cur_dp_stx, cur_dp_etx, cur_dp_len);
   } else {
-    rowf("Doorphone (CH4)", "Framing", dp_status_str, "%02X .. %02X",
-         cur_dp_stx, cur_dp_etx);
+    if (cur_dp_len > 0) {
+      rowf("Doorphone (CH4)", "Framing", dp_status_str, "%02X .. %02X (%u Bytes)",
+           cur_dp_stx, cur_dp_etx, cur_dp_len);
+    } else {
+      rowf("Doorphone (CH4)", "Framing", dp_status_str, "%02X .. %02X",
+           cur_dp_stx, cur_dp_etx);
+    }
   }
 
   DoorphoneMatchSnapshot dp_match{};
@@ -270,14 +271,16 @@ void wallpadPrintStatus(AppendBuf &out) {
     op_l.appendFormat("Bell:%02X, Call:%02X, Open:%02X, End:%02X",
                       dp_match.bell_lobby, dp_match.call_lobby, dp_match.open_lobby,
                       dp_match.end_lobby);
-  } else if (dp_status == FramingStatus::WAITING) {
-    dp_desc = "Waiting for traffic...";
-    op_f.append("Waiting...");
-    op_l.append("Waiting...");
   } else {
-    dp_desc = "No Catalog Match";
-    op_f.append("Bell:B5, Call:B9, Open:B4, End:B8");
-    op_l.append("Bell:5A, Call:5F, Open:61, End:60");
+    if (dp_status == FramingStatus::WAITING) {
+      dp_desc = "Waiting for traffic...";
+      op_f.append("Waiting...");
+      op_l.append("Waiting...");
+    } else {
+      dp_desc = "No Catalog Match";
+      op_f.append("Bell:B5, Call:B9, Open:B4, End:B8");
+      op_l.append("Bell:5A, Call:5F, Open:61, End:60");
+    }
   }
   print_row("", "Catalog Match", dp_desc, dp_m_st);
   print_row("", "Opcodes(F)", op_f.c_str(), dp_m_st);
@@ -307,12 +310,14 @@ void wallpadPrintStatus(AppendBuf &out) {
       if (!slot.enabled && !slot.is_connected && slot.target_ip[0] == '\0') {
         val_buf.append("Disabled");
         st = "[UNUSED]";
-      } else if (slot.is_connected) {
-        val_buf.appendFormat("Connect: %s",
-                             slot.target_ip[0] ? slot.target_ip : "-");
-        st = "[ACTIVE]";
       } else {
-        val_buf.append("Listening");
+        if (slot.is_connected) {
+          val_buf.appendFormat("Connect: %s",
+                               slot.target_ip[0] ? slot.target_ip : "-");
+          st = "[ACTIVE]";
+        } else {
+          val_buf.append("Listening");
+        }
       }
       print_row(f_label, p_buf.c_str(), val_buf.c_str(), st);
     }
@@ -333,12 +338,15 @@ void wallpadPrintStatus(AppendBuf &out) {
                         ? (desc.matched_packets * 100 / desc.tested_packets)
                         : 100;
   auto format_compact = [](FixedBuf<16> &buf, uint32_t count) {
-    if (count >= 1000000)
+    if (count >= 1000000) {
       buf.appendFormat("%.1fM", count / 1000000.0);
-    else if (count >= 1000)
+      return;
+    }
+    if (count >= 1000) {
       buf.appendFormat("%.1fk", count / 1000.0);
-    else
-      buf.appendFormat("%u", static_cast<unsigned>(count));
+      return;
+    }
+    buf.appendFormat("%u", static_cast<unsigned>(count));
   };
   FixedBuf<16> m_str, t_str;
   format_compact(m_str, desc.matched_packets);
@@ -549,9 +557,11 @@ void cmdTrace(CliContext &ctx) {
     bool ch_ok = false;
     if (sub_sv.size() == 2 && token_count >= 2) {
       ch_ok = CliFmt::ParseInt(ctx.args.get(2), ch_val, 1, 6);
-    } else if (sub_sv.size() == 3 && isdigit(static_cast<unsigned char>(sub[2]))) {
-      ch_val = sub[2] - '0';
-      ch_ok = (ch_val >= 1 && ch_val <= 6);
+    } else {
+      if (sub_sv.size() == 3 && isdigit(static_cast<unsigned char>(sub[2]))) {
+        ch_val = sub[2] - '0';
+        ch_ok = (ch_val >= 1 && ch_val <= 6);
+      }
     }
 
     if (ch_ok) {
@@ -571,8 +581,10 @@ void cmdTrace(CliContext &ctx) {
     uint8_t id = 0;
     if (is_devid_cmd && token_count >= 2) {
       id = static_cast<uint8_t>(strtol(ctx.args.get(2), nullptr, 16));
-    } else if (is_hex_prefix) {
-      id = static_cast<uint8_t>(strtol(sub, nullptr, 16));
+    } else {
+      if (is_hex_prefix) {
+        id = static_cast<uint8_t>(strtol(sub, nullptr, 16));
+      }
     }
     tracer.setFilter(TraceType::DEVID, id);
     sendTelnetMsgf(sock, "Packet trace ENABLED: Device ID 0x%02X only.\r\n", id);

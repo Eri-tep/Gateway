@@ -288,6 +288,40 @@ static void Boot_InitHardwareAndDevices() {
   Device_Init();
 }
 
+static void Boot_PreheatHotPaths() {
+  // Flash XIP instruction cache pre-heating using isolated dummy vector (dev_id = 0xFE)
+  // Dynamically constructed from active profile framing to ensure 100% vendor-agnostic pre-heating
+  // without polluting production registries.
+  constexpr uint8_t DUMMY_DEV_ID = 0xFE;
+  DeviceStateEntry dummy_snap{};
+  (void)Device_FindCopy(DUMMY_DEV_ID, 0x01, 0x00, dummy_snap);
+  (void)Device_Exists(DUMMY_DEV_ID, 0x01, 0x00);
+
+  ProfileInfoSnapshot p_snap{};
+  uint8_t stx = 0xF7, etx = 0xEE, q_op = 0x40;
+  if (ProtocolDiag_GetProfileInfo(Config_GetWallpadProfile(), p_snap) && p_snap.stx != 0) {
+    stx = p_snap.stx;
+    etx = p_snap.etx;
+    if (p_snap.query_op != 0) {
+      q_op = p_snap.query_op;
+    }
+  }
+
+  StaticPacket dummy_pkt{};
+  dummy_pkt.length = 11;
+  dummy_pkt.data.fill(0);
+  dummy_pkt.data[0] = stx;
+  dummy_pkt.data[1] = 11;
+  dummy_pkt.data[2] = 0x01;
+  dummy_pkt.data[3] = DUMMY_DEV_ID;
+  dummy_pkt.data[4] = 0x01;
+  dummy_pkt.data[5] = q_op;
+  dummy_pkt.data[10] = etx;
+
+  uint8_t d_dev = 0, d_sub1 = 0, d_sub2 = 0;
+  (void)ProtocolDiag_ExtractDeviceKey(dummy_pkt.data.data(), dummy_pkt.length, d_dev, d_sub1, d_sub2);
+}
+
 // ============================================================================
 // Stage 6: Network Stack, SoftAP Fallback & ArduinoOTA Lifecycle
 // ============================================================================
@@ -385,6 +419,7 @@ void setup() {
   Boot_RestoreConfigAndState();
   Boot_InitSubsystems();
   Boot_InitHardwareAndDevices();
+  Boot_PreheatHotPaths();
   Boot_StartTasks();
   Boot_InitWifiAndOta();
 

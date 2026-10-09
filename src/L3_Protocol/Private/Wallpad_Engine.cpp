@@ -33,6 +33,8 @@ void Wallpad_InvalidateProfileCache() noexcept {
   s_eff_profile_dirty.store(true, std::memory_order_release);
 }
 
+std::atomic<ChecksumAlgo> s_cached_active_algo{ChecksumAlgo::XOR_NO_STX};
+
 namespace {
 
  // CH2, CH3 (월패드 유래)
@@ -125,6 +127,7 @@ inline const EffProfile &effectiveProfile() noexcept {
     CriticalSectionLocker lock(&s_eff_mux);
     if (s_eff_profile_dirty.load(std::memory_order_relaxed)) {
       s_cached_eff_profile = computeEffectiveProfile();
+      s_cached_active_algo.store(s_cached_eff_profile.algo, std::memory_order_release);
       s_eff_profile_dirty.store(false, std::memory_order_release);
     }
   }
@@ -438,15 +441,6 @@ bool UniversalProtocolEngine::buildQueryPacket(uint8_t dev_id, uint8_t sub1,
   }
   return true;
 }
-
-uint16_t UniversalProtocolEngine::calculateChecksum(std::span<const uint8_t> data) const noexcept {
-  return calculateChecksumDirect(effectiveProfile().algo, data.data(), data.size());
-}
-
-uint16_t UniversalProtocolEngine::calculateChecksum(const uint8_t *data,
-                                                   size_t len) const {
-  return calculateChecksumDirect(effectiveProfile().algo, data, len);
-}
 uint8_t UniversalProtocolEngine::getStx() const {
   return effectiveProfile().stx;
 }
@@ -517,7 +511,10 @@ UniversalProtocolEngine &Universal_GetEngine() noexcept {
   return s_universal_engine;
 }
 
-void WallpadParserFactory::init() { ProfileRepository::init(); }
+void WallpadParserFactory::init() {
+  ProfileRepository::init();
+  s_cached_active_algo.store(effectiveProfile().algo, std::memory_order_release);
+}
 UniversalProtocolEngine *WallpadParserFactory::getActiveParser() {
   return &Universal_GetEngine();
 }
@@ -721,12 +718,15 @@ void ProfileRepository::inferVendorDescription(const AutoProbeDescriptor &ad,
   const uint8_t etx = ad.etx ? ad.etx : 0xEE;
 
   char len_buf[16];
-  if (ad.min_len == ad.max_len && ad.min_len >= 3)
-    snprintf(len_buf, sizeof(len_buf), "%uB", ad.min_len);
-  else if (ad.min_len >= 3 && ad.max_len <= 64 && ad.max_len > ad.min_len)
-    snprintf(len_buf, sizeof(len_buf), "%u-%uB", ad.min_len, ad.max_len);
-  else
+  if (ad.min_len >= 3 && ad.max_len <= 64) {
+    if (ad.min_len == ad.max_len) {
+      snprintf(len_buf, sizeof(len_buf), "%uB", ad.min_len);
+    } else {
+      snprintf(len_buf, sizeof(len_buf), "%u-%uB", ad.min_len, ad.max_len);
+    }
+  } else {
     snprintf(len_buf, sizeof(len_buf), "Var");
+  }
 
   snprintf(out_desc, max_len, "Profile (%02X..%02X, %s, %s)", stx, etx, len_buf,
            getChecksumShortName(ad.checksum_algo));
@@ -1198,8 +1198,10 @@ bool Wallpad_CheckConvergence(bool reset) noexcept {
   if (active_tgts > 0 && is_all_online) {
     if (s_stable_start_ms == 0) {
       s_stable_start_ms = millis();
-    } else if (TimeUtils::isElapsed(s_stable_start_ms,
-                                    Config::Timing::CACHE_CONVERGENCE_STABLE_MS)) {
+      return false;
+    }
+    if (TimeUtils::isElapsed(s_stable_start_ms,
+                             Config::Timing::CACHE_CONVERGENCE_STABLE_MS)) {
       s_convergence_done = true;
       if (g_system_event_group) {
         xEventGroupSetBits(g_system_event_group, SYS_EVT_CACHE_READY);

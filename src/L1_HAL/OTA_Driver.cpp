@@ -84,17 +84,12 @@ struct UrlParts {
     return std::unexpected(UrlParseError::UrlTooLong);
   }
 
-  bool is_https = false;
-  size_t scheme_len = 0;
-  if (iequalsScheme(url, "https://")) {
-    is_https = true;
-    scheme_len = 8;
-  } else if (iequalsScheme(url, "http://")) {
-    is_https = false;
-    scheme_len = 7;
-  } else {
+  bool is_https = iequalsScheme(url, "https://");
+  bool is_http = !is_https && iequalsScheme(url, "http://");
+  if (!is_https && !is_http) {
     return std::unexpected(UrlParseError::UnsupportedScheme);
   }
+  size_t scheme_len = is_https ? 8 : 7;
 
   uint16_t port = is_https ? 443 : 80;
   std::string_view rest = url.substr(scheme_len);
@@ -409,9 +404,11 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
     httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
       break;
-    } else if (httpCode == HTTP_CODE_MOVED_PERMANENTLY ||
-               httpCode == HTTP_CODE_FOUND || httpCode == HTTP_CODE_SEE_OTHER ||
-               httpCode == HTTP_CODE_TEMPORARY_REDIRECT || httpCode == 308) {
+    }
+    const bool is_redirect = (httpCode == HTTP_CODE_MOVED_PERMANENTLY ||
+                              httpCode == HTTP_CODE_FOUND || httpCode == HTTP_CODE_SEE_OTHER ||
+                              httpCode == HTTP_CODE_TEMPORARY_REDIRECT || httpCode == 308);
+    if (is_redirect) {
       redirect_count++;
       if (redirect_count > 2) {
         ota_fail("Too many redirects (>2)");

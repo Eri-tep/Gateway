@@ -229,11 +229,13 @@ void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
     const char *p_name = ProfileRepository::getActiveProfile(cur_p)
                              ? (cur_p.name[0] ? cur_p.name : cur_p.key)
                              : nullptr;
-    if (p_name && strcmp(catalog_vendor, "Unknown") != 0 &&
-        strcmp(p_name, catalog_vendor) != 0) {
-      snprintf(out_buf, max_len, "%s (%s)", p_name, catalog_vendor);
-    } else if (p_name) {
-      snprintf(out_buf, max_len, "%s", p_name);
+    if (p_name) {
+      if (strcmp(catalog_vendor, "Unknown") != 0 &&
+          strcmp(p_name, catalog_vendor) != 0) {
+        snprintf(out_buf, max_len, "%s (%s)", p_name, catalog_vendor);
+      } else {
+        snprintf(out_buf, max_len, "%s", p_name);
+      }
     } else {
       snprintf(out_buf, max_len, "%s", catalog_vendor);
     }
@@ -565,11 +567,13 @@ static void Protocol_OnBridgePacketReceived(uint8_t slot_idx, const StaticPacket
           ESP_LOGI("ProtocolDiag", "[CH5] Elevator State Changed -> Power: %u", new_pwr);
           Device_NotifyElevatorEvent(sub1, sub2, 15, 0, new_pwr, false);
         }
-      } else if (pkt.length == 13 && pkt.data[4] == 0x01 && pkt.data[8] == 0x01) {
-        uint8_t floor = pkt.data[9];
-        uint8_t ho = pkt.data[10];
-        ESP_LOGI("ProtocolDiag", "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor, ho);
-        Device_NotifyElevatorEvent(sub1, sub2, floor, ho, 0, true);
+      } else {
+        if (pkt.length == 13 && pkt.data[4] == 0x01 && pkt.data[8] == 0x01) {
+          uint8_t floor = pkt.data[9];
+          uint8_t ho = pkt.data[10];
+          ESP_LOGI("ProtocolDiag", "[CH5] Elevator Arrived -> Floor: %u, Car: %u", floor, ho);
+          Device_NotifyElevatorEvent(sub1, sub2, floor, ho, 0, true);
+        }
       }
     }
     if (dev_id != 0x2A) {

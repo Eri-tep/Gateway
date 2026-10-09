@@ -34,23 +34,34 @@ static inline uint8_t Device_Hash(uint8_t dev_id, uint8_t sub1,
   return Hash::deviceKey8(dev_id, sub1, sub2);
 }
 
-static inline void copyEntryBounded(DeviceStateEntry &dst,
-                                    const DeviceStateEntry &src) noexcept {
+static_assert(sizeof(DeviceStateEntry) % sizeof(uint32_t) == 0,
+              "DeviceStateEntry must be 32-bit word aligned");
+
+static inline void copyEntryDirectSeqlock(DeviceStateEntry &dst,
+                                          const DeviceStateEntry &src) noexcept {
+  dst.last_updated_ms = src.last_updated_ms;
+  dst.last_stale_poll_ms = src.last_stale_poll_ms;
   dst.dev_id = src.dev_id;
   dst.sub1 = src.sub1;
   dst.sub2 = src.sub2;
-  const uint8_t ack_len =
-      std::min<uint8_t>(src.last_ack_len, static_cast<uint8_t>(dst.last_ack_data.size()));
-  dst.last_ack_len = ack_len;
-  if (ack_len > 0) {
-    memcpy(dst.last_ack_data.data(), src.last_ack_data.data(), ack_len);
-  }
+  dst.is_online = src.is_online;
+  dst.shadow_packed_state = src.shadow_packed_state;
   dst.last_target_temp = src.last_target_temp;
   dst.last_current_temp = src.last_current_temp;
-  dst.last_updated_ms = src.last_updated_ms;
-  dst.last_stale_poll_ms = src.last_stale_poll_ms;
   dst.timeout_count = src.timeout_count;
-  dst.is_online = src.is_online;
+
+  const uint8_t ack_len = std::min<uint8_t>(src.last_ack_len, 64);
+  dst.last_ack_len = ack_len;
+  if (ack_len > 0) {
+    const volatile uint32_t *src_p =
+        reinterpret_cast<const volatile uint32_t *>(src.last_ack_data.data());
+    uint32_t *dst_p =
+        reinterpret_cast<uint32_t *>(dst.last_ack_data.data());
+    const size_t words = (ack_len + 3) / 4;
+    for (size_t i = 0; i < words; ++i) {
+      dst_p[i] = src_p[i];
+    }
+  }
 }
 
 class DeviceRepository {
@@ -250,7 +261,7 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
         continue;
       return false;
     }
-    copyEntryBounded(out_copy, *e);
+    copyEntryDirectSeqlock(out_copy, *e);
     if (!_seqlock.read_retry(seq)) [[likely]] {
       return true;
     }
@@ -260,7 +271,7 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
   if (!e) [[unlikely]]
     return false;
-  copyEntryBounded(out_copy, *e);
+  copyEntryDirectSeqlock(out_copy, *e);
   return true;
 }
 
@@ -355,7 +366,7 @@ bool DeviceRepository::getSnapshot(size_t index,
         continue;
       return false;
     }
-    copyEntryBounded(out_copy, cache[index]);
+    copyEntryDirectSeqlock(out_copy, cache[index]);
     if (!_seqlock.read_retry(seq)) [[likely]] {
       return true;
     }
@@ -364,7 +375,7 @@ bool DeviceRepository::getSnapshot(size_t index,
   CriticalSectionLocker lock(&_cache_mux);
   if (index >= _device_count.load(std::memory_order_relaxed))
     return false;
-  copyEntryBounded(out_copy, cache[index]);
+  copyEntryDirectSeqlock(out_copy, cache[index]);
   return true;
 }
 
@@ -403,7 +414,7 @@ size_t DeviceRepository::getSnapshotChunk(size_t start_idx,
     return 0;
   size_t to_copy = std::min(max_count, cnt - start_idx);
   for (size_t i = 0; i < to_copy; ++i) {
-    copyEntryBounded(out_buf[i], cache[start_idx + i]);
+    copyEntryDirectSeqlock(out_buf[i], cache[start_idx + i]);
   }
   return to_copy;
 }
@@ -480,10 +491,14 @@ void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8
   dev->last_current_temp = room_temp;
   dev->last_updated_ms = now;
 
-  if (is_online && !dev->is_online) {
-    _online_count.fetch_add(1, std::memory_order_relaxed);
-  } else if (!is_online && dev->is_online && _online_count.load(std::memory_order_relaxed) > 0) {
-    _online_count.fetch_sub(1, std::memory_order_relaxed);
+  if (is_online != dev->is_online) {
+    if (is_online) {
+      _online_count.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      if (_online_count.load(std::memory_order_relaxed) > 0) {
+        _online_count.fetch_sub(1, std::memory_order_relaxed);
+      }
+    }
   }
   dev->is_online = is_online;
 }
@@ -580,10 +595,12 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
       out_res.sub1 = r_sub1;
       out_res.sub2 = 0;
       out_res.state = legacy_st;
-    } else if (out_res.extra_count < 7) {
-      out_res.extra[out_res.extra_count].sub1 = r_sub1;
-      out_res.extra[out_res.extra_count].state = legacy_st;
-      out_res.extra_count++;
+    } else {
+      if (out_res.extra_count < 7) {
+        out_res.extra[out_res.extra_count].sub1 = r_sub1;
+        out_res.extra[out_res.extra_count].state = legacy_st;
+        out_res.extra_count++;
+      }
     }
   }
   return true;
@@ -705,7 +722,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
     }
 
     if (ack_changed) {
-      copyEntryBounded(dev_snap, *dev);
+      copyEntryDirectSeqlock(dev_snap, *dev);
     }
   } // _cache_mux unlocked (최소 락 윈도우 보장)
 

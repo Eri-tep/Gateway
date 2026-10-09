@@ -134,12 +134,14 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
         static constexpr uint8_t kFcuDispPkt[8] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08};
         Fmt::FormatHex(kFcuDispPkt, sizeof(kFcuDispPkt), ack_hex.storage, sizeof(ack_hex.storage));
         ack_hex.offset = strlen(ack_hex.storage);
-      } else if (dev.last_ack_len > 0) {
-        Fmt::FormatHex(dev.last_ack_data.data(), dev.last_ack_len, ack_hex.storage,
-                       sizeof(ack_hex.storage));
-        ack_hex.offset = strlen(ack_hex.storage);
       } else {
-        ack_hex.append("(No ACK received from bus yet)");
+        if (dev.last_ack_len > 0) {
+          Fmt::FormatHex(dev.last_ack_data.data(), dev.last_ack_len, ack_hex.storage,
+                         sizeof(ack_hex.storage));
+          ack_hex.offset = strlen(ack_hex.storage);
+        } else {
+          ack_hex.append("(No ACK received from bus yet)");
+        }
       }
 
       char updated_str[16] = "-";
@@ -255,10 +257,12 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
         Fmt::FormatElapsed(now, devs[d].last_seen_ms, elapsed_raw,
                            sizeof(elapsed_raw));
         char *ago_pos = strstr(elapsed_raw, " ago");
-        if (ago_pos)
+        if (!ago_pos) {
+          ago_pos = strstr(elapsed_raw, "ago");
+        }
+        if (ago_pos) {
           *ago_pos = '\0';
-        else if ((ago_pos = strstr(elapsed_raw, "ago")) != nullptr)
-          *ago_pos = '\0';
+        }
       }
       table.row({dev_hex.c_str(), devs[d].name, devs[d].cls_str,
                  devs[d].online ? "ONLINE" : "OFFLINE", "CH1", sub_str.c_str(), qry_str.c_str(),
@@ -317,26 +321,28 @@ void cmdDevs(CliContext &ctx) {
 }
 
 static void ctlHandleName(int sock, int argc, const Args &args) {
-  if (argc >= 3) {
-    uint8_t dev_id = static_cast<uint8_t>(strtoul(args.get(2), nullptr, 0));
-    const char *name = args.get(3);
-    if (dev_id == 0 || !name || !*name) {
-      sendTelnetMsg(
-          sock, "[ERROR] Missing name: ctl name <dev_id> <custom_name>\r\n");
-    } else if (ProtocolDiag_SetGroupName(dev_id, name)) {
-      sendTelnetMsgf(sock,
-                     "[OK] DevID 0x%02X group name set to '%s' and saved to "
-                     "NVS flash.\r\n",
-                     dev_id, name);
-    } else {
-      sendTelnetMsgf(
-          sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n",
-          dev_id);
-    }
-  } else {
+  if (argc < 3) {
     sendTelnetMsg(
         sock, "[ERROR] Missing argument: ctl name <dev_id> <custom_name>\r\n");
+    return;
   }
+  uint8_t dev_id = static_cast<uint8_t>(strtoul(args.get(2), nullptr, 0));
+  const char *name = args.get(3);
+  if (dev_id == 0 || !name || !*name) {
+    sendTelnetMsg(
+        sock, "[ERROR] Missing name: ctl name <dev_id> <custom_name>\r\n");
+    return;
+  }
+  if (ProtocolDiag_SetGroupName(dev_id, name)) {
+    sendTelnetMsgf(sock,
+                   "[OK] DevID 0x%02X group name set to '%s' and saved to "
+                   "NVS flash.\r\n",
+                   dev_id, name);
+    return;
+  }
+  sendTelnetMsgf(
+      sock, "[ERROR] DevID 0x%02X not found in blueprint registry.\r\n",
+      dev_id);
 }
 
 static void ctlHandleClass(int sock, int argc, const Args &args) {

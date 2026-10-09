@@ -142,24 +142,29 @@ void Config_Load() {
     const char *primary_key = (active_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
     const char *secondary_key = (active_bank == 1) ? "cfg_bin_0" : "cfg_bin_1";
 
-    bool loaded = false;
-    if (nvsGetEnv(p, primary_key, env_cfg)) {
-      c = env_cfg;
-      s_active_bank = active_bank;
-      loaded = true;
-      ESP_LOGI("CONFIG", "Loaded atomic A/B bank %u (CRC-32 verified)", active_bank);
-    } else if (nvsGetEnv(p, secondary_key, env_cfg)) {
-      c = env_cfg;
-      s_active_bank = (active_bank == 1) ? 0 : 1;
-      loaded = true;
-      ESP_LOGW("CONFIG", "Primary bank %u corrupted; recovered from alternate bank %u (CRC-32 verified)",
-               active_bank, s_active_bank);
-    } else if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
-      c = env_cfg;
-      s_active_bank = 0;
-      loaded = true;
-      ESP_LOGI("CONFIG", "Loaded legacy cfg_bin (CRC-32 verified)");
-    }
+    auto load_bank = [&]() {
+      if (nvsGetEnv(p, primary_key, env_cfg)) {
+        c = env_cfg;
+        s_active_bank = active_bank;
+        ESP_LOGI("CONFIG", "Loaded atomic A/B bank %u (CRC-32 verified)", active_bank);
+        return true;
+      }
+      if (nvsGetEnv(p, secondary_key, env_cfg)) {
+        c = env_cfg;
+        s_active_bank = (active_bank == 1) ? 0 : 1;
+        ESP_LOGW("CONFIG", "Primary bank %u corrupted; recovered from alternate bank %u (CRC-32 verified)",
+                 active_bank, s_active_bank);
+        return true;
+      }
+      if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
+        c = env_cfg;
+        s_active_bank = 0;
+        ESP_LOGI("CONFIG", "Loaded legacy cfg_bin (CRC-32 verified)");
+        return true;
+      }
+      return false;
+    };
+    bool loaded = load_bank();
 
     if (!loaded) {
       // 2. Fallback to individual legacy NVS keys

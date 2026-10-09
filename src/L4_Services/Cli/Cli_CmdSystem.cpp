@@ -46,10 +46,9 @@ static void AsyncWifiScanTask(void *pvParameters) {
   TableRenderer table(out, SCAN_COLS, 5);
   table.header(false);
 
-  if (n == 0) {
-    table.empty("(No wireless networks found)");
-  } else if (n < 0) {
-    table.empty("[ERROR] Wi-Fi hardware scan failed or timed out.");
+  if (n <= 0) {
+    table.empty((n == 0) ? "(No wireless networks found)"
+                         : "[ERROR] Wi-Fi hardware scan failed or timed out.");
   } else {
     int max_display = std::min(n, 40);
     for (int i = 0; i < max_display; ++i) {
@@ -696,12 +695,17 @@ void otaPrintStatus(AppendBuf &out) {
   }
   const char *next_desc = "Hardware Dual-Slot";
   const char *next_status = "[READY]";
-  if (next_state == ESP_OTA_IMG_INVALID) {
+  switch (next_state) {
+  case ESP_OTA_IMG_INVALID:
     next_desc = "Invalidated (Failed Boot)";
     next_status = "[INVALID]";
-  } else if (next_state == ESP_OTA_IMG_ABORTED) {
+    break;
+  case ESP_OTA_IMG_ABORTED:
     next_desc = "Aborted Image";
     next_status = "[ABORTED]";
+    break;
+  default:
+    break;
   }
 
   table.row({"Backup Target", "Partition", next_val.c_str(), "[STANDBY]"});
@@ -925,19 +929,24 @@ void FormatCh1Latency(AppendBuf &out, const LatencySnapshot &lat) {
 
   // 1. Title Row: 47 chars left + 33 chars right = 80 chars
   char r_buf[34];
-  if (mx == 0) {
-    snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: 0 us", static_cast<unsigned>(cnt));
-  } else if (mxUs >= 100000) {
-    snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: %u.%02u ms",
-             static_cast<unsigned>(cnt),
-             static_cast<unsigned>(mxUs / 100000),
-             static_cast<unsigned>((mxUs % 100000) / 1000));
-  } else {
+  auto fmt_lat = [&]() {
+    if (mx == 0) {
+      snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: 0 us", static_cast<unsigned>(cnt));
+      return;
+    }
+    if (mxUs >= 100000) {
+      snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: %u.%02u ms",
+               static_cast<unsigned>(cnt),
+               static_cast<unsigned>(mxUs / 100000),
+               static_cast<unsigned>((mxUs % 100000) / 1000));
+      return;
+    }
     snprintf(r_buf, sizeof(r_buf), "Count: %u | Max: %u.%01u us",
              static_cast<unsigned>(cnt),
              static_cast<unsigned>(mxUs / 100),
              static_cast<unsigned>((mxUs % 100) / 10));
-  }
+  };
+  fmt_lat();
   out.appendFormat("%-47s%33s\r\n", "Hot-Path Real-Time Latency (Core 1 / Task_Ch1)", r_buf);
 
   // 2. Divider

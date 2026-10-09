@@ -113,10 +113,12 @@ void Tcp_PollAndReceive(SessionType (&sessions)[N], SemaphoreHandle_t mux,
       int r = recv(s, rx_buf, sizeof(rx_buf), 0);
       if (r > 0) {
         handler(&sessions[i], rx_buf, r);
-      } else if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-        close(s);
-        sessions[i].sock = -1;
-        sessions[i].len = 0;
+      } else {
+        if (r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+          close(s);
+          sessions[i].sock = -1;
+          sessions[i].len = 0;
+        }
       }
     }
   }

@@ -90,6 +90,8 @@ void Wallpad_InvalidateProfileCache() noexcept;
 // 3. UNIVERSAL PROTOCOL ENGINE
 // ============================================================================
 
+extern std::atomic<ChecksumAlgo> s_cached_active_algo;
+
 class UniversalProtocolEngine {
 public:
   static constexpr size_t kVendorNameMaxLen = 64;
@@ -120,8 +122,12 @@ public:
   bool buildQueryPacket(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                         StaticPacket &out) const;
 
-  [[nodiscard]] uint16_t calculateChecksum(std::span<const uint8_t> data) const noexcept;
-  [[nodiscard]] uint16_t calculateChecksum(const uint8_t *data, size_t len) const;
+  [[nodiscard]] inline uint16_t calculateChecksum(std::span<const uint8_t> data) const noexcept {
+    return calculateChecksumDirect(s_cached_active_algo.load(std::memory_order_relaxed), data.data(), data.size());
+  }
+  [[nodiscard]] inline uint16_t calculateChecksum(const uint8_t *data, size_t len) const noexcept {
+    return calculateChecksumDirect(s_cached_active_algo.load(std::memory_order_relaxed), data, len);
+  }
   uint8_t getStx() const;
   uint8_t getEtx() const;
   uint8_t getMinPacketLen() const;

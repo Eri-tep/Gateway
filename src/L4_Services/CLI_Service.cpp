@@ -121,7 +121,9 @@ void sendTelnetMsgf(int sock, const char *fmt, ...) {
 void CliWriter::write(const char *data, size_t len) {
   if (buf) {
     buf->append(std::string_view(data, len));
-  } else if (sock >= 0 && data && len > 0) {
+    return;
+  }
+  if (sock >= 0 && data && len > 0) {
     CliIO::write(sock, data, len);
   }
 }
@@ -220,7 +222,9 @@ void CliWriter::centerBox(const char *str) {
 void TableRenderer::writeRaw(const char *data, size_t len) {
   if (buf) {
     buf->append(std::string_view(data, len));
-  } else if (w) {
+    return;
+  }
+  if (w) {
     w->write(data, len);
   }
 }
@@ -616,11 +620,9 @@ static void handleHistoryNav(TelnetManager::TelnetSession *sess, bool is_up) {
     return;
 
   if (is_up) {
-    if (sess->browse_idx == -1) {
-      sess->browse_idx = sess->hist_count - 1;
-    } else if (sess->browse_idx > 0) {
-      sess->browse_idx--;
-    }
+    sess->browse_idx = (sess->browse_idx == -1)
+                           ? (sess->hist_count - 1)
+                           : std::max(0, sess->browse_idx - 1);
   } else {
     if (sess->browse_idx == -1)
       return;
@@ -660,7 +662,9 @@ static void handleTabCompletion(TelnetManager::TelnetSession *sess) {
     char completed[TelnetManager::TelnetSession::CMD_MAX_LEN];
     snprintf(completed, sizeof(completed), "%s ", matches[0]);
     redrawLine(sess, completed);
-  } else if (match_count > 1) {
+    return;
+  }
+  if (match_count > 1) {
     // Multiple matches: list all candidates on new line, re-prompt current
     // buffer
     sendTelnetMsg(sess->sock, "\r\n");
@@ -670,9 +674,9 @@ static void handleTabCompletion(TelnetManager::TelnetSession *sess) {
         sendTelnetMsg(sess->sock, "\r\n");
     }
     sendTelnetMsgf(sess->sock, "> %s", sess->lineBuf);
-  } else {
-    sendTelnetMsg(sess->sock, "\a"); // Bell
+    return;
   }
+  sendTelnetMsg(sess->sock, "\a"); // Bell
 }
 
 static bool handlePasswordInput(TelnetManager::TelnetSession *session,
@@ -687,10 +691,14 @@ static bool handlePasswordInput(TelnetManager::TelnetSession *session,
       }
       session->pwLen = 0;
     }
-  } else if (c == '\b' || c == 0x7F) {
+    return false;
+  }
+  if (c == '\b' || c == 0x7F) {
     if (session->pwLen > 0)
       session->pwLen--;
-  } else if (isprint(c) && session->pwLen < sizeof(session->pwBuffer) - 1) {
+    return false;
+  }
+  if (isprint(c) && session->pwLen < sizeof(session->pwBuffer) - 1) {
     session->pwBuffer[session->pwLen++] = c;
   }
   return false;
@@ -732,8 +740,10 @@ static void handleAuthenticatedInput(TelnetManager::TelnetSession *session,
       session->lineLen = 0;
       sendTelnetMsg(session->sock, "\r\n> ");
       s_telnet_tracer.resume();
-    } else if (c == '\r') {
-      sendTelnetMsg(session->sock, "\r\n> ");
+    } else {
+      if (c == '\r') {
+        sendTelnetMsg(session->sock, "\r\n> ");
+      }
     }
     return;
   }
@@ -766,10 +776,8 @@ static void handleAuthenticatedInput(TelnetManager::TelnetSession *session,
   }
   if (session->esc_state == TelnetManager::TelnetSession::EscState::IN_CSI) {
     session->esc_state = TelnetManager::TelnetSession::EscState::NORMAL;
-    if (c == 'A') { // Up Arrow
-      handleHistoryNav(session, true);
-    } else if (c == 'B') { // Down Arrow
-      handleHistoryNav(session, false);
+    if (c == 'A' || c == 'B') {
+      handleHistoryNav(session, c == 'A');
     }
     return;
   }
@@ -797,7 +805,9 @@ void TelnetManager::onClientData(TelnetSession *session, const char *data,
     if (session->sessionState == SessionState::AWAITING_PASSWORD) {
       if (handlePasswordInput(session, c, should_close))
         break;
-    } else if (session->sessionState == SessionState::AUTHENTICATED) {
+      continue;
+    }
+    if (session->sessionState == SessionState::AUTHENTICATED) {
       handleAuthenticatedInput(session, c);
     }
   }
@@ -1077,8 +1087,10 @@ void TelnetManager::tick() {
       if (len > 0) {
         rx_buf[len] = '\0';
         onClientData(&s, rx_buf, len);
-      } else if (len == 0 ||
-                 (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        continue;
+      }
+      if (len == 0 ||
+          (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         handleClientDisconnect(&s);
         continue;
       }
@@ -1233,10 +1245,13 @@ bool TelnetTracer::passesFilter(uint8_t channel, TraceType type,
     if (pkt.length >= 5 && pkt.data[0] == PKT_STX) {
       ProtocolDiag_ExtractDeviceKey(pkt.data.data(), pkt.length, pkt_dev_id,
                                     dummy_s1, dummy_s2);
-    } else if (pkt.length == 5 && pkt.data[0] == 0x7F) {
-      pkt_dev_id = pkt.data[1];
+      return (pkt_dev_id == target);
     }
-    return (pkt_dev_id == target);
+    if (pkt.length == 5 && pkt.data[0] == 0x7F) {
+      pkt_dev_id = pkt.data[1];
+      return (pkt_dev_id == target);
+    }
+    return false;
   }
 
   return (type == mode);
@@ -1393,15 +1408,19 @@ void TelnetTracer::flushToClient() {
           delay_tag = kCmdTags[ch];
           delay_ms = -2;
         }
-      } else if (entry.type == TraceType::ACK) {
-        if (ch == 6 && s_trackers[5].active && s_trackers[5].dev_id == dev_id) {
-          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[5].tv);
-          delay_tag = "PASSTHRU";
-          s_trackers[5].active = false;
-        } else if (s_trackers[ch].active) {
-          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[ch].tv);
-          delay_tag = s_trackers[ch].is_query ? "CACHE  " : "FWD ACK";
-          s_trackers[ch].active = false;
+      } else {
+        if (entry.type == TraceType::ACK) {
+          if (ch == 6 && s_trackers[5].active && s_trackers[5].dev_id == dev_id) {
+            delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[5].tv);
+            delay_tag = "PASSTHRU";
+            s_trackers[5].active = false;
+          } else {
+            if (s_trackers[ch].active) {
+              delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[ch].tv);
+              delay_tag = s_trackers[ch].is_query ? "CACHE  " : "FWD ACK";
+              s_trackers[ch].active = false;
+            }
+          }
         }
       }
       break;
@@ -1439,11 +1458,13 @@ void TelnetTracer::flushToClient() {
                          (entry.type == TraceType::CTL), true};
         if (entry.type == TraceType::CTL)
           find_wch("GW FWD ");
-      } else if (entry.type == TraceType::ACK) {
-        if (s_trackers[1].active && s_trackers[1].dev_id == dev_id) {
-          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[1].tv);
-          delay_tag = "DEV ACK";
-          s_trackers[1].active = false;
+      } else {
+        if (entry.type == TraceType::ACK) {
+          if (s_trackers[1].active && s_trackers[1].dev_id == dev_id) {
+            delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[1].tv);
+            delay_tag = "DEV ACK";
+            s_trackers[1].active = false;
+          }
         }
       }
       break;
@@ -1516,12 +1537,12 @@ void TelnetTracer::flushToClient() {
           line_buf[idx++] = ' ';
       }
 
-      if (delay_ms >= 0) {
-        idx += snprintf(line_buf + idx, sizeof(line_buf) - idx,
-                        "[%s : +%3ldms]", delay_tag, delay_ms);
-      } else if (delay_ms == -2) {
-        idx +=
-            snprintf(line_buf + idx, sizeof(line_buf) - idx, "[%s]", delay_tag);
+      if (delay_ms >= 0 || delay_ms == -2) {
+        idx += (delay_ms >= 0)
+                   ? snprintf(line_buf + idx, sizeof(line_buf) - idx,
+                              "[%s : +%3ldms]", delay_tag, delay_ms)
+                   : snprintf(line_buf + idx, sizeof(line_buf) - idx, "[%s]",
+                              delay_tag);
       }
     }
 

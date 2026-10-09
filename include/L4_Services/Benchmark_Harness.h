@@ -33,6 +33,7 @@ struct HeapIntegrityMetrics {
   size_t  start_global_free{0};
   size_t  end_global_free{0};
   size_t  lowest_ever_free{0};
+  size_t  phase_peak_pbuf_drop{0}; // Peak drop during phase
   bool    floor_valid{true};       // Lowest >= 65536
 };
 
@@ -154,6 +155,8 @@ struct BenchmarkReport {
   int32_t  cold_warm_delta_cycles{0}; // Cache miss penalty (Cold - Warm)
   SystemSafetyMetrics safety;
   JitterDistribution jitter;
+  JitterDistribution core1_isolated_jitter;
+  bool has_core1_isolated{false};
 
   Phase0CalibrationMetrics phase0;
   Phase1PrimitiveMetrics phase1;
