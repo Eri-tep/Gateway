@@ -174,7 +174,7 @@ DeviceStateEntry *DeviceRepository::findMutable(uint8_t dev_id, uint8_t sub1,
   return findMutableFast(dev_id, sub1, sub2, h, auto_create);
 }
 
-IRAM_ATTR const DeviceStateEntry *
+const DeviceStateEntry *
 DeviceRepository::findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
                                    uint8_t sub2, uint8_t h) const noexcept {
   const size_t cnt = _device_count.load(std::memory_order_relaxed);
@@ -240,7 +240,7 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   return true;
 }
 
-IRAM_ATTR bool DeviceRepository::getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+bool DeviceRepository::getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                                 uint64_t &out_packed) const noexcept {
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
@@ -660,7 +660,7 @@ bool Device_FindCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   return s_device_repo.findCopy(dev_id, sub1, sub2, out_copy);
 }
 
-IRAM_ATTR bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
+bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                      uint64_t &out_packed) noexcept {
   return s_device_repo.getPackedState(dev_id, sub1, sub2, out_packed);
 }
@@ -693,7 +693,7 @@ void Device_SetLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept {
 
 // ── Device_UpdateFromBus ──────────────────────────────────────────────────────
 
-IRAM_ATTR DeviceUpdateResult Device_UpdateFromBus(StaticPacket &ack_pkt) noexcept {
+DeviceUpdateResult Device_UpdateFromBus(StaticPacket &ack_pkt) noexcept {
   return s_device_repo.updateFromBus(ack_pkt);
 }
 

@@ -172,7 +172,7 @@ void Router_RecordRoute(uint8_t channel_id, int8_t slot_idx,
 
 // ── Router_GetFastChannel ─────────────────────────────────────────────────────
 
-IRAM_ATTR uint8_t Router_GetFastChannel(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+uint8_t Router_GetFastChannel(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
   const uint8_t h = Hash::deviceKey8(dev_id, sub1, sub2);
   return s_fast_route_cache[h].load(std::memory_order_relaxed);
 }

@@ -129,7 +129,7 @@ enum class UartRxStatus { SUCCESS, TIMEOUT };
 using UartPollCallback = uint32_t (*)(void *ctx);
 
 QueueHandle_t Uart_GetEventQueue(uart_port_t u_num);
-IRAM_ATTR UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
+UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
                                        uint32_t tout_ms,
                                        UartPollCallback on_poll = nullptr,
                                        void *poll_ctx = nullptr,
@@ -144,7 +144,7 @@ void Ch1_SetState(Ch1State &cur_state, Ch1State new_state);
 // 2. UART RX Stream Demux & Packet Validation (formerly UartRx.cpp)
 // ============================================================================
 
-static inline IRAM_ATTR bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
+static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
                                                       size_t &stream_len,
                                                       size_t max_stream_buf,
                                                       uint32_t &last_rx_ms) {
@@ -207,7 +207,7 @@ static inline void Uart_FlushChannelInput(uart_port_t u_num) {
   }
 }
 
-IRAM_ATTR UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
+UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
                                        uint32_t tout_ms, UartPollCallback on_poll,
                                        void *poll_ctx, const StaticPacket *echo_match) {
   size_t u_idx = static_cast<size_t>(u_num);
