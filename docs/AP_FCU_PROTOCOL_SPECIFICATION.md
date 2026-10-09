@@ -1,129 +1,113 @@
 # AP FCU (Fan Coil Unit) RS-485 Modbus Protocol Specification
 
-본 문서는 **에이피(AP) 2-Pipe 절환식 천장형 카세트 팬코일유닛(FCU)** 기판의 RS-485 Modbus-RTU 통신 규격 및 실측 제어 명세를 정의합니다.
-실제 하드웨어 기판 계측(저항, 바이어스 전압, 실시간 레지스터 덤프 및 IR 무선 리모컨 동작)을 통해 100% 검증 및 확정된 내용입니다.
+Defines the RS-485 Modbus-RTU communication specification and control interface for the **AP 2-Pipe Changeover Ceiling Cassette Fan Coil Unit (FCU)** controller board. Fully validated against physical hardware measurements (impedance, bias voltage, register captures, and IR remote coexistence).
 
 ---
 
-## 1. 물리 계층 및 하드웨어 결선 (Hardware & Wiring)
+## 1. Physical Layer & Hardware Wiring
 
-### 1.1 포트 위치 및 핀맵
-- **통신 포트**: 기판 상단 우측 빨간색 커넥터 중 **`485-IN (적색 3핀 커넥터)`**
-  > **주의**: `485-OUT (적색 2핀 커넥터)`은 단독 세대 환경에서 펌웨어 정책상 기본 비활성화(Disable)되어 있으므로 반드시 `485-IN`에 연결해야 합니다.
-- **3핀 핀맵 (실측 계측 및 매뉴얼 검증 완료)**:
-  - **`1번 핀 (왼쪽, 대형 콘덴서 측)`**: **`RS-485 B (-)`** (매뉴얼상 흑색선, 1-3번 핀 간 52.7kΩ)
-  - **`2번 핀 (가운데)`**: **`GND (접지)`** (내부 차폐 및 1번 핀과 DC 0옴 접지)
-  - **`3번 핀 (오른쪽)`**: **`RS-485 A (+)`** (매뉴얼상 적색선, 1번 핀 대비 +300mV 바이어스 전위)
+### 1.1 Port Location & Pinout
+- **Port**: `485-IN` (Red 3-pin connector on upper-right board section).
+  > [!IMPORTANT]
+  > Do **not** connect to `485-OUT` (Red 2-pin connector); it is disabled by factory firmware in single-household configurations.
+- **Pinout (3-Pin Measured)**:
 
-### 1.2 시리얼 통신 환경 (EW11 세팅)
-- **Baud Rate**: `9600 bps`
-- **Data Bits**: `8 bit`
-- **Stop Bits**: `1 bit`
-- **Parity**: `None`
-- **Flow Control**: `None`
-- **EW11 UART Protocol**: **`NONE` (Transparent 투명 전송 모드 필수)**
+| Pin | Position / Wire | Signal | Measurement / Characteristics |
+|:---:|:---|:---:|:---|
+| **1** | Left (Capacitor side) / Black | **RS-485 B (-)** | 52.7 kΩ to Pin 3 |
+| **2** | Center / Shield | **GND** | Internal shield / DC 0 Ω to Pin 1 |
+| **3** | Right / Red | **RS-485 A (+)** | +300 mV DC bias relative to Pin 1 |
 
----
-
-## 2. 프로토콜 기본 사양 (Protocol Specification)
-
-- **프로토콜**: **표준 Modbus-RTU**
-- **기본 슬레이브 ID (Slave Address)**: **`0x01` (1번)**
-- **지원 Function Code**:
-  - `0x03` : **Read Holding Registers** (레지스터 상태 및 실시간 온도 읽기)
-  - `0x06` : **Write Single Register** (단일 항목 제어)
-  - `0x10` : **Write Multiple Registers** (다중 항목 일괄 제어)
-  > *(※ Coil 0x01/0x05, Discrete Input 0x02, Input Register 0x04는 미지원하며, 모든 상태는 Holding Register로 통합 관리됨)*
+### 1.2 Serial Configuration (EW11 Settings)
+- **Baud Rate**: `9600 bps` | **Data Bits**: `8` | **Stop Bits**: `1` | **Parity**: `None` | **Flow Control**: `None`
+- **EW11 UART Protocol**: `NONE` (Transparent transmission mode mandatory)
 
 ---
 
-## 3. Holding Register 메모리 맵 (`0x0000` ~ `0x0006`)
+## 2. Protocol Specification
 
-> 기판 롬(ROM) 메모리에는 정확히 **7개 레지스터(0x0000 ~ 0x0006)**만 할당되어 있으며, 7번 이상 번지는 Modbus Exception `0x83 0x02 (Illegal Data Address)`를 반환합니다.
-
-| 번지 (Hex) | PLC 번지 | 항목 명칭 | 속성 | 지원 값 (Value) | 상세 기능 및 동작 설명 |
-|:---:|:---:|:---:|:---:|:---:|:---|
-| **`0x0000`** | `40001` | **중앙제어 락 (Central Lock)** | R/W | **`0`**<br>`1` | **로컬 모드 (무선 IR 리모컨 100% 정상 허용) ★상시 0 유지★**<br>중앙제어 강제 락 (무선 IR 리모컨 입력 완전 무시/잠금) |
-| **`0x0001`** | `40002` | **운전 모드 (Operation Mode)** | R/W | **`1`**<br>**`2`**<br>**`3`** | **냉방 (Cool)**<br>**난방 (Heat)** *(겨울철 2-Pipe 배관 온수 절환 시 작동)*<br>**송풍 (Fan Only)** |
-| **`0x0002`** | `40003` | **풍량 (Fan Speed)** | R/W | **`0`**<br>**`1`**<br>**`2`**<br>**`3`**<br>**`4`** | **정지 (Fan OFF / 30~40초 지연 정지 트리거)**<br>**약풍 (Low, 1단)**<br>**중풍 (Mid, 2단)**<br>**강풍 (High, 3단)**<br>**자동 (Auto)** |
-| **`0x0003`** | `40004` | **바람 방향 스윙 (Swing)** | R/W | **`0`**<br>`1`<br>**`2`** | **스윙 정지 (Swing OFF / 바람 날개 고정)**<br>미사용 (예약)<br>**스윙 작동 (Swing ON / 날개 상하 자동 회전)** |
-| **`0x0004`** | `40005` | **에러 코드 (Alarm)** | Read | **`0`**<br>`1~5` | **정상 (이상 없음)**<br>자가진단 고장 코드 (센서 단선, 수위 경보 등) |
-| **`0x0005`** | `40006` | **희망 설정 온도 (Target Temp)** | R/W | **`18 ~ 30`** | **희망 설정 온도 (℃)** *(IR 리모컨 조작 시 실시간 동기화)* |
-| **`0x0006`** | `40007` | **실내 측정 온도 (Room Temp)** | Read | **측정값** | **기판 센서 실시간 실내온도 (℃, 예: 26, 27)** |
+- **Protocol**: Standard Modbus-RTU
+- **Default Slave ID**: `0x01`
+- **Supported Function Codes**:
+  - `0x03` : **Read Holding Registers** (Status & ambient temperature readout)
+  - `0x06` : **Write Single Register** (Individual parameter control)
+  - `0x10` : **Write Multiple Registers** (Batch control)
+  > [!NOTE]
+  > Function codes `0x01`, `0x02`, `0x04`, `0x05` are unsupported. All parameters reside in Holding Registers `0x0000`–`0x0006`. Addresses $\ge$ `0x0007` return Exception `0x83 0x02` (*Illegal Data Address*).
 
 ---
 
-## 4. 제어 및 조회 패킷 가이드 (HEX & CRC16)
+## 3. Holding Register Map (`0x0000`–`0x0006`)
 
-### 4.1 상태 조회 (Status Query - 0~6번 레지스터 일괄)
-- **송신 (TX)**: `01 03 00 00 00 07 04 08`
-- **수신 (RX)**: `01 03 0E [Reg0] [Reg1] [Reg2] [Reg3] [Reg4] [Reg5] [Reg6] [CRC]`
-  - 응답 예시: `01 03 0E 00 00 00 01 00 04 00 02 00 00 00 1A 00 1A 5A E5`
-  - 데이터 해석: `중앙락:0`, `냉방:1`, `풍량:자동(4)`, `스윙:ON(2)`, `에러:0`, `희망온도:26℃`, `실내온도:26℃`
-
-### 4.2 전원 제어 (Power Control - 무선 리모컨 락 방지)
-- **전원 켜기 (냉방 / 강풍 / 18℃ 일괄 ON)**:
-  - `01 10 00 01 00 03 06 00 01 00 03 00 12 A3 2A`
-  - *(※ Reg 0을 건드리지 않고 쓰므로 무선 리모컨이 죽지 않음)*
-- **전원 켜기 (송풍 / 강풍 일괄 ON)**:
-  - `01 10 00 01 00 02 04 00 03 00 03 F2 48`
-- **전원 끄기 (풍량 0 설정)**:
-  - `01 06 00 02 00 00 28 0A`
-  - *(※ 정지 명령 수신 후 배관 잔열/응축수 안전 배출을 위해 약 30~40초간 팬 회전 후 완전 정지됨)*
-
-### 4.3 풍량 제어 (Fan Speed)
-- **약풍 (1단)**: `01 06 00 02 00 01 E9 CB`
-- **중풍 (2단)**: `01 06 00 02 00 02 A9 CA`
-- **강풍 (3단)**: `01 06 00 02 00 03 68 0B`
-- **자동 (Auto)**: `01 06 00 02 00 04 29 C8`
-
-### 4.4 바람 방향 스윙 제어 (Swing)
-- **스윙 켜기 (Swing ON / 자동 회전)**: `01 06 00 03 00 02 F8 0B`
-- **스윙 끄기 (Swing OFF / 현재 각도 고정)**: `01 06 00 03 00 00 79 CB`
-
-### 4.5 희망 설정 온도 제어 (Target Temperature)
-- **18℃ (`0x12`)**: `01 06 00 05 00 12 18 0E`
-- **20℃ (`0x14`)**: `01 06 00 05 00 14 98 0F`
-- **22℃ (`0x16`)**: `01 06 00 05 00 16 19 CF`
-- **24℃ (`0x18`)**: `01 06 00 05 00 18 99 CA`
-- **26℃ (`0x1A`)**: `01 06 00 05 00 1A 19 C8`
-- **28℃ (`0x1C`)**: `01 06 00 05 00 1C 98 09`
-
-### 4.6 운전 모드 제어 (Mode Select)
-- **냉방 모드 (Cool, `1`)**: `01 06 00 01 00 01 19 CA`
-- **난방 모드 (Heat, `2`)**: `01 06 00 01 00 02 59 CB`
-- **송풍 모드 (Fan, `3`)**: `01 06 00 01 00 03 98 0B`
+| Address (Hex) | PLC Addr | Name | Access | Valid Values | Description |
+|:---:|:---:|:---|:---:|:---:|:---|
+| `0x0000` | `40001` | **Central Lock** | R/W | `0`<br>`1` | **`0`: Local mode (IR remote enabled; MUST MAINTAIN 0)**<br>`1`: Central lock (IR remote locked/ignored) |
+| `0x0001` | `40002` | **Operation Mode** | R/W | `1`<br>`2`<br>`3` | `1`: Cool<br>`2`: Heat (Active during winter hot-water changeover)<br>`3`: Fan Only |
+| `0x0002` | `40003` | **Fan Speed** | R/W | `0`<br>`1`<br>`2`<br>`3`<br>`4` | `0`: Off (Triggers 30–40 s purge delay)<br>`1`: Low<br>`2`: Medium<br>`3`: High<br>`4`: Auto |
+| `0x0003` | `40004` | **Vane Swing** | R/W | `0`<br>`2` | `0`: Swing Off (Vane fixed)<br>`2`: Swing On (Continuous oscillation) |
+| `0x0004` | `40005` | **Alarm Code** | Read | `0`<br>`1–5` | `0`: Normal (No fault)<br>`1–5`: Hardware fault (sensor, drain pan, etc.) |
+| `0x0005` | `40006` | **Target Temp** | R/W | `18–30` | Target setpoint in °C (synchronizes with IR remote) |
+| `0x0006` | `40007` | **Room Temp** | Read | Measured | Current ambient temperature in °C |
 
 ---
 
-## 5. 핵심 하드웨어 및 운영 아키텍처 특성
+## 4. Packet Reference (Hex & CRC-16)
 
-1. **무선 IR 리모컨 공존 메커니즘**:
-   - `0x0000` 레지스터는 상시 `0`을 유지해야 합니다.
-   - `0x0000`에 `1`을 쓰면 빌딩 관리실 강제 중앙제어 모드로 전환되어 무선 리모컨 수신이 잠깁니다.
-   - `0x0000 = 0` 상태에서 `0x0001`~`0x0005`만 제어하거나 상태를 조회할 경우 **무선 IR 리모컨과 RS-485 통신이 100% 완벽하게 공존**합니다.
-2. **지연 정지 (Delay-Off) 메커니즘**:
-   - 전원 정지 시 즉시 모터 전원을 끊지 않고, 코일 내 잔열 및 응축수 배출을 위해 **약 30~40초간 지연 운전 후 정지**합니다 (매뉴얼 11p 공식 사양).
-3. **2-Pipe 냉온수 절환 배관**:
-   - 기판의 파이프 온도센서 감지에 따라 배관 수온(냉수/온수)에 맞춰 모드가 안전하게 결정됩니다.
+### 4.1 Status Query (Registers 0–6 Batch)
+- **TX**: `01 03 00 00 00 07 04 08`
+- **RX**: `01 03 0E [Reg0] [Reg1] [Reg2] [Reg3] [Reg4] [Reg5] [Reg6] [CRC_L] [CRC_H]`
+  - *Example RX*: `01 03 0E 00 00 00 01 00 04 00 02 00 00 00 1A 00 1A 5A E5`
+  - *Decoded*: Lock: `0`, Mode: `Cool`, Fan: `Auto (4)`, Swing: `On (2)`, Alarm: `0`, Target: `26°C`, Room: `26°C`
+
+### 4.2 Power Control (Remote-Lock Safe)
+- **Turn On (Cool / High / 18°C)**: `01 10 00 01 00 03 06 00 01 00 03 00 12 A3 2A`
+  *(Writes Regs 1–3 without altering Reg 0, preserving IR remote operation)*
+- **Turn On (Fan Only / High)**: `01 10 00 01 00 02 04 00 03 00 03 F2 48`
+- **Turn Off (Fan Speed 0)**: `01 06 00 02 00 00 28 0A`
+  *(Fan runs for ~30–40 s post-command to dissipate residual heat/drain condensate before full shutdown)*
+
+### 4.3 Fan Speed Control
+- **Low (1)**: `01 06 00 02 00 01 E9 CB` | **Medium (2)**: `01 06 00 02 00 02 A9 CA`
+- **High (3)**: `01 06 00 02 00 03 68 0B` | **Auto (4)**: `01 06 00 02 00 04 29 C8`
+
+### 4.4 Vane Swing Control
+- **Swing On**: `01 06 00 03 00 02 F8 0B` | **Swing Off**: `01 06 00 03 00 00 79 CB`
+
+### 4.5 Target Setpoint Control
+- **18°C**: `01 06 00 05 00 12 18 0E` | **20°C**: `01 06 00 05 00 14 98 0F` | **22°C**: `01 06 00 05 00 16 19 CF`
+- **24°C**: `01 06 00 05 00 18 99 CA` | **26°C**: `01 06 00 05 00 1A 19 C8` | **28°C**: `01 06 00 05 00 1C 98 09`
+
+### 4.6 Mode Select
+- **Cool (1)**: `01 06 00 01 00 01 19 CA` | **Heat (2)**: `01 06 00 01 00 02 59 CB` | **Fan Only (3)**: `01 06 00 01 00 03 98 0B`
 
 ---
 
-## 6. Modbus-RTU CRC-16 고속 연산 아키텍처 (Slice-by-4 SWAR)
+## 5. Hardware & Operational Characteristics
 
-본 게이트웨이의 `Fcu_Engine`은 Modbus-RTU 패킷(기본 다항식 `0xA001`, 초기값 `0xFFFF`, Little-Endian 바이트 순서)의 실시간 계산 및 검증 시 기존 바이트 단위 루프 연산의 CPU 부하를 제거하기 위해 **Slice-by-4 SWAR(SIMD Within A Register)** 고속 연산 알고리즘을 적용합니다.
+1. **IR Remote Coexistence**:
+   - `0x0000` must remain `0`. Writing `1` engages central control lock, disabling the physical IR remote receiver.
+   - When updating `0x0001`–`0x0005`, RS-485 commands and the IR remote coexist seamlessly with bi-directional state synchronization.
+2. **Delayed Shutdown (Delay-Off)**:
+   - Power-off commands (Fan = `0`) do not immediately halt the blower. The motor continues spinning for 30–40 s to purge condensation and prevent mold.
+3. **2-Pipe Hydronic Changeover**:
+   - Pipe temperature sensors regulate operational viability based on water supply temperature (chilled vs. hot).
 
-### 6.1 알고리즘 구조 및 테이블 레이아웃
-Slice-by-4 방식은 데이터를 4바이트(32비트 워드) 단위로 처리하며, 4단계의 사전 계산된 CRC 룩업 테이블($T_0, T_1, T_2, T_3$)을 플래시 메모리(`PROGMEM` / `.rodata`)에 배치합니다:
-- **메모리 배치**: 각 테이블 $256 \times 2\text{ Bytes} = 512\text{ Bytes}$, 총 4개 테이블로 **Flash 2,048 Bytes (+2.0 KB)**를 점유하며 **RAM 사용량은 0 Bytes**입니다.
-- **수학적 연산식**:
-  $$CRC_{new} = T_3[(CRC \oplus B_0) \text{ \& } 0\text{xFF}] \oplus T_2[( (CRC \gg 8) \oplus B_1) \text{ \& } 0\text{xFF}] \oplus T_1[B_2] \oplus T_0[B_3]$$
-- **자투리 바이트(Tail Bytes)**: 4바이트 단위 처리 후 남은 1~3바이트는 표준 단일 테이블($T_0$)로 순차 처리합니다.
+---
 
-### 6.2 성능 지표 및 불변식 검증
-| 지표 | 레거시 단일 바이트 LUT | Slice-by-4 SWAR (현행) | 개선 효과 |
-|---|---|---|---|
-| **4바이트 처리 사이클** | ~140 cycles | **~35 cycles** | **약 400% (4배) 고속화** |
-| **D-Cache / SRAM 부하** | 0 Bytes | **0 Bytes** (순수 Flash `.rodata`) | RAM 오버헤드 전무 |
-| **컴파일 타임 안전성** | 런타임 수동 확인 | **`static_assert` 골든 벡터 검증** | `01 06 00 00 00 00` $\rightarrow$ `0x0804` |
+## 6. High-Speed Modbus CRC-16 Architecture (Slice-by-4 SWAR)
 
+The gateway engine uses a **Slice-by-4 SWAR (SIMD Within A Register)** algorithm for Modbus-RTU frames (poly: `0xA001`, init: `0xFFFF`, Little-Endian).
+
+### 6.1 Architecture & Memory Footprint
+- **Word Processing**: Processes 4 bytes (32-bit word) per iteration against four precomputed lookup tables ($T_0, T_1, T_2, T_3$).
+- **Storage**: $4 \times (256 \times 2\text{ bytes}) = 2{,}048\text{ bytes}$ located in Flash `.rodata` (`PROGMEM`). **0 bytes SRAM overhead**.
+- **Formula**:
+  $$CRC_{new} = T_3[(CRC \oplus B_0) \text{ \& } 0\text{xFF}] \oplus T_2[((CRC \gg 8) \oplus B_1) \text{ \& } 0\text{xFF}] \oplus T_1[B_2] \oplus T_0[B_3]$$
+- **Tail Bytes**: Remaining 1–3 bytes are processed sequentially using table $T_0$.
+
+### 6.2 Performance Comparison
+| Metric | Byte-by-Byte LUT | Slice-by-4 SWAR | Improvement |
+|---|:---:|:---:|:---:|
+| **4-Byte Processing Cycles** | ~140 cycles | **~35 cycles** | **4x speedup** |
+| **D-Cache / SRAM Overhead** | 0 Bytes | **0 Bytes** (Flash `.rodata`) | Zero heap / Zero RAM |
+| **Compile-Time Safety** | Runtime manual check | **`static_assert` golden vectors** | `01 06 00 00 00 00` $\rightarrow$ `0x0804` |

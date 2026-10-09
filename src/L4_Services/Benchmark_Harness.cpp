@@ -430,8 +430,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
   // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
   uint32_t cold_t0 = esp_cpu_get_cycle_count();
-  (void)Wallpad_ExtractLength(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
-  (void)Wallpad_ValidatePacket(sp);
+  (void)Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
   DeviceStateEntry cold_dummy;
   (void)Device_FindCopy(0x18, 0x01, 0x00, cold_dummy);
   uint32_t cold_t1 = esp_cpu_get_cycle_count();
@@ -439,8 +438,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
   // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP for all pipeline stages)
   for (uint32_t i = 0; i < 1000; ++i) {
-    (void)Wallpad_ExtractLength(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
-    (void)Wallpad_ValidatePacket(sp);
+    (void)Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     DeviceStateEntry dummy;
     (void)Device_FindCopy(0x18, 0x01, 0x00, dummy);
     if (cache_mux) {
@@ -470,6 +468,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   uint64_t sum_copy = 0, sum_ptr = 0, sum_span_param = 0;
   uint64_t sum_route = 0, sum_dispatch = 0;
   uint64_t sum_dedup_hit = 0, sum_dedup_delta = 0;
+  uint64_t sum_pure_e2e = 0;
   uint64_t total_cycles = 0;
   uint32_t min_c = UINT32_MAX, max_c = 0;
 
@@ -479,15 +478,16 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   for (uint32_t i = 0; i < iterations; ++i) {
     uint32_t loop_start = esp_cpu_get_cycle_count();
 
-    // 1. Framing
+    // 1. Framing & Single-Pass Extraction
     uint32_t t0 = esp_cpu_get_cycle_count();
-    uint8_t ext_len = Wallpad_ExtractLength(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+    ExtractedFrameResult ext_res = Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     uint32_t t1 = esp_cpu_get_cycle_count();
     sum_framing += static_cast<uint32_t>(t1 - t0);
+    uint8_t ext_len = static_cast<uint8_t>(ext_res.length);
 
-    // 2. Validate
+    // 2. Validate (Zero-Redundancy Verified Status Check)
     t0 = esp_cpu_get_cycle_count();
-    bool valid = Wallpad_ValidatePacket(sp);
+    bool valid = ext_res.checksum_ok;
     t1 = esp_cpu_get_cycle_count();
     sum_validate += static_cast<uint32_t>(t1 - t0);
 
@@ -574,10 +574,20 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     t1 = esp_cpu_get_cycle_count();
     sum_dispatch += static_cast<uint32_t>(t1 - t0);
 
+    // Pure E2E 1-Probe Pipeline (Probe Overhead Eliminated)
+    uint32_t pe_t0 = esp_cpu_get_cycle_count();
+    ExtractedFrameResult pe_ext = Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+    DeviceStateEntry pe_dummy;
+    (void)Device_FindCopy(0x18, 0x01, 0x00, pe_dummy);
+    (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
+    uint32_t pe_t1 = esp_cpu_get_cycle_count();
+    sum_pure_e2e += static_cast<uint32_t>(pe_t1 - pe_t0);
+
     s_observable_sink += (ext_len ^ (valid ? 1 : 0) ^ (found_full ? 2 : 0) ^
                           n_sub ^ (hit_ok ? 4 : 0) ^ (miss_ok ? 8 : 0) ^
                           (direct_exists ? 16 : 0) ^ sp_res ^ ch ^
-                          (dedup_hit ? 32 : 0) ^ (is_delta ? 64 : 0) ^ (delta_emitted ? 128 : 0));
+                          (dedup_hit ? 32 : 0) ^ (is_delta ? 64 : 0) ^ (delta_emitted ? 128 : 0) ^
+                          pe_ext.length ^ (pe_dummy.is_online ? 1 : 0));
 
     uint32_t loop_end = esp_cpu_get_cycle_count();
     uint32_t loop_diff = static_cast<uint32_t>(loop_end - loop_start);
@@ -594,11 +604,11 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
       RecordOutlier(r, i, loop_diff, GOLDEN_QUERY[3], GOLDEN_QUERY[4]);
     }
 
-    if ((i & 0x03FF) == 0) {
+    if ((i & 0x0FFF) == 0) {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
-      if ((i % 10000) == 0 && i > 0) {
+      if ((i % 20000) == 0 && i > 0) {
         vTaskDelay(pdMS_TO_TICKS(1));
       }
     }
@@ -625,6 +635,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   r.phase2.shadow_dedup_delta_cycles = static_cast<uint32_t>(sum_dedup_delta / iterations);
   r.phase2.route_lookup_cycles = static_cast<uint32_t>(sum_route / iterations);
   r.phase2.dispatch_build_cycles = static_cast<uint32_t>(sum_dispatch / iterations);
+  r.phase2.e2e_pure_pipeline_cycles = static_cast<uint32_t>(sum_pure_e2e / iterations);
 
   // Unaccounted overhead calculation (true loop residual)
   uint64_t all_measured_ops = r.phase2.stream_framing_cycles +
@@ -1143,6 +1154,8 @@ void FormatReport(AppendBuf &out, const BenchmarkReport &r) noexcept {
                      r.phase2.route_lookup_cycles, r.phase2.route_lookup_cycles / 240.0f);
     out.appendFormat("Pipeline Action Dispatch/Build : %6u cycles (%5.2f us)\r\n",
                      r.phase2.dispatch_build_cycles, r.phase2.dispatch_build_cycles / 240.0f);
+    out.appendFormat("Pure E2E 1-Probe Pipeline Lat  : %6u cycles (%5.2f us)\r\n",
+                     r.phase2.e2e_pure_pipeline_cycles, r.phase2.e2e_pure_pipeline_cycles / 240.0f);
     out.appendFormat("Unaccounted Overhead (Jitter)  : %6u cycles (%5.2f us)\r\n",
                      r.phase2.unaccounted_cycles, r.phase2.unaccounted_cycles / 240.0f);
   }

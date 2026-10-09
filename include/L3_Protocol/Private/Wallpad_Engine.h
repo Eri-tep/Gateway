@@ -20,6 +20,11 @@
 #include <freertos/FreeRTOS.h>
 #include <span>
 
+struct ExtractedFrameResult {
+  int length{-1};         // > 0: Valid frame length, 0: Partial/incomplete frame, -1: Invalid STX or bounds
+  bool checksum_ok{false}; // True if STX/ETX/Length bounds AND Checksum were verified valid
+};
+
 // ============================================================================
 // 1. DATA-DRIVEN VENDOR PROFILE DESCRIPTOR (STORED IN NVS)
 // ============================================================================
@@ -122,6 +127,7 @@ public:
   uint8_t getMinPacketLen() const;
   uint8_t getMaxPacketLen() const;
   int extractPacketLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) const;
+  ExtractedFrameResult extractPacketLengthAndValidate(const uint8_t *stream, size_t stream_len, size_t stx_idx) const noexcept;
 };
 
 // ============================================================================
@@ -245,6 +251,7 @@ void Wallpad_ResetStalePollCount() noexcept;
 
 uint8_t Wallpad_GetStx() noexcept;
 int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept;
+ExtractedFrameResult Wallpad_ExtractAndValidateFast(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept;
 bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept;
 
 bool Wallpad_HandleSubBusQuery(uint8_t channel_id, const StaticPacket &req,

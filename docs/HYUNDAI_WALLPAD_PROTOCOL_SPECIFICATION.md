@@ -1,329 +1,223 @@
-# 현대통신(현대에이치티) 월패드 RS-485 통신 프로토콜 상세 명세서
-> **규격 버전 (Spec Version)**: 2.0 (범용 템플릿 아키텍처 적용)  
-> **적용 벤더 / 모델**: 현대통신(현대에이치티) HDHN 시리즈 (HDHN-2000 등) 및 1:1 P2P 버스 단지
+# Hyundai Wallpad RS-485 Communication Protocol Specification
 
-본 문서는 국내 홈 IoT 커뮤니티 및 실제 댁내 월패드(HDHN-2000 계열 등) RS-485 버스 실측 패킷 분석을 통해 공개 오픈소스의 오류를 전면 교정하고 확정한 **현대통신 표준 패킷 프레임 구조 및 슬롯 오프셋 공식 베이스라인**입니다. 타 제조사(코콤, 코맥스, HDC 등) 프로토콜 문서화 시에도 동일한 템플릿 구조로 확장 활용할 수 있도록 표준화되었습니다.
+> **Specification Version**: 2.0 (Universal Template Architecture)  
+> **Target Vendor / Series**: Hyundai HT (HDHN series, e.g., HDHN-2000) & P2P Bus Residential Complexes
 
----
-
-## 1. 물리 계층 및 통신 규격 (Serial Specs)
-
-### 1.1 메인 제어 버스 (CH1 ~ CH3, CH5)
-- **대상 기기**: 조명, 난방, 환기, 가스, 콘센트, 시스템에어컨, 엘리베이터 등
-- **통신 방식**: RS-485 Half-Duplex
-- **통신 파라미터**: **`9600 bps`**, **`8 Data bit`**, **`1 Stop bit`**, **`No Parity (8N1)`**
-
-### 1.2 서브 비디오폰 버스 (CH4 주방 TV / 비디오폰 서브 버스)
-- **대상 기기**: 현관 도어폰, 로비 인터폰, 현관 및 공동현관 문열림
-- **통신 방식**: UART (SoftwareSerial Half-Duplex)
-- **통신 파라미터**: **`3840 bps`** (환경에 따라 3880~3890 bps 자동 수렴), **`8 Data bit`**, **`1 Stop bit`**, **`No Parity (8N1)`**
+Standard baseline for Hyundai HT RS-485 wallpad communication frames, slot offsets, and device interaction invariants.
 
 ---
 
-### 1.3 통신 세대별 아키텍처 구분 (신형 vs 구형 Legacy)
+## 1. Physical Layer & Serial Specifications
 
-| 비교 항목 | 구형 통신 방식 (Legacy) | **신형 통신 방식 (New - 본 문서 기준 규격)** |
-|:---|:---|:---|
-| **폴링 아키텍처** | **전 세대 일괄 브로드캐스트** (모든 방 데이터를 한 패킷에 모음) | **1:1 개별 룸 포인트 투 포인트 (P2P)** (방/기기별 개별 질의 및 개별 응답) |
-| **패킷 길이 (난방/에어컨)** | **34바이트 (`0x22`) 고정 대형 프레임** (1번방~6번방 데이터 나열) | **11B QRY $\leftrightarrow$ 11B/13B/14B/15B/18B 개별 응답** |
-| **주소 체계 (Address)** | 고정 인덱스 오프셋 방식 | **상/하위 4비트(Nibble) 분할 주소** (`Byte #6` = `Room\|Dev`) |
-| **제어 방식** | 일괄 프레임 내 특정 방 비트 수정 송출 | **11바이트 (`0x0B`) 전용 제어 단발 프레임** (`F7 0B 01 [Dev] 02 ...`) |
-| **제어 피드백 (ACK)** | 다음 주기 브로드캐스트 대기 | **즉시 응답 (Echo ACK)** (제어 직후 11B/13B로 `01 01`, `02 02` 즉시 반환) |
-| **기기 분기 (Category)** | 기능별 통합 프레임 | **기능별 카테고리 분기** (전원 `0x40`, 모드 `0x41`, 풍량 `0x42`, 온도 `0x45`) |
-| **적용 시기 / 단지** | 2010년대 초중반 이전 구축 아파트 | **2010년대 후반 ~ 현재 신축/준신축 아파트** (현대에이치티 HDHN 시리즈 등) |
+### 1.1 Main Control Bus (CH1–CH3, CH5)
+- **Target Devices**: Lights, Thermostats, Ventilation, Gas Valve, Outlets, HVAC/FCU, Elevator, HEMS.
+- **Protocol / Medium**: RS-485 Half-Duplex
+- **Serial Parameters**: `9600 bps`, `8 Data bits`, `1 Stop bit`, `No Parity (8N1)`
 
-> ⚠️ **호환성 경고**: 오픈소스(GitHub) 구형 현대통신 라이브러리 다수가 구형 34B 파서 기반입니다. 신형 버스에 구형 파서를 적용할 경우 패킷 길이 불일치로 버스 데이터가 100% 드랍되므로 반드시 본 문서의 1:1 P2P 파서를 적용해야 합니다.
+### 1.2 Sub Video Phone Bus (CH4 Kitchen TV / Sub Phone)
+- **Target Devices**: Front Doorphone, Lobby Intercom, Door Strike Release.
+- **Protocol / Medium**: UART (SoftwareSerial Half-Duplex)
+- **Serial Parameters**: `3840 bps` (Auto-tunes to 3880–3890 bps depending on line capacitance), `8N1`
 
-## 2. 패킷 프레임 기본 구조 및 체크섬 계산
+### 1.3 Architecture Comparison: New P2P vs. Legacy 34B
 
-### 2.1 메인 기기 공통 프레임 구조 (`0xF7` .. `0xEE`)
-
-| Index | 필드명 | 바이트 값 | 설명 |
-| :---: | :--- | :---: | :--- |
-| **0** | **Prefix** | `0xF7` | 패킷 시작 접두사 (STX) |
-| **1** | **Length** | `N` | 패킷 전체 길이 (`0x0B`: 11B, `0x0D`: 13B, `0x12`: 18B 등) |
-| **2** | **Sender ID** | `0x01` | 송신측 식별자 / 월패드 마스터 ID |
-| **3** | **Device Type** | `??h` | 대상 장치 식별 코드 (`0x18`, `0x19`, `0x1B`, `0x1C`, `0x1F`, `0x2B`, `0x34` 등) |
-| **4** | **Packet Type** | `??h` | `0x01`: 상태 조회(QRY), `0x02`: 제어 명령(CTL), `0x04`: 응답/확인(ACK) |
-| **5 ~ N-3** | **Payload** | 가변 | 카테고리/기능, 공간 및 기기 번호, 제어 파라미터 ($M = N - 7$ 바이트) |
-| **N-2** | **Checksum** | `??h` | XOR Sum Checksum |
-| **N-1** | **Suffix** | `0xEE` | 패킷 종료 접미사 (ETX) |
-
-#### 체크섬 계산식 (XOR Sum)
-$$\text{Checksum} = \text{Packet}[0] \oplus \text{Packet}[1] \oplus \dots \oplus \text{Packet}[N-3]$$
-*(인덱스 0부터 체크섬 바로 앞 바이트인 $N-3$까지의 모든 바이트를 XOR 연산)*
-
-### 2.2 도어폰 전용 프레임 구조 (`0x7F` .. `0xEE`, 5바이트 고정)
-
-| Index | 필드명 | 바이트 값 | 설명 |
-| :---: | :--- | :---: | :--- |
-| **0** | **STX** | `0x7F` | 도어폰 프레임 시작 접두사 |
-| **1** | **Opcode** | `??h` | 벨 호출 이벤트 및 3-Step 문열림 시퀀스 명령 |
-| **2** | **Arg1** | `0x00` | 패딩 바이트 |
-| **3** | **Arg2** | `0x00` | 패딩 바이트 |
-| **4** | **ETX** | `0xEE` | 도어폰 프레임 종료 접미사 |
-
-### 2.3 패킷 타입 코드 레지스트리 (Packet Type Registry)
-
-| Type Code | 명칭 | 방향 | 설명 |
-| :---: | :---: | :---: | :--- |
-| **`0x01`** | **QRY (상태 조회)** | 마스터 $\rightarrow$ 기기 | 월패드의 주기적 상태 질의 (Polling Query) |
-| **`0x02`** | **CTL (제어 명령)** | 마스터 $\rightarrow$ 기기 | 11B 단발 상태 변경 제어 트리거 |
-| **`0x04`** | **ACK (응답/확인)** | 기기 $\rightarrow$ 마스터 | 쿼리 응답 상태 데이터 반환 및 제어 명령 즉시 Echo |
-| **`0x01`** | **BC (브로드캐스트)** | 기기 $\rightarrow$ 버스 전체 | 슬레이브 기기의 자발적 이벤트 통보 (도착 감지, 외출 스위치 등) |
-
-> ⚠️ **파서 주의사항 (BC vs QRY 구분)**: 브로드캐스트(BC) 이벤트 패킷 역시 `Packet[4] == 0x01`을 사용합니다. 마스터 질의 없이 기기가 자발적으로 송출하는 패킷(예: 엘리베이터 도착 `0x34`, 방범/외출 `0x41`/`0x36`)은 폴링 질의(QRY)가 아닌 수신 이벤트(BC)로 처리해야 합니다.
+| Feature | Legacy System (< 2015) | New System (P2P Standard) |
+|---|---|---|
+| **Polling Topology** | Full-apartment broadcast (all rooms in one frame) | Point-to-Point (P2P) individual room query/response |
+| **Frame Length** | Fixed 34-byte (`0x22`) monolithic frame | 11B Query $\leftrightarrow$ 11B/13B/14B/15B/18B Response |
+| **Addressing** | Fixed array byte offsets | Split nibble address (`Byte #6` = `Room | Dev`) |
+| **Control Mechanism** | Modifies room bits inside 34B broadcast frame | Dedicated 11-byte command frame (`F7 0B 01 ...`) |
+| **Control ACK** | Waits for next global broadcast cycle | Immediate Echo ACK (`01 01` for ON, `02 02` for OFF) |
+| **Command Categories** | Monolithic control byte | Category codes: Power (`0x40`), Mode (`0x41`), Fan (`0x42`), Temp (`0x45`) |
 
 ---
 
-## 3. 기기 레지스트리 (Device Registry)
+## 2. Packet Framing & Checksum Algorithms
 
-### 3.1 기기 ID 마스터 테이블 (Device Type Master Table)
+### 2.1 Main Control Bus Framing (`0xF7` .. `0xEE`)
 
-| DevID | 기기명 | QRY 길이 | ACK 길이 | CTL ACK 길이 | 지원 제어 기능 | 비고 |
-| :---: | :--- | :---: | :---: | :---: | :--- | :--- |
-| **`0x19`** | 일반 조명 | 11B | 11B | 11B | 개별 전원, 룸 일괄 소등 | 기본 조명 |
-| **`0x1A`** | 디밍 조명 (확장) | — | — | 11B | 밝기 레벨(0~100%) | QRY 없음 (CTL 전용) |
-| **`0x15`** | 감성 조명 (확장) | — | — | 11B | 색온도(Tone) 단계 | QRY 없음 (CTL 전용) |
-| **`0x18`** | 난방 / 보일러 | 11B | **18B** | **13B** | 개별 전원, 희망온도, 외출 | 신형 1:1 P2P |
-| **`0x1C`** | 시스템 에어컨 / FCU | 11B | **14B/15B/18B** | 11B | 전원, 모드, 온도, 풍량, 스윙 | 단지별 길이/Cat 분기 |
-| **`0x1F`** | 스마트 콘센트 | 11B | **18B** | 11B | 전원 릴레이, 대기차단 모드 | 1W 단위 전력 |
-| **`0x2B`** | 전열교환기 (환기) | 11B | **13B** | **13B** | 전원, 풍량 단계, 운전 모드 | 모드 QRY 직접 주입 필요 |
-| **`0x1B`** | 가스 밸브 | 11B | **13B** | **13B** | **차단 전용 (Close Only)** | 법규상 원격 열기 불가 |
-| **`0x34`** | 엘리베이터 | — | — | 11B | 호출 제어 (CTL) | 도착 감지 BC (13B) |
-| **`0x41`/`0x36`** | 방범 / 현관 스위치 | — | — | — | 이벤트 수신 (BC 전용) | 외출/재실 상태 동기화 |
-| **`0x30`/`0x32`** | 원격 검침 (HEMS) | — | **18B** | — | 계량 데이터 수신 (ACK) | 전기/수도/가스/온수 |
-| **CH4** | 도어폰 (현관/로비) | — | **5B** | **5B $\times$ 3** | 호출 감지 및 문열림 3-Step FSM | 3840 bps 서브 버스 |
+| Byte Index | Field | Value | Description |
+|:---:|:---|:---:|:---|
+| **0** | **Prefix (STX)** | `0xF7` | Frame start delimiter |
+| **1** | **Length ($N$)** | `N` | Total frame length in bytes (`0x0B`: 11B, `0x0D`: 13B, `0x12`: 18B) |
+| **2** | **Sender ID** | `0x01` | Master transmitter ID (Wallpad Master) |
+| **3** | **Device Type** | `??h` | Target device identifier (`0x18`, `0x19`, `0x1B`, `0x1C`, `0x1F`, `0x2B`, `0x34`) |
+| **4** | **Packet Type** | `??h` | `0x01`: Query (QRY) / Broadcast (BC), `0x02`: Control (CTL), `0x04`: Response (ACK) |
+| **5 .. $N-3$** | **Payload** | Var | Category, Room/Device sub-address, state/control parameters ($M = N - 7$ bytes) |
+| **$N-2$** | **Checksum** | `??h` | XOR sum of bytes 0 through $N-3$ |
+| **$N-1$** | **Suffix (ETX)** | `0xEE` | Frame end delimiter |
 
-### 3.2 카테고리(Cat) 코드 레지스트리 (Category Code Registry)
+#### Checksum Equation (XOR Sum)
+$$\text{Checksum} = \bigoplus_{i=0}^{N-3} \text{Packet}[i]$$
 
-| Cat Code | 주요 기능 | 적용 기기 | 설명 및 단지별 변종 |
-| :---: | :--- | :--- | :--- |
-| **`0x40`** | 전원 제어 / 기본 상태 조회 | 전 기기 공통 | ON/OFF 가동 상태 질의 및 제어 |
-| **`0x41`** | 운전모드 제어 / 엘리베이터 | `0x1C`, `0x34` | 에어컨 냉방/제습/송풍/자동/난방 제어 (변종: `0x43`, `0x5C`) |
-| **`0x42`** | 풍량 제어 | `0x1C`, `0x2B` | 에어컨 및 환기 송풍 단계 제어 (변종: `0x5D`) |
-| **`0x43`** | 모드 제어 / 모드 전환 / 가스 | `0x2B`, `0x1F`, `0x1B` | 환기 모드 제어, 콘센트 대기차단 전환, 가스 밸브 조회/차단 |
-| **`0x44`** | 풍향(루버/스윙) 제어 | `0x1C` | 시스템 에어컨 상하 스윙 가동/정지 |
-| **`0x45`** | 희망온도 설정 | `0x18`, `0x1C` | 난방 및 에어컨 설정온도 변경 (정수 Hex, 0.5℃는 `+0x80`) |
-| **`0x46`** | 난방 상태 조회 / 전원 제어 | `0x18` | 난방 1:1 QRY 및 전원 ON/OFF/외출 제어 |
-| **`0x5C`** | 운전모드 제어 (변종) | `0x1C` | 특정 단지/인터페이스 게이트웨이 전용 모드 제어 Cat |
-| **`0x5D`** | 풍량 제어 (변종) | `0x1C` | 특정 단지/인터페이스 게이트웨이 전용 풍량 제어 Cat |
+### 2.2 Doorphone Framing (`0x7F` .. `0xEE`, 5 Bytes Fixed)
 
----
+| Byte Index | Field | Value | Description |
+|:---:|:---|:---:|:---|
+| **0** | **STX** | `0x7F` | Doorphone start delimiter |
+| **1** | **Opcode** | `??h` | Ring call event or 3-step door release command |
+| **2** | **Arg1** | `0x00` | Padding byte |
+| **3** | **Arg2** | `0x00` | Padding byte |
+| **4** | **ETX** | `0xEE` | Doorphone end delimiter |
 
-## 4. 기기별 4대 패킷 통합 총괄표 (Master Cheat Sheet)
+### 2.3 Packet Type Code Registry
 
-| DevID / 채널 | 기기명 | 패킷 종류 | 길이 | 전체 패킷 구조 및 주요 페이로드 | 핵심 슬롯 설명 |
-| :---: | :--- | :--- | :---: | :--- | :--- |
-| **0x19** | **일반 조명** | **쿼리 (QRY)** | 11B | `F7 0B 01 19 01 40 [Room\|Dev] 00 00 [CS] EE`<br>• 룸 전체 조회: `F7 0B 01 19 01 40 [Room\|0] 00 00 [CS] EE` | `Room\|Dev`: 방 및 조명 번호 (예: 1번방 1번 조명 `0x11`)<br>`Dev=0` 적용 시 해당 룸 전체 조명 일괄 폴링 |
-| | | **쿼리 응답 (ACK)** | 11B | `F7 0B 01 19 04 40 [Room\|Dev] 00 [State] [CS] EE` | **Byte #8 = State** (`0x01`: ON, `0x02`: OFF)<br>*(Byte #7은 0x00 패딩)* |
-| | | **제어 (CTL)** | 11B | `F7 0B 01 19 02 40 [Room\|Dev] [Cmd] 00 [CS] EE`<br>• 룸 전체 소등: `F7 0B 01 19 02 40 [Room\|0] 02 00 [CS] EE` | **Byte #7 = Cmd** (`0x01`: ON, `0x02`: OFF)<br>`Dev=0` 및 `Cmd=0x02` 시 해당 룸 전체 일괄 소등 |
-| | | **제어 응답 (ACK)** | 11B | `F7 0B 01 19 04 40 [Room\|Dev] [Cmd] [State] [CS] EE` | **Byte #7 = Cmd Echo**, **Byte #8 = State**<br>$\rightarrow$ **ON 제어 ACK**: **`01 01`**, **OFF 제어 ACK**: **`02 02`** |
-| **0x1A** | **디밍 조명 (확장)** | **밝기 제어 (CTL)** | 11B | `F7 0B 01 1A 02 40 [Room\|Dev] [Level] 00 [CS] EE` | **밝기(Dimming) 제어**: `Level` (`0x00`~`0x64`, 0~100% Hex) |
-| | | **제어 응답 (ACK)** | 11B | `F7 0B 01 1A 04 40 [Room\|Dev] [Echo] [Level] [CS] EE` | **#7 Echo**, **#8 반영된 밝기 레벨(0~100%)** |
-| **0x15** | **감성 조명 (확장)** | **색온도 제어 (CTL)** | 11B | `F7 0B 01 15 02 40 [Room\|Dev] [Tone] 00 [CS] EE` | **색온도(Color Tone) 제어**: `Tone` 단계별 Hex 값 (주광/주백/전구색) |
-| | | **제어 응답 (ACK)** | 11B | `F7 0B 01 15 04 40 [Room\|Dev] [Echo] [Tone] [CS] EE` | **#7 Echo**, **#8 반영된 색온도 단계(Tone Hex)** |
-| **0x18** | **난방 / 보일러** | **쿼리 (QRY)** | 11B | `F7 0B 01 18 01 46 [1\|Room] 00 00 [CS] EE` | `1\|Room`: 개별 룸 지정 (1번방 `0x11` ~ 4번방 `0x14`) |
-| | | **쿼리 응답 (ACK)** | **18B** | `F7 12 01 18 04 46 [1\|Room] 00 [State] [Amb] [Tgt] 00 00 00 00 00 [CS] EE` | **#8**: State (`0x01`: 일반 ON, `0x04`: 완전 OFF, `0x07`: 외출 모드 가동)<br>• **외출 모드 (`0x07`)**: 보일러 자체는 동파방지 켜짐(ON) 상태이며, 기기 본체에서 목표온도(`Tgt`)를 **`10℃`(`0x0A`)**로 자동 전환하여 텔레메트리 전송함.<br>**#9**: 현재 실내온도 (`Amb`), **#10**: 설정 목표온도 (`Tgt`) |
-| | | **제어 (CTL)** | 11B | **전원/외출**: `F7 0B 01 18 02 46 [1\|Room] [Cmd] 00 [CS] EE`<br>**온도**: `F7 0B 01 18 02 45 [1\|Room] [Tgt] 00 [CS] EE` | 전원 `Cmd`: `0x01`(일반 ON), `0x04`(OFF), `0x07`(외출 모드 진입)<br>• 외출 제어(`0x07`) 시 기기가 자체적으로 전원 켜짐 상태를 유지하고 목표온도를 10℃로 조정하므로, 드라이버는 온도를 임의 주입하지 않고 `power=2 (0x07)`만 전송함.<br>온도: 카테고리 `0x45`, `Tgt` = 정수 Hex (예: 24℃ $\rightarrow$ `0x18`) |
-| | | **제어 응답 (ACK)** | **13B** | `F7 0D 01 18 04 [Cat] [1\|Room] [Echo] [State] [Amb] [Tgt] [CS] EE` | **#0~#12 13B 정합 인덱스**:<br>• **#5**: Cat (`0x45`/`0x46`), **#6**: `1\|Room`<br>• **#7**: Echo, **#8**: State (`0x01` ON, `0x04` OFF, `0x07` 외출), **#9**: Amb, **#10**: Tgt (`0x0A`=10℃)<br>• **#11**: Checksum `[CS]`, **#12**: ETX (`0xEE`)<br>*(실측 예: `F7 0D 01 18 04 45 11 12 01 1C 12 AE EE`)* |
-| **0x1C** | **시스템 에어컨 / FCU** | **쿼리 (QRY)** | 11B | `F7 0B 01 1C 01 40 [Room\|Dev] 00 00 [CS] EE` | `Room\|Dev`: 상위 4비트 = 방 번호, 하위 4비트 = 기기 번호 (예: 거실 `0x11`, 안방 `0x21`) |
-| | | **쿼리 응답 (ACK)** | **14B / 15B / 18B** | **15B 표준형**: `F7 0F 01 1C 04 40 [Room\|Dev] 00 [State] [Mode] [Speed] [Amb] [Tgt] [CS] EE`<br>• 14B 단축형: `F7 0E 01 1C 04 40 [Room\|Dev] [State] [Mode] [Speed] [Amb] [Tgt] [CS] EE`<br>• 18B 패딩형: `F7 12 01 1C 04 40 [Room\|Dev] 00 [State] [Mode] [Speed] [Amb] [Tgt] 00 00 00 [CS] EE` | **단지/게이트웨이별 응답 길이 분기**:<br>• **#8 (또는 14B의 #7)**: State (`0x01`: ON, `0x02`: OFF, 상위 비트 `0x80`: 실외기/배수 이상 에러 플래그)<br>• **Mode**: `0x01`(냉방), `0x02`(제습), `0x03`(송풍), `0x04`(자동), `0x05`(난방)<br>• **Speed**: `0x01`(1단), `0x02`(2단), `0x03`(3단), `0x00`/`0x04`(자동)<br>• **Amb / Tgt**: 정수 Hex (섭씨 18~30℃, 예: 24℃ $\rightarrow$ `0x18`, 0.5℃ 지원 단지는 `0x80` 비트 플래그 결합) |
-| | | **제어 (CTL)** | 11B | **전원**: `F7 0B 01 1C 02 40 [Room\|Dev] [Cmd] 00 [CS] EE`<br>• 세대 전체 정지: `F7 0B 01 1C 02 40 00 02 00 [CS] EE`<br>• 룸 전체 정지: `F7 0B 01 1C 02 40 [Room\|0] 02 00 [CS] EE`<br>**희망온도**: `F7 0B 01 1C 02 45 [Room\|Dev] [Tgt] 00 [CS] EE`<br>**풍량**: `F7 0B 01 1C 02 42 [Room\|Dev] [Spd] 00 [CS] EE`<br>**운전모드**: `F7 0B 01 1C 02 41 [Room\|Dev] [Mode] 00 [CS] EE`<br>**풍향/루버**: `F7 0B 01 1C 02 44 [Room\|Dev] [Swing] 00 [CS] EE` | **단지별 제어 Cat 분기**:<br>• **전원 (`0x40`)**: `Cmd` (`0x01`: ON, `0x02`: OFF)<br>• **온도 (`0x45`)**: `Tgt` (정수 Hex, 18~30℃, 0.5℃는 `+0x80`)<br>• **풍량 (`0x42` / 변종 `0x5D`)**: `Spd` (`0x01` 미풍, `0x02` 약풍, `0x03` 강풍)<br>• **모드 (`0x41` / 변종 `0x43`, `0x5C`)**: `Mode` (`0x01` 냉방, `0x02` 제습, `0x03` 송풍, `0x04` 자동, `0x05` 난방)<br>• **스윙 (`0x44`)**: `Swing` (`0x01`: 정지/고정, `0x02`: 상하 스윙 가동) |
-| | | **제어 응답 (ACK)** | **11B** | `F7 0B 01 1C 04 [Cat] [Room\|Dev] [Echo] [State/Echo] [CS] EE` | **11바이트 고정 단발 즉시 응답 (Echo ACK)**:<br>• **Byte #7 = Cmd Echo**, **Byte #8 = State/Echo**<br>$\rightarrow$ **ON 제어 ACK**: **`01 01`**, **OFF 제어 ACK**: **`02 02`**<br>*(※ 다중 필드 갱신은 제어 직후 순환 쿼리 응답(14B/15B/18B)을 통해 최종 동기화)* |
-| **0x1F** | **스마트 콘센트** | **쿼리 (QRY)** | 11B | `F7 0B 01 1F 01 40 [Room\|Idx] 00 00 [CS] EE` | `Room\|Idx`: 공간 및 콘센트 번호 (예: `0x31`) |
-| | | **쿼리 응답 (ACK)** | **18B** | `F7 12 01 1F 04 40 [Room\|Idx] 00 [State] [W_H] [W_L] 00 00 00 00 [Mode] [CS] EE` | **#8**: State (`0x01`: ON, `0x02`: OFF)<br>**#9~10**: 소비전력 **1W 정수 단위 (Big-Endian)** (예: `0x00 0x19` = 25W, 0.1W 배율 왜곡 없음)<br>**#15**: `Mode` (`0x01`: 상시 전원, `0x02`: 대기전력 차단) |
-| | | **전원 제어 (CTL)** | 11B | `F7 0B 01 1F 02 40 [Room\|Idx] [Cmd] 00 [CS] EE` | **Byte #7 = Cmd** (`0x01`: ON, `0x02`: OFF) |
-| | | **모드 제어 (CTL)** | 11B | `F7 0B 01 1F 02 43 [Room\|Idx] [ModeCmd] 00 [CS] EE` | **대기전력 모드 전환**: `ModeCmd` (`0x01`: 상시 전원, `0x02`: 대기전력 자동 차단 모드 진입) |
-| | | **제어 응답 (ACK)** | **11B** | `F7 0B 01 1F 04 [Cat] [Room\|Idx] [Cmd] [State] [CS] EE` | **11B 고정 단발 패킷** (조명과 동일 구조)<br>**Byte #7 = Cmd Echo**, **Byte #8 = State**<br>$\rightarrow$ **ON 제어 ACK**: **`01 01`**, **OFF 제어 ACK**: **`02 02`** |
-| **0x2B** | **전열교환기 (환기)** | **기본 쿼리 (QRY)** | 11B | `F7 0B 01 2B 01 40 11 00 00 [CS] EE` | 전원/풍량 기본 쿼리 (`0x11`) |
-| | | **기본 응답 (ACK)** | **13B** | `F7 0D 01 2B 04 40 11 00 [State] [Mode\|Spd] FF [CS] EE` | **#8**: State (`0x01`: ON, `0x02`/`0x00`: OFF)<br>**#9**: `0x11`(1단), `0x13`(2단), `0x17`(3단), `0x10`(자동) |
-| | | **모드 쿼리 (QRY)** | 11B | `F7 0B 01 2B 01 43 11 00 00 84 EE` | **카테고리 `0x43` 운전 모드 전용 쿼리**<br>*(월패드가 주기 폴링하지 않으므로 게이트웨이가 직접 주입)* |
-| | | **모드 응답 (ACK)** | **13B** | `F7 0D 01 2B 04 43 11 00 [Mode] [Speed] FF [CS] EE` | **#8 (Mode)**: `0x01`(일반), `0x02`(자연환기/바이패스), `0x03`(자동), `0x04`(공기청정), `0x81`(Reject/Busy)<br>**#9 (Speed)**: `0x11`(1단), `0x13`(2단), `0x17`(3단), `0x10`(자동/가변) |
-| | | **제어 (CTL)** | 11B | **전원**: `F7 0B 01 2B 02 40 11 [Cmd] 00 [CS] EE`<br>**풍량**: `F7 0B 01 2B 02 42 11 [Spd] 00 [CS] EE`<br>**모드**: `F7 0B 01 2B 02 43 11 [Mode] 00 [CS] EE` | 전원 `Cmd`: `0x01`(ON), `0x02`(OFF)<br>풍량 `Spd`: `0x01`(1단), `0x03`(2단), `0x07`(3단)<br>모드 `Mode`: `0x01`(일반), `0x02`(바이패스), `0x03`(자동), `0x04`(공기청정)<br>*(⚠️ 벽 리모컨 환경 시 모드 강제 제어는 0x81 Reject될 수 있으나 읽기는 100% 정상 지원)* |
-| | | **제어 응답 (ACK)** | **13B** | `F7 0D 01 2B 04 [Cat] 11 00 [Echo/Mode] [Speed] FF [CS] EE` | **#8**: 반영된 상태/모드(Cat `0x43` 제어 시에만 거부 시 `0x81` Reject 반환 가능, 전원 `0x40`/풍량 `0x42`는 정상 반영), **#9**: 풍량 토큰 |
-| **0x1B** | **가스 밸브** | **쿼리 (QRY)** | 11B | `F7 0B 01 1B 01 43 11 00 00 [CS] EE` | 상태 조회 (카테고리 `0x43`) |
-| | | **쿼리 응답 (ACK)** | **13B** | `F7 0D 01 1B 04 43 11 00 [State] 00 00 [CS] EE` | **Byte #8 = State** (`0x01`: 열림, `0x04`: 닫힘)<br>*(인덱스 #0~#12 정합: #9=00, #10=00, #11=CS, #12=EE)* |
-| | | **제어 (CTL)** | 11B | `F7 0B 01 1B 02 43 11 02 00 [CS] EE` | **차단(닫기) 전용 (Close Only)**: `0x02`<br>⚠️ **원격 열기(OPEN) 불가**: 소방/가스 안전법규상 하드웨어 잠금 |
-| | | **제어 응답 (ACK)** | **13B** | `F7 0D 01 1B 04 43 11 00 04 00 00 [CS] EE` | **Byte #8 = 0x04** (차단 완료 상태 반환) |
-| **0x34** | **엘리베이터** | **호출 제어 (CTL)** | 11B | `F7 0B 01 34 02 41 10 06 00 9C EE` | **Byte #7 = 0x06** (상/하행 호출 요청 트리거) |
-| | | **호출 확인 (ACK)** | 11B | `F7 0B 01 34 04 41 10 00 06 9A EE` | **Byte #8 = 0x06** (호출 활성화/이동 중 플래그) |
-| | | **도착 감지 (BC)** | **13B** | `F7 0D 01 34 01 41 10 00 01 [Floor] [Car] [CS] EE` | **#8**: `0x01`(도착 이벤트), **#9**: 댁내 층수(예: `0x15`=15층), **#10**: 호기 번호(예: `0x02`=2호기) |
-| | | **대기 복귀 (RST)** | 11B | `F7 0B 01 34 04 41 10 00 00 9C EE` | **Byte #8 = 0x00** (도착 후 대기 상태 복귀) |
-| **CH4** | **도어폰 (현관 벨)** | **호출 이벤트 (RX)** | **5B** | `7F B5 00 00 EE` | 현관 호출 벨 울림 수신 (`bell_front = 0xB5`) |
-| *(3840 bps)* | | **종료 이벤트 (RX)** | **5B** | `7F B8 00 00 EE` (또는 `7F B6 00 00 EE`) | 현관 호출 무응답 / 통화 종료 수신 (`end_front`) |
-| | | **문열림 3단계 시퀀스** | **5B $\times$ 3** | ① 통화: `7F B9 00 00 EE`<br>② 열림: `7F B4 00 00 EE`<br>③ 종료: `7F B8 00 00 EE` | **현관문 개폐 FSM (자동 시퀀스)**:<br>• RX 인터럽트 후 **최소 50ms Guard Time (Line Silent)** 확보<br>• ① `0xB9` 송출 후 350ms 대기<br>• ② `0xB4` 송출 후 750ms 대기<br>• ③ `0xB8` 송출로 최종 락 해제 및 원복 |
-| **CH4** | **도어폰 (로비 벨)** | **호출 이벤트 (RX)** | **5B** | `7F 5A 00 00 EE` | 로비 호출 벨 울림 수신 (`bell_lobby = 0x5A`) |
-| *(3840 bps)* | | **종료 이벤트 (RX)** | **5B** | `7F 60 00 00 EE` | 로비 통화 종료 수신 (`end_lobby = 0x60`) |
-| | | **문열림 3단계 시퀀스** | **5B $\times$ 3** | ① 통화: `7F 5F 00 00 EE`<br>② 열림: `7F 61 00 00 EE`<br>③ 종료: `7F 60 00 00 EE` | **공동현관문 개폐 FSM (자동 시퀀스)**:<br>• RX 인터럽트 후 **최소 50ms Guard Time (Line Silent)** 확보<br>• ① `0x5F` 송출 후 350ms 대기<br>• ② `0x61` 송출 후 750ms 대기<br>• ③ `0x60` 송출로 로비 문열림 완료 |
-| **0x41 / 0x36** | **방범 / 현관 스위치** | **외출/방범 이벤트 (BC)** | 11B | `F7 0B 01 [Dev] 01 40 10 [State] 00 [CS] EE` | **현관 일괄스위치 연동**:<br>• `Byte #7`: `0x01`(재실/해제), `0x02`(외출/방범 설정)<br>• 외출 설정 시 세대 일괄 소등/가스 차단 자동 연동 |
-| **0x30 / 0x32** | **원격 검침 (HEMS)** | **검침 데이터 응답 (ACK)** | **18B** | `F7 12 01 [Dev] 04 40 [Media] 00 [Data_4B] 00 00 00 00 [CS] EE` | **실시간 원격 검침 에너지 데이터**:<br>• **Media**: `0x01`(전기), `0x02`(수도), `0x03`(가스), `0x04`(온수)<br>• **Data_4B**: 4바이트 누적 사용량 / 순간 소비량 |
+| Code | Type | Direction | Description |
+|:---:|:---:|:---:|:---|
+| `0x01` | **QRY** | Master $\rightarrow$ Device | Periodic polling query |
+| `0x02` | **CTL** | Master $\rightarrow$ Device | Discrete 11B state change command |
+| `0x04` | **ACK** | Device $\rightarrow$ Master | Status telemetry or immediate control echo |
+| `0x01` | **BC** | Device $\rightarrow$ Bus | Spontaneous broadcast event (elevator arrival, away switch) |
 
 ---
 
-## 5. 프로토콜 분석 핵심 원리 및 불변식 (Hardware Invariants)
+## 3. Device & Category Registry
 
-### 5.1 전 기기 공통 상태 슬롯 불변식 (Universal State Slot = Byte #8)
-모든 현대통신 기기의 1차 핵심 가동/전원/상태 슬롯은 **예외 없이 `Byte #8`**에 위치합니다:
-- 조명(0x19): `0x01` (ON), `0x02` (OFF)
-- 난방(0x18): `0x01` (ON), `0x04` (OFF), `0x07` (외출)
-- 에어컨/FCU(0x1C): `0x01` (ON), `0x02` (OFF) *(단, 14B 단축형 응답은 패딩 생략으로 Byte #7)*
-- 콘센트(0x1F): `0x01` (ON), `0x02` (OFF)
-- 환기(0x2B): `0x01` (ON), `0x02` (OFF)
-- 가스(0x1B): `0x01` (열림), `0x04` (닫힘)
-- 엘리베이터(0x34): `0x06` (호출 중), `0x00` (대기 중)
+### 3.1 Device Type Master Table
 
-### 5.2 전 기기 공통 제어/에코 슬롯 불변식 (Universal Control Slot = Byte #7)
-- 모든 11바이트 제어 명령(CTL)의 파라미터는 **`Byte #7`**에 실립니다.
-- 제어 응답(CTL ACK)의 `Byte #7`은 방금 보낸 명령값의 **Echo(확인)** 역할을 수행합니다.
-- **반복 바이트(`01 01`, `02 02`) 발생 원인**:
-  - `Byte #7 (Echo)` + `Byte #8 (State)` 구조이므로,
-  - ON 제어 성공 시: `0x01` + `0x01` $\rightarrow$ **`01 01`**
-  - OFF 제어 성공 시: `0x02` + `0x02` $\rightarrow$ **`02 02`**
+| DevID | Name | QRY Len | ACK Len | CTL ACK Len | Supported Functions |
+|:---:|:---|:---:|:---:|:---:|:---|
+| `0x19` | Light | 11B | 11B | 11B | Discrete power, all-lights-off per room |
+| `0x1A` | Dimming Light | — | — | 11B | Brightness level (0–100%) |
+| `0x15` | Color Temp Light | — | — | 11B | Color temperature steps |
+| `0x18` | Thermostat | 11B | **18B** | **13B** | Power, target temperature, away mode |
+| `0x1C` | HVAC / FCU | 11B | **14B/15B/18B** | 11B | Power, mode, target temp, fan speed, vane swing |
+| `0x1F` | Smart Outlet | 11B | **18B** | 11B | Relay power, standby-power cutoff mode, 1W power metering |
+| `0x2B` | Ventilation (ERV) | 11B | **13B** | **13B** | Power, fan speed, operation mode |
+| `0x1B` | Gas Valve | 11B | **13B** | **13B** | Close command only (Remote open prohibited by law) |
+| `0x34` | Elevator | — | — | 11B | Call trigger (CTL), arrival broadcast (13B BC) |
+| `0x41`/`0x36` | Away / Security Switch | — | — | — | Spontaneous broadcast (BC) for home occupancy sync |
+| `0x30`/`0x32` | HEMS Remote Metering | — | **18B** | — | Real-time metering (electric, water, gas, hot water) |
+| **CH4** | Doorphone (Front/Lobby) | — | **5B** | **5B $\times$ 3** | Ring event detection and 3-step door release FSM |
 
-### 5.3 FCU(팬코일유닛) 환경 특이사항 및 연동 불변식
-1. **2관식 배관 계절 종속성**: 중앙기계실에서 계절에 따라 냉수 또는 온수 단일 배관만 공급하는 2관식 단지는 월패드/실내기에서 난방-냉방 임의 전환이 불가하며 중앙 공급 상태에 종속됩니다.
-2. **모터 구동 밸브 개폐 지연(Delay Start)**: FCU는 2웨이/3웨이 전동 밸브 작동에 수십 초가 소요되므로, 전원 상태(`0x01`)가 반영되어도 송풍팬은 배관 수온 감지 후 지연 기동(Delay Start)할 수 있습니다. 게이트웨이는 밸브 개폐 지연에 따른 상태 토글 바운스를 방지하기 위해 낙관적 상태 유지(Optimistic Hold)를 적용해야 합니다.
+### 3.2 Category (Cat) Code Registry
 
-### 5.4 도어폰 3-Step FSM 시퀀스 필수 이유
-현대통신 비디오폰/도어폰 하드웨어는 통화 세션이 열리지 않은 상태에서 단순 문열림 바이트만 수신하면 보안상 명령을 무시합니다. 따라서 게이트웨이는 반드시 **`통화 시작(Call)` $\rightarrow$ `350ms 대기` $\rightarrow$ `문열림(Open)` $\rightarrow$ `750ms 대기` $\rightarrow$ `통화 종료(End)`** 순서로 하드웨어 타이머 인터럽트를 통해 송출해야 정상 개방됩니다.
-
-### 5.5 다중 파라미터 연속 제어 시 TX Guard Interval (120ms) 및 송신 순서 불변식
-- 스마트홈 연동 시 "전원 ON + 냉방 + 24℃ + 2단"과 같이 복합 명령이 유입될 때, 에어컨은 카테고리(`0x40`, `0x41`, `0x45`, `0x42`)별로 11B 프레임이 각각 분리 송신되어야 합니다.
-- **제어 시퀀스 선행 순서 (Command Precedence)**:
-  - 에어컨 인터페이스 게이트웨이(LG PI485 등)는 전원이 꺼진(OFF) 상태에서 유입되는 모드/온도/풍량 제어 패킷을 무시하거나 버퍼링하지 않고 버리는 특성이 있습니다.
-  - 따라서 전원 OFF 상태에서 복합 명령이 접수되면 반드시 **`전원 ON (0x40)` 패킷을 1순위로 선행 송출**하고, 인터벌 경과 후 나머지 설정 패킷을 순차 송출해야 합니다:
-    $$\text{Sequence: } \mathbf{Power(0x40)} \xrightarrow{120\text{ms}} \mathbf{Mode(0x41)} \xrightarrow{120\text{ms}} \mathbf{Target(0x45)} \xrightarrow{120\text{ms}} \mathbf{Speed(0x42)}$$
-- **필수 대기 시간**: RS-485 9600bps 반이중 라인 충돌 및 에어컨 인터페이스 게이트웨이의 수신 버퍼 오버플로우를 방지하기 위해, **제어 패킷 간 최소 100ms ~ 150ms (권장 120ms) Guard Delay를 강제 적용**해야 합니다.
-- 게이트웨이 및 Edge Driver는 다중 명령 유입 시 즉시 동시 송출하지 않고 FIFO 송신 큐(TX Queue)를 통해 순차 직렬화(Serialization) 송출해야 합니다.
-
-### 5.6 0.5℃ 분해능 및 정수 온도 스케일링 규칙
-- 현대통신 기본 온도 슬롯은 섭씨 정수 Hex(`0x16`=22℃, `0x18`=24℃)를 표준으로 사용합니다.
-- 최신 실내기/월패드가 0.5℃ 제어를 지원하는 단지의 경우, **최상위 비트 `0x80`을 0.5℃ 플래그**로 사용합니다 (예: 24.5℃ $\rightarrow$ `0x18 | 0x80 = 0x98`).
-- 게이트웨이는 `TempByte & 0x7F`로 정수부를 취하고, `TempByte & 0x80` 플래그 유무에 따라 0.5℃를 가산하여 SmartThings `thermostatCoolingSetpoint`에 매핑합니다.
-
-### 5.7 에어컨 실외기/배수펌프 에러 마스크 및 Fault State 처리 규칙
-- 실외기 통신 에러, 배수 펌프 만수, 냉매 누설 등 이상 발생 시 `Byte #8 (State)`의 최상위 비트(`0x80`)가 세트되거나 별도 에러 상태 코드가 반환됩니다.
-- 상태 파서는 단순 `0x01`(가동)/`0x02`(정지) 동등 비교에만 의존하지 않고, `State & 0x80` 마스크를 사전 검사하여 장애 발생 시 스마트홈에 에러 텔레메트리를 발행하고 비정상적인 전원 토글을 방지해야 합니다.
-
-### 5.8 시스템 에어컨 벽부형 리모컨(Wall Remote) 및 현장 실측 패킷 예외 규격 (Device 0x1C / 0x39)
-현대통신 공식 기본 문서에는 단순 바이트 표만 기술되어 있으나, 실제 현장(LG PI485 / 삼성 DVM 게이트웨이 및 EW11 서브넷 연동)에서는 벽 리모컨과 실내기간 상호작용으로 인해 다음 실측 규칙이 반드시 적용되어야 합니다:
-
-1. **장치 ID (Device Code) 이원화**:
-   - `0x1C`: 현대통신 월패드 표준 RS-485 라인에 직결된 시스템 에어컨 실내기/인터페이스 제어기.
-   - **`0x39`**: 현대통신 서브 패널, 독립 공조 라인 또는 EW11 브릿지(CH5) 격리 버스에서 광범위하게 쓰이는 시스템 에어컨 확장 식별자.
-2. **13B vs 14B 프레임 변종에 따른 상태 블록 오프셋 (`state_idx`) 가변**:
-   - 실내기 제조사/펌웨어 버전에 따라 프레임 전체 길이가 **14B(`0x0E`)** 또는 **13B(`0x0D`)**로 수신됩니다.
-   - **14B 패킷**: `state_idx = 7` (Byte #7: State, #8: Mode, #9: Speed, #10: Amb, #11: Tgt, #12: CS, #13: EE)
-   - **13B 패킷**: `state_idx = 8` (Byte #8: State, #9: Mode, #10: Speed, #11: Amb, #12: Tgt)
-   - 파서는 `(ack.length == 14) ? 7 : 8`로 시작 오프셋을 동적 결정해야 데이터 왜곡과 텔레메트리 오류를 방지할 수 있습니다.
-3. **벽 리모컨(Wall Remote)의 슬레이브 응답 및 상태 동기화 시퀀스**:
-   - 사용자가 벽에 부착된 물리 리모컨(온도조절기)에서 전원/온도/풍속 버튼을 눌러도, 벽 리모컨은 반이중 버스 충돌 방지를 위해 버스에 임의로 마스터 패킷을 송출하지 않습니다.
-   - 벽 리모컨은 내부 레지스터에 변경값을 보관하며, **월패드(또는 게이트웨이)의 다음 주기적 쿼리(`0x01 QRY`)가 도착했을 때 비로소 최신 상태를 실은 `0x04 ACK`로 응답**합니다.
-   - 따라서 게이트웨이는 수신된 ACK가 이전 캐시와 다를 경우(`ack_changed = true`) 즉시 스마트싱스 허브로 상태 이벤트를 푸시(Push)해야 실시간 UI 동기화가 유지됩니다.
-4. **0x81 NAK / 에러 패킷 필터링 (캐시 오염 방어)**:
-   - 1대의 실외기에 여러 대 실내기가 연결된 멀티V 공조 특성상, 다른 방이 냉방 중일 때 난방을 시도하거나 인터록이 걸리면 에어컨 제어기가 `0x81 (NAK / 명령 거부)` 응답을 반환합니다.
-   - 이 패킷(`ack.data[5] == 0x81 || ack.data[6] == 0x81`)을 정상 수신으로 처리하면 스마트싱스 기기 상태가 꺼짐으로 오인되거나 정상 캐시가 오염되므로, **반드시 0x81 패킷은 드롭(필터링)하여 기존 상태를 보존**해야 합니다.
-5. **바람 세기 자동풍 (`0x00` vs `0x04`) 정규화**:
-   - 벽 리모컨에서 "자동풍" 설정 시, 실내기 기종에 따라 `raw_spd = 0x04`를 주는 모델과 `raw_spd = 0x00`을 반환하는 모델이 존재합니다.
-   - `raw_spd == 0`일 때 안전하게 `4 (Auto)`로 정규화하여 스마트싱스 팬 속도 타일의 런타임 오류를 방지합니다.
-
-### 5.9 스마트 콘센트 대기전력 자동 차단 모드 전환 제어 규칙
-- 콘센트 쿼리 응답의 `Byte #15 (Mode)`는 현재 동작 모드(`0x01` 상시 전원, `0x02` 대기전력 차단 모드)를 나타냅니다.
-- 월패드에서 대기전력 차단 모드를 변경할 때에는 Cat `0x43`(또는 Cat `0x40`)의 CTL 패킷을 전송하여 상시 $\leftrightarrow$ 대기차단 모드를 전환합니다.
+| Cat Code | Primary Function | Target Devices | Description / Variants |
+|:---:|:---|:---|:---|
+| `0x40` | Power Control / Status Query | Universal | General ON/OFF state query and control |
+| `0x41` | Operation Mode / Elevator | `0x1C`, `0x34` | HVAC cool/dry/fan/auto/heat (Variants: `0x43`, `0x5C`) |
+| `0x42` | Fan Speed | `0x1C`, `0x2B` | HVAC and ERV fan speed levels (Variant: `0x5D`) |
+| `0x43` | Aux Mode / Gas Valve | `0x2B`, `0x1F`, `0x1B` | ERV modes, outlet standby mode, gas valve query/close |
+| `0x44` | Vane Swing | `0x1C` | HVAC vertical oscillation start/stop |
+| `0x45` | Target Temperature | `0x18`, `0x1C` | Thermostat & HVAC target setpoint (0.5°C uses `+0x80` MSB) |
+| `0x46` | Thermostat Status / Power | `0x18` | Thermostat 1:1 QRY and Power/Away control |
+| `0x5C` | Mode Control (Variant) | `0x1C` | Site-specific external HVAC gateway mode command |
+| `0x5D` | Fan Speed (Variant) | `0x1C` | Site-specific external HVAC gateway fan speed command |
 
 ---
 
-## 6. 오픈소스 공개 자료 대비 실측 팩트 교정 사항
+## 4. Master Packet Reference Table
 
-| 구분 | 공개 자료 (커뮤니티 / GitHub) | 실제 댁내 실측 팩트 (Fact) | 오류 원인 및 치명도 |
-| :--- | :--- | :--- | :--- |
-| **난방 (0x18)** | 34B(0x22) 전 세대 일괄 브로드캐스트 | 방 번호별(0x11~0x14) **18B 독립 쿼리 응답**<br>제어 ACK는 **13B 전용 응답** (#7 Echo, #8 State, #9 Amb, #10 Tgt, #11 CS, #12 EE) | **치명적**: 34B 파서 적용 시 패킷 전체 드랍 발생. 13B 인덱스 정합(#10 Tgt, #11 CS, #12 EE) 필수 |
-| **환기 (0x2B)** | 길이 12B(0x0C) 표기, 풍량 단순 정수(1, 2, 3), 모드 미지원 | **13B(0x0D)** 고정 프레임 (#10=FF, #11=CS, #12=EE)<br>• **운전 모드 (Cat 0x43)**: 일반(`0x01`), 바이패스(`0x02`), 자동(`0x03`), 공기청정(`0x04`)<br>• **풍량 토큰 (#9)**: 자동/가변(`0x10`), 1단(`0x11`), 2단(`0x13`), 3단(`0x17`)<br>• **모드 쿼리 (QRY)**: `F7 0B 01 2B 01 43 11 00 00 84 EE` (게이트웨이 직접 주입 필수)<br>• **0x81 Reject**: 벽 리모컨 우선권 인터록으로 모드 강제 제어 거부 시 반환 | **실측 정합 확정**: 월패드가 폴링하지 않는 Cat 0x43 게이트웨이 주입 및 0x81 에러 패킷 UI 방어 필수 |
-| **가스 (0x1B)** | 패딩 바이트 오타로 14B 표기, 양방향 개폐 제어 | 프레임 길이 **13B(0x0D)** 고정 (#11: CS, #12: EE)<br>**차단 전용 (Close Only)** | **치명적**: 소방/가스 안전법규상 원격 열기(OPEN)는 하드웨어적으로 원천 차단됨. 원격 제어는 차단(0x02)만 허용 |
-| **조명 (0x19)** | 개별 조명 제어만 표기 | `Room\|0`(예: `0x10`) 주소를 통한 **룸 전체 일괄 조회 및 소등(0x02)** 지원 | **확장 기능**: 월패드 일괄 소등 및 방 단위 상태 조회 브로드캐스트 정합 |
-| **도어폰 (CH4)** | 즉시 패킷 송출 | 3840 bps 반이중 UART 환경 충돌 방지용 **최소 50ms Guard Time (Line Silent)** 필수 | **안정성**: 벨 수신 즉시 송출 시 패킷 충돌로 문열림 실패 발생 |
-| **콘센트 (0x1F)** | 상세 페이로드 및 전력 변환식 누락 | 쿼리 응답 **18B**, 전력 단위 **1W 정수 (Byte #9~#10 Big-Endian)**<br>제어 ACK는 조명과 동일한 **11B 고정** | **실측 정합 확정**: 1W 단위 직접 파싱 (1/10 축소 왜곡 교정) 및 11B 즉시 ACK 매핑 |
-| **엘리베이터 (0x34)** | 단순 호출 명령 송출 후 5초 타이머 | **11B 호출 FSM + 13B 도착 브로드캐스트 감지**<br>(#8=0x01 도착, #9=층수, #10=호기) | **상태머신 확정**: 실제 엘리베이터 승강기 물리 도착 연동 |
-| **에어컨 / FCU (0x1C / 0x39)** | 14B 고정 표기 (인덱스 불일치 오류), 단순 냉방 제어로 축소, 벽 리모컨 연동 누락 | **13B(0x0D) / 14B(0x0E) / 15B(0x0F) / 18B(0x12) 단지별 가변**<br>• **오프셋 가변 분기**: 14B는 `state_idx=7`, 13B는 `state_idx=8` 동적 계산<br>• **벽 리모컨 동기화**: 리모컨 조작 시 마스터 Polling 대기 후 0x04 ACK 응답 (Slave 동작)<br>• **0x81 NAK 방어**: 난방/냉방 모드 충돌 등 거부 패킷 필터링으로 캐시 오염 차단<br>• **바람 세기 정규화**: 자동풍 0x00 $\rightarrow$ 4 (Auto) 변환<br>• **단지별 제어 카테고리 분기**: 풍량(`0x42` vs `0x5D`), 모드(`0x41`/`0x43` vs `0x5C`)<br>• **다중 제어 가드 딜레이**: 최소 120ms 인터벌 필수 | **정합성 확정**: 패킷 수신 시 `Length` 기반 동적 슬롯 오프셋 계산 및 0x81 NAK 필터링 필수 |
-| **콘센트 모드 제어 (`0x1F`)** | 상태 조회(QRY) 및 단순 전원 제어만 구현 | **상시 전원(`0x01`) $\leftrightarrow$ 대기전력 차단(`0x02`) 전환 제어 (CTL)** 지원 | **원격 제어 완전성**: 단순 릴레이 ON/OFF 외에 스마트 콘센트의 대기전력 자동 차단 모드 원격 전환 연동 |
-| **방범 / 현관 스위치** | 조명 일괄소등 패킷에만 의존 | **현관 방범/외출 스위치 전용 브로드캐스트 이벤트 감지** | **홈 보안 연동**: 외출 모드 설정 시 스마트홈 재실 모드 자동 동기화 |
-| **원격 검침 (HEMS, `0x30`)** | 누락 | **실시간 4종(전기/수도/가스/온수) 계량기 데이터 18B 캡처** | **에너지 모니터링**: 스마트싱스 에너지(Energy) 서비스와 연동 가능한 기반 데이터 제공 |
-
----
-
-## 7. 현장 실측 패킷 덤프 시 확인 체크리스트 (Field Verification Checklist)
-
-향후 신규 단지 또는 실측 패킷 덤프 분석 시 반드시 확인해야 할 5대 항목입니다:
-1. [ ] **에어컨 응답 길이 검증**: 버스 수신 패킷의 Byte #1이 `0x0E`(14B), `0x0F`(15B), `0x12`(18B) 중 어느 형태인지 확인.
-2. [ ] **에어컨 제어 카테고리 확인**: 풍량 제어가 `0x42`인지 `0x5D`인지, 모드 제어가 `0x41`/`0x43`인지 `0x5C`인지 확인.
-3. [ ] **0.5℃ 분해능 지원 여부**: 희망온도 0.5℃ 조정 시 Byte #7에 `0x80` 비트 플래그가 결합되는지 또는 별도 바이트인지 확인.
-4. [ ] **콘센트 대기차단 모드 제어 Cat**: 월패드 콘센트 화면에서 '대기전력 모드' 변경 시 송출되는 패킷의 Cat(`0x43` vs `0x40`) 확인.
-5. [ ] **외출 모드 브로드캐스트 ID**: 현관 일괄스위치 외출 버튼 터치 시 발생하는 패킷의 DevID(`0x41` vs `0x36`) 확인.
-
----
-
-## 부록 A. 현대통신 구형(Legacy) 통신 규격 상세 (34B 브로드캐스트)
-
-2010년대 초중반 이전 준공된 구축 아파트 단지(초기 힐스테이트, 아이파크 등)에서 널리 쓰이던 구형 통신 체계에 대한 보존 및 호환용 기술 명세입니다.
-
-### A.1 구형 통신 아키텍처 개요
-* **물리 계층**: 9600 bps, 8N1, Half-Duplex RS-485 (물리 계층은 신형과 동일)
-* **폴링 방식**: 세대 내 모든 방의 난방 상태를 하나의 거대한 **34바이트 (`0x22`) 고정 프레임**에 담아 순환 전송하는 전 세대 일괄 브로드캐스트 방식.
-* **신형과의 핵심 차이**: 신형은 방 번호(`0x11`~`0x14`)별로 개별 1:1 쿼리-응답을 수행하지만, 구형은 단일 응답 안에 최대 8개 방의 데이터가 3바이트씩 연속 배치됩니다.
-
----
-
-### A.2 구형 난방 34바이트 (`0x22`) 상세 슬롯 맵
-
-월패드의 쿼리(`F7 0B 01 18 01 46 10 00 00 ... EE`)에 대해 난방 마스터 제어기가 회신하는 프레임 구조:
-
-```text
-[ 구형 난방 34B 프레임 구조 (총 34바이트, Length = 0x22) ]
-Byte 0   : STX (0xF7)
-Byte 1   : Length (0x22 = 34바이트 고정)
-Byte 2   : Sender ID (0x01)
-Byte 3   : Device Type (0x18 = 난방)
-Byte 4   : Opcode (0x04 = 쿼리 응답)
-Byte 5   : Category (0x46 = 난방 상태)
-Byte 6   : Sub1 (0x10 = 난방 그룹 주소)
-Byte 7   : Sub2 (0x00 = 패딩)
-Byte 8~10: [1번방] State(8) | Current_Temp(9) | Target_Temp(10)
-Byte 11~13: [2번방] State(11) | Current_Temp(12) | Target_Temp(13)
-Byte 14~16: [3번방] State(14) | Current_Temp(15) | Target_Temp(16)
-Byte 17~19: [4번방] State(17) | Current_Temp(18) | Target_Temp(19)
-Byte 20~22: [5번방] State(20) | Current_Temp(21) | Target_Temp(22)
-Byte 23~25: [6번방] State(23) | Current_Temp(24) | Target_Temp(25)
-Byte 26~28: [7번방] State(26) | Current_Temp(27) | Target_Temp(28)
-Byte 29~31: [8번방] State(29) | Current_Temp(30) | Target_Temp(31)
-Byte 32  : Checksum (Index 0 ~ 31 XOR Sum)
-Byte 33  : ETX (0xEE)
-```
-
-#### 세부 필드 정의:
-* **State 바이트**: `0x01` (ON/가동), `0x04` (OFF/정지), `0x00` (방 미설치/미지원)
-* **Current_Temp**: 현재 실내온도 (정수 Hex, 예: 24℃ $\rightarrow$ `0x18`)
-* **Target_Temp**: 설정 희망온도 (정수 Hex, 예: 22℃ $\rightarrow$ `0x16`)
-* **Checksum 계산**:
-  $$\text{CS} = \text{Packet}[0] \oplus \text{Packet}[1] \oplus \dots \oplus \text{Packet}[31]$$
+| DevID | Device | Packet Type | Len | Frame Structure & Payload | Slot Details |
+|:---:|:---|:---|:---:|:---|:---|
+| **0x19** | **Light** | **Query (QRY)** | 11B | `F7 0B 01 19 01 40 [Room\|Dev] 00 00 [CS] EE`<br>Room poll: `F7 0B 01 19 01 40 [Room\|0] 00 00 [CS] EE` | `Room\|Dev`: Room & Light ID (e.g., Room 1 Light 1 = `0x11`)<br>`Dev=0`: Batch queries all lights in room |
+| | | **Query ACK** | 11B | `F7 0B 01 19 04 40 [Room\|Dev] 00 [State] [CS] EE` | **Byte #8 = State** (`0x01`: ON, `0x02`: OFF) |
+| | | **Control (CTL)** | 11B | `F7 0B 01 19 02 40 [Room\|Dev] [Cmd] 00 [CS] EE`<br>Room off: `F7 0B 01 19 02 40 [Room\|0] 02 00 [CS] EE` | **Byte #7 = Cmd** (`0x01`: ON, `0x02`: OFF)<br>`Dev=0` + `Cmd=0x02` turns off all room lights |
+| | | **Control ACK** | 11B | `F7 0B 01 19 04 40 [Room\|Dev] [Cmd] [State] [CS] EE` | **#7 Echo, #8 State** $\rightarrow$ ON: `01 01`, OFF: `02 02` |
+| **0x1A** | **Dimming** | **Control (CTL)** | 11B | `F7 0B 01 1A 02 40 [Room\|Dev] [Level] 00 [CS] EE` | **Byte #7 = Level** (`0x00`–`0x64`, 0–100%) |
+| | | **Control ACK** | 11B | `F7 0B 01 1A 04 40 [Room\|Dev] [Echo] [Level] [CS] EE` | **#7 Echo, #8 Applied Level** |
+| **0x15** | **Color Temp** | **Control (CTL)** | 11B | `F7 0B 01 15 02 40 [Room\|Dev] [Tone] 00 [CS] EE` | **Byte #7 = Tone** step value |
+| | | **Control ACK** | 11B | `F7 0B 01 15 04 40 [Room\|Dev] [Echo] [Tone] [CS] EE` | **#7 Echo, #8 Applied Tone** |
+| **0x18** | **Thermostat** | **Query (QRY)** | 11B | `F7 0B 01 18 01 46 [1\|Room] 00 00 [CS] EE` | `1\|Room`: Target room (`0x11`–`0x14`) |
+| | | **Query ACK** | **18B** | `F7 12 01 18 04 46 [1\|Room] 00 [State] [Amb] [Tgt] 00 00 00 00 00 [CS] EE` | **#8**: State (`0x01`: ON, `0x04`: OFF, `0x07`: Away)<br>**#9**: Ambient temp (`Amb`), **#10**: Target temp (`Tgt`)<br>*Away (`0x07`) maintains ON with auto Tgt=10°C (`0x0A`)* |
+| | | **Control (CTL)** | 11B | Power: `F7 0B 01 18 02 46 [1\|Room] [Cmd] 00 [CS] EE`<br>Temp: `F7 0B 01 18 02 45 [1\|Room] [Tgt] 00 [CS] EE` | Power `Cmd`: `0x01` (ON), `0x04` (OFF), `0x07` (Away)<br>Temp: Cat `0x45`, `Tgt` = Integer °C (e.g. 24°C $\rightarrow$ `0x18`) |
+| | | **Control ACK** | **13B** | `F7 0D 01 18 04 [Cat] [1\|Room] [Echo] [State] [Amb] [Tgt] [CS] EE` | **#7**: Echo, **#8**: State, **#9**: Amb, **#10**: Tgt, **#11**: CS, **#12**: EE |
+| **0x1C** | **HVAC / FCU** | **Query (QRY)** | 11B | `F7 0B 01 1C 01 40 [Room\|Dev] 00 00 [CS] EE` | `Room\|Dev`: e.g., Living room `0x11`, Master bedroom `0x21` |
+| | | **Query ACK** | **14B/15B/18B** | **15B**: `F7 0F 01 1C 04 40 [Room\|Dev] 00 [State] [Mode] [Speed] [Amb] [Tgt] [CS] EE`<br>**14B**: `F7 0E 01 1C 04 40 [Room\|Dev] [State] [Mode] [Speed] [Amb] [Tgt] [CS] EE`<br>**18B**: `F7 12 01 1C 04 40 [Room\|Dev] 00 [State] [Mode] [Speed] [Amb] [Tgt] 00 00 00 [CS] EE` | **#8 (or 14B #7)**: State (`0x01`: ON, `0x02`: OFF, `0x80` MSB: Fault)<br>**Mode**: `0x01` Cool, `0x02` Dry, `0x03` Fan, `0x04` Auto, `0x05` Heat<br>**Speed**: `0x01` Low, `0x02` Mid, `0x03` High, `0x00`/`0x04` Auto<br>**Amb / Tgt**: Hex °C (0.5°C flag: `+0x80`) |
+| | | **Control (CTL)** | 11B | Power: `F7 0B 01 1C 02 40 [Room\|Dev] [Cmd] 00 [CS] EE`<br>Temp: `F7 0B 01 1C 02 45 [Room\|Dev] [Tgt] 00 [CS] EE`<br>Speed: `F7 0B 01 1C 02 42 [Room\|Dev] [Spd] 00 [CS] EE`<br>Mode: `F7 0B 01 1C 02 41 [Room\|Dev] [Mode] 00 [CS] EE`<br>Swing: `F7 0B 01 1C 02 44 [Room\|Dev] [Swing] 00 [CS] EE` | `Cmd`: `0x01` ON, `0x02` OFF<br>`Tgt`: 18–30°C (`0x12`–`0x1E`, 0.5°C: `+0x80`)<br>`Spd`: `0x01` Low, `0x02` Mid, `0x03` High (Variant Cat: `0x5D`)<br>`Mode`: `0x01` Cool, `0x02` Dry, `0x03` Fan, `0x05` Heat (Var Cat: `0x43`, `0x5C`)<br>`Swing`: `0x01` Off, `0x02` Oscillate |
+| | | **Control ACK** | **11B** | `F7 0B 01 1C 04 [Cat] [Room\|Dev] [Echo] [State/Echo] [CS] EE` | Immediate Echo ACK: ON $\rightarrow$ `01 01`, OFF $\rightarrow$ `02 02` |
+| **0x1F** | **Smart Outlet** | **Query (QRY)** | 11B | `F7 0B 01 1F 01 40 [Room\|Idx] 00 00 [CS] EE` | `Room\|Idx`: Room & outlet index (e.g. `0x31`) |
+| | | **Query ACK** | **18B** | `F7 12 01 1F 04 40 [Room\|Idx] 00 [State] [W_H] [W_L] 00 00 00 00 [Mode] [CS] EE` | **#8**: State (`0x01` ON, `0x02` OFF)<br>**#9–10**: Power consumption in **1W integer Big-Endian**<br>**#15**: Mode (`0x01`: Always-on, `0x02`: Standby cutoff) |
+| | | **Power CTL** | 11B | `F7 0B 01 1F 02 40 [Room\|Idx] [Cmd] 00 [CS] EE` | **#7 Cmd**: `0x01` ON, `0x02` OFF |
+| | | **Mode CTL** | 11B | `F7 0B 01 1F 02 43 [Room\|Idx] [ModeCmd] 00 [CS] EE` | **#7 ModeCmd**: `0x01` Always-on, `0x02` Auto-cutoff |
+| | | **Control ACK** | **11B** | `F7 0B 01 1F 04 [Cat] [Room\|Idx] [Cmd] [State] [CS] EE` | **#7 Echo, #8 State** $\rightarrow$ ON: `01 01`, OFF: `02 02` |
+| **0x2B** | **Ventilation** | **Query (QRY)** | 11B | `F7 0B 01 2B 01 40 11 00 00 [CS] EE` | Primary power/speed query |
+| | | **Query ACK** | **13B** | `F7 0D 01 2B 04 40 11 00 [State] [Mode\|Spd] FF [CS] EE` | **#8**: State (`0x01` ON, `0x02`/`0x00` OFF)<br>**#9**: `0x11` Low, `0x13` Mid, `0x17` High, `0x10` Auto |
+| | | **Mode QRY** | 11B | `F7 0B 01 2B 01 43 11 00 00 84 EE` | Category `0x43` operation mode query (Gateway-injected) |
+| | | **Mode ACK** | **13B** | `F7 0D 01 2B 04 43 11 00 [Mode] [Speed] FF [CS] EE` | **#8 Mode**: `0x01` Normal, `0x02` Bypass, `0x03` Auto, `0x04` Clean, `0x81` Reject<br>**#9 Speed**: `0x11` Low, `0x13` Mid, `0x17` High, `0x10` Auto |
+| | | **Control (CTL)** | 11B | Power: `F7 0B 01 2B 02 40 11 [Cmd] 00 [CS] EE`<br>Speed: `F7 0B 01 2B 02 42 11 [Spd] 00 [CS] EE`<br>Mode: `F7 0B 01 2B 02 43 11 [Mode] 00 [CS] EE` | `Cmd`: `0x01` ON, `0x02` OFF<br>`Spd`: `0x01` Low, `0x03` Mid, `0x07` High<br>`Mode`: `0x01` Normal, `0x02` Bypass, `0x03` Auto, `0x04` Clean |
+| | | **Control ACK** | **13B** | `F7 0D 01 2B 04 [Cat] 11 00 [Echo/Mode] [Speed] FF [CS] EE` | Echoes status; wall remote interlock may return `0x81` on mode override |
+| **0x1B** | **Gas Valve** | **Query (QRY)** | 11B | `F7 0B 01 1B 01 43 11 00 00 [CS] EE` | Status query via Category `0x43` |
+| | | **Query ACK** | **13B** | `F7 0D 01 1B 04 43 11 00 [State] 00 00 [CS] EE` | **Byte #8 = State** (`0x01`: Open, `0x04`: Closed) |
+| | | **Control (CTL)** | 11B | `F7 0B 01 1B 02 43 11 02 00 [CS] EE` | **Close command only (`0x02`)**; Remote open is physically locked |
+| | | **Control ACK** | **13B** | `F7 0D 01 1B 04 43 11 00 04 00 00 [CS] EE` | **Byte #8 = 0x04** confirms closed status |
+| **0x34** | **Elevator** | **Call (CTL)** | 11B | `F7 0B 01 34 02 41 10 06 00 9C EE` | **Byte #7 = 0x06** triggers call sequence |
+| | | **Call ACK** | 11B | `F7 0B 01 34 04 41 10 00 06 9A EE` | **Byte #8 = 0x06** indicates active call / transit |
+| | | **Arrival (BC)** | **13B** | `F7 0D 01 34 01 41 10 00 01 [Floor] [Car] [CS] EE` | **#8**: `0x01` Arrival event, **#9**: Resident floor, **#10**: Car number |
+| | | **Reset (RST)** | 11B | `F7 0B 01 34 04 41 10 00 00 9C EE` | **Byte #8 = 0x00** idle state restored |
+| **CH4** | **Front Door** | **Ring (RX)** | **5B** | `7F B5 00 00 EE` | Front door chime received (`bell_front = 0xB5`) |
+| *(3840 bps)* | | **End (RX)** | **5B** | `7F B8 00 00 EE` | Call missed / call ended (`end_front`) |
+| | | **Release FSM** | **5B $\times$ 3** | ① Call: `7F B9 00 00 EE`<br>② Open: `7F B4 00 00 EE`<br>③ End: `7F B8 00 00 EE` | **Front door release sequence**:<br>• 50 ms line silence guard time<br>• Send ① `0xB9`, wait 350 ms<br>• Send ② `0xB4`, wait 750 ms<br>• Send ③ `0xB8` to release lock and reset |
+| **CH4** | **Lobby Door** | **Ring (RX)** | **5B** | `7F 5A 00 00 EE` | Lobby intercom chime received (`bell_lobby = 0x5A`) |
+| *(3840 bps)* | | **End (RX)** | **5B** | `7F 60 00 00 EE` | Lobby call ended (`end_lobby = 0x60`) |
+| | | **Release FSM** | **5B $\times$ 3** | ① Call: `7F 5F 00 00 EE`<br>② Open: `7F 61 00 00 EE`<br>③ End: `7F 60 00 00 EE` | **Lobby door release sequence**:<br>• 50 ms line silence guard time<br>• Send ① `0x5F`, wait 350 ms<br>• Send ② `0x61`, wait 750 ms<br>• Send ③ `0x60` to complete release |
+| **0x41/0x36** | **Away Switch** | **Away Event (BC)**| 11B | `F7 0B 01 [Dev] 01 40 10 [State] 00 [CS] EE` | `Byte #7`: `0x01` Home/Disarm, `0x02` Away/Arm |
+| **0x30/0x32** | **HEMS Meter** | **Data ACK** | **18B** | `F7 12 01 [Dev] 04 40 [Media] 00 [Data_4B] 00 00 00 00 [CS] EE` | `Media`: `0x01` Electric, `0x02` Water, `0x03` Gas, `0x04` Hot water<br>`Data_4B`: 4-byte cumulative meter counter |
 
 ---
 
-### A.3 신구 세대 런타임 자동 식별(Auto-Detection) 판별식
+## 5. Architectural Invariants & Protocol Rules
 
-게이트웨이 펌웨어에서 아파트 단지 환경(신형 vs 구형)을 자동 판별할 때 사용하는 규칙:
+### 5.1 Universal State Slot = Byte #8
+The primary operational state is universally encoded in **`Byte #8`**:
+- Light (`0x19`): `0x01` ON, `0x02` OFF
+- Thermostat (`0x18`): `0x01` ON, `0x04` OFF, `0x07` Away
+- HVAC (`0x1C`): `0x01` ON, `0x02` OFF *(Except 14B packet where padding is omitted $\rightarrow$ Byte #7)*
+- Outlet (`0x1F`): `0x01` ON, `0x02` OFF
+- ERV (`0x2B`): `0x01` ON, `0x02`/`0x00` OFF
+- Gas (`0x1B`): `0x01` Open, `0x04` Closed
+- Elevator (`0x34`): `0x06` In transit, `0x00` Idle
 
-$$\text{Architecture} = \begin{cases} \text{Legacy (구형 34B 브로드캐스트)}, & \text{if } \text{Packet}[1] == 0\text{x}22 \\ \text{New (신형 1:1 개별 룸 P2P)}, & \text{if } \text{Packet}[1] \in \{0\text{x}0\text{B}, 0\text{x}0\text{D}, 0\text{x}0\text{E}, 0\text{x}0\text{F}, 0\text{x}12\} \end{cases}$$
+### 5.2 Universal Control Slot = Byte #7
+- 11-byte control commands place the action parameter in **`Byte #7`**.
+- Control ACK packets echo `Byte #7` as verification, creating duplicate consecutive bytes:
+  - ON Success: `0x01` + `0x01` $\rightarrow$ **`01 01`**
+  - OFF Success: `0x02` + `0x02` $\rightarrow$ **`02 02`**
 
-> 상세 파서 구현 로직 및 C++/Lua 패턴은 **[부록 C. 파서 구현 레퍼런스](#부록-c-파서-구현-레퍼런스-parser-reference)**를 참조하십시오.
+### 5.3 HVAC Multi-Command Serialization & 120 ms TX Guard
+- When transmitting compound commands (Power ON + Cool + 24°C + High), each category frame (`0x40`, `0x41`, `0x45`, `0x42`) must be serialized via a FIFO TX queue.
+- **Command Precedence**: HVAC gateways (e.g. LG PI485) drop mode/temperature packets received while powered off. Therefore, **Power ON (`0x40`) must precede all other commands**:
+  $$\mathbf{Power(0x40)} \xrightarrow{120\text{ ms}} \mathbf{Mode(0x41)} \xrightarrow{120\text{ ms}} \mathbf{Target(0x45)} \xrightarrow{120\text{ ms}} \mathbf{Speed(0x42)}$$
+- **Mandatory Guard Delay**: Enforce a **100–150 ms (nominal 120 ms)** interval between consecutive TX frames to prevent RS-485 line collisions and buffer overflows.
+
+### 5.4 Doorphone 3-Step FSM Sequence
+Hyundai doorphone hardware ignores raw door-release signals unless an active audio session is established. The release sequence must execute strictly in 3 steps:
+$$\mathbf{Call(Op1)} \xrightarrow{350\text{ ms}} \mathbf{Open(Op2)} \xrightarrow{750\text{ ms}} \mathbf{End(Op3)}$$
+A **50 ms silent line guard time** is required prior to initiating Step 1.
+
+### 5.5 Temperature Resolution & 0.5°C Encoding
+- Standard temperatures use integer Hex (°C).
+- For systems supporting 0.5°C increments, the **MSB (`0x80`) serves as the 0.5°C flag** (e.g. 24.5°C = `0x18 | 0x80 = 0x98`).
+- Integer extraction: `TempByte & 0x7F`; add 0.5°C if `(TempByte & 0x80) != 0`.
+
+### 5.6 HVAC Error Mask (`0x80`) & 0x81 NAK Defense
+- **Error Flag**: The MSB of the state byte (`State & 0x80`) indicates outdoor unit / condensate drain fault.
+- **NAK Defense**: Aircon controllers return `0x81` (NAK / Command Reject) during mode conflicts (e.g., requesting heat while another zone cools). Gateways must drop `0x81` packets to avoid corrupting valid cached states.
+
+### 5.7 Dynamic HVAC Packet Length Offset
+Depending on indoor unit firmware, HVAC ACK frames arrive with length 13B, 14B, 15B, or 18B:
+- **14B Frame**: `state_idx = 7` (padding byte omitted)
+- **15B/18B Frame**: `state_idx = 8`
+- Dynamic selection: `state_idx = (ack.length == 14) ? 7 : 8`.
 
 ---
 
-## 부록 C. 파서 구현 레퍼런스 (Parser Reference)
+## 6. Corrected Open-Source Fallacies vs. Empirical Facts
 
-본 부록은 펌웨어(C++23) 및 SmartThings Edge Driver(Lua 5.3) 파서 구현 시 표준으로 채택하는 핵심 알고리즘 의사코드(Pseudocode)입니다.
+| Component | Open-Source Fallacy (GitHub / Forums) | Verified Hardware Reality | Severity / Impact |
+|:---|:---|:---|:---|
+| **Thermostat (`0x18`)** | Assumed 34B broadcast | Per-room (`0x11`–`0x14`) **18B Query ACK** & **13B Control ACK** | **Critical**: 34B parser drops 100% of modern traffic |
+| **Ventilation (`0x2B`)** | Stated as 12B without operation modes | Fixed **13B** frame; Cat `0x43` queries operation modes | **Verified**: Mode queries require direct gateway injection |
+| **Gas Valve (`0x1B`)** | Bi-directional open/close assumed | **Close Only (`0x02`)**; Remote open is physically locked | **Safety**: Open commands prohibited by fire/gas safety codes |
+| **Outlet (`0x1F`)** | Fractional power scaling assumed | **1W integer Big-Endian (Bytes 9–10)**; 11B immediate ACK | **Accurate**: Direct 1W integer reading without 0.1x scaling |
+| **HVAC (`0x1C`)** | Fixed 14B assumed; ignored wall remote | **13B/14B/15B/18B variable lengths**; Wall remotes operate as slaves | **Critical**: Requires dynamic offset and `0x81` NAK filtering |
+| **Doorphone (CH4)** | Single-step immediate command | **3-Step FSM with 50 ms line silence guard** | **Critical**: Door fails to open without 3-step sequence |
 
-### C.1 패킷 무결성 및 체크섬 검증
+---
+
+## 7. Appendix: Parser Reference Implementations
+
+### 7.1 Packet Integrity & Checksum Verification
 ```text
 function VerifyPacket(packet, length):
     if length < 5: return false
@@ -337,50 +231,12 @@ function VerifyPacket(packet, length):
 
     return (calculated_cs == packet[length - 2])
 ```
-> [!NOTE] **C++23 프로덕션 펌웨어 SWAR 가속**:
-> 게이트웨이 펌웨어(`src/L3_Protocol/`)에서는 상기 스칼라 루프 의사코드와 수학적으로 100% 동일한 결과를 보장하면서, 32비트 워드 청크(`uint32_t`) 단위 병렬 XOR 연산을 수행하는 **SWAR(SIMD Within A Register)** 체크섬 연산 파이프라인을 채택하여 패킷 검증 사이클을 최소화합니다.
 
-### C.2 신구 세대 및 가변 길이 파싱 분기
-```text
-function DispatchPacket(packet, length):
-    if not VerifyPacket(packet, length): return
-
-    device_type = packet[3]
-    opcode      = packet[4]
-
-    // 1) 구형 34B 난방 브로드캐스트
-    if length == 0x22 and device_type == 0x18:
-        ParseLegacyHeating34B(packet)
-        return
-
-    // 2) 신형 1:1 P2P 표준 프레임
-    switch device_type:
-        case 0x19: // 조명 (11B)
-            ParseLight(packet)
-        case 0x18: // 난방 (QRY ACK 18B / CTL ACK 13B)
-            ParseHeating(packet, length)
-        case 0x1C: // 시스템 에어컨 (14B / 15B / 18B 가변)
-            ParseAirconDynamic(packet, length)
-        case 0x1F: // 콘센트 (18B)
-            ParseOutlet(packet)
-        case 0x2B: // 환기 (13B)
-            ParseVent(packet)
-        case 0x1B: // 가스 (13B)
-            ParseGas(packet)
-        case 0x34: // 엘리베이터 (CTL ACK 11B / 도착 BC 13B)
-            ParseElevator(packet, length)
-```
-
-### C.3 에어컨 가변 응답 동적 슬롯 오프셋 계산
+### 7.2 Dynamic HVAC Parsing
 ```text
 function ParseAirconDynamic(packet, length):
-    // 기본 슬롯 (공통)
     room_dev = packet[6]
-    
-    if length == 14:       // 14B 단축형 (Padding 0x00 생략)
-        state_idx = 7
-    else:                  // 15B 표준형 및 18B 패딩형
-        state_idx = 8
+    state_idx = (length == 14) ? 7 : 8
 
     state = packet[state_idx]
     mode  = packet[state_idx + 1]
@@ -390,22 +246,5 @@ function ParseAirconDynamic(packet, length):
 
     has_fault = (state & 0x80) != 0
     is_on     = (state & 0x7F) == 0x01
-    is_half_c = (tgt & 0x80) != 0
-    target_c  = (tgt & 0x7F) + (0.5 if is_half_c else 0.0)
+    target_c  = (tgt & 0x7F) + (((tgt & 0x80) != 0) ? 0.5 : 0.0)
 ```
-
----
-
-## 부록 D. 단지별 Cat 코드 분기 매트릭스 (Complex-Specific Cat Matrix)
-
-현대통신 월패드와 연동되는 타사 서브 시스템(LG/삼성 에어컨 게이트웨이, 환기 전열교환기 등)은 아파트 준공 연도 및 납품 게이트웨이 모델에 따라 제어 카테고리(`Cat`) 코드가 분기됩니다. 현장 실측 패킷 덤프 시 아래 매트릭스를 대조하여 해당 단지의 프로파일을 결정합니다:
-
-| 제어 기능 | 표준형 단지 (Default) | A형 단지 (LG/삼성 구형) | B형 단지 (특수 게이트웨이) | 확인 및 판별 방법 |
-| :--- | :---: | :---: | :---: | :--- |
-| **에어컨 운전모드 제어** | **`0x41`** | **`0x43`** | **`0x5C`** | 월패드에서 에어컨 모드(냉방/난방) 변경 시 TX 패킷의 Byte #5 확인 |
-| **에어컨 풍량 제어** | **`0x42`** | **`0x5D`** | — | 월패드에서 에어컨 풍량 변경 시 TX 패킷의 Byte #5 확인 |
-| **에어컨 풍향(루버) 제어** | **`0x44`** | 미지원 | — | 월패드 루버 스윙 토글 시 TX 패킷 발생 여부 |
-| **환기 운전모드 제어** | **`0x43`** | — | — | 월패드 또는 게이트웨이 주입 패킷 (벽리모컨 인터록 시 `0x81` Reject) |
-| **스마트 콘센트 모드 전환** | **`0x43`** | **`0x40`** | — | 월패드에서 상시 $\leftrightarrow$ 대기차단 모드 전환 시 TX 패킷의 Byte #5 확인 |
-| **외출/방범 이벤트 DevID** | **`0x41`** | **`0x36`** | — | 현관 일괄소등/외출 스위치 버튼 조작 시 발생하는 패킷의 Byte #3 확인 |
-

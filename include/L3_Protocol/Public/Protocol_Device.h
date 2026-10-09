@@ -300,6 +300,9 @@ void Device_Clear() noexcept;
 [[nodiscard]] bool Device_FindCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                    DeviceStateEntry &out_copy) noexcept;
 
+/// Probe existence of device entry without copying 80B struct (thread-safe, zero copy).
+[[nodiscard]] bool Device_Exists(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept;
+
 /// Get 64-bit packed state fingerprint (thread-safe, zero struct copy).
 [[nodiscard]] bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                          uint64_t &out_packed) noexcept;

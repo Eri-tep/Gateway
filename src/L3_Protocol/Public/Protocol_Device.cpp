@@ -83,6 +83,8 @@ public:
   void clear();
   [[nodiscard]] bool findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                               DeviceStateEntry &out_copy) const noexcept;
+  [[nodiscard]] bool exists(uint8_t dev_id, uint8_t sub1,
+                            uint8_t sub2) const noexcept;
   [[nodiscard]] bool getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                     uint64_t &out_packed) const noexcept;
   [[nodiscard]] bool getMetadata(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
@@ -260,6 +262,29 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
     return false;
   copyEntryBounded(out_copy, *e);
   return true;
+}
+
+bool DeviceRepository::exists(uint8_t dev_id, uint8_t sub1,
+                              uint8_t sub2) const noexcept {
+  const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
+  const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
+
+  constexpr size_t MAX_RETRIES = 8;
+  for (size_t retry = 0; retry < MAX_RETRIES; ++retry) {
+    const uint32_t seq = _seqlock.read_begin();
+    const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
+    if (!e) [[unlikely]] {
+      if (_seqlock.read_retry(seq))
+        continue;
+      return false;
+    }
+    if (!_seqlock.read_retry(seq)) [[likely]] {
+      return true;
+    }
+  }
+
+  CriticalSectionLocker lock(&_cache_mux);
+  return findInternalFast(dev_id, norm_sub1, sub2, h) != nullptr;
 }
 
 bool DeviceRepository::getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
@@ -790,6 +815,10 @@ bool Device_FindCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   return s_device_repo.findCopy(dev_id, sub1, sub2, out_copy);
 }
 
+bool Device_Exists(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
+  return s_device_repo.exists(dev_id, sub1, sub2);
+}
+
 bool Device_GetPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
                                      uint64_t &out_packed) noexcept {
   return s_device_repo.getPackedState(dev_id, sub1, sub2, out_packed);
@@ -1056,8 +1085,7 @@ bool findCopyDirect(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 }
 
 bool probeDirectExists(uint8_t dev_id, uint8_t sub1, uint8_t sub2) noexcept {
-  DeviceStateEntry snap;
-  return s_device_repo.findCopy(dev_id, sub1, sub2, snap);
+  return s_device_repo.exists(dev_id, sub1, sub2);
 }
 
 portMUX_TYPE *getMuxHandle() noexcept {

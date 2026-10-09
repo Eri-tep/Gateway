@@ -108,6 +108,7 @@ struct Phase2CatalogDecompMetrics {
   uint32_t unaccounted_cycles{0};    // Wall-clock vs pipeline cycles delta
   uint32_t shadow_dedup_hit_cycles{0};   // 2-I: Warm Path Shadow State Dedup Hit (no delta)
   uint32_t shadow_dedup_delta_cycles{0}; // 2-J: Warm Path Shadow State Delta Emit
+  uint32_t e2e_pure_pipeline_cycles{0};  // Pure E2E 1-probe pipeline latency (probe overhead eliminated)
 };
 
 // ── Phase 3: Synchronization & Realistic SMP Dual-Core Contention ─────────────

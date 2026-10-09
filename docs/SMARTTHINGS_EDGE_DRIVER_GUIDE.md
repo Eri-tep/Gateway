@@ -157,7 +157,7 @@ The `gateway-ultra` profile defines 6 independent components, each rendered as a
 ## 6. SmartThings CLI Deployment Workflow
 
 > [!CAUTION]
-> **NO UNMODIFIED PACKAGE MANDATE**: 엣지드라이버 폴더(`Gateway-edge-driver/`) 내 파일 수정이 발생하지 않은 작업에서는 패키징 명령(`edge:drivers:package`) 실행이 절대 금지됩니다.
+> **NO UNMODIFIED PACKAGE MANDATE**: Packaging (`edge:drivers:package`) is strictly forbidden unless files under `Gateway-edge-driver/` have been modified in the current task.
 
 ### 6.1 One-Liner Package & Deploy (Recommended)
 Package, assign channel, and install to hub in a single step:

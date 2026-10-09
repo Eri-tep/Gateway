@@ -460,21 +460,20 @@ uint8_t UniversalProtocolEngine::getMaxPacketLen() const {
   return effectiveProfile().max_len;
 }
 
-int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
-                                                 size_t stream_len,
-                                                 size_t stx_idx) const {
+ExtractedFrameResult UniversalProtocolEngine::extractPacketLengthAndValidate(
+    const uint8_t *stream, size_t stream_len, size_t stx_idx) const noexcept {
   if (stx_idx >= stream_len)
-    return -1;
+    return {-1, false};
   const EffProfile &e = effectiveProfile();
   if (stream[stx_idx] != e.stx)
-    return -1;
+    return {-1, false};
 
   const uint8_t safe_min = std::max<uint8_t>(e.min_len, 3);
   const uint8_t safe_max =
       (e.max_len >= safe_min && e.max_len <= 64) ? e.max_len : 64;
 
   if (stx_idx + safe_min > stream_len)
-    return 0; // 최소 길이조차 아직 덜 들어옴
+    return {0, false}; // 최소 길이조차 아직 덜 들어옴
 
   // Hardware-accelerated ETX search with multi-ETX fallback resilience
   size_t cur_offset = stx_idx + safe_min - 1;
@@ -490,13 +489,19 @@ int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
     const size_t l = (static_cast<const uint8_t *>(hit) - &stream[stx_idx]) + 1;
     if (checkFramingPure(std::span<const uint8_t>(&stream[stx_idx], l), e.stx, e.etx,
                          safe_min, safe_max, e.algo)) [[likely]] {
-      return static_cast<int>(l);
+      return {static_cast<int>(l), true};
     }
     // 페이로드 내부 우연한 ETX 매칭이었으나 체크섬 불일치 -> 다음 바이트부터 계속 탐색
     cur_offset = (static_cast<const uint8_t *>(hit) - stream) + 1;
   }
 
-  return (stx_idx + safe_max <= stream_len) ? -1 : 0;
+  return {(stx_idx + safe_max <= stream_len) ? -1 : 0, false};
+}
+
+int UniversalProtocolEngine::extractPacketLength(const uint8_t *stream,
+                                                 size_t stream_len,
+                                                 size_t stx_idx) const {
+  return extractPacketLengthAndValidate(stream, stream_len, stx_idx).length;
 }
 
 bool UniversalProtocolEngine::isLocked() const noexcept {
@@ -1230,8 +1235,12 @@ uint8_t Wallpad_GetStx() noexcept {
   return Universal_GetEngine().getStx();
 }
 
+ExtractedFrameResult Wallpad_ExtractAndValidateFast(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
+  return Universal_GetEngine().extractPacketLengthAndValidate(stream, stream_len, stx_idx);
+}
+
 int Wallpad_ExtractLength(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
-  return Universal_GetEngine().extractPacketLength(stream, stream_len, stx_idx);
+  return Wallpad_ExtractAndValidateFast(stream, stream_len, stx_idx).length;
 }
 
 bool Wallpad_ValidatePacket(std::span<const uint8_t> frame) noexcept {

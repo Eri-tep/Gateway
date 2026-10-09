@@ -23,6 +23,7 @@
 #include "L2_Transport/RS485_CH.h"
 #include "L1_HAL/Diagnostics_Driver.h"
 #include "L1_HAL/Uart_Driver.h"
+#include "L0_Foundation/Lockless_RingBuffer.h"
 
 #include "esp_task_wdt.h"
 #include <Arduino.h>
@@ -47,15 +48,19 @@ void RS485_RegisterDispatcher(const RS485_PacketDispatcher &dispatcher) noexcept
   s_dispatcher = dispatcher;
 }
 
-// ── Static FreeRTOS Queues & Storage Pools (File-local) ──
-static StaticQueue_t s_ch1_ctrl_queue_buf, s_ch4_pass_queue_buf, s_ch1_vip_queue_buf;
+// ── Static FreeRTOS Queues, SPSC RingBuffer & Storage Pools (File-local) ──
+static StaticQueue_t s_ch1_ctrl_queue_buf, s_ch4_pass_queue_buf;
 static uint8_t
     s_ch1_ctrl_storage[Config::Queue::POOL_SIZE_CONTROL * sizeof(StaticPacket)];
 static uint8_t s_ch4_pass_storage[Config::Queue::POOL_SIZE_CH4_PASS *
                                   sizeof(StaticPacket)];
-static uint8_t s_ch1_vip_storage[Config::Queue::POOL_SIZE_VIP * sizeof(StaticPacket)];
 
-static QueueHandle_t s_ch1_control_queue = nullptr, s_ch1_vip_queue = nullptr;
+// L2 VIP Command Queue: Lockless SPSC RingBuffer + Counting Semaphore Bridge
+static Foundation::LocklessSpscRingBuffer<StaticPacket, Config::Queue::POOL_SIZE_VIP> s_ch1_vip_ringbuf;
+static StaticSemaphore_t s_ch1_vip_sem_buf;
+static SemaphoreHandle_t s_ch1_vip_sem = nullptr;
+
+static QueueHandle_t s_ch1_control_queue = nullptr;
 static QueueSetHandle_t s_ch1_queue_set = nullptr;
 static QueueHandle_t s_uart0_event_queue = nullptr, s_uart1_event_queue = nullptr,
                      s_uart2_event_queue = nullptr;
@@ -79,14 +84,16 @@ void Engine_InitQueues() {
 
   s_ch1_control_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CONTROL, sizeof(StaticPacket),
                                            s_ch1_ctrl_storage, &s_ch1_ctrl_queue_buf);
-  s_ch1_vip_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_VIP, sizeof(StaticPacket),
-                                       s_ch1_vip_storage, &s_ch1_vip_queue_buf);
+  s_ch1_vip_sem = xSemaphoreCreateCountingStatic(Config::Queue::POOL_SIZE_VIP, 0,
+                                                &s_ch1_vip_sem_buf);
   s_ch4_passthrough_queue = xQueueCreateStatic(Config::Queue::POOL_SIZE_CH4_PASS, sizeof(StaticPacket),
                                                s_ch4_pass_storage, &s_ch4_pass_queue_buf);
 
   s_ch1_queue_set = xQueueCreateSet(Config::Queue::POOL_SIZE_CONTROL + Config::Queue::POOL_SIZE_VIP);
   if (s_ch1_queue_set) {
-    xQueueAddToSet(s_ch1_vip_queue, s_ch1_queue_set);
+    if (s_ch1_vip_sem) {
+      xQueueAddToSet(s_ch1_vip_sem, s_ch1_queue_set);
+    }
     xQueueAddToSet(s_ch1_control_queue, s_ch1_queue_set);
   }
 }
@@ -107,8 +114,17 @@ bool Queue_EnqueueDropTail(QueueHandle_t queue,
 // ── RS-485 Channel TX Enqueue (canonical L2 → internal queue bridge) ─────────
 
 bool Engine_EnqueueCh1(const StaticPacket &pkt, bool vip) noexcept {
-  QueueHandle_t q = vip ? s_ch1_vip_queue : s_ch1_control_queue;
-  return Queue_EnqueueDropTail(q, pkt);
+  if (vip) {
+    if (s_ch1_vip_ringbuf.push(pkt)) {
+      if (s_ch1_vip_sem) {
+        xSemaphoreGive(s_ch1_vip_sem);
+      }
+      return true;
+    }
+    Diag_RecordChannelQueueFull(1);
+    return false;
+  }
+  return Queue_EnqueueDropTail(s_ch1_control_queue, pkt);
 }
 
 bool Engine_EnqueueCh4Pass(const StaticPacket &pkt) noexcept {
@@ -367,8 +383,18 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 // ============================================================================
 
 bool RS485_EnqueueControl(const StaticPacket &pkt, bool vip) noexcept {
-  QueueHandle_t q = vip ? s_ch1_vip_queue : s_ch1_control_queue;
-  if (Queue_EnqueueDropTail(q, pkt)) {
+  if (vip) {
+    if (s_ch1_vip_ringbuf.push(pkt)) {
+      if (s_ch1_vip_sem) {
+        xSemaphoreGive(s_ch1_vip_sem);
+      }
+      System_TracePacket(1, true, TraceType::CTL, pkt);
+      return true;
+    }
+    Diag_RecordChannelQueueFull(1);
+    return false;
+  }
+  if (Queue_EnqueueDropTail(s_ch1_control_queue, pkt)) {
     System_TracePacket(1, true, TraceType::CTL, pkt);
     return true;
   }
@@ -619,12 +645,16 @@ void Task_Ch1(void *pvParameters) {
       vTaskDelay(wait_ticks);
     }
 
-    if (s_ch1_vip_queue &&
-        xQueueReceive(s_ch1_vip_queue, &ctrlPacket, 0) == pdTRUE) {
+    if (s_ch1_vip_ringbuf.pop(ctrlPacket)) {
+      if (s_ch1_vip_sem) {
+        xSemaphoreTake(s_ch1_vip_sem, 0);
+      }
       Ch1_SetState(current_state, Ch1State::VIP_CONTROL);
       Ch1_HandleCtrl(ctrlPacket);
       Ch1_SetState(current_state, Ch1State::IDLE);
       continue; // VIP 처리 완료 후 다음 루프로 즉시 재평가
+    } else if (activated == s_ch1_vip_sem && s_ch1_vip_sem) {
+      xSemaphoreTake(s_ch1_vip_sem, 0);
     }
 
     if (activated == s_ch1_control_queue && s_ch1_control_queue &&
