@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.6.5";
+constexpr const char *FIRMWARE_VERSION = "v2.6.6";
 } // namespace Config
 
 namespace Config::Task {
@@ -62,6 +62,8 @@ constexpr uint32_t NVS_COMMIT_BUS_QUIET_MS = 100;
 constexpr uint32_t NVS_COMMIT_STARVATION_MS = 30000;
 constexpr uint32_t NVS_COMMIT_FORCE_FLUSH_BUDGET_MS = 150;
 constexpr uint32_t OTA_VALIDATION_PERIOD_MS = 120000;
+constexpr uint32_t OTA_RS485_ACTIVITY_TIMEOUT_MS = 15000;
+constexpr uint32_t OTA_HUB_EXTENDED_TIMEOUT_MS = 60000;
 constexpr uint32_t RESCUE_BUTTON_HOLD_MS = 2500;
 constexpr uint32_t WIFI_BACKGROUND_RETRY_INTERVAL_MS = 60000;
 constexpr uint32_t WARM_CACHE_NVS_DEBOUNCE_MS = 60000;

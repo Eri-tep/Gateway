@@ -67,6 +67,7 @@ static QueueHandle_t s_uart0_event_queue = nullptr, s_uart1_event_queue = nullpt
                      s_uart2_event_queue = nullptr;
 static QueueHandle_t s_ch4_passthrough_queue = nullptr;
 static std::atomic<uint8_t> s_ch4_pending{0};
+static StaticSemaphore_t s_uart0_mutex_buf, s_uart1_mutex_buf, s_uart2_mutex_buf;
 static SemaphoreHandle_t s_uart0_mutex = nullptr, s_uart1_mutex = nullptr,
                          s_uart2_mutex = nullptr;
 
@@ -78,9 +79,9 @@ QueueHandle_t *Engine_GetUartEventQueuePtr(uint8_t uart_num) noexcept {
 }
 
 void Engine_InitQueues() {
-  s_uart0_mutex = xSemaphoreCreateMutex();
-  s_uart1_mutex = xSemaphoreCreateMutex();
-  s_uart2_mutex = xSemaphoreCreateMutex();
+  s_uart0_mutex = xSemaphoreCreateMutexStatic(&s_uart0_mutex_buf);
+  s_uart1_mutex = xSemaphoreCreateMutexStatic(&s_uart1_mutex_buf);
+  s_uart2_mutex = xSemaphoreCreateMutexStatic(&s_uart2_mutex_buf);
   assert(s_uart0_mutex != nullptr && s_uart1_mutex != nullptr &&
          s_uart2_mutex != nullptr);
 
@@ -106,6 +107,7 @@ bool Queue_EnqueueDropTail(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
   if (UNLIKELY(!queue))
     return false;
+  const uint8_t ch = (queue == s_ch4_passthrough_queue) ? 4 : 1;
   if (queue == s_ch1_control_queue) {
     if (s_ch1_control_pending.load(std::memory_order_relaxed) >= Config::Queue::POOL_SIZE_CONTROL) [[unlikely]] {
       Diag_RecordChannelQueueFull(1);
@@ -118,7 +120,7 @@ bool Queue_EnqueueDropTail(QueueHandle_t queue,
     }
     return true;
   }
-  Diag_RecordChannelQueueFull(1);
+  Diag_RecordChannelQueueFull(ch);
   return false;
 }
 
@@ -698,10 +700,13 @@ void Task_Ch1(void *pvParameters) {
       }
     }
 
-    const uint32_t poll_interval = s_dispatcher.onGetPollIntervalMs();
+    const uint32_t poll_interval = s_dispatcher.onGetPollIntervalMs
+                                        ? s_dispatcher.onGetPollIntervalMs()
+                                        : 100;
 
     uint32_t now = millis();
-    uint32_t rem_ms = (now < next_poll_due_ms) ? (next_poll_due_ms - now) : 0;
+    int32_t diff_ms = static_cast<int32_t>(next_poll_due_ms - now);
+    uint32_t rem_ms = (diff_ms > 0) ? static_cast<uint32_t>(diff_ms) : 0;
     TickType_t wait_ticks = (rem_ms > 0) ? pdMS_TO_TICKS(rem_ms) : 1;
 
     const bool work_pending = (!s_ch1_vip_ringbuf.empty() ||
@@ -734,7 +739,7 @@ void Task_Ch1(void *pvParameters) {
         s_ch1_control_pending.fetch_sub(1, std::memory_order_relaxed);
       }
       std::span<const uint8_t> frame(ctrlPacket.data.data(), ctrlPacket.length);
-      bool is_query = s_dispatcher.onIsQueryPacket(frame);
+      bool is_query = s_dispatcher.onIsQueryPacket ? s_dispatcher.onIsQueryPacket(frame) : false;
 
       Ch1_SetState(current_state,
                    is_query ? Ch1State::POLL_DEVICE : Ch1State::NORMAL_CONTROL);
@@ -743,7 +748,8 @@ void Task_Ch1(void *pvParameters) {
       continue; // 일반 제어 처리 완료 후 다음 루프로 즉시 재평가
     }
 
-    if (activated == nullptr || now >= next_poll_due_ms) {
+    now = millis();
+    if (activated == nullptr || static_cast<int32_t>(now - next_poll_due_ms) >= 0) {
       Ch1_SetState(current_state, Ch1State::POLL_DEVICE);
       Ch1_PollNext(current_dev_idx);
       Ch1_SetState(current_state, Ch1State::IDLE);
@@ -871,12 +877,12 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
 
 void Task_Ch2(void *pvParameters) {
   auto *cfg = static_cast<WallpadChannelConfig *>(pvParameters);
-  RunSlaveChannelLoop(cfg, 1 /* CH2 WDT Slot */);
+  RunSlaveChannelLoop(cfg, Config::Task::WDT_ID_CH2);
 }
 
 void Task_Ch3(void *pvParameters) {
   auto *cfg = static_cast<WallpadChannelConfig *>(pvParameters);
-  RunSlaveChannelLoop(cfg, 2 /* CH3 WDT Slot */);
+  RunSlaveChannelLoop(cfg, Config::Task::WDT_ID_CH3);
 }
 
 // ============================================================================
@@ -982,6 +988,9 @@ void Task_Ch4(void *pvParameters) {
     }
 
     if (xQueueReceive(s_ch4_passthrough_queue, &packet_to_tx, 0) == pdTRUE) {
+      if (s_ch4_pending.load(std::memory_order_relaxed) > 0) {
+        s_ch4_pending.fetch_sub(1, std::memory_order_relaxed);
+      }
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
     }
 

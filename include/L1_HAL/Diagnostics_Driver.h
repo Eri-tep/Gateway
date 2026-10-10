@@ -66,6 +66,7 @@ private:
   MetricSample _current{};
   uint16_t _cached_flash_kb{0};
   mutable SemaphoreHandle_t _metrics_mutex = nullptr;
+  mutable StaticSemaphore_t _metrics_mutex_buf{};
 
 public:
   SystemMetricsTracker() noexcept = default;

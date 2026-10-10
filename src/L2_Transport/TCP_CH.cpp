@@ -8,7 +8,6 @@
 #include "L0_Foundation/System_Platform.h"
 #include "L1_HAL/OTA_Driver.h"
 
-#include <WiFi.h>
 #include <esp_task_wdt.h>
 #include <sys/time.h>
 
@@ -55,7 +54,7 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
 
     int act = 0;
     const bool has_clients = Bridge_HasActiveClients();
-    struct timeval tv = has_clients ? (struct timeval){0, 2000} : (struct timeval){0, 20000};
+    struct timeval tv = has_clients ? timeval{0, 2000} : timeval{0, 20000};
     if (max_fd >= 0) [[likely]] {
       act = select(max_fd + 1, &readfds, nullptr, &errorfds, &tv);
       if (ota_now) [[unlikely]] {

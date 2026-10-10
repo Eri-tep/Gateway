@@ -11,7 +11,7 @@
 
 static EventGroupHandle_t s_wifi_event_group = nullptr;
 static StaticEventGroup_t s_wifi_event_group_buf;
-static uint32_t s_wifi_disconnect_count = 0;
+static std::atomic<uint32_t> s_wifi_disconnect_count{0};
 static WifiHwConfig s_hw_cfg;
 static std::atomic<bool> s_ap_active{false};
 
@@ -28,9 +28,12 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
     break;
   case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-    s_wifi_disconnect_count = 0;
-    Serial.printf("[WIFI EVENT] STA Got IP: %s\r\n",
-                  IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+    s_wifi_disconnect_count.store(0, std::memory_order_relaxed);
+    {
+      IPAddress sta_ip(info.got_ip.ip_info.ip.addr);
+      Serial.printf("[WIFI EVENT] STA Got IP: %u.%u.%u.%u\r\n",
+                    sta_ip[0], sta_ip[1], sta_ip[2], sta_ip[3]);
+    }
     if (s_wifi_event_group) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
       xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
@@ -44,9 +47,12 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     tzset();
     break;
   case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-    s_wifi_disconnect_count++;
-    Serial.printf("[WIFI EVENT] STA Disconnected (Reason: %d, Count: %u)\r\n",
-                  info.wifi_sta_disconnected.reason, s_wifi_disconnect_count);
+    {
+      uint32_t disc_cnt =
+          s_wifi_disconnect_count.fetch_add(1, std::memory_order_relaxed) + 1;
+      Serial.printf("[WIFI EVENT] STA Disconnected (Reason: %d, Count: %u)\r\n",
+                    info.wifi_sta_disconnected.reason, disc_cnt);
+    }
     if (s_wifi_event_group) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
       xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_CONNECTED | WIFI_BIT_GOT_IP);
@@ -148,8 +154,9 @@ void Wifi_Driver_Init(const WifiHwConfig &cfg) {
 
   if (connected) {
     WiFi.setSleep(false);
-    Serial.printf("[WIFI] Fast-boot connected successfully! IP: %s, RSSI: %d dBm\r\n",
-                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    IPAddress sta_ip = WiFi.localIP();
+    Serial.printf("[WIFI] Fast-boot connected successfully! IP: %u.%u.%u.%u, RSSI: %d dBm\r\n",
+                  sta_ip[0], sta_ip[1], sta_ip[2], sta_ip[3], WiFi.RSSI());
   } else {
     Serial.println(F("[WIFI] Fast-boot: STA association in progress asynchronously. Local buses starting immediately..."));
   }
@@ -174,9 +181,10 @@ void Wifi_Driver_StartFallbackAp() noexcept {
 
   WiFi.setSleep(false);
   esp_wifi_set_max_tx_power(78);
-  Serial.printf("[WIFI] Fallback SoftAP '%s' started: %s (IP: %s)\r\n",
+  IPAddress ap_ip = WiFi.softAPIP();
+  Serial.printf("[WIFI] Fallback SoftAP '%s' started: %s (IP: %u.%u.%u.%u)\r\n",
                 fallback_ap, ap_ok ? "SUCCESS" : "FAILED",
-                WiFi.softAPIP().toString().c_str());
+                ap_ip[0], ap_ip[1], ap_ip[2], ap_ip[3]);
 }
 
 [[nodiscard]] bool Wifi_Driver_IsApActive() noexcept {
@@ -200,6 +208,10 @@ void Wifi_Driver_StartFallbackAp() noexcept {
 
 void Wifi_Driver_Reconnect() noexcept {
   esp_wifi_connect();
+}
+
+[[nodiscard]] uint32_t Wifi_Driver_GetDisconnectCount() noexcept {
+  return s_wifi_disconnect_count.load(std::memory_order_relaxed);
 }
 
 // ── L0 Foundation Universal Contract Implementations ──
@@ -263,7 +275,7 @@ bool System_WifiIsApActive() noexcept {
 }
 
 // ── IP Subnet & Management Whitelist Filters (L1 Physical HAL) ────────────────
-bool Tcp_IsAllowedIP(IPAddress ip) {
+[[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip) noexcept {
   if (ip == IPAddress(127, 0, 0, 1))
     return true;
 
@@ -287,7 +299,7 @@ bool Tcp_IsAllowedIP(IPAddress ip) {
   return false;
 }
 
-bool Telnet_IsAllowedIP(IPAddress ip) {
+[[nodiscard]] bool Telnet_IsAllowedIP(IPAddress ip) noexcept {
   if (ip == IPAddress(115, 91, 242, 69))
     return true;
 

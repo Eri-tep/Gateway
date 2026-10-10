@@ -179,7 +179,8 @@ void TaskWdtMonitor::feed(size_t index) noexcept {
   s_rtc_last_alive_ms[index] = now;
   tasks[index].last_feed_ms.store(now, std::memory_order_relaxed);
   if (prev > 0) {
-    const uint32_t gap = (now >= prev) ? (now - prev) : 0;
+    const int32_t d = static_cast<int32_t>(now - prev);
+    const uint32_t gap = (d > 0) ? static_cast<uint32_t>(d) : 0u;
     uint32_t cur_max =
         tasks[index].max_interval_ms.load(std::memory_order_relaxed);
     while (gap > cur_max && !tasks[index].max_interval_ms.compare_exchange_weak(
@@ -305,22 +306,34 @@ void Diag_DiagnoseStuck() {
     return;
   }
 
-  uint32_t max_val = 0;
+  size_t base_idx = 0;
+  bool has_active_task = false;
   for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
-    if (s_rtc_last_alive_ms[i] > max_val)
-      max_val = s_rtc_last_alive_ms[i];
+    if (s_rtc_last_alive_ms[i] > 0) {
+      base_idx = i;
+      has_active_task = true;
+      break;
+    }
   }
 
-  if (max_val == 0)
+  if (!has_active_task)
     return;
+
+  uint32_t most_recent_ms = s_rtc_last_alive_ms[base_idx];
+  for (size_t i = base_idx + 1; i < Config::Task::TASK_COUNT; i++) {
+    if (s_rtc_last_alive_ms[i] > 0) {
+      if (static_cast<int32_t>(s_rtc_last_alive_ms[i] - most_recent_ms) > 0) {
+        most_recent_ms = s_rtc_last_alive_ms[i];
+      }
+    }
+  }
 
   uint32_t max_gap = 0;
   int found_idx = -1;
   for (size_t i = 0; i < Config::Task::TASK_COUNT; i++) {
     if (s_rtc_last_alive_ms[i] > 0) {
-      uint32_t gap = (max_val >= s_rtc_last_alive_ms[i])
-                         ? (max_val - s_rtc_last_alive_ms[i])
-                         : 0;
+      int32_t d = static_cast<int32_t>(most_recent_ms - s_rtc_last_alive_ms[i]);
+      uint32_t gap = (d > 0) ? static_cast<uint32_t>(d) : 0u;
       if (gap >= 2000 && gap > max_gap) {
         max_gap = gap;
         found_idx = static_cast<int>(i);
@@ -427,10 +440,12 @@ void Diag_CheckOtaHealth() {
                 s_pkt_stats.ch5.is_connected.load(std::memory_order_relaxed);
 
   bool rs485_ok =
-      (millis() - s_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) < 15000);
+      (millis() - s_pkt_stats.ch1.last_activity_ms.load(std::memory_order_relaxed) <
+       Config::Timing::OTA_RS485_ACTIVITY_TIMEOUT_MS);
   bool time_ok = TimeUtils::isElapsed(s_boot_start_ms,
                                       Config::Timing::OTA_VALIDATION_PERIOD_MS);
-  bool extended_time_ok = TimeUtils::isElapsed(s_boot_start_ms, 60000);
+  bool extended_time_ok =
+      TimeUtils::isElapsed(s_boot_start_ms, Config::Timing::OTA_HUB_EXTENDED_TIMEOUT_MS);
 
   if (!time_ok || !wifi_ok || (!hub_ok && !extended_time_ok) || !rs485_ok) {
     return;
@@ -477,9 +492,10 @@ void Diag_StartRescueAp(const RescueHwConfig &cfg) {
   WiFi.setSleep(false);
   esp_wifi_set_max_tx_power(78);
 
+  IPAddress ap_ip = WiFi.softAPIP();
   ::Serial.printf(
-      "[RESCUE] SoftAP 'Sweet_Home_Rescue' started: %s (IP: %s)\r\n",
-      ap_ok ? "SUCCESS" : "FAILED", WiFi.softAPIP().toString().c_str());
+      "[RESCUE] SoftAP 'Sweet_Home_Rescue' started: %s (IP: %u.%u.%u.%u)\r\n",
+      ap_ok ? "SUCCESS" : "FAILED", ap_ip[0], ap_ip[1], ap_ip[2], ap_ip[3]);
 
   if (cfg.sta_ssid && cfg.sta_ssid[0]) {
     WiFi.persistent(false);
@@ -499,7 +515,8 @@ void Diag_StartRescueAp(const RescueHwConfig &cfg) {
   }
 
   if (!g_system_event_group) {
-    g_system_event_group = xEventGroupCreate();
+    static StaticEventGroup_t s_diag_system_event_group_buf;
+    g_system_event_group = xEventGroupCreateStatic(&s_diag_system_event_group_buf);
     xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
   }
 
@@ -547,8 +564,11 @@ void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept {
   for (size_t i = 0; i < 6; ++i) {
     uint32_t last_feed =
         s_wdt_monitor.tasks[i].last_feed_ms.load(std::memory_order_relaxed);
-    uint32_t elapsed =
-        (last_feed > 0 && now >= last_feed) ? (now - last_feed) : 0;
+    uint32_t elapsed = 0;
+    if (last_feed > 0) {
+      int32_t d = static_cast<int32_t>(now - last_feed);
+      elapsed = (d > 0) ? static_cast<uint32_t>(d) : 0u;
+    }
     uint32_t peak =
         s_wdt_monitor.tasks[i].max_interval_ms.load(std::memory_order_relaxed);
 
@@ -742,7 +762,7 @@ struct MetricAccumulator {
 
 void SystemMetricsTracker::init() {
   if (!_metrics_mutex)
-    _metrics_mutex = xSemaphoreCreateMutex();
+    _metrics_mutex = xSemaphoreCreateMutexStatic(&_metrics_mutex_buf);
   _cached_flash_kb = _current.flash_kb =
       static_cast<uint16_t>(ESP.getSketchSize() / 1024);
   memset(&_cur_bucket, 0, sizeof(_cur_bucket));
@@ -892,9 +912,9 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
   sys.wifi_rssi = static_cast<int8_t>(WiFi.RSSI());
 
   if (sys.wifi_connected) {
-    strncpy(sys.wifi_ip, WiFi.localIP().toString().c_str(),
-            sizeof(sys.wifi_ip) - 1);
-    sys.wifi_ip[sizeof(sys.wifi_ip) - 1] = '\0';
+    IPAddress sta_ip = WiFi.localIP();
+    snprintf(sys.wifi_ip, sizeof(sys.wifi_ip), "%u.%u.%u.%u",
+             sta_ip[0], sta_ip[1], sta_ip[2], sta_ip[3]);
   } else {
     strncpy(sys.wifi_ip, "0.0.0.0", sizeof(sys.wifi_ip) - 1);
     sys.wifi_ip[sizeof(sys.wifi_ip) - 1] = '\0';

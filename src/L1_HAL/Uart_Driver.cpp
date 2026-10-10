@@ -20,6 +20,8 @@
 // Previously: `extern SoftwareSerial g_doorphone_serial;` in NetworkRouter.h
 // Now: completely hidden inside this translation unit. Rule 17 compliant.
 static SoftwareSerial s_doorphone_serial;
+static int s_doorphone_rx_pin = Config::GPIO::RX_GPIO;
+static int s_doorphone_tx_pin = Config::GPIO::TX_GPIO;
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -64,6 +66,8 @@ esp_err_t Uart_InitSwSerial(int rx_pin, int tx_pin,
   if (rx_pin < 0 || tx_pin < 0) {
     return ESP_ERR_INVALID_ARG;
   }
+  s_doorphone_rx_pin = rx_pin;
+  s_doorphone_tx_pin = tx_pin;
   s_doorphone_serial.begin(cfg.baud, toSwSerialConfig(cfg.framing), rx_pin, tx_pin);
   pinMode(rx_pin, INPUT_PULLUP);
   return ESP_OK;
@@ -88,8 +92,8 @@ esp_err_t Uart_ReconfigHw(uart_port_t port, const UartHwConfig &cfg) noexcept {
 
 esp_err_t Uart_ReconfigSwSerial(const UartHwConfig &cfg) noexcept {
   s_doorphone_serial.begin(cfg.baud, toSwSerialConfig(cfg.framing),
-                           Config::GPIO::RX_GPIO, Config::GPIO::TX_GPIO);
-  pinMode(Config::GPIO::RX_GPIO, INPUT_PULLUP);
+                           s_doorphone_rx_pin, s_doorphone_tx_pin);
+  pinMode(s_doorphone_rx_pin, INPUT_PULLUP);
   return ESP_OK;
 }
 

@@ -25,7 +25,6 @@
 
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Platform.h"
-#include <IPAddress.h>
 #include <sys/select.h>
 #include <cstddef>
 #include <cstdint>

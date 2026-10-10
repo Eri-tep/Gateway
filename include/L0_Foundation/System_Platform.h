@@ -497,6 +497,6 @@ void System_WifiStartFallbackAp() noexcept;
 
 
 // ── IP Subnet & Management Whitelist Filters (Global Security Policy) ────────
-[[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip);
-[[nodiscard]] bool Telnet_IsAllowedIP(IPAddress ip);
+[[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip) noexcept;
+[[nodiscard]] bool Telnet_IsAllowedIP(IPAddress ip) noexcept;
 

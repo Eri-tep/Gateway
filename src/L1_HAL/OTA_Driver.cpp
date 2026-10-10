@@ -315,7 +315,6 @@ static void ota_fail(const char *fmt, ...) {
 }
 
 static bool Ota_ResolveDownloadUrl(const char *initial_url,
-                                   String &out_final_url,
                                    WiFiClientSecure &secure_client,
                                    WiFiClient &plain_client, HTTPClient &http,
                                    int &out_content_length) {
@@ -353,7 +352,9 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
   const char *header_keys[] = {"Location"};
   http.collectHeaders(header_keys, 1);
 
-  String current_url = initial_url;
+  static char s_current_url[MAX_REDIRECT_LOCATION_LEN + 1];
+  strncpy(s_current_url, initial_url ? initial_url : "", sizeof(s_current_url) - 1);
+  s_current_url[sizeof(s_current_url) - 1] = '\0';
   int redirect_count = 0;
   int httpCode = 0;
 
@@ -366,12 +367,12 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
     memset(path, 0, sizeof(path));
     int port = 0;
     bool is_https = false;
-    Ota_ExtractUrlComponents(current_url.c_str(), host, sizeof(host), port, path,
+    Ota_ExtractUrlComponents(s_current_url, host, sizeof(host), port, path,
                            sizeof(path), is_https);
 
     OtaUrlContext ctx = (redirect_count == 0) ? OtaUrlContext::Initial
                                               : OtaUrlContext::Redirect;
-    if (!Ota_IsTrustedUrl(current_url.c_str(), ctx)) {
+    if (!Ota_IsTrustedUrl(s_current_url, ctx)) {
       ota_fail("Untrusted URL in chain (host: %s, port: %d)",
                host[0] ? host : "invalid", port);
       http.end();
@@ -393,7 +394,7 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
       transport = &plain_client;
     }
 
-    if (!http.begin(*transport, current_url)) {
+    if (!http.begin(*transport, s_current_url)) {
       ota_fail("HTTP begin failed");
       http.end();
       secure_client.stop();
@@ -450,7 +451,8 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
         return false;
       }
 
-      current_url = location;
+      strncpy(s_current_url, location.c_str(), sizeof(s_current_url) - 1);
+      s_current_url[sizeof(s_current_url) - 1] = '\0';
       ::Serial.printf("[OTA] Redirect #%d (%d) -> to host: %s (port %d)\r\n",
                       redirect_count, httpCode, host, next_port);
     } else {
@@ -481,7 +483,6 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
     return false;
   }
 
-  out_final_url = current_url;
   return true;
 }
 
@@ -637,10 +638,9 @@ static bool Ota_StreamAndWritePartition(HTTPClient &http,
 static bool do_ota(const char *initial_url) {
   OtaInProgressGuard ota_guard;
 
-  String final_url;
   int content_length = 0;
 
-  if (!Ota_ResolveDownloadUrl(initial_url, final_url, s_secure_client,
+  if (!Ota_ResolveDownloadUrl(initial_url, s_secure_client,
                               s_plain_client, s_http, content_length)) {
     return false;
   }

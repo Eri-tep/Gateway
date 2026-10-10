@@ -24,3 +24,4 @@ void Wifi_Driver_Reconnect() noexcept;
 [[nodiscard]] EventBits_t Wifi_Driver_GetEventBits() noexcept;
 void Wifi_Driver_StartFallbackAp() noexcept;
 [[nodiscard]] bool Wifi_Driver_IsApActive() noexcept;
+[[nodiscard]] uint32_t Wifi_Driver_GetDisconnectCount() noexcept;

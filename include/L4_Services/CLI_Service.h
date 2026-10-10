@@ -158,6 +158,8 @@ public:
 
     void reset() {
       if (sock >= 0) {
+        struct linger sl = {.l_onoff = 1, .l_linger = 0};
+        setsockopt(sock, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
         close(sock);
         sock = -1;
       }
