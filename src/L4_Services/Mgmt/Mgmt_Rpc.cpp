@@ -280,8 +280,7 @@ static void HandleRpc_ClearCoredump(int sock, long req_id,
                                     const char * /*json_str*/,
                                     const IPAddress & /*client_ip*/) {
   esp_core_dump_image_erase();
-  g_coredump_info.valid = false;
-  memset(&g_coredump_info, 0, sizeof(g_coredump_info));
+  System_ClearCoreDumpInfo();
   sendRpcResponse(sock, req_id, "ok", "Flash core dump erased");
 }
 
@@ -568,7 +567,7 @@ static void HandleRpc_SetEw11(int sock, long req_id, const char *json_str,
   if (slot >= 0 && slot < Config::TCP::MAX_EW11_SLOTS) {
     uint16_t def_slot_port = Config::TCP::EW11_SLOT_PORTS[slot];
     HubClientSlotSnapshot slot_snap;
-    System_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
+    ProtocolDiag_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
     uint16_t target_port =
         (port > 0 && port <= 65535)
             ? static_cast<uint16_t>(port)

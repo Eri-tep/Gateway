@@ -299,7 +299,7 @@ void wallpadPrintStatus(AppendBuf &out) {
     FixedBuf<32> val_buf;
     for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
       HubClientSlotSnapshot slot;
-      System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
+      ProtocolDiag_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
       p_buf.reset();
       val_buf.reset();
       p_buf.appendFormat("%u",

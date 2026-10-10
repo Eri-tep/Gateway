@@ -261,3 +261,35 @@ void System_WifiStartFallbackAp() noexcept {
 bool System_WifiIsApActive() noexcept {
   return Wifi_Driver_IsApActive();
 }
+
+// ── IP Subnet & Management Whitelist Filters (L1 Physical HAL) ────────────────
+bool Tcp_IsAllowedIP(IPAddress ip) {
+  if (ip == IPAddress(127, 0, 0, 1))
+    return true;
+
+  if (ip[0] == 172 && ip[1] == 30 && (ip[2] == 1 || ip[2] == 2))
+    return true;
+
+  if (System_WifiIsConnected()) {
+    IPAddress sta_ip = System_WifiGetIp();
+    IPAddress sta_mask = System_WifiGetSubnetMask();
+    if ((ip & sta_mask) == (sta_ip & sta_mask))
+      return true;
+  }
+
+  IPAddress ap_ip = System_WifiGetApIp();
+  if (ap_ip != IPAddress(0, 0, 0, 0)) {
+    IPAddress ap_mask = System_WifiGetApSubnetMask();
+    if ((ip & ap_mask) == (ap_ip & ap_mask))
+      return true;
+  }
+
+  return false;
+}
+
+bool Telnet_IsAllowedIP(IPAddress ip) {
+  if (ip == IPAddress(115, 91, 242, 69))
+    return true;
+
+  return Tcp_IsAllowedIP(ip);
+}

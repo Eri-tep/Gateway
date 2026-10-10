@@ -561,7 +561,7 @@ static void ew11PrintStatus(int sock) {
       FixedBuf<24> pkt_buf;
       for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
         HubClientSlotSnapshot slot;
-        System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
+        ProtocolDiag_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
         const char *status_str = !slot.enabled         ? "Disabled"
                                  : !slot.is_connected  ? "Listening"
                                  : (slot.rx_pkts == 0) ? "Idle"
@@ -606,7 +606,7 @@ static void ew11PrintStatus(int sock) {
     {
       for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
         HubClientSlotSnapshot slot;
-        System_GetBridgeSlotSnapshot(s, slot);
+        ProtocolDiag_GetBridgeSlotSnapshot(s, slot);
         FcuDeviceSnapshot snap;
         Device_GetFcuSnapshot(s, snap);
 
@@ -662,7 +662,7 @@ void cmdEw11(CliContext &ctx) {
          if (!ew11ParseSlot(sock, args.get(2), slot, "set"))
            return;
          HubClientSlotSnapshot slot_snap;
-         System_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
+         ProtocolDiag_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
          uint16_t default_port = Config::TCP::EW11_SLOT_PORTS[slot];
          uint16_t port =
              slot_snap.target_port > 0 ? slot_snap.target_port : default_port;
@@ -695,7 +695,7 @@ void cmdEw11(CliContext &ctx) {
          }
          if (ProtocolDiag_SetBridgeSlotConfig(static_cast<uint8_t>(slot), enabled, ip_str, port,
                                         name_str)) {
-           System_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
+           ProtocolDiag_GetBridgeSlotSnapshot(static_cast<uint8_t>(slot), slot_snap);
            sendTelnetMsgf(
                sock,
                "[OK] EW11 Slot #%d configured (Name: %s, Listen Port: %u, "

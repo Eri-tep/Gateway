@@ -20,11 +20,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <span>
-
-struct ExtractedFrameResult {
-  int length{-1};         // > 0: Valid frame length, 0: Partial/incomplete frame, -1: Invalid STX or bounds
-  bool checksum_ok{false}; // True if STX/ETX/Length bounds AND Checksum were verified valid
-};
+#include "L3_Protocol/Public/Protocol_Facade.h"
 
 // ============================================================================
 // 1. DATA-DRIVEN VENDOR PROFILE DESCRIPTOR (STORED IN NVS)
@@ -275,6 +271,7 @@ struct FramingTracker {
   std::atomic<bool> is_custom_fixed{false};
 
   std::atomic<bool> nvs_dirty{false};
+  std::atomic<bool> has_first_request{false};
   std::atomic<uint32_t> first_request_ms{0};
   std::atomic<uint32_t> last_request_ms{0};
   uint32_t next_retry_ms{0};

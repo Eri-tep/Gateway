@@ -196,6 +196,7 @@ void cmdSup(CliContext &ctx);
 void cmdReboot(CliContext &ctx);
 void cmdLogView(CliContext &ctx);
 void cmdCoreDump(CliContext &ctx);
+void cmdNvs(CliContext &ctx);
 void cmdOta(CliContext &ctx);
 void cmdHelp(CliContext &ctx);
 

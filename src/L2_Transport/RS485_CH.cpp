@@ -102,8 +102,6 @@ void Engine_InitQueues() {
   }
 }
 
-CoreDumpInfo g_coredump_info;
-
 bool Queue_EnqueueDropTail(QueueHandle_t queue,
                            const StaticPacket &packet) noexcept {
   if (UNLIKELY(!queue))

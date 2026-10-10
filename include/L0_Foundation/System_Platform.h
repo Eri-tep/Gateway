@@ -244,7 +244,8 @@ struct CoreDumpInfo {
   bool bt_corrupted{false};
 };
 
-extern CoreDumpInfo g_coredump_info;
+void System_GetCoreDumpSnapshot(CoreDumpInfo &out) noexcept;
+void System_ClearCoreDumpInfo() noexcept;
 
 void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt);
 
@@ -336,27 +337,7 @@ void System_RegisterTraceSink(const SystemTraceSink &sink) noexcept;
 void System_RegisterShutdownHook(ShutdownHookFn hook) noexcept;
 
 // ── System Snapshots & Diagnostics DTOs (L0 Universal Platform) ──────────────
-enum class HubDeviceType : uint8_t {
-  WALLPAD_COMPATIBLE = 0,
-  AIR_CONDITIONER = 1
-};
 
-struct HubClientSlotSnapshot {
-  bool enabled{false};
-  bool is_connected{false};
-  char name[16]{""};
-  char target_ip[16]{""};
-  uint16_t target_port{0};
-  HubDeviceType dev_type{HubDeviceType::WALLPAD_COMPATIBLE};
-  uint32_t last_rx_ms{0};
-  uint32_t rx_pkts{0};
-  uint32_t tx_pkts{0};
-  uint32_t crc_errors{0};
-  uint32_t invalid_frames{0};
-  uint32_t timeouts{0};
-  uint32_t uncached_pkts{0};
-  uint32_t dropped_pkts{0};
-};
 
 struct MgmtSessionSnapshot {
   bool is_active{false};
@@ -448,6 +429,9 @@ void System_TakeSnapshot(SysSnapshot &sys, HwSnapshot &hw, StackSnapshot &st,
                          PktSnapshot &pkt) noexcept;
 void System_GetPktSnapshot(PktSnapshot &pkt) noexcept;
 void System_GetCh1Latency(LatencySnapshot &lat) noexcept;
+void System_GetNvsOverlapStats(uint32_t &out_hits, uint32_t &out_max_us) noexcept;
+void System_ResetNvsOverlapStats() noexcept;
+void System_SetNvsBusy(bool busy) noexcept;
 void System_ReadCpuPct(uint8_t &cpu0_out, uint8_t &cpu1_out) noexcept;
 int8_t System_ReadTempC() noexcept;
 void System_GetCpuAndTemp(uint8_t &cpu0, uint8_t &cpu1, int8_t &temp_c) noexcept;
@@ -510,8 +494,7 @@ void System_WifiReconnect() noexcept;
 void System_WifiStartFallbackAp() noexcept;
 [[nodiscard]] bool System_WifiIsApActive() noexcept;
 
-// ── Bridge Transport Channel Slot Snapshot Contract ──────────────────────────
-bool System_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;
+
 
 // ── IP Subnet & Management Whitelist Filters (Global Security Policy) ────────
 [[nodiscard]] bool Tcp_IsAllowedIP(IPAddress ip);

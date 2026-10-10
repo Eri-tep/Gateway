@@ -32,41 +32,9 @@ void System_TracePacket(uint8_t channel, bool is_tx, TraceType type,
   }
 }
 
-// ── IP Subnet & Management Whitelist Filters ──────────────────────────────────
-bool Tcp_IsAllowedIP(IPAddress ip) {
-  if (ip == IPAddress(127, 0, 0, 1))
-    return true;
 
-  if (ip[0] == 172 && ip[1] == 30 && (ip[2] == 1 || ip[2] == 2))
-    return true;
-
-  if (System_WifiIsConnected()) {
-    IPAddress sta_ip = System_WifiGetIp();
-    IPAddress sta_mask = System_WifiGetSubnetMask();
-    if ((ip & sta_mask) == (sta_ip & sta_mask))
-      return true;
-  }
-
-  IPAddress ap_ip = System_WifiGetApIp();
-  if (ap_ip != IPAddress(0, 0, 0, 0)) {
-    IPAddress ap_mask = System_WifiGetApSubnetMask();
-    if ((ip & ap_mask) == (ap_ip & ap_mask))
-      return true;
-  }
-
-  return false;
-}
-
-bool Telnet_IsAllowedIP(IPAddress ip) {
-  if (ip == IPAddress(115, 91, 242, 69))
-    return true;
-
-  return Tcp_IsAllowedIP(ip);
-}
 
 // ── Watchdog Feeding Hook Bridge ──────────────────────────────────────────────
-extern "C" __attribute__((weak)) void Diagnostics_FeedWdt(size_t index) noexcept;
-
 static std::atomic<WdtFeedHook> s_wdt_feed_hook{nullptr};
 
 void System_RegisterWdtHook(WdtFeedHook hook) noexcept {
@@ -74,10 +42,6 @@ void System_RegisterWdtHook(WdtFeedHook hook) noexcept {
 }
 
 void System_FeedWdt(size_t index) noexcept {
-  if (Diagnostics_FeedWdt) {
-    Diagnostics_FeedWdt(index);
-    return;
-  }
   auto hook = s_wdt_feed_hook.load(std::memory_order_relaxed);
   if (hook) {
     hook(index);

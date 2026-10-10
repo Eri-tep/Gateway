@@ -6,8 +6,8 @@
 #include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
+#include "L1_HAL/OTA_Driver.h"
 
-#include <ArduinoOTA.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 #include <sys/time.h>
@@ -35,7 +35,7 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
   for (;;) {
     esp_task_wdt_reset();
     System_FeedWdt(Config::Task::WDT_ID_NET);
-    ArduinoOTA.handle();
+    SystemOta_Handle();
 
     const bool ota_now = g_ota_in_progress.load(std::memory_order_relaxed);
     const uint32_t now_ms = millis();

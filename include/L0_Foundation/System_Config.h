@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.6.2";
+constexpr const char *FIRMWARE_VERSION = "v2.6.3";
 } // namespace Config
 
 namespace Config::Task {
@@ -58,6 +58,9 @@ constexpr uint32_t DEFAULT_DOORPHONE_INTER_BYTE_TIMEOUT_MS = 16;
 uint32_t getDoorphoneInterByteTimeoutMs(uint32_t baud) noexcept;
 constexpr uint32_t CH2_CACHE_DELAY_MS = 30;
 constexpr uint32_t CH3_CACHE_DELAY_MS = 240;
+constexpr uint32_t NVS_COMMIT_BUS_QUIET_MS = 100;
+constexpr uint32_t NVS_COMMIT_STARVATION_MS = 30000;
+constexpr uint32_t NVS_COMMIT_FORCE_FLUSH_BUDGET_MS = 150;
 constexpr uint32_t OTA_VALIDATION_PERIOD_MS = 120000;
 constexpr uint32_t RESCUE_BUTTON_HOLD_MS = 2500;
 constexpr uint32_t WIFI_BACKGROUND_RETRY_INTERVAL_MS = 60000;

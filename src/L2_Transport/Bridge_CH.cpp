@@ -136,11 +136,6 @@ bool Bridge_GetSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) {
   return true;
 }
 
-bool System_GetBridgeSlotSnapshot(uint8_t slot_idx,
-                                  HubClientSlotSnapshot &out) noexcept {
-  return Bridge_GetSlotSnapshot(slot_idx, out);
-}
-
 bool Bridge_IsSlotOnline(uint8_t slot_idx) noexcept {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS) {
     return false;

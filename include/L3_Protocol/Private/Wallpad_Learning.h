@@ -276,6 +276,8 @@ struct GroupControlTemplate {
 
 static_assert(sizeof(GroupControlTemplate) == 180,
               "NVS ABI break: GroupControlTemplate size changed");
+static_assert(std::is_trivially_copyable_v<GroupControlTemplate>,
+              "GroupControlTemplate must be trivially copyable for raw snapshot copy");
 
 class ControlTemplateRegistry {
 public:
@@ -351,6 +353,7 @@ private:
   mutable portMUX_TYPE _snap_mux = portMUX_INITIALIZER_UNLOCKED;
 
   std::atomic<bool> _nvs_dirty{false};
+  std::atomic<bool> _has_first_request{false};
   std::atomic<uint32_t> _first_request_ms{0};
   std::atomic<uint32_t> _last_request_ms{0};
   uint32_t _next_retry_ms{0};

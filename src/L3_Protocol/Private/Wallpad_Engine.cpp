@@ -16,9 +16,9 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <esp_task_wdt.h>
 #include <esp_timer.h>
-
-uint32_t ProtocolDiag_GetLastCh1RxMs() noexcept;
+#include "L3_Protocol/Public/Protocol_Facade.h"
 
 // ============================================================================
 // PART 1: VENDOR PROFILES & UNIVERSAL PROTOCOL PARSER ENGINE
@@ -880,7 +880,10 @@ bool ProfileRepository::commitAutoProfileNvsIfPending() noexcept {
     }
   }
 
-  return nvsPutEnvNs("wp_profiles", "p_0", d);
+  System_SetNvsBusy(true);
+  const bool res = nvsPutEnvNs("wp_profiles", "p_0", d);
+  System_SetNvsBusy(false);
+  return res;
 }
 
 void ProfileRepository::resetAllToDefaults() {
@@ -1414,6 +1417,7 @@ void FramingTracker::requestNvsSave(const char *nvs_ns) noexcept {
   bool expected = false;
   if (nvs_dirty.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     first_request_ms.store(now, std::memory_order_release);
+    has_first_request.store(true, std::memory_order_release);
   }
   last_request_ms.store(now, std::memory_order_release);
 }
@@ -1428,19 +1432,22 @@ bool FramingTracker::commitNvsIfPending() noexcept {
     return false;
   }
 
+  const bool has_first = has_first_request.load(std::memory_order_relaxed);
   const uint32_t first_req = first_request_ms.load(std::memory_order_relaxed);
   const uint32_t last_req = last_request_ms.load(std::memory_order_relaxed);
   const bool starvation_triggered =
-      (first_req > 0 && static_cast<int32_t>(now - (first_req + 30000)) >= 0);
+      (has_first &&
+       static_cast<int32_t>(now - (first_req + Config::Timing::NVS_COMMIT_STARVATION_MS)) >= 0);
 
   if (!starvation_triggered) {
     // 1. Debounce (3s quiet since last request)
     if (last_req > 0 && static_cast<int32_t>(now - (last_req + 3000)) < 0) {
       return false;
     }
-    // 2. Bus quiet (1000ms silence on CH1)
+    // 2. Realistic bus quiet (100ms idle on CH1 inter-packet gap)
     const uint32_t last_ch1_rx = ProtocolDiag_GetLastCh1RxMs();
-    if (last_ch1_rx > 0 && static_cast<int32_t>(now - (last_ch1_rx + 1000)) < 0) {
+    if (last_ch1_rx > 0 &&
+        static_cast<int32_t>(now - (last_ch1_rx + Config::Timing::NVS_COMMIT_BUS_QUIET_MS)) < 0) {
       return false;
     }
   }
@@ -1458,11 +1465,19 @@ bool FramingTracker::commitNvsIfPending() noexcept {
   const bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
 
   struct FramingSnapshot {
-    uint8_t s, e, l;
-    bool locked, fixed;
-    char ns[16];
-  } snap{s, e, l, is_locked, fixed, {0}};
-  strncpy(snap.ns, pending_nvs_ns, sizeof(snap.ns));
+    uint8_t s{0}, e{0}, l{0};
+    bool locked{false}, fixed{false};
+    char ns[16]{0};
+  };
+  static_assert(std::is_trivially_copyable_v<FramingSnapshot>);
+  FramingSnapshot snap;
+  memset(&snap, 0, sizeof(snap));
+  snap.s = s;
+  snap.e = e;
+  snap.l = l;
+  snap.locked = is_locked;
+  snap.fixed = fixed;
+  strncpy(snap.ns, pending_nvs_ns, sizeof(snap.ns) - 1);
 
   const uint32_t current_crc =
       FastCrc32(reinterpret_cast<const uint8_t *>(&snap), sizeof(snap));
@@ -1470,10 +1485,16 @@ bool FramingTracker::commitNvsIfPending() noexcept {
   if (has_committed_crc && current_crc == last_committed_crc32) {
     failure_count = 0;
     next_retry_ms = 0;
+    has_first_request.store(false, std::memory_order_release);
     xSemaphoreGive(commit_mutex);
     return true; // Wear guard: identical data
   }
 
+  if (esp_task_wdt_status(nullptr) == ESP_OK) {
+    esp_task_wdt_reset();
+  }
+
+  System_SetNvsBusy(true);
   Preferences prefs;
   bool success = false;
   if (prefs.begin(pending_nvs_ns, false)) {
@@ -1485,19 +1506,21 @@ bool FramingTracker::commitNvsIfPending() noexcept {
     prefs.end();
     success = true;
   }
+  System_SetNvsBusy(false);
 
   if (success) {
     last_committed_crc32 = current_crc;
     has_committed_crc = true;
     failure_count = 0;
     next_retry_ms = 0;
+    has_first_request.store(false, std::memory_order_release);
     ESP_LOGI("FRAMING", "[NVS] Decoupled commit succeeded (%s): STX=0x%02X ETX=0x%02X L=%u",
              pending_nvs_ns, s, e, l);
   } else {
     nvs_dirty.store(true, std::memory_order_release);
     failure_count = std::min<uint8_t>(failure_count + 1, 5);
-    uint32_t backoff_ms = 3000 * (1 << (failure_count - 1));
-    if (backoff_ms > 60000) backoff_ms = 60000;
+    const uint32_t backoff_ms =
+        std::min<uint32_t>(3000u << std::min<uint8_t>(failure_count - 1, 4), 60000u);
     next_retry_ms = millis() + backoff_ms;
     ESP_LOGW("FRAMING", "[NVS] Commit failed (attempt %u), backoff %u ms",
              failure_count, backoff_ms);
@@ -1526,20 +1549,33 @@ bool FramingTracker::forceFlush(uint32_t timeout_ms) noexcept {
   const bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
 
   struct FramingSnapshot {
-    uint8_t s, e, l;
-    bool locked, fixed;
-    char ns[16];
-  } snap{s, e, l, is_locked, fixed, {0}};
-  strncpy(snap.ns, pending_nvs_ns, sizeof(snap.ns));
+    uint8_t s{0}, e{0}, l{0};
+    bool locked{false}, fixed{false};
+    char ns[16]{0};
+  };
+  FramingSnapshot snap;
+  memset(&snap, 0, sizeof(snap));
+  snap.s = s;
+  snap.e = e;
+  snap.l = l;
+  snap.locked = is_locked;
+  snap.fixed = fixed;
+  strncpy(snap.ns, pending_nvs_ns, sizeof(snap.ns) - 1);
 
   const uint32_t current_crc =
       FastCrc32(reinterpret_cast<const uint8_t *>(&snap), sizeof(snap));
 
   if (has_committed_crc && current_crc == last_committed_crc32) {
+    has_first_request.store(false, std::memory_order_release);
     xSemaphoreGive(commit_mutex);
     return true;
   }
 
+  if (esp_task_wdt_status(nullptr) == ESP_OK) {
+    esp_task_wdt_reset();
+  }
+
+  System_SetNvsBusy(true);
   Preferences prefs;
   bool success = false;
   if (prefs.begin(pending_nvs_ns, false)) {
@@ -1551,12 +1587,14 @@ bool FramingTracker::forceFlush(uint32_t timeout_ms) noexcept {
     prefs.end();
     success = true;
   }
+  System_SetNvsBusy(false);
 
   if (success) {
     last_committed_crc32 = current_crc;
     has_committed_crc = true;
     failure_count = 0;
     next_retry_ms = 0;
+    has_first_request.store(false, std::memory_order_release);
   } else {
     nvs_dirty.store(true, std::memory_order_release);
   }

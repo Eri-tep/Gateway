@@ -9,6 +9,7 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
+#include "L2_Transport/Bridge_CH.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include <array>
 #include <cstddef>
@@ -206,8 +207,8 @@ bool ProtocolDiag_CommitAutoProfileNvsIfPending() noexcept;
 /// Round-robin background commit for all L3 decoupled NVS persistence targets (Task_Ch1 non-blocking).
 bool ProtocolDiag_CommitPendingNvs() noexcept;
 
-/// Force flushes all pending NVS items (e.g. before restart or OTA).
-void ProtocolDiag_ForceFlushAllNvs(uint32_t per_item_timeout_ms = 50) noexcept;
+/// Force flushes all pending NVS items (e.g. before restart or OTA) within a shared budget.
+void ProtocolDiag_ForceFlushAllNvs(uint32_t total_budget_ms = Config::Timing::NVS_COMMIT_FORCE_FLUSH_BUDGET_MS) noexcept;
 
 /// PreRebootHook compliant function for Supervisor P2 Active Mode (try-lock with timeout budget).
 bool Protocol_ForceFlushPendingNvs(uint32_t timeout_ms) noexcept;
@@ -244,12 +245,30 @@ inline constexpr uint16_t kChecksumInvalid = 0x0100;
 [[nodiscard]] uint16_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
 
 // ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
+struct HubClientSlotSnapshot;
+bool ProtocolDiag_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;
 bool ProtocolDiag_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept;
 bool ProtocolDiag_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
                                       uint16_t port, const char *name) noexcept;
 bool ProtocolDiag_SetBridgeFramingLock(uint8_t slot_idx, uint8_t stx, uint8_t etx, uint8_t len) noexcept;
 bool ProtocolDiag_ResetBridgeFraming(uint8_t slot_idx) noexcept;
 void ProtocolDiag_ResetBridgeStats() noexcept;
+
+// ── Benchmark & Diagnostics Packet Codec Validation Facade ────────────────────
+struct ExtractedFrameResult {
+  int length{-1};         // > 0: Valid frame length, 0: Partial/incomplete frame, -1: Invalid STX or bounds
+  bool checksum_ok{false}; // True if STX/ETX/Length bounds AND Checksum were verified valid
+};
+
+ExtractedFrameResult ProtocolDiag_ExtractAndValidateFast(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept;
+bool ProtocolDiag_ValidatePacket(std::span<const uint8_t> frame) noexcept;
+#if defined(BENCHMARK_BUILD)
+uint16_t ProtocolDiag_CalculateChecksumDirect(uint8_t algo_idx, const uint8_t *data, size_t len) noexcept;
+uint16_t ProtocolDiag_CalculateChecksumUniversal(std::span<const uint8_t> frame) noexcept;
+uint8_t ProtocolDiag_ControlTemplateNormSub1(uint8_t dev_id, uint8_t sub1) noexcept;
+bool ProtocolDiag_IsAutoProbeLocked() noexcept;
+void ProtocolDiag_InitAutoProbeFromNvs() noexcept;
+#endif
 
 // ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
 struct RS485_PacketDispatcher;

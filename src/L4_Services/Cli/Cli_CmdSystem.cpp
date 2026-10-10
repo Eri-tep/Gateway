@@ -1,11 +1,13 @@
 #include "L4_Services/CLI_Commands.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
+#include <Preferences.h>
 #include <WiFi.h>
 #include <algorithm>
 #include <esp_core_dump.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 
 namespace WifiCli {
 
@@ -384,6 +386,7 @@ void cmdStats(CliContext &ctx) {
          ProtocolDiag_PollingResetHits();
          Telemetry_ResetStats();
          System_ResetNvsStats();
+         System_ResetNvsOverlapStats();
          sendTelnetMsg(s, "All traffic statistics, hits, and metrics history "
                           "CLEARED to 0.\r\n");
        }},
@@ -748,6 +751,60 @@ void otaValidate(int sock) {
   }
 }
 
+void cmdNvs(CliContext &ctx) {
+  int client = ctx.sock;
+  uint8_t count = ctx.args.count();
+  const char *subCmd = (count > 0) ? ctx.args.get(1) : "stress";
+
+  static const CliFmt::SubCmdDef kNvsDefs[] = {
+      {"flush", "flush", "Force commit all pending decoupled NVS structures",
+       [](int s, int, const Args &) {
+         ProtocolDiag_ForceFlushAllNvs(Config::Timing::NVS_COMMIT_FORCE_FLUSH_BUDGET_MS);
+         sendTelnetMsg(s, "[NVS] Force flush completed for all decoupled structures.\r\n");
+       }},
+      {"stress", "stress [count]", "Induce forced NVS write collisions during active traffic (1..100)",
+       [](int s, int ac, const Args &args) {
+         int num_cycles = 10;
+         if (ac >= 2 && args.get(2) != nullptr) {
+           num_cycles = atoi(args.get(2));
+           if (num_cycles <= 0) num_cycles = 1;
+           if (num_cycles > 100) num_cycles = 100;
+         }
+         sendTelnetMsgf(s, "[NVS STRESS] Starting %d forced NVS write cycles on Core 0...\r\n", num_cycles);
+         Preferences prefs;
+         const uint32_t start_ms = millis();
+         int success_count = 0;
+         for (int i = 0; i < num_cycles; ++i) {
+           if (esp_task_wdt_status(nullptr) == ESP_OK) {
+             esp_task_wdt_reset();
+           }
+           System_SetNvsBusy(true);
+           if (prefs.begin("nvs_stress", false)) {
+             char key[16];
+             snprintf(key, sizeof(key), "k%d", i % 10);
+             prefs.putUInt(key, millis());
+             prefs.end();
+             success_count++;
+           }
+           System_SetNvsBusy(false);
+           vTaskDelay(pdMS_TO_TICKS(50));
+         }
+         const uint32_t total_ms = millis() - start_ms;
+         uint32_t hits = 0;
+         uint32_t max_us = 0;
+         System_GetNvsOverlapStats(hits, max_us);
+         sendTelnetMsgf(s, "[NVS STRESS] Completed: %d/%d writes ok in %u ms.\r\n"
+                           "Overlap Hits: %u, Overlap Max Latency: %u us (Limit: 133 ms)\r\n",
+                        success_count, num_cycles, total_ms, hits, max_us);
+       }},
+  };
+
+  if (count > 0 && CliFmt::DispatchSubCmd(subCmd, client, count, ctx.args, kNvsDefs)) {
+    return;
+  }
+  CliFmt::PrintSubCmdHelp(client, "nvs", kNvsDefs);
+}
+
 void cmdOta(CliContext &ctx) {
   int sock = ctx.sock;
   uint8_t count = ctx.args.count();
@@ -1093,7 +1150,7 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   FixedBuf<16> chan_name;
   for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
     HubClientSlotSnapshot slot;
-    System_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
+    ProtocolDiag_GetBridgeSlotSnapshot(static_cast<uint8_t>(s), slot);
     if (!slot.enabled && strlen(slot.target_ip) == 0 && slot.target_port == 0)
       continue;
 
@@ -1227,6 +1284,31 @@ void FormatCh1Latency(AppendBuf &out, const LatencySnapshot &lat) {
   }
 
   out.appendFormat("%-45s%35s\r\n", peak_buf, ago_buf);
+
+  // 7. NVS-Ch1 Overlap Collision Summary: 45 chars left + 35 chars right = 80 chars
+  uint32_t overlap_cnt = 0;
+  uint32_t overlap_max_us = 0;
+  System_GetNvsOverlapStats(overlap_cnt, overlap_max_us);
+  char coll_buf[46];
+  char fifo_buf[36];
+  if (overlap_cnt == 0) {
+    snprintf(coll_buf, sizeof(coll_buf), "NVS-Ch1 Collisions: 0 hits (No Overlap)");
+    snprintf(fifo_buf, sizeof(fifo_buf), "FIFO Limit: 133 ms (Safe)");
+  } else {
+    if (overlap_max_us >= 1000) {
+      snprintf(coll_buf, sizeof(coll_buf), "NVS-Ch1 Collisions: %u hits | Max: %u.%02u ms",
+               static_cast<unsigned>(overlap_cnt),
+               static_cast<unsigned>(overlap_max_us / 1000),
+               static_cast<unsigned>((overlap_max_us % 1000) / 10));
+    } else {
+      snprintf(coll_buf, sizeof(coll_buf), "NVS-Ch1 Collisions: %u hits | Max: %u us",
+               static_cast<unsigned>(overlap_cnt),
+               static_cast<unsigned>(overlap_max_us));
+    }
+    snprintf(fifo_buf, sizeof(fifo_buf), "FIFO Limit: 133 ms (%s)",
+             (overlap_max_us < 133000) ? "Safe" : "OVERFLOW RISK");
+  }
+  out.appendFormat("%-45s%35s\r\n", coll_buf, fifo_buf);
 }
 
 } // namespace Fmt

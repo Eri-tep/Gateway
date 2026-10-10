@@ -462,6 +462,8 @@ constexpr CommandDef kConsoleCmds[] = {
      "Display comprehensive command reference and usage examples"},
     {"logview", SystemCli::cmdLogView, 0,
      "Persistent reboot history & crash logs [list|<1-20>|last|clear]"},
+    {"nvs", SystemCli::cmdNvs, 0,
+     "Decoupled NVS management & stress testing [stress|flush]"},
     {"ota", SystemCli::cmdOta, 0,
      "Dual-partition OTA & rollback [status|rollback|validate|cloud]"},
     {"q", WallpadCli::cmdStop, 0,

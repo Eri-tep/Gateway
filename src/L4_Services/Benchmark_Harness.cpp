@@ -15,7 +15,7 @@
 #include "L0_Foundation/System_Config.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
-#include "L3_Protocol/Private/Wallpad_Engine.h"
+
 #include "L4_Services/CLI_Commands.h"
 
 #include <esp_cpu.h>
@@ -206,7 +206,7 @@ uint32_t MeasureSelfOverhead() noexcept {
 
 void Initialize() noexcept {
   MeasureSelfOverhead();
-  (void)Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+  (void)ProtocolDiag_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
   DeviceStateEntry dummy;
   (void)Device_FindCopy(0x18, 0x01, 0x00, dummy);
   (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
@@ -335,8 +335,8 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
 
   // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
   uint32_t cold_t0 = esp_cpu_get_cycle_count();
-  (void)calculateChecksumDirect(ChecksumAlgo::XOR_NO_STX, span_pkt.data(), span_pkt.size());
-  (void)Universal_GetEngine().calculateChecksum(span_pkt);
+  (void)ProtocolDiag_CalculateChecksumDirect(2, span_pkt.data(), span_pkt.size());
+  (void)ProtocolDiag_CalculateChecksumUniversal(span_pkt);
   benchSpanCalc(span_pkt);
   benchPtrLenCalc(GOLDEN_QUERY, sizeof(GOLDEN_QUERY));
   (void)benchExpectedRet(GOLDEN_QUERY[3]);
@@ -348,8 +348,8 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
 
   // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP)
   for (uint32_t i = 0; i < 1000; ++i) {
-    (void)calculateChecksumDirect(ChecksumAlgo::XOR_NO_STX, span_pkt.data(), span_pkt.size());
-    (void)Universal_GetEngine().calculateChecksum(span_pkt);
+    (void)ProtocolDiag_CalculateChecksumDirect(2, span_pkt.data(), span_pkt.size());
+    (void)ProtocolDiag_CalculateChecksumUniversal(span_pkt);
     benchSpanCalc(span_pkt);
     benchPtrLenCalc(GOLDEN_QUERY, sizeof(GOLDEN_QUERY));
     (void)benchExpectedRet(GOLDEN_QUERY[3]);
@@ -369,7 +369,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
   uint64_t total_cycles = 0;
   uint32_t min_c = UINT32_MAX, max_c = 0;
 
-  auto &active_parser = Universal_GetEngine();
+  
   uint32_t t_start = micros();
 
   for (uint32_t i = 0; i < iterations; ++i) {
@@ -377,12 +377,12 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
 
     // 1-A Checksum Calculation Micro A/B (Direct Inlined vs Universal E2E API)
     uint32_t t0 = esp_cpu_get_cycle_count();
-    uint16_t cs_dir = calculateChecksumDirect(ChecksumAlgo::XOR_NO_STX, span_pkt.data(), span_pkt.size());
+    uint16_t cs_dir = ProtocolDiag_CalculateChecksumDirect(2, span_pkt.data(), span_pkt.size());
     uint32_t t1 = esp_cpu_get_cycle_count();
     sum_cs_dir += static_cast<uint32_t>(t1 - t0);
 
     t0 = esp_cpu_get_cycle_count();
-    uint16_t cs = active_parser.calculateChecksum(span_pkt);
+    uint16_t cs = ProtocolDiag_CalculateChecksumUniversal(span_pkt);
     t1 = esp_cpu_get_cycle_count();
     sum_cs += static_cast<uint32_t>(t1 - t0);
     s_observable_sink += static_cast<uint8_t>(cs ^ cs_dir);
@@ -474,7 +474,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
 
   // Condition B: Run Isolated on Core 1 at Priority 18 (Algorithmic Determinism)
   r.core1_isolated_jitter = MeasureIsolatedOnCore1([&]() {
-    uint16_t cs = Universal_GetEngine().calculateChecksum(span_pkt);
+    uint16_t cs = ProtocolDiag_CalculateChecksumUniversal(span_pkt);
     uint8_t bv = 0;
     (void)benchBoolRet(GOLDEN_QUERY[3], bv);
     s_observable_sink += cs ^ bv;
@@ -506,7 +506,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
   // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
   uint32_t cold_t0 = esp_cpu_get_cycle_count();
-  (void)Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+  (void)ProtocolDiag_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
   DeviceStateEntry cold_dummy;
   (void)Device_FindCopy(0x18, 0x01, 0x00, cold_dummy);
   uint32_t cold_t1 = esp_cpu_get_cycle_count();
@@ -514,7 +514,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
   // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP for all pipeline stages)
   for (uint32_t i = 0; i < 1000; ++i) {
-    (void)Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+    (void)ProtocolDiag_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     DeviceStateEntry dummy;
     (void)Device_FindCopy(0x18, 0x01, 0x00, dummy);
     if (cache_mux) {
@@ -522,7 +522,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
       s_observable_sink = s_observable_sink + 1;
       portEXIT_CRITICAL(cache_mux);
     }
-    (void)ControlTemplate_NormSub1(0x18, 0x01);
+    (void)ProtocolDiag_ControlTemplateNormSub1(0x18, 0x01);
     (void)DeviceBenchmark::findCopyDirect(0x18, 0x01, 0x00, dummy);
     (void)DeviceBenchmark::findCopyDirect(0x99, 0x99, 0x99, dummy);
     (void)DeviceBenchmark::probeDirectExists(0x18, 0x01, 0x00);
@@ -561,7 +561,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
     // 1. Framing & Single-Pass Extraction
     uint32_t t0 = esp_cpu_get_cycle_count();
-    ExtractedFrameResult ext_res = Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+    ExtractedFrameResult ext_res = ProtocolDiag_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     uint32_t t1 = esp_cpu_get_cycle_count();
     sum_framing += static_cast<uint32_t>(t1 - t0);
     uint8_t ext_len = static_cast<uint8_t>(ext_res.length);
@@ -590,7 +590,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
     // 2-C. ControlTemplate_NormSub1 (Derived Cache LUT)
     t0 = esp_cpu_get_cycle_count();
-    uint8_t n_sub = ControlTemplate_NormSub1(0x18, 0x01);
+    uint8_t n_sub = ProtocolDiag_ControlTemplateNormSub1(0x18, 0x01);
     t1 = esp_cpu_get_cycle_count();
     sum_pure_lookup += static_cast<uint32_t>(t1 - t0);
 
@@ -730,7 +730,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
   uint64_t sum_isolated_e2e = 0;
   for (uint32_t k = 0; k < 5000; ++k) {
     uint32_t pe_t0 = esp_cpu_get_cycle_count();
-    ExtractedFrameResult pe_ext = Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+    ExtractedFrameResult pe_ext = ProtocolDiag_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     DeviceStateEntry pe_dummy;
     (void)Device_FindCopy(0x18, 0x01, 0x00, pe_dummy);
     (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
@@ -775,7 +775,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
 
   // Condition B: Run Isolated on Core 1 at Priority 18 (Algorithmic Determinism)
   r.core1_isolated_jitter = MeasureIsolatedOnCore1([&]() {
-    ExtractedFrameResult pe_ext = Wallpad_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
+    ExtractedFrameResult pe_ext = ProtocolDiag_ExtractAndValidateFast(GOLDEN_QUERY, sizeof(GOLDEN_QUERY), 0);
     DeviceStateEntry pe_dummy;
     (void)Device_FindCopy(0x18, 0x01, 0x00, pe_dummy);
     (void)Protocol_LookupDeviceChannel(0x18, 0x01, 0x00);
@@ -1070,20 +1070,20 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
 
   // Pillar 3: Capture Cold-Start latency (1st invocation before cache heat)
   uint32_t cold_t0 = esp_cpu_get_cycle_count();
-  Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
+  ProtocolDiag_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
   DeviceStateEntry cold_dummy;
   (void)Device_FindCopy(0x18, 0x01, 0x00, cold_dummy);
-  Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
+  ProtocolDiag_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
   (void)Device_FindCopy(0x88, 0x88, 0x88, cold_dummy);
   uint32_t cold_t1 = esp_cpu_get_cycle_count();
   r.cold_start_cycles = static_cast<uint32_t>(cold_t1 - cold_t0);
 
   // Warm-up (1,000 runs per Pillar 3 invariant: pre-heat instruction cache & Flash MMU XIP)
   for (uint32_t w = 0; w < 1000; ++w) {
-    Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
+    ProtocolDiag_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
     DeviceStateEntry dummy;
     (void)Device_FindCopy(0x18, 0x01, 0x00, dummy);
-    Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
+    ProtocolDiag_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
     (void)Device_FindCopy(0x88, 0x88, 0x88, dummy);
 
     if ((w & 0x01FF) == 0) {
@@ -1097,7 +1097,7 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
   uint64_t total_cycles = 0;
   uint32_t min_c = UINT32_MAX, max_c = 0;
 
-  const bool was_locked = AutoProbe_GetEngine().isLocked();
+  const bool was_locked = ProtocolDiag_IsAutoProbeLocked();
   uint32_t t_start = micros();
 
   for (uint32_t i = 0; i < iterations; ++i) {
@@ -1105,7 +1105,7 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
 
     // Workload A: Hot Hit (Thermo 0x18 recurring)
     uint32_t t0 = esp_cpu_get_cycle_count();
-    Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
+    ProtocolDiag_ValidatePacket(std::span<const uint8_t>(PKT_THERMO, 11));
     DeviceStateEntry snap_a;
     (void)Device_FindCopy(0x18, 0x01, 0x00, snap_a);
     uint32_t t1 = esp_cpu_get_cycle_count();
@@ -1122,7 +1122,7 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
       case 4: mix_pkt = PKT_VENT;   dev_target = 0x2B; break;
     }
     t0 = esp_cpu_get_cycle_count();
-    Wallpad_ValidatePacket(std::span<const uint8_t>(mix_pkt, 11));
+    ProtocolDiag_ValidatePacket(std::span<const uint8_t>(mix_pkt, 11));
     DeviceStateEntry snap_b;
     (void)Device_FindCopy(dev_target, 0x01, 0x00, snap_b);
     t1 = esp_cpu_get_cycle_count();
@@ -1130,7 +1130,7 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
 
     // Workload C: Stress (Malformed Checksum + Missing Device)
     t0 = esp_cpu_get_cycle_count();
-    Wallpad_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
+    ProtocolDiag_ValidatePacket(std::span<const uint8_t>(PKT_BAD_CS, 11));
     DeviceStateEntry snap_c;
     (void)Device_FindCopy(0x88, 0x88, 0x88, snap_c);
     t1 = esp_cpu_get_cycle_count();
@@ -1165,8 +1165,8 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
         (static_cast<uint64_t>(iterations) * 1000000ULL) / r.total_duration_us);
   }
 
-  if (was_locked && !AutoProbe_GetEngine().isLocked()) {
-    AutoProbe_GetEngine().initFromNvs();
+  if (was_locked && !ProtocolDiag_IsAutoProbeLocked()) {
+    ProtocolDiag_InitAutoProbeFromNvs();
   }
 
   r.phase5.workload_a_hot_hit_cycles = static_cast<uint32_t>(sum_a / iterations);

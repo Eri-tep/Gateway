@@ -385,30 +385,51 @@ bool ProtocolDiag_CommitPendingNvs() noexcept {
   return false;
 }
 
-void ProtocolDiag_ForceFlushAllNvs(uint32_t per_item_timeout_ms) noexcept {
-  Control_GetRegistry().forceFlush(per_item_timeout_ms);
-  Wallpad_DoorphoneForceFlushNvs(per_item_timeout_ms);
-  ProfileRepository::commitAutoProfileNvsIfPending();
+void ProtocolDiag_ForceFlushAllNvs(uint32_t total_budget_ms) noexcept {
+  const uint32_t start_ms = millis();
+  auto get_remaining = [start_ms, total_budget_ms]() -> uint32_t {
+    const uint32_t elapsed = millis() - start_ms;
+    return (elapsed >= total_budget_ms) ? 0 : (total_budget_ms - elapsed);
+  };
+
+  uint32_t rem = get_remaining();
+  if (rem > 0) {
+    Control_GetRegistry().forceFlush(rem);
+  }
+  rem = get_remaining();
+  if (rem > 0) {
+    Wallpad_DoorphoneForceFlushNvs(rem);
+  }
+  rem = get_remaining();
+  if (rem > 0) {
+    ProfileRepository::commitAutoProfileNvsIfPending();
+  }
 }
 
 bool Protocol_ForceFlushPendingNvs(uint32_t timeout_ms) noexcept {
   const uint32_t start_ms = millis();
-  uint32_t per_item = timeout_ms / 3;
-  if (per_item == 0) per_item = 1;
+  auto get_remaining = [start_ms, timeout_ms]() -> uint32_t {
+    const uint32_t elapsed = millis() - start_ms;
+    return (elapsed >= timeout_ms) ? 0 : (timeout_ms - elapsed);
+  };
 
   // 1) 제어 템플릿 NVS 플러시 (pending 시에만 try-lock 시도)
   if (Control_GetRegistry().isNvsDirty()) {
-    Control_GetRegistry().forceFlush(per_item);
+    const uint32_t rem = get_remaining();
+    if (rem > 0) {
+      Control_GetRegistry().forceFlush(rem);
+    }
   }
-  uint32_t elapsed = millis() - start_ms;
-  if (elapsed >= timeout_ms) return true;
+  if (get_remaining() == 0) return true;
 
   // 2) 도어폰 프레이밍 NVS 플러시 (pending 시에만 try-lock 시도)
   if (Wallpad_DoorphoneIsFramingNvsDirty()) {
-    Wallpad_DoorphoneForceFlushNvs(per_item);
+    const uint32_t rem = get_remaining();
+    if (rem > 0) {
+      Wallpad_DoorphoneForceFlushNvs(rem);
+    }
   }
-  elapsed = millis() - start_ms;
-  if (elapsed >= timeout_ms) return true;
+  if (get_remaining() == 0) return true;
 
   // 3) 자동 학습 프로필 NVS 플러시
   ProfileRepository::commitAutoProfileNvsIfPending();
@@ -724,4 +745,41 @@ size_t Protocol_GetRoutes(DeviceRouteSnapshot *out_buf, size_t max_count) noexce
 bool Protocol_DispatchControl(StaticPacket &req, StaticPacket &virtual_ack_out) noexcept {
   return Router_DispatchControl(req, virtual_ack_out);
 }
+
+bool ProtocolDiag_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept {
+  return Bridge_GetSlotSnapshot(slot_idx, out);
+}
+
+ExtractedFrameResult ProtocolDiag_ExtractAndValidateFast(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept {
+  return Wallpad_ExtractAndValidateFast(stream, stream_len, stx_idx);
+}
+
+bool ProtocolDiag_ValidatePacket(std::span<const uint8_t> frame) noexcept {
+  return Wallpad_ValidatePacket(frame);
+}
+
+#if defined(BENCHMARK_BUILD)
+uint16_t ProtocolDiag_CalculateChecksumDirect(uint8_t algo_idx, const uint8_t *data, size_t len) noexcept {
+  return calculateChecksumDirect(static_cast<ChecksumAlgo>(algo_idx), data, len);
+}
+
+uint16_t ProtocolDiag_CalculateChecksumUniversal(std::span<const uint8_t> frame) noexcept {
+  return Universal_GetEngine().calculateChecksum(frame);
+}
+
+uint8_t ProtocolDiag_ControlTemplateNormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
+  return ControlTemplate_NormSub1(dev_id, sub1);
+}
+
+bool ProtocolDiag_IsAutoProbeLocked() noexcept {
+  return AutoProbe_GetEngine().isLocked();
+}
+
+void ProtocolDiag_InitAutoProbeFromNvs() noexcept {
+  AutoProbe_GetEngine().initFromNvs();
+}
+#endif
+
+
+
 

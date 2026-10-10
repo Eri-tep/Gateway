@@ -373,26 +373,37 @@ void Diag_LogResetReason() {
   }
 }
 
+static CoreDumpInfo s_coredump_info{};
+
 void Diag_CheckCoreDump() {
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
   esp_core_dump_summary_t s{};
   if (esp_core_dump_get_summary(&s) == ESP_OK) {
-    g_coredump_info.valid = true;
-    strncpy(g_coredump_info.task_name, s.exc_task,
-            sizeof(g_coredump_info.task_name) - 1);
-    g_coredump_info.task_name[sizeof(g_coredump_info.task_name) - 1] = '\0';
-    g_coredump_info.exc_pc = s.exc_pc;
-    g_coredump_info.exc_cause = s.ex_info.exc_cause;
+    s_coredump_info.valid = true;
+    strncpy(s_coredump_info.task_name, s.exc_task,
+            sizeof(s_coredump_info.task_name) - 1);
+    s_coredump_info.task_name[sizeof(s_coredump_info.task_name) - 1] = '\0';
+    s_coredump_info.exc_pc = s.exc_pc;
+    s_coredump_info.exc_cause = s.ex_info.exc_cause;
     uint8_t depth = static_cast<uint8_t>(s.exc_bt_info.depth);
     if (depth > 16)
       depth = 16;
-    g_coredump_info.bt_depth = depth;
-    g_coredump_info.bt_corrupted = s.exc_bt_info.corrupted;
+    s_coredump_info.bt_depth = depth;
+    s_coredump_info.bt_corrupted = s.exc_bt_info.corrupted;
     for (uint8_t i = 0; i < depth; i++) {
-      g_coredump_info.bt[i] = s.exc_bt_info.bt[i];
+      s_coredump_info.bt[i] = s.exc_bt_info.bt[i];
     }
   }
 #endif
+}
+
+void System_GetCoreDumpSnapshot(CoreDumpInfo &out) noexcept {
+  out = s_coredump_info;
+}
+
+void System_ClearCoreDumpInfo() noexcept {
+  s_coredump_info.valid = false;
+  memset(&s_coredump_info, 0, sizeof(s_coredump_info));
 }
 
 bool System_IsOtaPendingVerify() {
@@ -1090,12 +1101,57 @@ void System_GetCh1Latency(LatencySnapshot &lat) noexcept {
   s_ch1_proc_latency.takeSnapshot(lat);
 }
 
+static std::atomic<bool> s_nvs_busy{false};
+static std::atomic<uint32_t> s_nvs_overlap_hits{0};
+static std::atomic<uint32_t> s_nvs_overlap_max_cycles{0};
+
+void Diag_SetNvsBusy(bool busy) noexcept {
+  s_nvs_busy.store(busy, std::memory_order_release);
+}
+
+bool Diag_IsNvsBusy() noexcept {
+  return s_nvs_busy.load(std::memory_order_acquire);
+}
+
+void Diag_GetNvsOverlapStats(uint32_t &out_hits, uint32_t &out_max_us) noexcept {
+  out_hits = s_nvs_overlap_hits.load(std::memory_order_relaxed);
+  const uint32_t max_cyc = s_nvs_overlap_max_cycles.load(std::memory_order_relaxed);
+  // ESP32-S3 CPU clock 240MHz: cycles / 240 = us
+  out_max_us = max_cyc / 240;
+}
+
+void Diag_ResetNvsOverlapStats() noexcept {
+  s_nvs_overlap_hits.store(0, std::memory_order_relaxed);
+  s_nvs_overlap_max_cycles.store(0, std::memory_order_relaxed);
+}
+
+void System_SetNvsBusy(bool busy) noexcept {
+  Diag_SetNvsBusy(busy);
+}
+
+void System_GetNvsOverlapStats(uint32_t &out_hits, uint32_t &out_max_us) noexcept {
+  Diag_GetNvsOverlapStats(out_hits, out_max_us);
+}
+
+void System_ResetNvsOverlapStats() noexcept {
+  Diag_ResetNvsOverlapStats();
+}
+
 void Diag_RecordCh1Latency(uint32_t cycles) noexcept {
   s_ch1_proc_latency.record(cycles);
+  if (s_nvs_busy.load(std::memory_order_relaxed)) {
+    s_nvs_overlap_hits.fetch_add(1, std::memory_order_relaxed);
+    uint32_t cur_max = s_nvs_overlap_max_cycles.load(std::memory_order_relaxed);
+    while (cycles > cur_max &&
+           !s_nvs_overlap_max_cycles.compare_exchange_weak(
+               cur_max, cycles, std::memory_order_relaxed)) {
+    }
+  }
 }
 
 void Diag_ResetCh1Latency() noexcept {
   s_ch1_proc_latency.reset();
+  Diag_ResetNvsOverlapStats();
 }
 
 

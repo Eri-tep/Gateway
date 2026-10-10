@@ -885,4 +885,8 @@ void SystemOta_InitArduinoOta(const char *hostname, const char *password) {
   ArduinoOTA.begin();
 }
 
+void SystemOta_Handle() noexcept {
+  ArduinoOTA.handle();
+}
+
 

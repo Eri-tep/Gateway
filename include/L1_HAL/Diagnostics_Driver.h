@@ -304,6 +304,11 @@ void Diag_RecordCh1StateTransition(uint8_t from_state, uint8_t to_state, uint32_
 void Diag_RecordCh1Latency(uint32_t cycles) noexcept;
 void Diag_ResetCh1Latency() noexcept;
 
+void Diag_SetNvsBusy(bool busy) noexcept;
+[[nodiscard]] bool Diag_IsNvsBusy() noexcept;
+void Diag_GetNvsOverlapStats(uint32_t &out_hits, uint32_t &out_max_us) noexcept;
+void Diag_ResetNvsOverlapStats() noexcept;
+
 class Diag_ScopedCh1Latency {
 public:
   Diag_ScopedCh1Latency() noexcept : _t0(esp_cpu_get_cycle_count()) {}

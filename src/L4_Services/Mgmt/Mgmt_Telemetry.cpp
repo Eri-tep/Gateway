@@ -159,14 +159,16 @@ static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
                                                                  : "false");
 
   out.append("\"coredump\":{");
-  if (g_coredump_info.valid) {
+  CoreDumpInfo cd_info{};
+  System_GetCoreDumpSnapshot(cd_info);
+  if (cd_info.valid) {
     out.appendFormat("\"valid\":true,\"task\":\"%s\",\"pc\":\"0x%08X\","
                      "\"cause\":%u,\"bt_depth\":%u,"
                      "\"summary\":\"⚠️ Crash in %s at 0x%08X (Cause %u)\"},",
-                     g_coredump_info.task_name, g_coredump_info.exc_pc,
-                     g_coredump_info.exc_cause, g_coredump_info.bt_depth,
-                     g_coredump_info.task_name, g_coredump_info.exc_pc,
-                     g_coredump_info.exc_cause);
+                     cd_info.task_name, cd_info.exc_pc,
+                     cd_info.exc_cause, cd_info.bt_depth,
+                     cd_info.task_name, cd_info.exc_pc,
+                     cd_info.exc_cause);
   } else {
     out.append("\"valid\":false,\"task\":\"\",\"pc\":\"0x00000000\",\"cause\":"
                "0,\"bt_depth\":0,"
@@ -410,7 +412,7 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
   {
     for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
       HubClientSlotSnapshot slot;
-      System_GetBridgeSlotSnapshot(s, slot);
+      ProtocolDiag_GetBridgeSlotSnapshot(s, slot);
 
       // 소켓 설정이 활성화되어 있거나 수신 이력이 있는 경우 노출 (SSOT: FcuDeviceSnapshot)
       FcuDeviceSnapshot fcu_snap{};

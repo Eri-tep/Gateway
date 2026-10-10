@@ -16,11 +16,9 @@
 #include <bitset>
 #include <cstdio>
 #include <cstring>
-#include <initializer_list>
-#include <span>
+#include <esp_task_wdt.h>
 #include <utility>
-
-uint32_t ProtocolDiag_GetLastCh1RxMs() noexcept;
+#include "L3_Protocol/Public/Protocol_Facade.h"
 
 // ============================================================================
 // PART 1: AUTO-PROBING ENGINE IMPLEMENTATION
@@ -1886,44 +1884,52 @@ void ControlTemplateRegistry::requestNvsSave() noexcept {
   bool expected = false;
   if (_nvs_dirty.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     _first_request_ms.store(now, std::memory_order_release);
+    _has_first_request.store(true, std::memory_order_release);
   }
   _last_request_ms.store(now, std::memory_order_release);
 }
 
 bool ControlTemplateRegistry::commitNvsIfPending() noexcept {
+  // 1. Confirm dirty flag only (do not clear until policy and lock are satisfied)
   if (!_nvs_dirty.load(std::memory_order_acquire)) {
     return false;
   }
 
   const uint32_t now = millis();
   if (_next_retry_ms > 0 && static_cast<int32_t>(now - _next_retry_ms) < 0) {
-    return false; // Backoff window active
+    return false; // Backoff window active -> return without clearing dirty
   }
 
+  const bool has_first = _has_first_request.load(std::memory_order_relaxed);
   const uint32_t first_req = _first_request_ms.load(std::memory_order_relaxed);
   const uint32_t last_req = _last_request_ms.load(std::memory_order_relaxed);
   const bool starvation_triggered =
-      (first_req > 0 && static_cast<int32_t>(now - (first_req + 30000)) >= 0);
+      (has_first &&
+       static_cast<int32_t>(now - (first_req + Config::Timing::NVS_COMMIT_STARVATION_MS)) >= 0);
 
   if (!starvation_triggered) {
-    // 1. Request debounce (3s quiet since last mutation)
+    // 2-A. Request debounce (3s quiet since last mutation)
     if (last_req > 0 && static_cast<int32_t>(now - (last_req + 3000)) < 0) {
       return false;
     }
-    // 2. Real bus quiet window (1000ms silence on CH1)
+    // 2-B. Realistic bus quiet window (100ms idle on CH1 inter-packet gap)
     const uint32_t last_ch1_rx = ProtocolDiag_GetLastCh1RxMs();
-    if (last_ch1_rx > 0 && static_cast<int32_t>(now - (last_ch1_rx + 1000)) < 0) {
-      return false;
+    if (last_ch1_rx > 0 &&
+        static_cast<int32_t>(now - (last_ch1_rx + Config::Timing::NVS_COMMIT_BUS_QUIET_MS)) < 0) {
+      return false; // Bus in active transaction
     }
   }
 
-  // Non-blocking try-lock (never stall Core 0 if another flush is in flight)
+  // 3. Try-lock commit mutex (10ms). If busy, return without clearing dirty
   if (xSemaphoreTake(_commit_mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
     return false;
   }
 
-  // Clear dirty flag BEFORE taking snapshot to prevent torn updates
+  // 4. Clear dirty flag ONLY after lock acquisition and policy satisfaction
   _nvs_dirty.exchange(false, std::memory_order_acq_rel);
+
+  // 5. Zero padding to guarantee deterministic CRC Wear Guard
+  memset(&s_nvs_transfer_buf, 0, sizeof(s_nvs_transfer_buf));
 
   size_t save_count = 0;
   portENTER_CRITICAL(&_snap_mux);
@@ -1941,10 +1947,16 @@ bool ControlTemplateRegistry::commitNvsIfPending() noexcept {
   if (_has_committed_crc && current_crc == _last_committed_crc32) {
     _failure_count = 0;
     _next_retry_ms = 0;
+    _has_first_request.store(false, std::memory_order_release);
     xSemaphoreGive(_commit_mutex);
     return true; // Wear guard: identical data, flash write skipped
   }
 
+  if (esp_task_wdt_status(nullptr) == ESP_OK) {
+    esp_task_wdt_reset();
+  }
+
+  System_SetNvsBusy(true);
   const uint8_t prof_idx = getCurrentProfileIndex();
   char ns[16];
   getControlNamespace(ns, sizeof(ns), prof_idx);
@@ -1960,19 +1972,22 @@ bool ControlTemplateRegistry::commitNvsIfPending() noexcept {
     prefs.end();
     success = true;
   }
+  System_SetNvsBusy(false);
 
   if (success) {
     _last_committed_crc32 = current_crc;
     _has_committed_crc = true;
     _failure_count = 0;
     _next_retry_ms = 0;
+    _has_first_request.store(false, std::memory_order_release);
     ESP_LOGI("CTRL_REG", "[NVS] Decoupled commit succeeded: %u groups (CRC 0x%08X)",
              save_count, current_crc);
   } else {
+    // 6. Failure recovery: restore dirty flag, preserve _has_first_request so starvation cap holds!
     _nvs_dirty.store(true, std::memory_order_release);
     _failure_count = std::min<uint8_t>(_failure_count + 1, 5);
-    uint32_t backoff_ms = 3000 * (1 << (_failure_count - 1));
-    if (backoff_ms > 60000) backoff_ms = 60000;
+    const uint32_t backoff_ms =
+        std::min<uint32_t>(3000u << std::min<uint8_t>(_failure_count - 1, 4), 60000u);
     _next_retry_ms = millis() + backoff_ms;
     ESP_LOGW("CTRL_REG", "[NVS] Commit failed (attempt %u), backoff %u ms",
              _failure_count, backoff_ms);
@@ -1994,6 +2009,8 @@ bool ControlTemplateRegistry::forceFlush(uint32_t timeout_ms) noexcept {
 
   _nvs_dirty.exchange(false, std::memory_order_acq_rel);
 
+  memset(&s_nvs_transfer_buf, 0, sizeof(s_nvs_transfer_buf));
+
   size_t save_count = 0;
   portENTER_CRITICAL(&_snap_mux);
   for (size_t i = 0; i < _group_count; ++i) {
@@ -2008,10 +2025,16 @@ bool ControlTemplateRegistry::forceFlush(uint32_t timeout_ms) noexcept {
       save_count * sizeof(GroupControlTemplate));
 
   if (_has_committed_crc && current_crc == _last_committed_crc32) {
+    _has_first_request.store(false, std::memory_order_release);
     xSemaphoreGive(_commit_mutex);
     return true;
   }
 
+  if (esp_task_wdt_status(nullptr) == ESP_OK) {
+    esp_task_wdt_reset();
+  }
+
+  System_SetNvsBusy(true);
   const uint8_t prof_idx = getCurrentProfileIndex();
   char ns[16];
   getControlNamespace(ns, sizeof(ns), prof_idx);
@@ -2027,12 +2050,14 @@ bool ControlTemplateRegistry::forceFlush(uint32_t timeout_ms) noexcept {
     prefs.end();
     success = true;
   }
+  System_SetNvsBusy(false);
 
   if (success) {
     _last_committed_crc32 = current_crc;
     _has_committed_crc = true;
     _failure_count = 0;
     _next_retry_ms = 0;
+    _has_first_request.store(false, std::memory_order_release);
   } else {
     _nvs_dirty.store(true, std::memory_order_release);
   }

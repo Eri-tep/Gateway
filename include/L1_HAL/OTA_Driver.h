@@ -38,3 +38,6 @@ void SystemOta_RegisterPreOtaHook(PreOtaHookFn hook) noexcept;
 
 // ArduinoOTA 포트 및 콜백 수명주기 초기화 함수
 void SystemOta_InitArduinoOta(const char *hostname, const char *password);
+
+// ArduinoOTA 백그라운드 패킷 핸들러 폴링 함수
+void SystemOta_Handle() noexcept;
