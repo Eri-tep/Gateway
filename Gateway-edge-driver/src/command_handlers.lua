@@ -136,7 +136,7 @@ function CommandHandlers.handle_refresh(driver, device, command)
 
   -- 자식 기기 새로고침 처리
   if p_key:match("^dev_") then
-    local d_id, s1, s2 = parse_child_key(p_key)
+    local d_id = parse_child_key(p_key)
     local cls = resolve_child_class(d_id, p_key, device)
     local refresh_fn = CHILD_REFRESH_DISPATCH[cls]
     if refresh_fn then
@@ -149,10 +149,10 @@ function CommandHandlers.handle_refresh(driver, device, command)
       local res, _ = gateway_client.get_devices(ip, port)
       if res and res.devices then
         for _, ldev in ipairs(res.devices) do
-          local d_id = tonumber(ldev.dev_id) or 0
-          local s1 = tonumber(ldev.sub1) or 0
-          local s2 = tonumber(ldev.sub2) or 0
-          local c_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+          local dev_id = tonumber(ldev.dev_id) or 0
+          local sub1 = tonumber(ldev.sub1) or 0
+          local sub2 = tonumber(ldev.sub2) or 0
+          local c_key = string.format("dev_%02X_%d_%d", dev_id, sub1, sub2)
           if c_key == p_key then
             telemetry_handler.handle_device_state_event(driver, ldev)
             break
@@ -197,7 +197,6 @@ function CommandHandlers.handle_switch_on(driver, device, command)
       end
     end
 
-    local cosock = require "cosock"
     cosock.spawn(function()
       local res, err = gateway_client.doorphone_action(ip, port, action)
       if not res then
@@ -216,7 +215,6 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     return
   end
 
-  local cosock = require "cosock"
   local COMPONENT_SWITCH_HANDLERS = {
     wallpad = function()
       log.info("🔄 [CMD] Auto-Probing Reset triggered from Wallpad switch!")

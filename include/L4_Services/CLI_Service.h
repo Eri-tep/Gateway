@@ -71,18 +71,6 @@ public:
   }
   void text(const char *s);
   void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-  void line(const char *fmt = nullptr, ...);
-  void ok(const char *msg);
-  void error(const char *msg);
-  void warn(const char *msg);
-  void header(const char *title);
-  void subtitle(const char *sub);
-  void footer(const char *tip = nullptr);
-  void separator(char ch = '-');
-  void cardRow2(const char *key, const char *val);
-
-private:
-  void centerBox(const char *str);
 };
 
 enum class Align : uint8_t { LEFT, CENTER, RIGHT };
@@ -332,8 +320,6 @@ public:
 TelnetManager &CLI_GetTelnetManager() noexcept;
 TelnetTracer &CLI_GetTracer() noexcept;
 void CLI_RequestRestart(const char *reason = nullptr) noexcept;
-bool CLI_IsRestartPending() noexcept;
-const char *CLI_GetRestartReason() noexcept;
 TelnetManager::WifiScanReq &CLI_GetWifiScanReq() noexcept;
 
 struct CliContext {

@@ -276,6 +276,10 @@ inline void System_SetOtaInProgress(bool in_prog) noexcept {
   g_ota_in_progress.store(in_prog, std::memory_order_relaxed);
 }
 
+inline void System_DelayMs(uint32_t ms) noexcept {
+  vTaskDelay(pdMS_TO_TICKS(ms) > 0 ? pdMS_TO_TICKS(ms) : 1);
+}
+
 // ── Sealed System State Contracts (implemented in L1 Diagnostics_Driver) ──
 /// Crash breadcrumb in RTC SRAM; read/cleared by System_DiagnoseStuck().
 void System_MarkStage(uint32_t stage) noexcept;

@@ -196,11 +196,10 @@ end
 function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_connected_cb)
   if not ip or not port then return end
 
-  local cosock = require "cosock"
   cosock.spawn(function()
     log.info(string.format("📡 [CH6 PUSH] Starting single persistent session on %s:%d", ip, port))
     while true do
-      local tcp, err = socket.tcp()
+      local tcp = socket.tcp()
       if tcp then
         tcp:settimeout(5) -- [H-7] 연결 시도 타임아웃 5초
         local ok, conn_err = tcp:connect(ip, port)
@@ -265,7 +264,7 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_co
                   elseif data.event and on_event_cb then
                     on_event_cb(driver, data)
                   elseif data.pong then
-                    -- Heartbeat Pong 소비
+                    log.debug("📡 [CH6 PUSH] Heartbeat pong received")
                   end
                 end
               end

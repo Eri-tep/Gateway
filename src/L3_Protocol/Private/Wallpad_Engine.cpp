@@ -1585,7 +1585,7 @@ bool Wallpad_DoorphoneOpen(bool is_lobby) noexcept {
     if (now_ms - last_bell < kDpPreGuardMs) {
       uint32_t rem_ms = kDpPreGuardMs - (now_ms - last_bell);
       if (rem_ms > 0) {
-        vTaskDelay(pdMS_TO_TICKS(rem_ms) > 0 ? pdMS_TO_TICKS(rem_ms) : 1);
+        System_DelayMs(rem_ms);
       }
     }
   }

@@ -63,5 +63,3 @@ IPAddress Remote_GetClientIp(int sock);
 void Remote_SendRpcResponse(int sock, long req_id, const char *res,
                             const char *msg = nullptr);
 void Remote_StartWifiFallbackTest(const char *prev_ssid, const char *prev_pass) noexcept;
-void Remote_ResetTrustedHubIp() noexcept;
-IPAddress Remote_GetTrustedHubIp() noexcept;

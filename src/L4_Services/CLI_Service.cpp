@@ -46,10 +46,6 @@ void CLI_RequestRestart(const char *reason) noexcept {
   s_restart_reason = reason;
   s_restart_pending.store(true, std::memory_order_release);
 }
-bool CLI_IsRestartPending() noexcept {
-  return s_restart_pending.load(std::memory_order_acquire);
-}
-const char *CLI_GetRestartReason() noexcept { return s_restart_reason; }
 TelnetManager::WifiScanReq &CLI_GetWifiScanReq() noexcept { return s_wifi_scan_req; }
 
 // ============================================================================
@@ -159,81 +155,6 @@ void CliWriter::printf(const char *fmt, ...) {
   if (n > 0)
     write(b, static_cast<size_t>(
                  n < static_cast<int>(sizeof(b)) ? n : sizeof(b) - 1));
-}
-
-void CliWriter::line(const char *fmt, ...) {
-  if (!fmt) {
-    text("\r\n");
-    return;
-  }
-  char b[256];
-  va_list ap;
-  va_start(ap, fmt);
-  int n = vsnprintf(b, sizeof(b) - 2, fmt, ap);
-  va_end(ap);
-  if (n > 0) {
-    size_t len = static_cast<size_t>(
-        n < static_cast<int>(sizeof(b) - 2) ? n : sizeof(b) - 3);
-    b[len] = '\r';
-    b[len + 1] = '\n';
-    write(b, len + 2);
-  }
-}
-
-void CliWriter::ok(const char *msg) { printf("[OK] %s\r\n", msg ? msg : ""); }
-void CliWriter::error(const char *msg) {
-  printf("[ERROR] %s\r\n", msg ? msg : "");
-}
-void CliWriter::warn(const char *msg) {
-  printf("[WARN] %s\r\n", msg ? msg : "");
-}
-
-void CliWriter::header(const char *title) {
-  text("\r\n+=================================================================="
-       "============+\r\n");
-  centerBox(title);
-  text("+======================================================================"
-       "========+\r\n");
-}
-
-void CliWriter::subtitle(const char *sub) { centerBox(sub); }
-
-void CliWriter::footer(const char *tip) {
-  if (tip && *tip)
-    centerBox(tip);
-  text("+======================================================================"
-       "========+\r\n\r\n");
-}
-
-void CliWriter::separator(char ch) {
-  if (ch == '=') {
-    text("+===================================================================="
-         "==========+\r\n");
-  } else {
-    text("+--------------------------------------------------------------------"
-         "----------+\r\n");
-  }
-}
-
-void CliWriter::cardRow2(const char *key, const char *val) {
-  char line_buf[96];
-  int n = snprintf(line_buf, sizeof(line_buf), "| %-25.25s | %-48.48s |\r\n",
-                   key ? key : "", val ? val : "");
-  if (n > 0)
-    write(line_buf, static_cast<size_t>(n));
-}
-
-void CliWriter::centerBox(const char *str) {
-  int len = str ? static_cast<int>(strlen(str)) : 0;
-  if (len > 78)
-    len = 78;
-  int pad_l = (78 - len) / 2;
-  int pad_r = 78 - len - pad_l;
-  char line_buf[96];
-  int n = snprintf(line_buf, sizeof(line_buf), "|%*s%.*s%*s|\r\n", pad_l, "",
-                   len, str ? str : "", pad_r, "");
-  if (n > 0)
-    write(line_buf, static_cast<size_t>(n));
 }
 
 void TableRenderer::writeRaw(const char *data, size_t len) {
@@ -450,7 +371,7 @@ bool TelnetManager::handlePassword(TelnetSession *session,
     if (System_IsRollbackDetected()) {
       char warn_msg[384];
       const esp_partition_t *cur = esp_ota_get_running_partition();
-      const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
+      const esp_partition_t *other = esp_ota_get_next_update_partition(nullptr);
       snprintf(
           warn_msg, sizeof(warn_msg),
           "===================================================================="

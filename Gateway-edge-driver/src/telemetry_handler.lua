@@ -143,7 +143,7 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   -- 2-1. Protocol Profile Name (The_Astin)
   local slot = (data.profile and data.profile.active_slot) or 1
   local raw_key = data.profile and data.profile.active_key
-  local label_key = ""
+  local label_key
   if slot == 0 then
     label_key = "Auto Detect"
   elseif slot == 1 then
@@ -337,7 +337,7 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   local wifi_data = data.wifi or {}
   local ssid = (wifi_data.ssid and wifi_data.ssid ~= "") and wifi_data.ssid or "Disconnected"
   local rssi = wifi_data.rssi or (sys and sys.wifi_rssi)
-  local wifi_display = "Disconnected (0%)"
+  local wifi_display
   if ssid == "Disconnected" then
     wifi_display = "Disconnected (0%)"
   elseif rssi then
@@ -350,7 +350,7 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   local ip_addr = (data.wifi and data.wifi.ip and data.wifi.ip ~= "") and data.wifi.ip or "172.30.1.3"
   local ap_ip_str = "172.30.2.1"
   local raw_wmode = (data.wifi and data.wifi.mode) or "STA"
-  local mode_str = ""
+  local mode_str
   if raw_wmode:match("AP") and raw_wmode:match("STA") then
     mode_str = string.format("STA + AP (%s)", ap_ip_str)
   elseif raw_wmode == "AP" then
@@ -485,12 +485,6 @@ end
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 장치 클래스별 텔레메트리 디스패치 테이블 및 핸들러 (Table-Driven Pattern)
 -- ═══════════════════════════════════════════════════════════════════════════
-
-local ELEVATOR_DIR_FORMAT = {
-  [1] = "%d호 상승 (%dF)",
-  [2] = "%d호 하강 (%dF)",
-  [3] = "%d호 도착 (%dF)",
-}
 
 local ELEVATOR_FSM = {
   [1] = { -- Calling 상태 (pwr == 1)

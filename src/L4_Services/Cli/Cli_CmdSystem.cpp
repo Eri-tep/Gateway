@@ -163,7 +163,7 @@ void cmdWifi(CliContext &ctx) {
          scan_req.clientIp = IPAddress(0, 0, 0, 0);
          scan_req.sessionId = 0;
          xTaskCreatePinnedToCore(AsyncWifiScanTask, "WifiScanWorker", 4096,
-                                 &scan_req, 2, NULL, 0);
+                                 &scan_req, 2, nullptr, 0);
        }},
       {"connect", "connect <ssid> [password]",
        "Connect to specified AP and save to NVS",
@@ -922,22 +922,38 @@ void cmdSup(CliContext &ctx) {
            return;
          }
          Supervisor::Inject kind = Supervisor::Inject::None;
-         if (strcmp(k_name, "spin") == 0) {
+         switch (Hash::fnv1a32_ci_rt(k_name)) {
+         case Hash::fnv1a32_ci("spin"):
            kind = Supervisor::Inject::Spin;
-         } else if (strcmp(k_name, "block") == 0) {
+           break;
+         case Hash::fnv1a32_ci("block"):
            kind = Supervisor::Inject::Block;
-         } else {
+           break;
+         default:
            sendTelnetMsg(s, "[ERROR] Unknown kind. Use 'spin' or 'block'\r\n");
            return;
          }
+         struct TaskMapping {
+           const char *name;
+           SystemTaskId id;
+         };
+         static constexpr TaskMapping kTaskMap[] = {
+             {"ch1", SystemTaskId::CH1},
+             {"ch2", SystemTaskId::CH2},
+             {"ch3", SystemTaskId::CH3},
+             {"ch4", SystemTaskId::CH4},
+             {"net", SystemTaskId::NETWORK},
+             {"network", SystemTaskId::NETWORK},
+             {"telnet", SystemTaskId::TELNET},
+         };
          uint8_t id = Supervisor::kNoTask;
-         if (strcmp(t_name, "ch1") == 0) id = static_cast<uint8_t>(SystemTaskId::CH1);
-         else if (strcmp(t_name, "ch2") == 0) id = static_cast<uint8_t>(SystemTaskId::CH2);
-         else if (strcmp(t_name, "ch3") == 0) id = static_cast<uint8_t>(SystemTaskId::CH3);
-         else if (strcmp(t_name, "ch4") == 0) id = static_cast<uint8_t>(SystemTaskId::CH4);
-         else if (strcmp(t_name, "net") == 0 || strcmp(t_name, "network") == 0) id = static_cast<uint8_t>(SystemTaskId::NETWORK);
-         else if (strcmp(t_name, "telnet") == 0) id = static_cast<uint8_t>(SystemTaskId::TELNET);
-         else {
+         for (const auto &m : kTaskMap) {
+           if (strcasecmp(t_name, m.name) == 0) {
+             id = std::to_underlying(m.id);
+             break;
+           }
+         }
+         if (id == Supervisor::kNoTask) {
            sendTelnetMsg(s, "[ERROR] Unknown task name. Options: ch1, ch2, ch3, ch4, net, telnet\r\n");
            return;
          }

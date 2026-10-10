@@ -15,15 +15,6 @@ static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include <esp_core_dump.h>
 #include <lwip/sockets.h>
 
-
-void Remote_ResetTrustedHubIp() noexcept {
-  s_trusted_hub_ip = IPAddress(0, 0, 0, 0);
-}
-
-IPAddress Remote_GetTrustedHubIp() noexcept {
-  return s_trusted_hub_ip;
-}
-
 static bool Socket_SendAll(int sock, const void *buf, size_t len,
                            uint32_t timeout_ms = 1000) {
   if (sock < 0 || !buf || len == 0)
@@ -393,7 +384,7 @@ static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
     offset += snprintf(resp + offset, sizeof(resp) - offset,
                        "%s{\"ssid\":\"%s\",\"pct\":%d}", (i > 0 ? "," : ""),
                        top_aps[i].ssid, top_aps[i].pct);
-    if (offset >= (int)sizeof(resp) - 8)
+    if (offset >= static_cast<int>(sizeof(resp)) - 8)
       break;
   }
   snprintf(resp + offset, sizeof(resp) - offset, "]}\n");
@@ -466,7 +457,7 @@ static void HandleRpc_SetWifi(int sock, long req_id, const char *json_str,
   auto has_bad_chars = [](const char *str) {
     for (size_t i = 0; str[i] != '\0'; i++) {
       unsigned char c = static_cast<unsigned char>(str[i]);
-      if (c < 32 || c == 127 || c == '\r' || c == '\n')
+      if (c < 32 || c == 127)
         return true;
     }
     return false;

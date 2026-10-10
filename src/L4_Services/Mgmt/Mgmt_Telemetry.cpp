@@ -175,7 +175,7 @@ static void serializeDiagnostics(AppendBuf &out, const char *rst_reason) {
 
   out.append("\"reboot_logs\":[");
   size_t log_cnt = System_GetRebootLogCount();
-  size_t max_logs_to_emit = (log_cnt > 5) ? 5 : log_cnt;
+  size_t max_logs_to_emit = std::min<size_t>(log_cnt, 5);
   for (size_t i = 0; i < max_logs_to_emit; i++) {
     LogEntry e{};
     if (System_GetRebootLogEntry(i, e)) {
@@ -394,11 +394,11 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
                        snap.dev_id, snap.sub1, snap.sub2, cls_str, name_buf, ch,
                        st.power);
 
-      for (const auto &fmt : kPropFormatters) {
-        if (fmt.cls == dc || (fmt.cls == DeviceClass::OUTLET && is_outlet)) {
-          fmt.format(out, st);
-          break;
-        }
+      auto it = std::ranges::find_if(kPropFormatters, [&](const auto &fmt) {
+        return fmt.cls == dc || (fmt.cls == DeviceClass::OUTLET && is_outlet);
+      });
+      if (it != std::end(kPropFormatters)) {
+        it->format(out, st);
       }
       out.append("}");
       locked_count++;

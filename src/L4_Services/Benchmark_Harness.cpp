@@ -1512,45 +1512,19 @@ void cmdBench(CliContext &ctx) {
            });
          }},
         {"all", [](int client, uint32_t) {
-           auto drainTcpAndReclaimPbufs = [](int sock) {
-             if (sock < 0) return;
-             for (int iter = 0; iter < 10; ++iter) {
-               taskYIELD();
-               if (esp_get_free_heap_size() >= 100000) break;
-             }
-           };
+           static Benchmark::BenchmarkReport s_all_reports[6];
+           s_all_reports[0] = Benchmark::RunPhase0_BaselineCalibration();
+           s_all_reports[1] = Benchmark::RunPhase1_PrimitiveParser(50000);
+           s_all_reports[2] = Benchmark::RunPhase2_CH1HotPathFlow(50000);
+           s_all_reports[3] = Benchmark::RunPhase3_SyncAndAtomic(50000);
+           s_all_reports[4] = Benchmark::RunPhase4_CodegenDiagnostics();
+           s_all_reports[5] = Benchmark::RunPhase5_RealWorkloadReplay(50000);
 
-           drainTcpAndReclaimPbufs(client);
-           withScratchBuf(client, [](AppendBuf &out) {
-             Benchmark::BenchmarkReport r0 = Benchmark::RunPhase0_BaselineCalibration();
-             Benchmark::FormatReport(out, r0);
-           });
-           drainTcpAndReclaimPbufs(client);
-           withScratchBuf(client, [](AppendBuf &out) {
-             Benchmark::BenchmarkReport r1 = Benchmark::RunPhase1_PrimitiveParser(50000);
-             Benchmark::FormatReport(out, r1);
-           });
-           drainTcpAndReclaimPbufs(client);
-           withScratchBuf(client, [](AppendBuf &out) {
-             Benchmark::BenchmarkReport r2 = Benchmark::RunPhase2_CH1HotPathFlow(50000);
-             Benchmark::FormatReport(out, r2);
-           });
-           drainTcpAndReclaimPbufs(client);
-           withScratchBuf(client, [](AppendBuf &out) {
-             Benchmark::BenchmarkReport r3 = Benchmark::RunPhase3_SyncAndAtomic(50000);
-             Benchmark::FormatReport(out, r3);
-           });
-           drainTcpAndReclaimPbufs(client);
-           withScratchBuf(client, [](AppendBuf &out) {
-             Benchmark::BenchmarkReport r4 = Benchmark::RunPhase4_CodegenDiagnostics();
-             Benchmark::FormatReport(out, r4);
-           });
-           drainTcpAndReclaimPbufs(client);
-           withScratchBuf(client, [](AppendBuf &out) {
-             Benchmark::BenchmarkReport r5 = Benchmark::RunPhase5_RealWorkloadReplay(50000);
-             Benchmark::FormatReport(out, r5);
-           });
-           drainTcpAndReclaimPbufs(client);
+           for (size_t p = 0; p < 6; ++p) {
+             withScratchBuf(client, [p](AppendBuf &out) {
+               Benchmark::FormatReport(out, s_all_reports[p]);
+             });
+           }
          }},
     };
 

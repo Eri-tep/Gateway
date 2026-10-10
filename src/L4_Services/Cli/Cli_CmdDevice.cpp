@@ -360,7 +360,7 @@ static void ctlHandleClass(int sock, int argc, const Args &args) {
       def_name = "Light";
       break;
     case Hash::fnv1a32_ci("outlet"):
-      cls = DeviceClass::SWITCH;
+      cls = DeviceClass::OUTLET;
       def_name = "Outlet";
       break;
     case Hash::fnv1a32_ci("vent"):
