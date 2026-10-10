@@ -66,8 +66,8 @@ static void write(int sock, const char *data, size_t len) noexcept {
   if (!valid(sock, data, len))
     return;
 
-  // Bulkhead Protection: Free Heap이 64KB 안전 마진 미만이면 비핵심 텔넷 출력 즉시 드랍-테일
-  if (esp_get_free_heap_size() < 65536) {
+  // Bulkhead Protection: Free Heap이 비상 한계선(25KB) 미만이면 비핵심 텔넷 출력 즉시 드랍-테일
+  if (esp_get_free_heap_size() < Config::Memory::MIN_HEAP_THRESHOLD_KB * 1024) {
     return;
   }
 
@@ -79,23 +79,37 @@ static void write(int sock, const char *data, size_t len) noexcept {
     return;
 
   size_t sent = 0;
-  uint8_t retries = 0;
-  while (sent < len && retries < 10) {
-    const size_t to_send = std::min<size_t>(len - sent, 512);
+  constexpr uint32_t MAX_WRITE_TIMEOUT_MS = 2000;
+  const uint32_t start_ms = millis();
+
+  while (sent < len) {
+    const size_t to_send = std::min<size_t>(len - sent, 1024);
     const int r = send(sock, data + sent, to_send, MSG_DONTWAIT);
     if (r > 0) {
       sent += static_cast<size_t>(r);
-      retries = 0;
       continue;
     }
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      ++retries;
-      vTaskDelay(pdMS_TO_TICKS(1));
+      if (TimeUtils::isElapsed(start_ms, MAX_WRITE_TIMEOUT_MS)) {
+        break; // 클라이언트 단선/행 방지 데드라인
+      }
+      fd_set wfds;
+      FD_ZERO(&wfds);
+      FD_SET(sock, &wfds);
+      struct timeval tv { .tv_sec = 0, .tv_usec = 50000 };
+      int sel_res = select(sock + 1, nullptr, &wfds, nullptr, &tv);
+      if (sel_res > 0 && FD_ISSET(sock, &wfds)) {
+        continue; // 커널이 ACK 수신 후 버퍼 확보 시 마이크로초 단위 즉시 재개
+      }
+      if (sel_res < 0 && errno != EINTR) {
+        break; // 소켓 오류/연결 종료
+      }
+      System_FeedWdt(Config::Task::WDT_ID_TELNET);
       continue;
     }
     break;
   }
-  System_FeedWdt(5);
+  System_FeedWdt(Config::Task::WDT_ID_TELNET);
 }
 
 static inline void text(int sock, const char *s) noexcept {
@@ -539,6 +553,8 @@ constexpr CommandDef kConsoleCmds[] = {
      "Save current runtime configuration to NVS flash"},
     {"stats", SystemCli::cmdStats, 0,
      "Show real-time HW metrics & traffic stats [clear]"},
+    {"sup", SystemCli::cmdSup, 0,
+     "Task supervisor status, logs & fault injection [status|inject]"},
     {"trace", WallpadCli::cmdTrace, 0,
      "Packet monitoring [on|off|ctl|ack|pol|rmt|drp|ch|devid]"},
     {"wallpad", WallpadCli::cmdWallpad, 0,
@@ -905,7 +921,7 @@ void TelnetManager::onClientConnect(int new_sock,
   fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
   int nodelay = 1;
   setsockopt(new_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-  int sndbuf = 4096; // 4 KB Bounded Buffer (Bulkhead)
+  int sndbuf = 2048; // 2 KB Bounded Buffer (Bulkhead)
   setsockopt(new_sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
   int emptySlot = -1;

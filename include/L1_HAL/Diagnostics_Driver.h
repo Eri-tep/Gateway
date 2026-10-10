@@ -319,16 +319,6 @@ private:
 
 // ── Unified System Trace Sink & Shutdown Hooks are canonically in System_Platform.h ──
 
-// ── Task Identifier & Handles (Encapsulated) ──
-enum class SystemTaskId : uint8_t {
-  CH1 = 0,
-  CH2,
-  CH3,
-  CH4,
-  NETWORK,
-  TELNET,
-  COUNT
-};
-
+// ── Task Handles (Encapsulated) ──
 void System_RegisterTaskHandle(SystemTaskId id, TaskHandle_t handle) noexcept;
 [[nodiscard]] TaskHandle_t System_GetTaskHandle(SystemTaskId id) noexcept;

@@ -46,6 +46,7 @@ struct TaskSpawnDescriptor {
   StaticTask_t *tcb_buf;
   SystemTaskId task_id;
   bool bypass_in_rescue;
+  uint32_t deadline_ms;
 };
 
 static WallpadChannelConfig ch2_config = {
@@ -356,22 +357,22 @@ static StackType_t s_stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
 static const TaskSpawnDescriptor kTaskDescriptors[] = {
     {Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1, nullptr,
      TaskPriority::CH1_REALTIME, 1, s_stackCore1Ch1, &s_task_core1_ch1_buf,
-     SystemTaskId::CH1, true},
+     SystemTaskId::CH1, true, 1000},
     {Task_Ch2, "CH#2_WP#1", Config::Task::STACK_SIZE_CH2, &ch2_config,
      TaskPriority::WALLPAD_EMULATION, 1, s_stackCore1Slave,
-     &s_task_core1_slave_buf, SystemTaskId::CH2, true},
+     &s_task_core1_slave_buf, SystemTaskId::CH2, true, 1000},
     {Task_Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_CH3, &ch3_config,
      TaskPriority::WALLPAD_EMULATION, 1, s_stackCore1Slave2,
-     &s_task_core1_slave2_buf, SystemTaskId::CH3, true},
+     &s_task_core1_slave2_buf, SystemTaskId::CH3, true, 1000},
     {Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,
      TaskPriority::CH4_SUBWALLPAD, 1, s_stackCore1Ch4, &s_task_core1_ch4_buf,
-     SystemTaskId::CH4, true},
+     SystemTaskId::CH4, true, 1000},
     {Transport::TcpReactor::runTask, "Network", Config::Task::STACK_SIZE_CORE0, nullptr,
      TaskPriority::NETWORK, 0, s_stackCore0Net, &s_task_core0_net_buf,
-     SystemTaskId::NETWORK, false},
+     SystemTaskId::NETWORK, false, 1500},
     {Task_Telnet, "Telnet_CLI", Config::Task::STACK_SIZE_TELNET, nullptr,
      TaskPriority::TELNET_CLI, 0, s_telnetTaskStack, &s_telnet_task_buf,
-     SystemTaskId::TELNET, false},
+     SystemTaskId::TELNET, false, 3000},
 };
 
 static void Boot_StartTasks() {
@@ -402,12 +403,20 @@ static void Boot_StartTasks() {
 
     if (h) {
       System_RegisterTaskHandle(desc.task_id, h);
+      Supervisor::TaskSpec spec{
+          .name = desc.name,
+          .deadline_ms = desc.deadline_ms,
+          .core = desc.core_id,
+      };
+      Supervisor::registerTask(static_cast<uint8_t>(desc.task_id), h, spec);
     } else {
       Serial.printf("[FATAL] Failed to create static task '%s' on core %d!\r\n",
                     desc.name, static_cast<int>(desc.core_id));
       System_Restart("Fatal: Task Create Failed");
     }
   }
+
+  Supervisor::start(Supervisor::Mode::Shadow);
 }
 
 // ============================================================================

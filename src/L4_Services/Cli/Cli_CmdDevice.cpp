@@ -47,7 +47,7 @@ void devsPrintTier1Targets(AppendBuf &out, uint32_t now) {
       {"Raw Query Packet Frame", 51, Align::LEFT, Align::LEFT},
   };
   TableRenderer table(out, TIER1_COLS, 4);
-  table.header(false);
+  table.header(true);
 
   constexpr uint8_t ALLOWED_MASK = (1 << 2) | (1 << 3) | (1 << 5);
 
@@ -114,7 +114,7 @@ void devsPrintTier2Cache(AppendBuf &out, uint32_t now) {
       {"Raw Physical ACK Response Frame", 58, Align::LEFT, Align::LEFT},
   };
   TableRenderer table(out, TIER2_COLS, 3);
-  table.header(false);
+  table.header(true);
 
   if (total_count == 0) {
     table.empty("(No physical devices discovered on RS-485 bus yet)");
@@ -238,7 +238,7 @@ void devsPrintSummary(AppendBuf &out, uint32_t now) {
       {"LastSeen", 8, Align::CENTER, Align::CENTER},
   };
   TableRenderer table(out, DEVS_COLS, 8);
-  table.header(false);
+  table.header(true);
 
   if (dev_count == 0) {
     table.empty("(No active devices registered in 1st/2nd tier cache)");
@@ -524,7 +524,7 @@ void wallpadPrintControlTable(AppendBuf &out) {
       {"Status Offsets", 23, Align::LEFT, Align::CENTER},
   };
   TableRenderer table(out, CTL_COLS, 7);
-  table.header(false);
+  table.header(true);
 
   if (count == 0) {
     table.empty("(No control blueprints registered yet. Waiting for profile or "

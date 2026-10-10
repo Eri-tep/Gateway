@@ -192,6 +192,7 @@ void wallpadPrintControlDetail(AppendBuf &out, uint8_t dev_id);
 
 namespace SystemCli {
 void cmdStats(CliContext &ctx);
+void cmdSup(CliContext &ctx);
 void cmdReboot(CliContext &ctx);
 void cmdLogView(CliContext &ctx);
 void cmdCoreDump(CliContext &ctx);

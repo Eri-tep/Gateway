@@ -19,6 +19,7 @@ static void AsyncWifiScanTask(void *pvParameters) {
   }
   TelnetManager::WifiScanReq req =
       *static_cast<TelnetManager::WifiScanReq *>(pvParameters);
+  Supervisor::DeadlineHold net_hold(static_cast<uint8_t>(SystemTaskId::NETWORK), 10000);
   vTaskDelay(pdMS_TO_TICKS(100));
 
   int n = WiFi.scanNetworks(false, true);
@@ -480,7 +481,7 @@ void cmdLogView(CliContext &ctx) {
                {"Uptime", 12, Align::CENTER, Align::CENTER},
            };
            TableRenderer table(out, REBOOT_COLS, 4);
-           table.header(false);
+           table.header(true);
 
            FixedBuf<32> time_buf;
            FixedBuf<16> up_buf;
@@ -795,6 +796,166 @@ void cmdHelp(CliContext &ctx) {
     CliFmt::PrintBoxFooter(
         out, "Type '<command> ?' or '<command> help' for detailed reference");
   });
+}
+
+void cmdSup(CliContext &ctx) {
+  int client = ctx.sock;
+  uint8_t count = ctx.args.count();
+  const char *subCmd = (count > 0) ? ctx.args.get(1) : "status";
+
+  static const CliFmt::SubCmdDef kSupDefs[] = {
+      {"status", "status", "Show task liveness supervisor status & verdicts",
+       [](int s, int, const Args &) {
+         withScratchBuf(s, [](AppendBuf &out) {
+           Supervisor::Snapshot snap{};
+           Supervisor::getSnapshot(snap);
+
+           CliFmt::PrintBoxHeader(out, "TASK LIVENESS SUPERVISOR (SHADOW MONITOR)");
+           CliFmt::PrintBoxSubtitlef(
+               out, "Mode: %s | Would Act: %u | Period: %ums | Confirm: %ums (%u Ticks)",
+               snap.mode == Supervisor::Mode::Shadow ? "Shadow" : "Active",
+               static_cast<unsigned>(snap.would_act),
+               static_cast<unsigned>(Supervisor::kPeriodMs),
+               static_cast<unsigned>(Supervisor::kConfirmCount * Supervisor::kPeriodMs),
+               static_cast<unsigned>(Supervisor::kConfirmCount));
+
+           static constexpr Column SUP_COLS[] = {
+               {"ID", 4, Align::CENTER, Align::CENTER},
+               {"Task Name", 12, Align::LEFT, Align::CENTER},
+               {"Heartbeat Age", 19, Align::CENTER, Align::CENTER},
+               {"Suspect", 7, Align::CENTER, Align::CENTER},
+               {"State", 9, Align::CENTER, Align::CENTER},
+               {"Free Stack", 10, Align::RIGHT, Align::CENTER},
+           };
+           TableRenderer table(out, SUP_COLS, 6);
+           table.header(true);
+
+           FixedBuf<8> id_buf;
+           FixedBuf<24> age_buf;
+           FixedBuf<8> susp_buf;
+           FixedBuf<16> stack_buf;
+
+           for (uint8_t i = 0; i < snap.task_count; ++i) {
+             const auto &t = snap.tasks[i];
+             id_buf.reset();
+             id_buf.appendFormat("#%u", t.id);
+
+             age_buf.reset();
+             age_buf.appendFormat("%ums / %ums", t.age_ms, t.deadline_ms);
+
+             susp_buf.reset();
+             susp_buf.appendFormat("%u", t.suspect);
+
+             stack_buf.reset();
+             stack_buf.appendFormat("%u B", t.stack_free);
+
+             table.row({id_buf.c_str(), t.name, age_buf.c_str(), susp_buf.c_str(),
+                        Supervisor::stateName(t.state), stack_buf.c_str()});
+           }
+           table.end('-');
+
+           if (snap.event_count > 0) {
+             CliFmt::PrintBoxSubtitle(out, "RECENT ANOMALIES & CLASSIFICATION (RING BUFFER)");
+             static constexpr Column EVT_COLS[] = {
+                 {"Time", 9, Align::CENTER, Align::CENTER},
+                 {"Task", 11, Align::LEFT, Align::CENTER},
+                 {"Verdict", 17, Align::LEFT, Align::CENTER},
+                 {"Culprit", 11, Align::LEFT, Align::CENTER},
+                 {"State", 7, Align::CENTER, Align::CENTER},
+                 {"CPU", 6, Align::RIGHT, Align::CENTER},
+             };
+             TableRenderer evTable(out, EVT_COLS, 6);
+             evTable.header(true);
+
+             FixedBuf<12> t_buf, cpu_buf;
+             for (uint8_t k = 0; k < snap.event_count; ++k) {
+               const auto &e = snap.events[k];
+               t_buf.reset();
+               t_buf.appendFormat("%u.%us", e.t_ms / 1000, (e.t_ms % 1000) / 100);
+
+               cpu_buf.reset();
+               cpu_buf.appendFormat("%u%%", e.cpu_pct);
+
+               evTable.row({t_buf.c_str(), Supervisor::nameOf(e.task),
+                            Supervisor::verdictName(e.verdict),
+                            Supervisor::nameOf(e.culprit),
+                            Supervisor::stateName(e.state), cpu_buf.c_str()});
+             }
+             evTable.end('-');
+           }
+
+           if (snap.has_prev_boot) {
+             CliFmt::PrintBoxSubtitlef(
+                 out, "PREV-BOOT LAST: Task=%s | Verdict=%s | Culprit=%s | CPU=%u%%",
+                 Supervisor::nameOf(snap.prev_boot.task),
+                 Supervisor::verdictName(snap.prev_boot.verdict),
+                 Supervisor::nameOf(snap.prev_boot.culprit),
+                 static_cast<unsigned>(snap.prev_boot.cpu_pct));
+             out.append(CliFmt::BOX80_DASH);
+           }
+
+           CliFmt::PrintBoxFooter(
+               out, snap.event_count == 0
+                        ? "Status: All tasks healthy. No anomalies recorded in ring buffer."
+                        : "Tip: In Shadow mode, supervisor observes without restarting tasks");
+         });
+       }},
+#if SUP_FAULT_INJECTION
+      {"inject", "inject <task> <spin|block> <ms>",
+       "Inject fault for testing (task: ch1..ch4, net, telnet)",
+       [](int s, int ac, const Args &args) {
+         if (ac < 4) {
+           sendTelnetMsg(
+               s, "Usage: sup inject <ch1|ch2|ch3|ch4|net|telnet> <spin|block> <ms>\r\n");
+           return;
+         }
+         const char *t_name = args.get(2);
+         const char *k_name = args.get(3);
+         const char *ms_str = args.get(4);
+         int ms = atoi(ms_str);
+         if (ms <= 0 || ms > 15000) {
+           sendTelnetMsg(s, "[ERROR] Duration must be 1..15000 ms\r\n");
+           return;
+         }
+         Supervisor::Inject kind = Supervisor::Inject::None;
+         if (strcmp(k_name, "spin") == 0) {
+           kind = Supervisor::Inject::Spin;
+         } else if (strcmp(k_name, "block") == 0) {
+           kind = Supervisor::Inject::Block;
+         } else {
+           sendTelnetMsg(s, "[ERROR] Unknown kind. Use 'spin' or 'block'\r\n");
+           return;
+         }
+         uint8_t id = Supervisor::kNoTask;
+         if (strcmp(t_name, "ch1") == 0) id = static_cast<uint8_t>(SystemTaskId::CH1);
+         else if (strcmp(t_name, "ch2") == 0) id = static_cast<uint8_t>(SystemTaskId::CH2);
+         else if (strcmp(t_name, "ch3") == 0) id = static_cast<uint8_t>(SystemTaskId::CH3);
+         else if (strcmp(t_name, "ch4") == 0) id = static_cast<uint8_t>(SystemTaskId::CH4);
+         else if (strcmp(t_name, "net") == 0 || strcmp(t_name, "network") == 0) id = static_cast<uint8_t>(SystemTaskId::NETWORK);
+         else if (strcmp(t_name, "telnet") == 0) id = static_cast<uint8_t>(SystemTaskId::TELNET);
+         else {
+           sendTelnetMsg(s, "[ERROR] Unknown task name. Options: ch1, ch2, ch3, ch4, net, telnet\r\n");
+           return;
+         }
+         Supervisor::inject(id, kind, static_cast<uint32_t>(ms));
+         sendTelnetMsgf(s, "[SUP] Injected %s on task %s for %d ms\r\n", k_name, t_name, ms);
+       }},
+#else
+      {"inject", "inject <task> <spin|block> <ms>",
+       "Fault injection (Disabled in production build)",
+       [](int s, int, const Args &) {
+         sendTelnetMsg(
+             s, "[SUP] Fault injection is disabled (Build with -DSUP_FAULT_INJECTION=1).\r\n");
+       }},
+#endif
+  };
+
+  if (CliFmt::DispatchSubCmd(subCmd, client, count, ctx.args, kSupDefs))
+    return;
+
+  CliFmt::PrintSubCmdHelp(
+      client, "SUPERVISOR COMMAND REFERENCE", kSupDefs,
+      "Tip: Shadow mode observes and classifies culprits/victims without intervention");
 }
 
 } // namespace SystemCli

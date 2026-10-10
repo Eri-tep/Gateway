@@ -1831,8 +1831,8 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
   // 단일 유닛 기기는 학습된 sub1 을 사용
   size_t units = 0;
   for (size_t i = 0; i < Device_GetCount() && units < 2; ++i) {
-    DeviceStateEntry snap{};
-    if (Device_GetSnapshot(i, snap) && snap.dev_id == dev_id)
+    DeviceMetadata meta{};
+    if (Device_GetAtMetadata(i, meta) && meta.dev_id == dev_id)
       ++units;
   }
   if (units == 0)

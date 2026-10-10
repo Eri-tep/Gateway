@@ -167,6 +167,8 @@ void TaskWdtMonitor::feed(size_t index) noexcept {
   if (UNLIKELY(index >= TASK_COUNT))
     return;
 
+  Supervisor::heartbeat(static_cast<uint8_t>(index));
+
   const uint32_t now = millis();
   const uint32_t prev =
       tasks[index].last_feed_ms.load(std::memory_order_relaxed);

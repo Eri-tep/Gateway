@@ -28,6 +28,7 @@
 #include <Arduino.h>
 #include <IPAddress.h>
 #include <Preferences.h>
+#include "Supervisor.h"
 
 // ── RAII FreeRTOS Synchronization Primitives ──
 class [[nodiscard]] CriticalSectionLocker {
@@ -63,7 +64,17 @@ public:
                        TickType_t timeout = portMAX_DELAY) noexcept
       : _mutex(mutex) {
     if (_mutex) {
+      if (xSemaphoreTake(_mutex, 0) == pdTRUE) {
+        _locked = true;
+        _acquired_ms = millis();
+        return;
+      }
+      if (timeout == 0) {
+        return;
+      }
+      Supervisor::noteWaitBegin(_mutex);
       _locked = (xSemaphoreTake(_mutex, timeout) == pdTRUE);
+      Supervisor::noteWaitEnd();
       if (_locked) {
         _acquired_ms = millis();
       }

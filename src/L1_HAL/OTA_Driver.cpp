@@ -660,6 +660,9 @@ static bool do_ota(const char *initial_url) {
 
 
 static void Task_HttpOta(void *pvParameters) {
+  Supervisor::DeadlineHold net_hold(static_cast<uint8_t>(SystemTaskId::NETWORK), 120000);
+  Supervisor::DeadlineHold telnet_hold(static_cast<uint8_t>(SystemTaskId::TELNET), 120000);
+
   // 진입 즉시 FreeRTOS WDT 감시 등록 (접속 단계 행 방지)
   bool wdt_registered = (esp_task_wdt_add(nullptr) == ESP_OK);
 

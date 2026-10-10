@@ -411,14 +411,11 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
     for (uint8_t s = 1; s < Config::TCP::MAX_EW11_SLOTS; ++s) {
       HubClientSlotSnapshot slot;
       System_GetBridgeSlotSnapshot(s, slot);
-      DeviceStateEntry fcu_dev{};
-      bool has_fcu_dev = Device_FindCopy(Config::FCU::DEV_ID, s, 0, fcu_dev);
 
-      // 소켓 설정이 활성화되어 있거나 수신 이력이 있는 경우 노출
+      // 소켓 설정이 활성화되어 있거나 수신 이력이 있는 경우 노출 (SSOT: FcuDeviceSnapshot)
       FcuDeviceSnapshot fcu_snap{};
       bool has_fcu_snap = Device_GetFcuSnapshot(s, fcu_snap);
-      if (slot.enabled || (has_fcu_snap && fcu_snap.is_online) ||
-          (has_fcu_dev && fcu_dev.last_ack_len > 0)) {
+      if (slot.enabled || (has_fcu_snap && fcu_snap.is_online)) {
         if (locked_count > 0)
           out.append(",");
         char name_buf[32];
@@ -429,16 +426,8 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
         int mode = static_cast<int>(fcu_snap.mode);
         int fan = static_cast<int>(fcu_snap.fan_speed);
         int swg = static_cast<int>(fcu_snap.swing);
-        int tgt = (fcu_snap.target_temp > 0)
-                      ? fcu_snap.target_temp
-                      : ((has_fcu_dev && fcu_dev.last_target_temp > 0)
-                             ? fcu_dev.last_target_temp
-                             : 24);
-        int cur = (fcu_snap.room_temp > 0)
-                      ? fcu_snap.room_temp
-                      : ((has_fcu_dev && fcu_dev.last_current_temp > 0)
-                             ? fcu_dev.last_current_temp
-                             : tgt);
+        int tgt = (fcu_snap.target_temp > 0) ? fcu_snap.target_temp : 24;
+        int cur = (fcu_snap.room_temp > 0) ? fcu_snap.room_temp : tgt;
 
         int err_code = 0;
 

@@ -802,7 +802,7 @@ void cmdRoutes(CliContext &ctx) {
         {"Last Seen", 13, Align::CENTER, Align::CENTER},
     };
     TableRenderer table(out, ROUTES_COLS, 3);
-    table.header(false);
+    table.header(true);
 
     if (count == 0) {
       table.empty(

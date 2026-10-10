@@ -1462,6 +1462,7 @@ void cmdBench(CliContext &ctx) {
        }},
       {"run", "run <0-5|all> [runs]", "Run benchmark phase",
        [](int client, int sub_count, const Args &args) {
+         Supervisor::DeadlineHold bench_hold(static_cast<uint8_t>(SystemTaskId::TELNET), 60000);
          const char *phase_arg = (sub_count >= 2) ? args.get(2) : "0";
          uint32_t custom_runs = 0;
          if (sub_count >= 3) {
