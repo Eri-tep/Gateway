@@ -23,7 +23,7 @@
 #include "L2_Transport/RS485_CH.h"
 #include "L1_HAL/Diagnostics_Driver.h"
 #include "L1_HAL/Uart_Driver.h"
-#include "L0_Foundation/Lockless_RingBuffer.h"
+#include "L0_Foundation/System_Buffer.h"
 
 #include "esp_task_wdt.h"
 #include <Arduino.h>

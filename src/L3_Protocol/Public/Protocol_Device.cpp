@@ -9,7 +9,7 @@
 #include "L3_Protocol/Private/Wallpad_Learning.h"
 #include "L3_Protocol/Private/Routing_Engine.h"
 #include "L2_Transport/Bridge_CH.h"
-#include "L0_Foundation/Lockless_RingBuffer.h"
+#include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L0_Foundation/Seqlock.h"
 

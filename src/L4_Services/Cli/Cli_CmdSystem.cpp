@@ -832,6 +832,7 @@ void cmdSup(CliContext &ctx) {
 
            FixedBuf<8> id_buf;
            FixedBuf<24> age_buf;
+           FixedBuf<8> dl_buf;
            FixedBuf<8> susp_buf;
            FixedBuf<16> stack_buf;
 
@@ -840,8 +841,11 @@ void cmdSup(CliContext &ctx) {
              id_buf.reset();
              id_buf.appendFormat("#%u", t.id);
 
+             dl_buf.reset();
+             dl_buf.appendFormat("%ums", t.deadline_ms);
+
              age_buf.reset();
-             age_buf.appendFormat("%ums / %ums", t.age_ms, t.deadline_ms);
+             age_buf.appendFormat("%4ums / %-6s", t.age_ms, dl_buf.c_str());
 
              susp_buf.reset();
              susp_buf.appendFormat("%u", t.suspect);

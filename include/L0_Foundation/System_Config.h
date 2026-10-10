@@ -10,16 +10,16 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.5.7";
+constexpr const char *FIRMWARE_VERSION = "v2.5.8";
 } // namespace Config
 
 namespace Config::Task {
 constexpr size_t STACK_SIZE_CORE1 = 5888;
-constexpr size_t STACK_SIZE_CH2 = 5824;
+constexpr size_t STACK_SIZE_CH2 = 4160;
 constexpr size_t STACK_SIZE_CH3 = 4160;
 constexpr size_t STACK_SIZE_CH4 = 3328;
 constexpr size_t STACK_SIZE_CORE0 = 6528;
-constexpr size_t STACK_SIZE_TELNET = 7168;
+constexpr size_t STACK_SIZE_TELNET = 6528;
 constexpr size_t TASK_COUNT = 6;
 constexpr uint8_t WDT_ID_CH1 = 0;
 constexpr uint8_t WDT_ID_CH2 = 1;

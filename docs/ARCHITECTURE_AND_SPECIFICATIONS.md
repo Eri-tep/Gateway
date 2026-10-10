@@ -32,9 +32,8 @@ This document defines the system specifications, runtime topology, channel mappi
 ```
 include/
 ├── L0_Foundation/                  [L0: Pure Foundation Soil Leaf]
-│   ├── Lockless_RingBuffer.h (Wait-Free SPSC lockless ring buffer for fast cross-task streaming)
 │   ├── Seqlock.h             (C++23 RAII SequenceLock & CriticalSeqWriterGuard for lockless readers)
-│   ├── System_Buffer.h       (AppendBuf fixed scratch buffers, Endian abstractions, zero-heap utilities, SWAR)
+│   ├── System_Buffer.h       (AppendBuf fixed scratch buffers, Endian abstractions, SPSC/MPSC lockless ring buffers, SWAR)
 │   ├── System_Config.h       (NVS keys, baud rates, timing constants, monadic parsers)
 │   └── System_Platform.h     (Abstract System_* platform contracts, StaticPacket, trace sinks)
 ├── L1_HAL/                         [L1: Physical HAL Drivers]

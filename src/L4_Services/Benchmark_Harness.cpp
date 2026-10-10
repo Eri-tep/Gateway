@@ -13,7 +13,6 @@
 #include "L0_Foundation/System_Platform.h"
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
-#include "L0_Foundation/Lockless_RingBuffer.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L3_Protocol/Private/Wallpad_Engine.h"
@@ -698,9 +697,6 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
-      if ((i % 20000) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-      }
     }
   }
 
@@ -1159,9 +1155,6 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
       esp_task_wdt_reset();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
-      if ((i % 10000) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-      }
     }
   }
 
@@ -1523,7 +1516,6 @@ void cmdBench(CliContext &ctx) {
              if (sock < 0) return;
              for (int iter = 0; iter < 10; ++iter) {
                taskYIELD();
-               vTaskDelay(pdMS_TO_TICKS(10));
                if (esp_get_free_heap_size() >= 100000) break;
              }
            };
