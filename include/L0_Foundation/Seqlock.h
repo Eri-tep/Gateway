@@ -7,6 +7,9 @@
 #include "L0_Foundation/System_Platform.h"
 #include <atomic>
 #include <cstdint>
+#if defined(ESP_PLATFORM)
+#include <esp_rom_sys.h>
+#endif
 
 namespace Gateway::Foundation {
 

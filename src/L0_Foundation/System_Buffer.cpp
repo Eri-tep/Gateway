@@ -1,10 +1,6 @@
 #include "L0_Foundation/System_Buffer.h"
 
 namespace TimeUtils {
-bool isElapsed(uint32_t start_ms, uint32_t duration_ms) noexcept {
-  return (millis() - start_ms) >= duration_ms;
-}
-
 long elapsedMs(const struct timeval &now, const struct timeval &prev) noexcept {
   if (prev.tv_sec == 0)
     return -1;

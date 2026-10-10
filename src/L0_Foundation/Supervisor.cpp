@@ -61,6 +61,10 @@ std::atomic<bool>     s_rebooting{false};
 PreRebootHook         s_hook = nullptr;
 uint8_t               s_confirm[kMaxTasks] = {};
 uint32_t              s_acted = 0;
+[[nodiscard]] [[gnu::always_inline]] inline uint32_t tickAge(uint32_t now, uint32_t last) noexcept {
+  const int32_t d = static_cast<int32_t>(now - last);
+  return d > 0 ? static_cast<uint32_t>(d) : 0u;
+}
 
 [[nodiscard]] uint32_t uptimeSeconds() noexcept {
   return static_cast<uint32_t>(esp_timer_get_time() / 1'000'000ULL);
@@ -187,7 +191,8 @@ void evaluate() {
   const uint32_t now = nowMs();
 
   // 1) 부팅 시동 유예 (15초): 초기화 과정 오탐 방지
-  if (now < s_bootGraceUntilMs.load(std::memory_order_relaxed)) {
+  const uint32_t grace = s_bootGraceUntilMs.load(std::memory_order_relaxed);
+  if (grace != 0 && static_cast<int32_t>(grace - now) > 0) {
     for (uint8_t i = 0; i < kMaxTasks; ++i) {
       s_suspect[i]  = 0;
       s_confirm[i]  = 0;
@@ -201,7 +206,7 @@ void evaluate() {
   bool is_exempt = false;
   if (s_exempt.load(std::memory_order_relaxed) > 0) {
     const uint32_t start_ms = s_exemptStartMs.load(std::memory_order_relaxed);
-    const uint32_t elapsed  = (now >= start_ms) ? (now - start_ms) : 0;
+    const uint32_t elapsed  = tickAge(now, start_ms);
     if (elapsed <= kMaxExemptDurationMs) {
       is_exempt = true;
     }
@@ -239,7 +244,7 @@ void evaluate() {
       continue;
     }
     const uint32_t last = g_lastFeedMs[i].load(std::memory_order_relaxed);
-    const uint32_t age  = (now >= last) ? (now - last) : 0;
+    const uint32_t age  = tickAge(now, last);
     if (age <= s_spec[i].deadline_ms) {
       s_suspect[i]  = 0;
       s_reported[i] = false;
@@ -588,7 +593,7 @@ void dump(Writer w, void* ctx) {
     if (s_handle[i] == nullptr) continue;
     const uint32_t curNow = nowMs();
     const uint32_t last   = g_lastFeedMs[i].load(std::memory_order_relaxed);
-    const uint32_t age    = (curNow >= last) ? (curNow - last) : 0;
+    const uint32_t age    = tickAge(curNow, last);
     std::snprintf(line, sizeof line, "[%u] %-10s age=%" PRIu32 "ms/%" PRIu32 "ms suspect=%u state=%s stack_free=%" PRIu32,
                   static_cast<unsigned>(i), nameOf(i), age,
                   s_spec[i].deadline_ms, static_cast<unsigned>(s_suspect[i]),
@@ -625,7 +630,7 @@ void getSnapshot(Snapshot& out) {
     TaskSnapshot& ts      = out.tasks[out.task_count++];
     ts.id          = i;
     ts.name        = nameOf(i);
-    ts.age_ms      = (curNow >= last) ? (curNow - last) : 0;
+    ts.age_ms      = tickAge(curNow, last);
     ts.deadline_ms = s_spec[i].deadline_ms;
     ts.suspect     = s_suspect[i];
     ts.state       = static_cast<uint8_t>(eTaskGetState(s_handle[i]));

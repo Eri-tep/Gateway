@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v2.6.4";
+constexpr const char *FIRMWARE_VERSION = "v2.6.5";
 } // namespace Config
 
 namespace Config::Task {
@@ -109,7 +109,7 @@ constexpr uint8_t MAX_MGMT_CLIENTS = 3;
 constexpr uint8_t MAX_EW11_SLOTS = 5;
 constexpr uint16_t EW11_SLOT_PORTS[MAX_EW11_SLOTS] = {8898, 8891, 8892, 8893,
                                                       8894};
-constexpr int SOCKET_BUFFER_SIZE = 4096;
+constexpr int SOCKET_BUFFER_SIZE = 2048;
 constexpr size_t HUB_RX_BUFFER_SIZE = 1024;
 constexpr size_t MGMT_BUFFER_SIZE = 512;
 constexpr size_t POLL_RX_CHUNK_SIZE = 128;

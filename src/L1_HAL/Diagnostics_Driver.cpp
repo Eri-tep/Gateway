@@ -90,7 +90,7 @@ void System_TriggerLifecycle(SystemLifecycleEvent evt) noexcept {
   }
 }
 
-void System_RegisterShutdownHook(ShutdownHook hook) noexcept {
+void System_RegisterShutdownHook(ShutdownHookFn hook) noexcept {
   System_RegisterLifecycleHook(SystemLifecycleEvent::PRE_SHUTDOWN, hook);
 }
 

@@ -83,6 +83,9 @@ static void write(int sock, const char *data, size_t len) noexcept {
     const int r = send(sock, data + sent, to_send, MSG_DONTWAIT);
     if (r > 0) {
       sent += static_cast<size_t>(r);
+      if (sent < len && (sent % 2048) == 0) {
+        taskYIELD();
+      }
       continue;
     }
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {

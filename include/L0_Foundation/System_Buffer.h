@@ -128,7 +128,9 @@ static_assert([] {
 }(), "Endian load*At bounds check or underflow defense failed");
 
 namespace TimeUtils {
-[[nodiscard]] bool isElapsed(uint32_t start_ms, uint32_t duration_ms) noexcept;
+[[nodiscard]] [[gnu::always_inline]] inline bool isElapsed(uint32_t start_ms, uint32_t duration_ms) noexcept {
+  return (millis() - start_ms) >= duration_ms;
+}
 [[nodiscard]] long elapsedMs(const struct timeval &now,
                              const struct timeval &prev) noexcept;
 } // namespace TimeUtils

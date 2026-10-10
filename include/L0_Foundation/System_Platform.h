@@ -117,7 +117,8 @@ using std::to_underlying;
   return FastCrc32(std::span<const uint8_t>(data, len));
 }
 
-template <typename T> struct NvsEnvelope {
+template <typename T> struct alignas(4) NvsEnvelope {
+  static_assert(std::is_trivially_copyable_v<T>, "NvsEnvelope payload must be trivially copyable");
   uint32_t magic{0x4757484D}; // "GWHM"
   uint16_t version{1};
   uint16_t data_len{sizeof(T)};
@@ -320,7 +321,6 @@ struct SystemTraceSink {
   SystemTraceMessageFn trace_msg{nullptr};
 };
 using ShutdownHookFn = void (*)() noexcept;
-using ShutdownHook = ShutdownHookFn;
 
 enum class SystemLifecycleEvent : uint8_t {
   PRE_SHUTDOWN,
