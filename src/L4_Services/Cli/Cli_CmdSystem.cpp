@@ -19,6 +19,7 @@ static void AsyncWifiScanTask(void *pvParameters) {
   }
   TelnetManager::WifiScanReq req =
       *static_cast<TelnetManager::WifiScanReq *>(pvParameters);
+  Supervisor::ExemptGuard scan_guard;
   Supervisor::DeadlineHold net_hold(static_cast<uint8_t>(SystemTaskId::NETWORK), 10000);
   vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -810,11 +811,15 @@ void cmdSup(CliContext &ctx) {
            Supervisor::Snapshot snap{};
            Supervisor::getSnapshot(snap);
 
-           CliFmt::PrintBoxHeader(out, "TASK LIVENESS SUPERVISOR (SHADOW MONITOR)");
+           CliFmt::PrintBoxHeader(
+               out, snap.mode == Supervisor::Mode::Shadow
+                        ? "TASK LIVENESS SUPERVISOR (SHADOW MONITOR)"
+                        : "TASK LIVENESS SUPERVISOR (ACTIVE REBOOT GUARD)");
            CliFmt::PrintBoxSubtitlef(
-               out, "Mode: %s | Would Act: %u | Period: %ums | Confirm: %ums (%u Ticks)",
+               out, "Mode: %s | Would Act: %u | Acted: %u | Period: %ums | Confirm: %ums (%u Ticks)",
                snap.mode == Supervisor::Mode::Shadow ? "Shadow" : "Active",
                static_cast<unsigned>(snap.would_act),
+               static_cast<unsigned>(snap.acted),
                static_cast<unsigned>(Supervisor::kPeriodMs),
                static_cast<unsigned>(Supervisor::kConfirmCount * Supervisor::kPeriodMs),
                static_cast<unsigned>(Supervisor::kConfirmCount));
@@ -898,11 +903,29 @@ void cmdSup(CliContext &ctx) {
              out.append(CliFmt::BOX80_DASH);
            }
 
+           char rb_buf[160];
+           Supervisor::formatRebootStatus(rb_buf, sizeof(rb_buf));
+           CliFmt::PrintBoxSubtitle(out, rb_buf);
+           out.append(CliFmt::BOX80_DASH);
+
            CliFmt::PrintBoxFooter(
-               out, snap.event_count == 0
-                        ? "Status: All tasks healthy. No anomalies recorded in ring buffer."
-                        : "Tip: In Shadow mode, supervisor observes without restarting tasks");
+               out, snap.mode == Supervisor::Mode::Shadow
+                        ? "Tip: Shadow mode observes anomalies without restarting system"
+                        : "Tip: Active mode immediately executes clean reboot upon confirmed fault");
          });
+       }},
+      {"mode", "mode [shadow|active]", "Get or set supervisor mode (persisted to NVS)",
+       [](int s, int ac, const Args &args) {
+         char msg[96];
+         const char *arg = (ac >= 2) ? args.get(2) : nullptr;
+         Supervisor::cliMode(arg, msg, sizeof(msg));
+         sendTelnetMsgf(s, "[SUP] %s\r\n", msg);
+       }},
+      {"reboot", "reboot", "Graceful supervisor clean reboot (150ms delay, excluded from loop guard)",
+       [](int s, int, const Args &) {
+         char msg[64];
+         Supervisor::cliReboot(msg, sizeof(msg));
+         sendTelnetMsg(s, msg);
        }},
 #if SUP_FAULT_INJECTION
       {"inject", "inject <task> <spin|block> <ms>",

@@ -1,13 +1,17 @@
-// Supervisor.cpp - P1 (Shadow 모드): 관측 / 범인·피해자 판정 / 기록
+// Supervisor.cpp - 태스크 생존성 슈퍼바이저 (P1: Shadow / P2: Active 신속 클린 리부트)
 #include "Supervisor.h"
 
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 
+#include <Preferences.h>
 #include "esp_attr.h"
+#include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 namespace Supervisor {
 
@@ -15,12 +19,31 @@ std::atomic<uint32_t> g_lastFeedMs[kMaxTasks];
 
 namespace {
 
-constexpr uint32_t    kStackBytes = 2560;  // 2.5 KB (4KB -> 2.5KB 최적화, 1536B 가용 램 회수)
-constexpr UBaseType_t kPriority   = 14;    // CH1_REALTIME(13)보다 높아야 폭주 태스크를 선점할 수 있다
-constexpr BaseType_t  kCore       = 0;
-constexpr size_t      kRingSize   = 32;
-constexpr size_t      kSnapMax    = 24;    // 24개 (최대 15~16개 태스크 대비 마진 확보, 640B 가용 램 회수)
-constexpr uint32_t    kRtcMagic   = 0x53555056u;
+constexpr uint32_t    kStackBytes       = 2560;  // 2.5 KB (4KB -> 2.5KB 최적화, 1536B 가용 램 회수)
+constexpr UBaseType_t kPriority         = 14;    // CH1_REALTIME(13)보다 높아야 폭주 태스크를 선점할 수 있다
+constexpr BaseType_t  kCore             = 0;
+constexpr size_t      kRingSize         = 32;
+constexpr size_t      kSnapMax          = 24;    // 24개 (최대 15~16개 태스크 대비 마진 확보, 640B 가용 램 회수)
+constexpr uint32_t    kRtcMagic         = 0x53555056u;  // 'SUPV' (Shadow 아노말리 링버퍼용)
+constexpr uint32_t    kRtcMagicActive   = 0x53555052u;  // 'SUPR' (P2 Active 재부팅 레코드용)
+constexpr uint32_t    kLoopWindowS      = 600;          // 급속 재부팅 판정 창 (10분)
+constexpr uint8_t     kMaxConsecutive   = 3;            // 연속 N회 초과 시 Shadow 강등
+constexpr uint32_t    kHookTimeoutMs    = 200;          // 재부팅 직전 훅 허용 시간
+constexpr uint64_t    kBackstopUs       = 1'500'000;    // 훅이 멈춰도 1.5초 후 강제 재시작
+
+struct RtcRecord {
+  uint32_t magic;
+  uint32_t total;        // Supervisor 유발 재부팅 누적
+  uint32_t lastUptimeS;  // 직전 재부팅 시점의 업타임(초)
+  uint8_t  consecutive;  // 급속 재부팅 연속 횟수
+  uint8_t  lastTask;
+  uint8_t  lastVerdict;
+  uint8_t  demoted;      // 1 = 루프 방지로 Shadow 강제 (전원 사이클 시 NVS 동기화)
+  char     why[16];
+};
+static_assert(sizeof(RtcRecord) <= 32, "RTC 레코드는 작게 유지");
+
+RTC_NOINIT_ATTR RtcRecord s_rtc;
 
 TaskHandle_t                   s_handle[kMaxTasks];
 TaskSpec                       s_spec[kMaxTasks];
@@ -29,6 +52,19 @@ bool                           s_reported[kMaxTasks];
 std::atomic<uint32_t>          s_holdUntil[kMaxTasks];  // 0 = 유예 없음
 std::atomic<SemaphoreHandle_t> s_waitSem[kMaxTasks];
 std::atomic<Mode>              s_mode{Mode::Shadow};
+
+std::atomic<uint8_t>  s_exempt{0};
+std::atomic<uint32_t> s_exemptStartMs{0};
+std::atomic<uint32_t> s_exemptCooldownUntilMs{0};
+std::atomic<uint32_t> s_bootGraceUntilMs{0};
+std::atomic<bool>     s_rebooting{false};
+PreRebootHook         s_hook = nullptr;
+uint8_t               s_confirm[kMaxTasks] = {};
+uint32_t              s_acted = 0;
+
+[[nodiscard]] uint32_t uptimeSeconds() noexcept {
+  return static_cast<uint32_t>(esp_timer_get_time() / 1'000'000ULL);
+}
 
 Event    s_ring[kRingSize];
 size_t   s_ringHead   = 0;
@@ -148,11 +184,48 @@ void record(const Event& e) {
 }
 
 void evaluate() {
-  const uint32_t now         = nowMs();
-  uint8_t        missing[kMaxTasks];
-  uint8_t        nMissing    = 0;
-  uint8_t        registered  = 0;
-  bool           anySuspect  = false;
+  const uint32_t now = nowMs();
+
+  // 1) 부팅 시동 유예 (15초): 초기화 과정 오탐 방지
+  if (now < s_bootGraceUntilMs.load(std::memory_order_relaxed)) {
+    for (uint8_t i = 0; i < kMaxTasks; ++i) {
+      s_suspect[i]  = 0;
+      s_confirm[i]  = 0;
+      s_reported[i] = false;
+    }
+    s_baseValid = false;
+    return;
+  }
+
+  // 2) 글로벌 유예 (OTA, Wi-Fi 스캔) 및 사후 쿨다운 (2초)
+  bool is_exempt = false;
+  if (s_exempt.load(std::memory_order_relaxed) > 0) {
+    const uint32_t start_ms = s_exemptStartMs.load(std::memory_order_relaxed);
+    const uint32_t elapsed  = (now >= start_ms) ? (now - start_ms) : 0;
+    if (elapsed <= kMaxExemptDurationMs) {
+      is_exempt = true;
+    }
+  }
+  if (!is_exempt) {
+    const uint32_t cd = s_exemptCooldownUntilMs.load(std::memory_order_relaxed);
+    if (cd != 0 && static_cast<int32_t>(cd - now) > 0) {
+      is_exempt = true;
+    }
+  }
+  if (is_exempt) {
+    for (uint8_t i = 0; i < kMaxTasks; ++i) {
+      s_suspect[i]  = 0;
+      s_confirm[i]  = 0;
+      s_reported[i] = false;
+    }
+    s_baseValid = false;
+    return;
+  }
+
+  uint8_t missing[kMaxTasks];
+  uint8_t nMissing   = 0;
+  uint8_t registered = 0;
+  bool    anySuspect = false;
 
   for (uint8_t i = 0; i < kMaxTasks; ++i) {
     if (s_handle[i] == nullptr) continue;
@@ -162,6 +235,7 @@ void evaluate() {
     if (hold != 0 && static_cast<int32_t>(hold - now) > 0) {
       s_suspect[i]  = 0;
       s_reported[i] = false;
+      s_confirm[i]  = 0;
       continue;
     }
     const uint32_t last = g_lastFeedMs[i].load(std::memory_order_relaxed);
@@ -169,12 +243,13 @@ void evaluate() {
     if (age <= s_spec[i].deadline_ms) {
       s_suspect[i]  = 0;
       s_reported[i] = false;
+      s_confirm[i]  = 0;
       continue;
     }
     anySuspect = true;
     if (s_suspect[i] < 255) ++s_suspect[i];
     if (s_suspect[i] == 1 && !s_baseValid) takeBaseline();
-    if (s_suspect[i] >= kConfirmCount && !s_reported[i]) missing[nMissing++] = i;
+    if (s_suspect[i] >= kConfirmCount) missing[nMissing++] = i;
   }
 
   if (!anySuspect) {
@@ -199,22 +274,42 @@ void evaluate() {
 
   for (uint8_t m = 0; m < nMissing; ++m) {
     const uint8_t id = missing[m];
-    Event         e{};
+    if (id >= kMaxTasks) continue;
+
+    Event e{};
     e.t_ms    = now;
     e.task    = id;
     e.culprit = js[m].culprit;
     e.verdict = js[m].v;
     e.state   = js[m].state;
     e.cpu_pct = js[m].cpu;
-    record(e);
-    s_reported[id] = true;  // 같은 장애를 100ms 마다 반복 기록하지 않음
+
+    if (!s_reported[id]) {
+      record(e);
+      s_reported[id] = true;  // RTC 링버퍼는 첫 감지 시 1회만 기록
+    }
 
     const bool culprit = (js[m].v == Verdict::CulpritHog || js[m].v == Verdict::CulpritSelfStall);
-    if (!culprit) continue;
+    if (!culprit) {
+      s_confirm[id] = 0;
+      continue;
+    }
+
     if (s_mode.load(std::memory_order_relaxed) == Mode::Active) {
-      // P2: 협조적 중지 요청 -> 유예 -> (락 미보유 확인 후) 강제 삭제 -> 재생성
+      if (s_confirm[id] < 0xFF) ++s_confirm[id];
+      if (s_confirm[id] >= kConfirmCount) {
+        s_confirm[id] = 0;
+        ++s_acted;
+        (void)rebootNow(id, static_cast<uint8_t>(js[m].v),
+                        js[m].v == Verdict::CulpritHog ? "HOG" : "STALL",
+                        /*countsTowardLoop=*/true);
+      }
     } else {
-      ++s_wouldAct;
+      if (s_confirm[id] == 0) {
+        // Shadow 모드: 비정상 첫 감지 시에만 wouldAct 증가
+        ++s_wouldAct;
+        s_confirm[id] = 1;
+      }
     }
   }
 }
@@ -278,8 +373,54 @@ void registerTask(uint8_t id, TaskHandle_t h, const TaskSpec& spec) {
   g_lastFeedMs[id].store(nowMs(), std::memory_order_relaxed);
 }
 
+void setPreRebootHook(PreRebootHook hook) noexcept { s_hook = hook; }
+
+void enterGlobalExempt() noexcept {
+  if (s_exempt.fetch_add(1, std::memory_order_relaxed) == 0) {
+    s_exemptStartMs.store(nowMs(), std::memory_order_relaxed);
+  }
+}
+
+void exitGlobalExempt() noexcept {
+  if (s_exempt.fetch_sub(1, std::memory_order_relaxed) == 1) {
+    s_exemptCooldownUntilMs.store(nowMs() + kPostExemptCooldownMs, std::memory_order_relaxed);
+  }
+}
+
+void onBoot() noexcept {
+  const bool swReset = (esp_reset_reason() == ESP_RST_SW);
+  if (!swReset || s_rtc.magic != kRtcMagicActive) {
+    std::memset(&s_rtc, 0, sizeof(s_rtc));
+    s_rtc.magic = kRtcMagicActive;
+  }
+
+  Mode saved = Mode::Shadow;
+  {
+    Preferences p;
+    if (p.begin("sup", /*readOnly=*/true)) {
+      saved = (p.getUChar("mode", 0) == 1) ? Mode::Active : Mode::Shadow;
+      p.end();
+    }
+  }
+
+  if (s_rtc.demoted != 0) {
+    saved = Mode::Shadow;
+    ESP_LOGW("SUP", "demoted to Shadow (rapid reboot loop guard)");
+    // 전원 사이클 후에도 루프를 방지하도록 NVS의 mode 키도 Shadow로 영구 동기화
+    Preferences p;
+    if (p.begin("sup", false)) {
+      p.putUChar("mode", 0);
+      p.end();
+    }
+  }
+
+  s_mode.store(saved, std::memory_order_relaxed);
+}
+
 void start(Mode m) {
-  s_mode.store(m);
+  s_mode.store(m, std::memory_order_relaxed);
+  s_bootGraceUntilMs.store(nowMs() + kBootStartupGraceMs, std::memory_order_relaxed);
+
   if (esp_reset_reason() == ESP_RST_POWERON) s_rtcMagic = 0;  // 전원 인가 직후 RTC 값은 쓰레기
   if (s_rtcMagic == kRtcMagic) {
     s_prevBoot    = s_rtcLast;  // 직전 부팅의 마지막 판정을 보존
@@ -289,8 +430,132 @@ void start(Mode m) {
   xTaskCreateStaticPinnedToCore(taskMain, "Supervisor", kStackBytes, nullptr, kPriority, s_stack, &s_tcb, kCore);
 }
 
-void setMode(Mode m) { s_mode.store(m); }
-Mode mode() { return s_mode.load(); }
+void setMode(Mode m, bool persist) noexcept {
+  if (m == Mode::Active) {
+    s_rtc.demoted = 0;  // 명시적 Active 요청 = 강등 플래그 해제
+  }
+  s_mode.store(m, std::memory_order_relaxed);
+  if (persist) {
+    Preferences p;
+    if (p.begin("sup", false)) {
+      p.putUChar("mode", m == Mode::Active ? 1 : 0);
+      p.end();
+    }
+  }
+}
+
+Mode mode() noexcept { return s_mode.load(std::memory_order_relaxed); }
+
+namespace {
+void backstopCb(void*) { esp_restart(); }
+}  // namespace
+
+bool rebootNow(uint8_t taskIdx, uint8_t verdict, const char* why, bool countsTowardLoop) noexcept {
+  if (s_rebooting.exchange(true, std::memory_order_acq_rel)) return true;  // 이미 재부팅 진행 중
+
+  const uint32_t up = uptimeSeconds();
+
+  // 1) 루프 방지 판정 (락 없음, RTC 메모리만 사용)
+  if (countsTowardLoop) {
+    const uint8_t next = (up < kLoopWindowS)
+                             ? static_cast<uint8_t>(s_rtc.consecutive + 1)
+                             : 1;
+    if (next > kMaxConsecutive) {
+      s_rtc.demoted     = 1;
+      s_rtc.lastTask    = taskIdx;
+      s_rtc.lastVerdict = verdict;
+      std::snprintf(s_rtc.why, sizeof(s_rtc.why), "LOOPGUARD");
+      s_mode.store(Mode::Shadow, std::memory_order_relaxed);
+      s_rebooting.store(false, std::memory_order_release);
+      ESP_LOGE("SUP", "reboot loop guard tripped -> Demoted to Shadow");
+      return false;
+    }
+    s_rtc.consecutive = next;
+  }
+
+  // 2) 사유 기록 (재부팅 후 sup status 로 확인)
+  ++s_rtc.total;
+  s_rtc.lastUptimeS = up;
+  s_rtc.lastTask    = taskIdx;
+  s_rtc.lastVerdict = verdict;
+  std::snprintf(s_rtc.why, sizeof(s_rtc.why), "%s", why ? why : "-");
+
+  // 3) 백스톱 타이머: 1.5초 후 강제 재시작 (사전 훅이 멈춰도 esp_timer 태스크에서 독립 실행)
+  esp_timer_handle_t t = nullptr;
+  const esp_timer_create_args_t args{
+      .callback              = backstopCb,
+      .arg                   = nullptr,
+      .dispatch_method       = ESP_TIMER_TASK,
+      .name                  = "sup_bs",
+      .skip_unhandled_events = true,
+  };
+  if (esp_timer_create(&args, &t) == ESP_OK) {
+    esp_timer_start_once(t, kBackstopUs);
+  }
+
+  // 4) 선택적 사전 훅 (NVS pending flush 등 - try-lock 계약)
+  if (s_hook) {
+    (void)s_hook(kHookTimeoutMs);
+  }
+
+  // 5) 락/클라이언트 정리 없이 직접 재시작
+  esp_restart();
+  return true;
+}
+
+namespace {
+void manualRebootTimerCb(void*) {
+  rebootNow(kNoTask, kNoTask, "manual", /*countsTowardLoop=*/false);
+}
+}  // namespace
+
+void scheduleManualReboot(uint32_t delay_ms) noexcept {
+  esp_timer_handle_t t = nullptr;
+  const esp_timer_create_args_t args{
+      .callback              = manualRebootTimerCb,
+      .arg                   = nullptr,
+      .dispatch_method       = ESP_TIMER_TASK,
+      .name                  = "sup_man_rb",
+      .skip_unhandled_events = true,
+  };
+  if (esp_timer_create(&args, &t) == ESP_OK) {
+    esp_timer_start_once(t, static_cast<uint64_t>(delay_ms) * 1000ULL);
+  } else {
+    rebootNow(kNoTask, kNoTask, "manual", false);
+  }
+}
+
+void formatRebootStatus(char* out, size_t n) noexcept {
+  std::snprintf(out, n,
+                "Reboots(sup): total=%lu consec=%u last{task=%u v=%u up=%lus why=%s}%s",
+                static_cast<unsigned long>(s_rtc.total), s_rtc.consecutive,
+                s_rtc.lastTask, s_rtc.lastVerdict,
+                static_cast<unsigned long>(s_rtc.lastUptimeS), s_rtc.why,
+                s_rtc.demoted ? " [DEMOTED]" : "");
+}
+
+bool cliMode(const char* arg, char* out, size_t n) noexcept {
+  if (arg && *arg) {
+    if (std::strcmp(arg, "active") == 0) {
+      setMode(Mode::Active, true);
+    } else if (std::strcmp(arg, "shadow") == 0) {
+      setMode(Mode::Shadow, true);
+    } else {
+      std::snprintf(out, n, "usage: sup mode [shadow|active]");
+      return false;
+    }
+  }
+  std::snprintf(out, n, "Mode: %s%s",
+                mode() == Mode::Active ? "Active" : "Shadow",
+                s_rtc.demoted ? " (demoted: use 'sup mode active' to re-arm)" : "");
+  return true;
+}
+
+bool cliReboot(char* out, size_t n) noexcept {
+  std::snprintf(out, n, "Gateway is rebooting manually in 150ms...\r\n");
+  scheduleManualReboot(150);
+  return true;
+}
 
 void holdFor(uint8_t id, uint32_t ms) {
   if (id >= kMaxTasks) return;
@@ -351,6 +616,7 @@ void dump(Writer w, void* ctx) {
 void getSnapshot(Snapshot& out) {
   out.mode       = s_mode.load(std::memory_order_relaxed);
   out.would_act  = s_wouldAct;
+  out.acted      = s_acted;
   out.task_count = 0;
   for (uint8_t i = 0; i < kMaxTasks; ++i) {
     if (s_handle[i] == nullptr) continue;

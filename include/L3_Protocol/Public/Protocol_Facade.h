@@ -209,6 +209,9 @@ bool ProtocolDiag_CommitPendingNvs() noexcept;
 /// Force flushes all pending NVS items (e.g. before restart or OTA).
 void ProtocolDiag_ForceFlushAllNvs(uint32_t per_item_timeout_ms = 50) noexcept;
 
+/// PreRebootHook compliant function for Supervisor P2 Active Mode (try-lock with timeout budget).
+bool Protocol_ForceFlushPendingNvs(uint32_t timeout_ms) noexcept;
+
 /// Record timestamp of CH1 activity (bus quiet detector).
 void ProtocolDiag_RecordCh1Rx() noexcept;
 

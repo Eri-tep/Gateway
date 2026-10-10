@@ -416,7 +416,7 @@ static void Boot_StartTasks() {
     }
   }
 
-  Supervisor::start(Supervisor::Mode::Shadow);
+  Supervisor::start(Supervisor::mode());
 }
 
 // ============================================================================
@@ -426,6 +426,8 @@ void setup() {
   Boot_CheckCrashLoop();
   Boot_InitSyncPrimitives();
   Boot_RestoreConfigAndState();
+  Supervisor::onBoot();
+  Supervisor::setPreRebootHook(Protocol_ForceFlushPendingNvs);
   Boot_InitSubsystems();
   Boot_InitHardwareAndDevices();
   Boot_PreheatHotPaths();

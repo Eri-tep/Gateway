@@ -33,6 +33,9 @@ inline constexpr uint8_t  kNoTask       = 0xFF;
 inline constexpr uint32_t kPeriodMs     = 100;  // 감시 주기
 inline constexpr uint8_t  kConfirmCount = 3;    // 연속 N회 데드라인 초과 시에만 판정(오탐 방지)
 inline constexpr uint8_t  kHogCpuPct    = 90;   // 한 코어 기준 점유율 임계값(%)
+inline constexpr uint32_t kBootStartupGraceMs   = 15000;   // 부팅 초기 시동 유예 15초
+inline constexpr uint32_t kMaxExemptDurationMs  = 120000;  // 단일 유예 상한 120초
+inline constexpr uint32_t kPostExemptCooldownMs = 2000;    // 유예 종료 후 사후 유예 2초
 
 enum class Mode : uint8_t { Shadow, Active };
 
@@ -81,9 +84,32 @@ inline void heartbeat(uint8_t id) {
 // System_RegisterTaskHandle() 안에서 호출. start() 보다 먼저 모두 등록할 것.
 void registerTask(uint8_t id, TaskHandle_t h, const TaskSpec& spec);
 
+// 재부팅 직전 호출되는 선택적 훅 (NVS 지연 커밋 등). 반드시 "try-lock + timeout"으로만 구현할 것.
+using PreRebootHook = bool (*)(uint32_t timeout_ms) noexcept;
+void setPreRebootHook(PreRebootHook hook) noexcept;
+
+// 부팅 초기(태스크 생성 전, NVS 초기화 후)에 1회 호출
+void onBoot() noexcept;
+
 void start(Mode mode);
-void setMode(Mode m);
-Mode mode();
+void setMode(Mode m, bool persist = false) noexcept;
+[[nodiscard]] Mode mode() noexcept;
+
+// P2 클린 리부트 단행 (countsTowardLoop=false 는 수동 sup reboot 용)
+bool rebootNow(uint8_t taskIdx, uint8_t verdict, const char* why, bool countsTowardLoop) noexcept;
+void scheduleManualReboot(uint32_t delay_ms = 150) noexcept;
+
+// 글로벌 유예 제어 (OTA, Wi-Fi 스캔 등 판정 일시 유예)
+void enterGlobalExempt() noexcept;
+void exitGlobalExempt() noexcept;
+
+class ExemptGuard {
+ public:
+  ExemptGuard() noexcept { enterGlobalExempt(); }
+  ~ExemptGuard() noexcept { exitGlobalExempt(); }
+  ExemptGuard(const ExemptGuard&)            = delete;
+  ExemptGuard& operator=(const ExemptGuard&) = delete;
+};
 
 // 정당한 장시간 작업(OTA, bench, wifi scan)은 지금처럼 TWDT 를 직접 먹이지 말고
 // 이 유예로 선언한다. ms 동안 해당 태스크는 판정에서 제외된다.
@@ -128,6 +154,7 @@ struct TaskSnapshot {
 struct Snapshot {
   Mode         mode;
   uint32_t     would_act;
+  uint32_t     acted;
   uint8_t      task_count;
   TaskSnapshot tasks[kMaxTasks];
   uint8_t      event_count;
@@ -137,6 +164,10 @@ struct Snapshot {
 };
 
 void getSnapshot(Snapshot& out);
+
+void formatRebootStatus(char* out, size_t n) noexcept;
+bool cliMode(const char* arg, char* out, size_t n) noexcept;
+bool cliReboot(char* out, size_t n) noexcept;
 
 const char* verdictName(Verdict v);
 const char* stateName(uint8_t s);

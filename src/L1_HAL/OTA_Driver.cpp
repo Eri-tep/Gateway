@@ -660,6 +660,7 @@ static bool do_ota(const char *initial_url) {
 
 
 static void Task_HttpOta(void *pvParameters) {
+  Supervisor::ExemptGuard ota_guard;
   Supervisor::DeadlineHold net_hold(static_cast<uint8_t>(SystemTaskId::NETWORK), 120000);
   Supervisor::DeadlineHold telnet_hold(static_cast<uint8_t>(SystemTaskId::TELNET), 120000);
 
@@ -857,6 +858,7 @@ void SystemOta_InitArduinoOta(const char *hostname, const char *password) {
     ArduinoOTA.setPassword(password);
   }
   ArduinoOTA.onStart([]() {
+    Supervisor::enterGlobalExempt();
     g_ota_in_progress.store(true, std::memory_order_release);
     if (g_system_event_group) {
       xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
@@ -868,10 +870,12 @@ void SystemOta_InitArduinoOta(const char *hostname, const char *password) {
     System_FeedWdt(Config::Task::WDT_ID_NET);
   });
   ArduinoOTA.onEnd([]() {
+    Supervisor::exitGlobalExempt();
     ::Serial.println(F("[ArduinoOTA] Finished successfully!"));
     System_Restart("OTA Firmware Update");
   });
   ArduinoOTA.onError([](ota_error_t error) {
+    Supervisor::exitGlobalExempt();
     g_ota_in_progress.store(false, std::memory_order_release);
     if (g_system_event_group) {
       xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);

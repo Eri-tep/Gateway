@@ -391,6 +391,30 @@ void ProtocolDiag_ForceFlushAllNvs(uint32_t per_item_timeout_ms) noexcept {
   ProfileRepository::commitAutoProfileNvsIfPending();
 }
 
+bool Protocol_ForceFlushPendingNvs(uint32_t timeout_ms) noexcept {
+  const uint32_t start_ms = millis();
+  uint32_t per_item = timeout_ms / 3;
+  if (per_item == 0) per_item = 1;
+
+  // 1) 제어 템플릿 NVS 플러시 (pending 시에만 try-lock 시도)
+  if (Control_GetRegistry().isNvsDirty()) {
+    Control_GetRegistry().forceFlush(per_item);
+  }
+  uint32_t elapsed = millis() - start_ms;
+  if (elapsed >= timeout_ms) return true;
+
+  // 2) 도어폰 프레이밍 NVS 플러시 (pending 시에만 try-lock 시도)
+  if (Wallpad_DoorphoneIsFramingNvsDirty()) {
+    Wallpad_DoorphoneForceFlushNvs(per_item);
+  }
+  elapsed = millis() - start_ms;
+  if (elapsed >= timeout_ms) return true;
+
+  // 3) 자동 학습 프로필 NVS 플러시
+  ProfileRepository::commitAutoProfileNvsIfPending();
+  return true;
+}
+
 void ProtocolDiag_DoorphoneClearNvs(const char *nvs_ns) noexcept {
   Wallpad_DoorphoneClearNvs(nvs_ns);
 }
