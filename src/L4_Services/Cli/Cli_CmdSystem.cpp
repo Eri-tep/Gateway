@@ -1069,9 +1069,9 @@ void FormatNetworkStats(AppendBuf &out, const PktSnapshot &pkt) {
 
 void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
   out.append(DIV80);
-  out.appendFormat("%-10s %10s %12s %15s %10s %9s %8s %7s\r\n", "Channel",
+  out.appendFormat("%-10s %10s %12s %15s %10s %9s %8s\r\n", "Channel",
                    "RX Pkts", "TX Pkts", "CRC Err", "Inv Frm", "Timeouts",
-                   "Uncache", "QFull");
+                   "Uncache");
   out.append(DIV80);
 
   const char *rs_n[] = {"CH#1_IoT", "CH#2_WP#1", "CH#3_WP#2", "CH#4_WP#3"};
@@ -1082,13 +1082,12 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
     r_str.reset();
     r_str.appendFormat("%u (%.2f%%)", static_cast<unsigned>(crc),
                        rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
-    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u %7u\r\n", rs_n[i],
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", rs_n[i],
                      static_cast<unsigned>(rx),
                      static_cast<unsigned>(rs_st[i]->tx_pkts), r_str.c_str(),
                      static_cast<unsigned>(rs_st[i]->invalid_frames),
                      static_cast<unsigned>(rs_st[i]->timeouts),
-                     static_cast<unsigned>(rs_st[i]->uncached_pkts),
-                     static_cast<unsigned>(rs_st[i]->queue_full));
+                     static_cast<unsigned>(rs_st[i]->uncached_pkts));
   }
 
   FixedBuf<16> chan_name;
@@ -1108,14 +1107,13 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
     r_str.appendFormat("%u (%.2f%%)", static_cast<unsigned>(crc),
                        rx ? (static_cast<float>(crc) / rx) * 100.0f : 0.0f);
 
-    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u %7u\r\n", chan_name.c_str(),
+    out.appendFormat("%-10s %10u %12u %15s %10u %9u %8u\r\n", chan_name.c_str(),
                      static_cast<unsigned>(slot.rx_pkts),
                      static_cast<unsigned>(slot.tx_pkts),
                      r_str.c_str(),
                      static_cast<unsigned>(slot.invalid_frames),
                      static_cast<unsigned>(slot.timeouts),
-                     static_cast<unsigned>(slot.uncached_pkts),
-                     static_cast<unsigned>(slot.dropped_pkts));
+                     static_cast<unsigned>(slot.uncached_pkts));
   }
 }
 
