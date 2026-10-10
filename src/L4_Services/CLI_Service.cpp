@@ -415,10 +415,10 @@ bool TelnetManager::handlePassword(TelnetSession *session,
 TelnetManager::TelnetManager(uint16_t port) : _port(port) {}
 
 // ============================================================================
-// Shared CLI 5KB Scratch Buffer Implementation
+// Shared CLI 7KB Scratch Buffer Implementation
 // ============================================================================
 
-static char s_cli_scratch_buf[5120];
+static char s_cli_scratch_buf[7168];
 
 char *Cli_GetScratchBuffer() {
   return s_cli_scratch_buf;
