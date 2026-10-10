@@ -13,15 +13,23 @@
 #include <atomic>
 #include <span>
 
+static std::atomic<uint32_t> s_last_ch1_rx_ms{0};
+
+void ProtocolDiag_RecordCh1Rx() noexcept {
+  s_last_ch1_rx_ms.store(millis(), std::memory_order_relaxed);
+}
+
+uint32_t ProtocolDiag_GetLastCh1RxMs() noexcept {
+  return s_last_ch1_rx_ms.load(std::memory_order_relaxed);
+}
+
 void ProtocolDiag_WarmCacheSaveToNvs() noexcept {
   WarmCache_SaveToNvs();
 }
 
 void ProtocolDiag_WarmCacheCheckNvsDebounce() noexcept {
-  // NVS write (WarmCache_CheckNvsDebounce) is intentionally NOT called here.
-  // Network task (Core 0) must never block on Preferences NVS write.
-  // Actual NVS flush is performed inside Wallpad_BuildNextPollPacket()
-  // which runs on Task_Ch1 (Core 1) every polling cycle.
+  // Decoupled NVS persistence commit tick (Core 0, round-robin, max 1 commit/tick)
+  ProtocolDiag_CommitPendingNvs();
   Wallpad_DoorphoneCheckBellTimeout();
 }
 
@@ -342,6 +350,47 @@ bool ProtocolDiag_CommitAutoProfileNvsIfPending() noexcept {
   return ProfileRepository::commitAutoProfileNvsIfPending();
 }
 
+bool ProtocolDiag_CommitPendingNvs() noexcept {
+  static uint8_t s_rr_idx = 0;
+  constexpr uint8_t NUM_ITEMS = 3;
+
+  for (uint8_t i = 0; i < NUM_ITEMS; ++i) {
+    const uint8_t cur = s_rr_idx;
+    s_rr_idx = (s_rr_idx + 1) % NUM_ITEMS;
+
+    switch (cur) {
+    case 0:
+      if (Control_GetRegistry().isNvsDirty()) {
+        if (Control_GetRegistry().commitNvsIfPending()) {
+          return true; // 1 commit per tick limit enforced
+        }
+      }
+      break;
+    case 1:
+      if (Wallpad_DoorphoneIsFramingNvsDirty()) {
+        if (Wallpad_DoorphoneCommitNvsIfPending()) {
+          return true; // 1 commit per tick limit enforced
+        }
+      }
+      break;
+    case 2:
+      if (ProfileRepository::commitAutoProfileNvsIfPending()) {
+        return true; // 1 commit per tick limit enforced
+      }
+      break;
+    default:
+      break;
+    }
+  }
+  return false;
+}
+
+void ProtocolDiag_ForceFlushAllNvs(uint32_t per_item_timeout_ms) noexcept {
+  Control_GetRegistry().forceFlush(per_item_timeout_ms);
+  Wallpad_DoorphoneForceFlushNvs(per_item_timeout_ms);
+  ProfileRepository::commitAutoProfileNvsIfPending();
+}
+
 void ProtocolDiag_DoorphoneClearNvs(const char *nvs_ns) noexcept {
   Wallpad_DoorphoneClearNvs(nvs_ns);
 }
@@ -507,7 +556,13 @@ void ProtocolDiag_ResetBridgeStats() noexcept {
 // ── L2 RS485 Dispatcher SPI Binding & Lifecycle ─────────────────────────────
 void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
   dispatcher.onBuildPoll = Wallpad_BuildNextPollPacket;
-  dispatcher.onBusPacket = Wallpad_HandleBusPacket;
+  dispatcher.onBusPacket = [](uint8_t ch, const StaticPacket &pkt,
+                              const StaticPacket *orig) noexcept {
+    if (ch == 1) {
+      ProtocolDiag_RecordCh1Rx();
+    }
+    Wallpad_HandleBusPacket(ch, pkt, orig);
+  };
   dispatcher.onTimeout = Device_HandlePollingTimeout;
   dispatcher.onDispatchControl = Router_DispatchControl;
   dispatcher.onGetPollIntervalMs = Wallpad_GetPollIntervalMs;
@@ -517,6 +572,7 @@ void Protocol_BindDispatcher(RS485_PacketDispatcher &dispatcher) noexcept {
     return e.isAutoMode() && !e.isLocked();
   };
   dispatcher.onFeedAutoFrame = [](std::span<const uint8_t> f) noexcept {
+    ProtocolDiag_RecordCh1Rx();
     AutoProbe_GetEngine().feedFrame(f);
   };
   dispatcher.onExtractLength = [](const uint8_t *s, size_t len, size_t idx) noexcept {

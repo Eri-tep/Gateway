@@ -1183,14 +1183,15 @@ void Task_Telnet(void *pvParameters) {
     // 2. 시스템 재부팅 가드
     if (s_restart_pending.load(std::memory_order_acquire)) {
       s_restart_pending.store(false, std::memory_order_relaxed);
+      ProtocolDiag_ForceFlushAllNvs(50);
       System_Restart(s_restart_reason ? s_restart_reason : "Telnet Command");
     }
 
     // 3. 온라인 메인 I/O 처리
     s_telnet_manager.tick();
 
-    // 4. 비동기 NVS 저장 커밋 (Task_Ch1으로부터 분리된 저우선순위 백그라운드 플러시)
-    ProtocolDiag_CommitAutoProfileNvsIfPending();
+    // 4. 비동기 NVS 저장 커밋 (Task_Ch1으로부터 분리된 저우선순위 백그라운드 플러시: 라운드로빈 틱당 최대 1건)
+    ProtocolDiag_CommitPendingNvs();
 
     TSTAGE(11);
     const bool has_clients = s_telnet_manager.hasActiveClients();

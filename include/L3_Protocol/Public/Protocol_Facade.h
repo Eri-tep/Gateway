@@ -203,6 +203,18 @@ void ProtocolDiag_RequestRelearn() noexcept;
 /// Background commit for auto-probing profile learning result (Task_Ch1 non-blocking).
 bool ProtocolDiag_CommitAutoProfileNvsIfPending() noexcept;
 
+/// Round-robin background commit for all L3 decoupled NVS persistence targets (Task_Ch1 non-blocking).
+bool ProtocolDiag_CommitPendingNvs() noexcept;
+
+/// Force flushes all pending NVS items (e.g. before restart or OTA).
+void ProtocolDiag_ForceFlushAllNvs(uint32_t per_item_timeout_ms = 50) noexcept;
+
+/// Record timestamp of CH1 activity (bus quiet detector).
+void ProtocolDiag_RecordCh1Rx() noexcept;
+
+/// Return timestamp of most recent CH1 activity.
+uint32_t ProtocolDiag_GetLastCh1RxMs() noexcept;
+
 // ── Doorphone Management Facade ──────────────────────────────────────────────
 void ProtocolDiag_DoorphoneClearNvs(const char *nvs_ns) noexcept;
 void ProtocolDiag_DoorphoneGetFraming(FramingStatus &out_status, uint8_t &out_stx,

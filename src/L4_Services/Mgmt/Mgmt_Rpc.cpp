@@ -410,6 +410,7 @@ static void HandleRpc_SystemReboot(int sock, long req_id, const char *json_str,
   char reason_buf[64] = {0};
   findJsonStringValue(json_str, "reason", reason_buf, sizeof(reason_buf));
   sendRpcResponse(sock, req_id, "ok");
+  ProtocolDiag_ForceFlushAllNvs(50);
   vTaskDelay(pdMS_TO_TICKS(100));
   System_Restart(reason_buf[0] ? reason_buf : "RPC Requested Reboot");
 }

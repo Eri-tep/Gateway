@@ -311,8 +311,11 @@ public:
     GroupControlTemplate *grp = registerOrTouchUnlocked(dev_id, initial_name);
     if (!grp)
       return false;
+    portENTER_CRITICAL(&_snap_mux);
     mutator(*grp);
+    portEXIT_CRITICAL(&_snap_mux);
     rebuildNormSub1LutLocked();
+    requestNvsSave();
     return true;
   }
 
@@ -329,6 +332,13 @@ public:
   void loadFromNvsForProfile(uint8_t prof_idx);
   void onProfileChanged(uint8_t old_prof_idx, uint8_t new_prof_idx);
 
+  void requestNvsSave() noexcept;
+  bool commitNvsIfPending() noexcept;
+  bool forceFlush(uint32_t timeout_ms = 50) noexcept;
+  [[nodiscard]] bool isNvsDirty() const noexcept {
+    return _nvs_dirty.load(std::memory_order_relaxed);
+  }
+
 private:
   GroupControlTemplate _groups[MAX_GROUPS];
   size_t _group_count{0};
@@ -336,6 +346,17 @@ private:
   mutable SemaphoreHandle_t _mutex{nullptr};
   mutable StaticSemaphore_t _nvs_mutex_storage{};
   mutable SemaphoreHandle_t _nvs_mutex{nullptr};
+  mutable StaticSemaphore_t _commit_mutex_storage{};
+  mutable SemaphoreHandle_t _commit_mutex{nullptr};
+  mutable portMUX_TYPE _snap_mux = portMUX_INITIALIZER_UNLOCKED;
+
+  std::atomic<bool> _nvs_dirty{false};
+  std::atomic<uint32_t> _first_request_ms{0};
+  std::atomic<uint32_t> _last_request_ms{0};
+  uint32_t _next_retry_ms{0};
+  uint8_t _failure_count{0};
+  uint32_t _last_committed_crc32{0};
+  bool _has_committed_crc{false};
 
   void rebuildNormSub1LutLocked() noexcept;
   void autoAssignGroupName(GroupControlTemplate &group);

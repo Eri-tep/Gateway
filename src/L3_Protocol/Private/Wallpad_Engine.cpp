@@ -18,6 +18,8 @@
 #include <cstring>
 #include <esp_timer.h>
 
+uint32_t ProtocolDiag_GetLastCh1RxMs() noexcept;
+
 // ============================================================================
 // PART 1: VENDOR PROFILES & UNIVERSAL PROTOCOL PARSER ENGINE
 // ============================================================================
@@ -1307,7 +1309,7 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
 
   if (stx == 0x7F && etx == 0xEE && (len == 0 || len == 5)) {
     setFixedLock(0x7F, 0xEE, 5);
-    saveToNvs(nvs_ns, tag);
+    requestNvsSave(nvs_ns);
     return;
   }
 
@@ -1332,7 +1334,7 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
     uint8_t m = consecutive_matches.fetch_add(1, std::memory_order_relaxed) + 1;
     if (m >= 3) {
       status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
-      saveToNvs(nvs_ns, tag);
+      requestNvsSave(nvs_ns);
     } else {
       status.store(FramingStatus::LEARNING, std::memory_order_relaxed);
     }
@@ -1359,6 +1361,12 @@ void FramingTracker::processFrame(uint8_t stx, uint8_t etx, uint8_t len,
   }
 }
 
+void FramingTracker::init() noexcept {
+  if (!commit_mutex) {
+    commit_mutex = xSemaphoreCreateMutexStatic(&commit_mutex_storage);
+  }
+}
+
 void FramingTracker::restoreFromNvs(const char *nvs_ns,
                                     const char *tag) noexcept {
   if (!nvs_ns)
@@ -1379,6 +1387,17 @@ void FramingTracker::restoreFromNvs(const char *nvs_ns,
       candidate_len.store(l, std::memory_order_relaxed);
       status.store(FramingStatus::LOCKED, std::memory_order_relaxed);
       is_custom_fixed.store(fixed, std::memory_order_relaxed);
+
+      struct FramingSnapshot {
+        uint8_t s, e, l;
+        bool locked, fixed;
+        char ns[16];
+      } snap{s, e, l, locked, fixed, {0}};
+      strncpy(snap.ns, nvs_ns, sizeof(snap.ns));
+      last_committed_crc32 =
+          FastCrc32(reinterpret_cast<const uint8_t *>(&snap), sizeof(snap));
+      has_committed_crc = true;
+
       ::Serial.printf("[%s] Restored valid framing from NVS (%s): STX=0x%02X, "
                       "ETX=0x%02X, LEN=%u\r\n",
                       tag, nvs_ns, s, e, l);
@@ -1386,48 +1405,172 @@ void FramingTracker::restoreFromNvs(const char *nvs_ns,
   }
 }
 
-void FramingTracker::saveToNvs(const char *nvs_ns, const char *tag) noexcept {
-  if (!nvs_ns)
-    nvs_ns = "dp_frame_p0";
+void FramingTracker::requestNvsSave(const char *nvs_ns) noexcept {
+  if (nvs_ns && nvs_ns[0]) {
+    strncpy(pending_nvs_ns, nvs_ns, sizeof(pending_nvs_ns) - 1);
+    pending_nvs_ns[sizeof(pending_nvs_ns) - 1] = '\0';
+  }
+  const uint32_t now = millis();
+  bool expected = false;
+  if (nvs_dirty.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    first_request_ms.store(now, std::memory_order_release);
+  }
+  last_request_ms.store(now, std::memory_order_release);
+}
 
-  uint8_t s = candidate_stx.load(std::memory_order_relaxed);
-  uint8_t e = candidate_etx.load(std::memory_order_relaxed);
-  uint8_t l = candidate_len.load(std::memory_order_relaxed);
-  bool is_locked =
-      (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
-  bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
+bool FramingTracker::commitNvsIfPending() noexcept {
+  if (!nvs_dirty.load(std::memory_order_acquire)) {
+    return false;
+  }
 
-  static uint8_t s_last_s = 0, s_last_e = 0, s_last_l = 0;
-  static bool s_last_locked = false, s_last_fixed = false;
-  static char s_last_ns[16] = {0};
+  const uint32_t now = millis();
+  if (next_retry_ms > 0 && static_cast<int32_t>(now - next_retry_ms) < 0) {
+    return false;
+  }
 
-  if (s == s_last_s && e == s_last_e && l == s_last_l &&
-      is_locked == s_last_locked && fixed == s_last_fixed &&
-      strncmp(s_last_ns, nvs_ns, sizeof(s_last_ns)) == 0) {
-    return; // 동일 설정 중복 쓰기 방지로 Flash I/O 지연 스킵
+  const uint32_t first_req = first_request_ms.load(std::memory_order_relaxed);
+  const uint32_t last_req = last_request_ms.load(std::memory_order_relaxed);
+  const bool starvation_triggered =
+      (first_req > 0 && static_cast<int32_t>(now - (first_req + 30000)) >= 0);
+
+  if (!starvation_triggered) {
+    // 1. Debounce (3s quiet since last request)
+    if (last_req > 0 && static_cast<int32_t>(now - (last_req + 3000)) < 0) {
+      return false;
+    }
+    // 2. Bus quiet (1000ms silence on CH1)
+    const uint32_t last_ch1_rx = ProtocolDiag_GetLastCh1RxMs();
+    if (last_ch1_rx > 0 && static_cast<int32_t>(now - (last_ch1_rx + 1000)) < 0) {
+      return false;
+    }
+  }
+
+  if (!commit_mutex || xSemaphoreTake(commit_mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+    return false;
+  }
+
+  nvs_dirty.exchange(false, std::memory_order_acq_rel);
+
+  const uint8_t s = candidate_stx.load(std::memory_order_relaxed);
+  const uint8_t e = candidate_etx.load(std::memory_order_relaxed);
+  const uint8_t l = candidate_len.load(std::memory_order_relaxed);
+  const bool is_locked = (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
+  const bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
+
+  struct FramingSnapshot {
+    uint8_t s, e, l;
+    bool locked, fixed;
+    char ns[16];
+  } snap{s, e, l, is_locked, fixed, {0}};
+  strncpy(snap.ns, pending_nvs_ns, sizeof(snap.ns));
+
+  const uint32_t current_crc =
+      FastCrc32(reinterpret_cast<const uint8_t *>(&snap), sizeof(snap));
+
+  if (has_committed_crc && current_crc == last_committed_crc32) {
+    failure_count = 0;
+    next_retry_ms = 0;
+    xSemaphoreGive(commit_mutex);
+    return true; // Wear guard: identical data
   }
 
   Preferences prefs;
-  if (prefs.begin(nvs_ns, false)) {
+  bool success = false;
+  if (prefs.begin(pending_nvs_ns, false)) {
     prefs.putUChar("stx", s);
     prefs.putUChar("etx", e);
     prefs.putUChar("len", l);
     prefs.putBool("locked", is_locked);
     prefs.putBool("fixed", fixed);
     prefs.end();
-
-    s_last_s = s;
-    s_last_e = e;
-    s_last_l = l;
-    s_last_locked = is_locked;
-    s_last_fixed = fixed;
-    strncpy(s_last_ns, nvs_ns, sizeof(s_last_ns) - 1);
-    s_last_ns[sizeof(s_last_ns) - 1] = '\0';
-
-    ::Serial.printf("[%s] Persisted framing to NVS (%s): STX=0x%02X, "
-                    "ETX=0x%02X, LEN=%u%s\r\n",
-                    tag, nvs_ns, s, e, l, fixed ? " [FIXED]" : "");
+    success = true;
   }
+
+  if (success) {
+    last_committed_crc32 = current_crc;
+    has_committed_crc = true;
+    failure_count = 0;
+    next_retry_ms = 0;
+    ESP_LOGI("FRAMING", "[NVS] Decoupled commit succeeded (%s): STX=0x%02X ETX=0x%02X L=%u",
+             pending_nvs_ns, s, e, l);
+  } else {
+    nvs_dirty.store(true, std::memory_order_release);
+    failure_count = std::min<uint8_t>(failure_count + 1, 5);
+    uint32_t backoff_ms = 3000 * (1 << (failure_count - 1));
+    if (backoff_ms > 60000) backoff_ms = 60000;
+    next_retry_ms = millis() + backoff_ms;
+    ESP_LOGW("FRAMING", "[NVS] Commit failed (attempt %u), backoff %u ms",
+             failure_count, backoff_ms);
+  }
+
+  xSemaphoreGive(commit_mutex);
+  return success;
+}
+
+bool FramingTracker::forceFlush(uint32_t timeout_ms) noexcept {
+  if (!nvs_dirty.load(std::memory_order_acquire)) {
+    return true;
+  }
+
+  if (!commit_mutex || xSemaphoreTake(commit_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+    ESP_LOGW("FRAMING", "[WARN] forceFlush lock timeout (%u ms), skipping to prevent hang", timeout_ms);
+    return false;
+  }
+
+  nvs_dirty.exchange(false, std::memory_order_acq_rel);
+
+  const uint8_t s = candidate_stx.load(std::memory_order_relaxed);
+  const uint8_t e = candidate_etx.load(std::memory_order_relaxed);
+  const uint8_t l = candidate_len.load(std::memory_order_relaxed);
+  const bool is_locked = (status.load(std::memory_order_relaxed) == FramingStatus::LOCKED);
+  const bool fixed = is_custom_fixed.load(std::memory_order_relaxed);
+
+  struct FramingSnapshot {
+    uint8_t s, e, l;
+    bool locked, fixed;
+    char ns[16];
+  } snap{s, e, l, is_locked, fixed, {0}};
+  strncpy(snap.ns, pending_nvs_ns, sizeof(snap.ns));
+
+  const uint32_t current_crc =
+      FastCrc32(reinterpret_cast<const uint8_t *>(&snap), sizeof(snap));
+
+  if (has_committed_crc && current_crc == last_committed_crc32) {
+    xSemaphoreGive(commit_mutex);
+    return true;
+  }
+
+  Preferences prefs;
+  bool success = false;
+  if (prefs.begin(pending_nvs_ns, false)) {
+    prefs.putUChar("stx", s);
+    prefs.putUChar("etx", e);
+    prefs.putUChar("len", l);
+    prefs.putBool("locked", is_locked);
+    prefs.putBool("fixed", fixed);
+    prefs.end();
+    success = true;
+  }
+
+  if (success) {
+    last_committed_crc32 = current_crc;
+    has_committed_crc = true;
+    failure_count = 0;
+    next_retry_ms = 0;
+  } else {
+    nvs_dirty.store(true, std::memory_order_release);
+  }
+
+  xSemaphoreGive(commit_mutex);
+  return success;
+}
+
+void FramingTracker::saveToNvs(const char *nvs_ns, const char * /*tag*/) noexcept {
+  if (nvs_ns) {
+    strncpy(pending_nvs_ns, nvs_ns, sizeof(pending_nvs_ns) - 1);
+    pending_nvs_ns[sizeof(pending_nvs_ns) - 1] = '\0';
+  }
+  forceFlush(100);
 }
 
 bool FramingTracker::isConsistent(uint8_t stx, uint8_t etx) const noexcept {
@@ -1594,6 +1737,7 @@ bool Wallpad_DoorphoneOpen(bool is_lobby) noexcept {
 }
 
 void Wallpad_DoorphoneInit() noexcept {
+  s_doorphone_tracker.init();
   s_doorphone_controller.init();
   ProfileRepository::addProfileChangeListener(Wallpad_DoorphoneOnProfileChanged);
   Control_GetRegistry().init();
@@ -1645,7 +1789,7 @@ void Wallpad_DoorphoneFrameDetected(uint8_t stx, uint8_t etx, uint8_t len) noexc
   if (Wallpad_MatchDoorphoneLock(stx, etx, len, fixed_len) && len >= 5) {
     if (s_doorphone_tracker.status.load(std::memory_order_relaxed) != FramingStatus::LOCKED) {
       s_doorphone_tracker.setFixedLock(stx, etx, fixed_len);
-      s_doorphone_tracker.saveToNvs(cur_dp_ns);
+      s_doorphone_tracker.requestNvsSave(cur_dp_ns);
     }
   } else {
     s_doorphone_tracker.processFrame(stx, etx, len, cur_dp_ns);
@@ -1669,6 +1813,18 @@ void Wallpad_DoorphoneRestoreNvs(const char *nvs_ns) noexcept {
 
 void Wallpad_DoorphoneSaveNvs(const char *nvs_ns) noexcept {
   s_doorphone_tracker.saveToNvs(nvs_ns, "DOORPHONE");
+}
+
+bool Wallpad_DoorphoneIsFramingNvsDirty() noexcept {
+  return s_doorphone_tracker.isNvsDirty();
+}
+
+bool Wallpad_DoorphoneCommitNvsIfPending() noexcept {
+  return s_doorphone_tracker.commitNvsIfPending();
+}
+
+void Wallpad_DoorphoneForceFlushNvs(uint32_t timeout_ms) noexcept {
+  s_doorphone_tracker.forceFlush(timeout_ms);
 }
 
 void Wallpad_DoorphoneOnProfileChanged(uint8_t old_idx, uint8_t new_idx) noexcept {

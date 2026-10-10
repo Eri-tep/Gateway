@@ -20,6 +20,8 @@
 #include <span>
 #include <utility>
 
+uint32_t ProtocolDiag_GetLastCh1RxMs() noexcept;
+
 // ============================================================================
 // PART 1: AUTO-PROBING ENGINE IMPLEMENTATION
 // ============================================================================
@@ -1351,6 +1353,7 @@ GroupControlTemplate *insertSorted(GroupControlTemplate *arr, size_t &count,
 ControlTemplateRegistry::ControlTemplateRegistry() {
   _mutex = xSemaphoreCreateMutexStatic(&_mutex_storage);
   _nvs_mutex = xSemaphoreCreateMutexStatic(&_nvs_mutex_storage);
+  _commit_mutex = xSemaphoreCreateMutexStatic(&_commit_mutex_storage);
   clear();
 }
 
@@ -1468,13 +1471,15 @@ bool ControlTemplateRegistry::setGroupName(uint8_t dev_id, const char *name) {
         [&](const GroupControlTemplate &x) { return x.dev_id == dev_id; });
     if (g == &_groups[0] + _group_count)
       return false;
+    portENTER_CRITICAL(&_snap_mux);
     setStr(g->group_name, name);
     const DeviceClass inferred_cls = resolveDeviceClassFromName(name);
     if (inferred_cls != DeviceClass::UNKNOWN) {
       g->coverage.dev_class = inferred_cls;
     }
+    portEXIT_CRITICAL(&_snap_mux);
   }
-  saveToNvs();
+  requestNvsSave();
   return true;
 }
 
@@ -1492,6 +1497,7 @@ bool ControlTemplateRegistry::setGroupClass(uint8_t dev_id, DeviceClass cls,
     if (g == &_groups[0] + _group_count)
       return false;
 
+    portENTER_CRITICAL(&_snap_mux);
     if (g->coverage.dev_class != cls &&
         g->coverage.dev_class != DeviceClass::UNKNOWN) {
       g->coverage = SlotCoverage{}; // 클래스 변경 → 기존 슬롯 무효화
@@ -1502,8 +1508,9 @@ bool ControlTemplateRegistry::setGroupClass(uint8_t dev_id, DeviceClass cls,
       setStr(g->group_name, name);
     else
       autoAssignGroupName(*g);
+    portEXIT_CRITICAL(&_snap_mux);
   }
-  saveToNvs();
+  requestNvsSave();
   return true;
 }
 
@@ -1593,14 +1600,17 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
             std::find_if(begin, end, [&](const GroupControlTemplate &x) {
               return x.dev_id == dev_id;
             });
+        portENTER_CRITICAL(&_snap_mux);
         if (g != end) {
           std::move(g + 1, end, g);
           *(end - 1) = GroupControlTemplate{};
           --_group_count;
           modified = true;
         }
+        portEXIT_CRITICAL(&_snap_mux);
       }
     } else {
+      portENTER_CRITICAL(&_snap_mux);
       for (GroupControlTemplate *g = begin; g != end; ++g) {
         if (dev_id != 0 && g->dev_id != dev_id)
           continue;
@@ -1614,6 +1624,7 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
         if (dev_id != 0)
           break;
       }
+      portEXIT_CRITICAL(&_snap_mux);
     }
     if (modified) {
       rebuildNormSub1LutLocked();
@@ -1637,7 +1648,7 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
     }
     synthesizeFromConvergedCache();
   } else {
-    saveToNvs();
+    requestNvsSave();
   }
   return true;
 }
@@ -1805,7 +1816,7 @@ void ControlTemplateRegistry::synthesizeFromConvergedCache() {
   }
 
   matchAndInject(ad); // 제조사 명세 기반 슬롯 주입
-  saveToNvs();
+  requestNvsSave();
 }
 
 bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
@@ -1860,57 +1871,174 @@ bool ControlTemplateRegistry::buildControlPacket(uint8_t dev_id, uint8_t sub1,
 }
 
 bool ControlTemplateRegistry::saveToNvs() {
-  return saveToNvsForProfile(getCurrentProfileIndex());
+  return forceFlush(100);
 }
 void ControlTemplateRegistry::loadFromNvs() {
   loadFromNvsForProfile(getCurrentProfileIndex());
 }
 
 bool ControlTemplateRegistry::saveToNvsForProfile(uint8_t prof_idx) {
-  uint8_t save_count = 0;
-  bool ram_locked = false;
-  bool nvs_opened = false;
+  return forceFlush(100);
+}
 
-  {
-    MutexLocker nvs_lock(_nvs_mutex, kManageLockTimeout);
-    if (!nvs_lock.isLocked()) {
-      ESP_LOGW("CTRL_REG", "[WARN] _nvs_mutex timeout saving profile %u", prof_idx);
+void ControlTemplateRegistry::requestNvsSave() noexcept {
+  const uint32_t now = millis();
+  bool expected = false;
+  if (_nvs_dirty.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    _first_request_ms.store(now, std::memory_order_release);
+  }
+  _last_request_ms.store(now, std::memory_order_release);
+}
+
+bool ControlTemplateRegistry::commitNvsIfPending() noexcept {
+  if (!_nvs_dirty.load(std::memory_order_acquire)) {
+    return false;
+  }
+
+  const uint32_t now = millis();
+  if (_next_retry_ms > 0 && static_cast<int32_t>(now - _next_retry_ms) < 0) {
+    return false; // Backoff window active
+  }
+
+  const uint32_t first_req = _first_request_ms.load(std::memory_order_relaxed);
+  const uint32_t last_req = _last_request_ms.load(std::memory_order_relaxed);
+  const bool starvation_triggered =
+      (first_req > 0 && static_cast<int32_t>(now - (first_req + 30000)) >= 0);
+
+  if (!starvation_triggered) {
+    // 1. Request debounce (3s quiet since last mutation)
+    if (last_req > 0 && static_cast<int32_t>(now - (last_req + 3000)) < 0) {
       return false;
     }
-
-    {
-      MutexLocker ram_lock(_mutex, kManageLockTimeout);
-      if (ram_lock.isLocked()) {
-        ram_locked = true;
-        for (size_t i = 0; i < _group_count; ++i)
-          if (_groups[i].dev_id != 0)
-            s_nvs_transfer_buf[save_count++] = _groups[i];
-      }
-    }
-
-    if (!ram_locked) {
-      ESP_LOGW("CTRL_REG", "[WARN] _mutex timeout copying RAM snapshot for profile %u", prof_idx);
+    // 2. Real bus quiet window (1000ms silence on CH1)
+    const uint32_t last_ch1_rx = ProtocolDiag_GetLastCh1RxMs();
+    if (last_ch1_rx > 0 && static_cast<int32_t>(now - (last_ch1_rx + 1000)) < 0) {
       return false;
-    }
-
-    char ns[16];
-    getControlNamespace(ns, sizeof(ns), prof_idx);
-    Preferences prefs;
-    if (prefs.begin(ns, false)) {
-      nvs_opened = true;
-      prefs.putUChar("cnt", save_count);
-      for (size_t i = 0; i < save_count; ++i) {
-        char key[16];
-        snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
-        nvsPutEnv(prefs, key, s_nvs_transfer_buf[i]);
-      }
-      prefs.end();
-    } else {
-      ESP_LOGW("CTRL_REG", "[WARN] Failed to open NVS namespace %s", ns);
     }
   }
 
-  return nvs_opened;
+  // Non-blocking try-lock (never stall Core 0 if another flush is in flight)
+  if (xSemaphoreTake(_commit_mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+    return false;
+  }
+
+  // Clear dirty flag BEFORE taking snapshot to prevent torn updates
+  _nvs_dirty.exchange(false, std::memory_order_acq_rel);
+
+  size_t save_count = 0;
+  portENTER_CRITICAL(&_snap_mux);
+  for (size_t i = 0; i < _group_count; ++i) {
+    if (_groups[i].dev_id != 0) {
+      s_nvs_transfer_buf[save_count++] = _groups[i];
+    }
+  }
+  portEXIT_CRITICAL(&_snap_mux);
+
+  const uint32_t current_crc = FastCrc32(
+      reinterpret_cast<const uint8_t *>(s_nvs_transfer_buf),
+      save_count * sizeof(GroupControlTemplate));
+
+  if (_has_committed_crc && current_crc == _last_committed_crc32) {
+    _failure_count = 0;
+    _next_retry_ms = 0;
+    xSemaphoreGive(_commit_mutex);
+    return true; // Wear guard: identical data, flash write skipped
+  }
+
+  const uint8_t prof_idx = getCurrentProfileIndex();
+  char ns[16];
+  getControlNamespace(ns, sizeof(ns), prof_idx);
+  Preferences prefs;
+  bool success = false;
+  if (prefs.begin(ns, false)) {
+    prefs.putUChar("cnt", save_count);
+    for (size_t i = 0; i < save_count; ++i) {
+      char key[16];
+      snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
+      nvsPutEnv(prefs, key, s_nvs_transfer_buf[i]);
+    }
+    prefs.end();
+    success = true;
+  }
+
+  if (success) {
+    _last_committed_crc32 = current_crc;
+    _has_committed_crc = true;
+    _failure_count = 0;
+    _next_retry_ms = 0;
+    ESP_LOGI("CTRL_REG", "[NVS] Decoupled commit succeeded: %u groups (CRC 0x%08X)",
+             save_count, current_crc);
+  } else {
+    _nvs_dirty.store(true, std::memory_order_release);
+    _failure_count = std::min<uint8_t>(_failure_count + 1, 5);
+    uint32_t backoff_ms = 3000 * (1 << (_failure_count - 1));
+    if (backoff_ms > 60000) backoff_ms = 60000;
+    _next_retry_ms = millis() + backoff_ms;
+    ESP_LOGW("CTRL_REG", "[NVS] Commit failed (attempt %u), backoff %u ms",
+             _failure_count, backoff_ms);
+  }
+
+  xSemaphoreGive(_commit_mutex);
+  return success;
+}
+
+bool ControlTemplateRegistry::forceFlush(uint32_t timeout_ms) noexcept {
+  if (!_nvs_dirty.load(std::memory_order_acquire)) {
+    return true;
+  }
+
+  if (xSemaphoreTake(_commit_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+    ESP_LOGW("CTRL_REG", "[WARN] forceFlush lock timeout (%u ms), skipping to prevent hang", timeout_ms);
+    return false;
+  }
+
+  _nvs_dirty.exchange(false, std::memory_order_acq_rel);
+
+  size_t save_count = 0;
+  portENTER_CRITICAL(&_snap_mux);
+  for (size_t i = 0; i < _group_count; ++i) {
+    if (_groups[i].dev_id != 0) {
+      s_nvs_transfer_buf[save_count++] = _groups[i];
+    }
+  }
+  portEXIT_CRITICAL(&_snap_mux);
+
+  const uint32_t current_crc = FastCrc32(
+      reinterpret_cast<const uint8_t *>(s_nvs_transfer_buf),
+      save_count * sizeof(GroupControlTemplate));
+
+  if (_has_committed_crc && current_crc == _last_committed_crc32) {
+    xSemaphoreGive(_commit_mutex);
+    return true;
+  }
+
+  const uint8_t prof_idx = getCurrentProfileIndex();
+  char ns[16];
+  getControlNamespace(ns, sizeof(ns), prof_idx);
+  Preferences prefs;
+  bool success = false;
+  if (prefs.begin(ns, false)) {
+    prefs.putUChar("cnt", save_count);
+    for (size_t i = 0; i < save_count; ++i) {
+      char key[16];
+      snprintf(key, sizeof(key), "grp_%u", static_cast<unsigned>(i));
+      nvsPutEnv(prefs, key, s_nvs_transfer_buf[i]);
+    }
+    prefs.end();
+    success = true;
+  }
+
+  if (success) {
+    _last_committed_crc32 = current_crc;
+    _has_committed_crc = true;
+    _failure_count = 0;
+    _next_retry_ms = 0;
+  } else {
+    _nvs_dirty.store(true, std::memory_order_release);
+  }
+
+  xSemaphoreGive(_commit_mutex);
+  return success;
 }
 
 void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
@@ -1953,14 +2081,22 @@ void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
       prefs.end();
   }
 
+  // Flash wear leveling guard 초기화: 부팅 시 로드된 데이터의 CRC32 등록
+  _last_committed_crc32 = FastCrc32(
+      reinterpret_cast<const uint8_t *>(s_nvs_transfer_buf),
+      valid * sizeof(GroupControlTemplate));
+  _has_committed_crc = true;
+
   // RAM 에 원자적으로 반영 (저장된 항목이 없으면 비움)
   MutexLocker ram_lock(_mutex, kManageLockTimeout);
   if (!ram_lock.isLocked())
     return;
+  portENTER_CRITICAL(&_snap_mux);
   std::fill(std::begin(_groups), std::end(_groups), GroupControlTemplate{});
   _group_count = 0;
   for (size_t i = 0; i < valid; ++i)
     insertSorted(&_groups[0], _group_count, MAX_GROUPS, s_nvs_transfer_buf[i]);
+  portEXIT_CRITICAL(&_snap_mux);
   rebuildNormSub1LutLocked();
 }
 
@@ -1968,7 +2104,7 @@ void ControlTemplateRegistry::onProfileChanged(uint8_t old_prof_idx,
                                                uint8_t new_prof_idx) {
   if (old_prof_idx == new_prof_idx)
     return;
-  saveToNvsForProfile(old_prof_idx);
+  forceFlush(100);
   loadFromNvsForProfile(new_prof_idx);
   if (getGroupCount() == 0)
     synthesizeFromConvergedCache();

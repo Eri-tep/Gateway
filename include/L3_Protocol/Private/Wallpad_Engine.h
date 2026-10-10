@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <expected>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <span>
 
 struct ExtractedFrameResult {
@@ -273,6 +274,18 @@ struct FramingTracker {
   std::atomic<uint8_t> consecutive_mismatches{0};
   std::atomic<bool> is_custom_fixed{false};
 
+  std::atomic<bool> nvs_dirty{false};
+  std::atomic<uint32_t> first_request_ms{0};
+  std::atomic<uint32_t> last_request_ms{0};
+  uint32_t next_retry_ms{0};
+  uint8_t failure_count{0};
+  uint32_t last_committed_crc32{0};
+  bool has_committed_crc{false};
+  char pending_nvs_ns[16]{"dp_frame_p0"};
+  mutable StaticSemaphore_t commit_mutex_storage{};
+  mutable SemaphoreHandle_t commit_mutex{nullptr};
+
+  void init() noexcept;
   void setFixedLock(uint8_t stx, uint8_t etx, uint8_t len) noexcept;
   void reset() noexcept;
   void clearNvs(const char *nvs_ns, const char *tag = "FRAMING") noexcept;
@@ -285,6 +298,12 @@ struct FramingTracker {
 
   void restoreFromNvs(const char *nvs_ns = "dp_frame_p0", const char *tag = "FRAMING") noexcept;
   void saveToNvs(const char *nvs_ns = "dp_frame_p0", const char *tag = "FRAMING") noexcept;
+  void requestNvsSave(const char *nvs_ns = nullptr) noexcept;
+  bool commitNvsIfPending() noexcept;
+  bool forceFlush(uint32_t timeout_ms = 50) noexcept;
+  [[nodiscard]] bool isNvsDirty() const noexcept {
+    return nvs_dirty.load(std::memory_order_relaxed);
+  }
   [[nodiscard]] bool isConsistent(uint8_t stx, uint8_t etx) const noexcept;
 };
 
@@ -304,6 +323,9 @@ void Wallpad_DoorphoneCheckBellTimeout() noexcept;
 void Wallpad_DoorphoneClearNvs(const char *nvs_ns) noexcept;
 void Wallpad_DoorphoneRestoreNvs(const char *nvs_ns) noexcept;
 void Wallpad_DoorphoneSaveNvs(const char *nvs_ns) noexcept;
+bool Wallpad_DoorphoneIsFramingNvsDirty() noexcept;
+bool Wallpad_DoorphoneCommitNvsIfPending() noexcept;
+void Wallpad_DoorphoneForceFlushNvs(uint32_t timeout_ms = 50) noexcept;
 void Wallpad_DoorphoneOnProfileChanged(uint8_t old_idx, uint8_t new_idx) noexcept;
 
 void Wallpad_HandleDoorphonePacket(const StaticPacket &packet) noexcept;
