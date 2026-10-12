@@ -10,29 +10,41 @@ local _orig_debug = log.debug
 local _orig_trace = log.trace
 local _orig_warn = log.warn
 
+local NOOP = function() end
+
+local LOG_LEVEL_CONFIGS = {
+  WARN = {
+    trace = NOOP,
+    debug = NOOP,
+    info  = NOOP,
+    warn  = _orig_warn,
+  },
+  ERROR = {
+    trace = NOOP,
+    debug = NOOP,
+    info  = NOOP,
+    warn  = NOOP,
+  },
+  DEBUG = {
+    trace = _orig_trace,
+    debug = _orig_debug,
+    info  = _orig_info,
+    warn  = _orig_warn,
+  },
+  INFO = {
+    trace = NOOP,
+    debug = NOOP,
+    info  = _orig_info,
+    warn  = _orig_warn,
+  },
+}
+
 local function apply_log_level(level)
-  level = level or "INFO"
-  if level == "WARN" then
-    log.trace = function() end
-    log.debug = function() end
-    log.info = function() end
-    log.warn = _orig_warn
-  elseif level == "ERROR" then
-    log.trace = function() end
-    log.debug = function() end
-    log.info = function() end
-    log.warn = function() end
-  elseif level == "DEBUG" then
-    log.trace = _orig_trace
-    log.debug = _orig_debug
-    log.info = _orig_info
-    log.warn = _orig_warn
-  else -- "INFO" (기본값: trace/debug 숨김, info/warn/error 출력)
-    log.trace = function() end
-    log.debug = function() end
-    log.info = _orig_info
-    log.warn = _orig_warn
-  end
+  local cfg = LOG_LEVEL_CONFIGS[level] or LOG_LEVEL_CONFIGS.INFO
+  log.trace = cfg.trace
+  log.debug = cfg.debug
+  log.info  = cfg.info
+  log.warn  = cfg.warn
 end
 
 local function schedule_polling_timer(driver, device)
@@ -52,68 +64,155 @@ local function schedule_polling_timer(driver, device)
   log.info(string.format("Scheduled gateway telemetry polling timer every %d seconds", interval))
 end
 
+local EVENT_HANDLERS = {
+  doorphone = telemetry_handler.handle_doorphone_event,
+  device_state = telemetry_handler.handle_device_state_event,
+  devices_updated = telemetry_handler.handle_devices_updated_event,
+}
+
 local function device_init(driver, device)
   log.info("Initializing Device: " .. tostring(device.label) .. " (Type: " .. tostring(device.type) .. ")")
 
-  -- 자식 기기(도어폰 - 세대 도어 / 로비 도어 / 레거시)인 경우 초기 상태 설정
+  -- ★ 자식 기기 전체 분기 가드: p_key가 존재하면 절대 부모 영역으로 fallthrough되지 않음
   local p_key = device.parent_assigned_child_key or ""
-  if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
-    local cap_motion = capabilities.motionSensor
-    local comp_main = device.profile.components["main"]
-    if comp_main then
-      device:emit_component_event(comp_main, capabilities.switch.switch.off())
-      if cap_motion then
-        device:emit_component_event(comp_main, cap_motion.motion.inactive())
-      end
-    end
-    local comp_lobby = device.profile.components["lobby"]
-    if comp_lobby then
-      device:emit_component_event(comp_lobby, capabilities.switch.switch.off())
-      if cap_motion then
-        device:emit_component_event(comp_lobby, cap_motion.motion.inactive())
-      end
-    end
-    return
-  end
+  if p_key ~= "" then
+    local CHILD_INIT_HANDLERS = {
+      doorphone = function(dev)
+        local cap_motion = capabilities.motionSensor
+        local comp_main = dev.profile.components["main"]
+        if comp_main then
+          dev:emit_component_event(comp_main, capabilities.switch.switch.off())
+          if cap_motion then
+            dev:emit_component_event(comp_main, cap_motion.motion.inactive())
+          end
+        end
+        local comp_lobby = dev.profile.components["lobby"]
+        if comp_lobby then
+          dev:emit_component_event(comp_lobby, capabilities.switch.switch.off())
+          if cap_motion then
+            dev:emit_component_event(comp_lobby, cap_motion.motion.inactive())
+          end
+        end
+      end,
 
-  -- ★ 동적 자식 기기 (LOCKED 조명/콘센트/난방/환기/가스/엘리베이터)인 경우 초기 상태 설정
-  if p_key:match("^dev_") then
-    -- 자식 기기에 혹시 남아있을 수 있는 롤링 타이머/레지스트리 완전 제거
+      outlet = function(dev)
+        local cur_month = os.date("%Y-%m")
+        local last_month = dev:get_field("last_energy_month")
+        local monthly_kwh = dev:get_field("monthly_energy_kwh") or 0.0
+
+        if last_month ~= cur_month then
+          monthly_kwh = 0.0
+          dev:set_field("monthly_energy_kwh", 0.0, { persist = true })
+          dev:set_field("last_energy_month", cur_month, { persist = true })
+        end
+
+        local kwh_val = math.floor(monthly_kwh * 1000 + 0.5) / 1000
+        dev:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
+      end,
+
+      thermostat = function(dev)
+        if dev:supports_capability_by_id(capabilities.switch.ID) then
+          local sw_ev = capabilities.switch.switch.off()
+          sw_ev.state_change = true
+          dev:emit_event(sw_ev)
+        end
+        local cap_away = capabilities["digituniverse06711.heatingAway"]
+        if cap_away and dev:supports_capability_by_id(cap_away.ID) then
+          local away_ev = cap_away.away("off")
+          away_ev.state_change = true
+          dev:emit_event(away_ev)
+        end
+        if dev:supports_capability_by_id(capabilities.thermostatMode.ID) then
+          dev:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
+        end
+      end,
+
+      aircon = function(dev)
+        dev:emit_event(capabilities.airConditionerMode.supportedAcModes({ "cool", "dry", "wind", "auto", "heat" }))
+      end,
+
+      fcu = function(dev)
+        local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
+        if cap_sp and dev:supports_capability_by_id("digituniverse06711.fcuSetpoint") then
+          local saved_sp = dev:get_field("last_fcu_setpoint") or 24
+          local ev = cap_sp.setpoint({ value = saved_sp, unit = "°C" })
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_mode = capabilities["digituniverse06711.fcuMode"]
+        if cap_mode and dev:supports_capability_by_id("digituniverse06711.fcuMode") then
+          local saved_mode = dev:get_field("last_fcu_mode") or "cool"
+          local ev = cap_mode.mode(saved_mode)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_fan = capabilities["digituniverse06711.fcuFanSpeed"]
+        if cap_fan and dev:supports_capability_by_id("digituniverse06711.fcuFanSpeed") then
+          local saved_fan = dev:get_field("last_fcu_fan") or "auto"
+          local ev = cap_fan.fanSpeed(saved_fan)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
+        if cap_osc and dev:supports_capability_by_id("digituniverse06711.fcuOscillation") then
+          local saved_osc = dev:get_field("last_fcu_osc") or "fixed"
+          local ev = cap_osc.oscillation(saved_osc)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+
+        local cap_info = capabilities["digituniverse06711.fcuInfo"]
+        if cap_info and dev:supports_capability_by_id("digituniverse06711.fcuInfo") then
+          local saved_info = dev:get_field("last_fcu_info") or "정상"
+          local ev = cap_info.info(saved_info)
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+      end,
+
+      elevator = function(dev)
+        local cap_hist = capabilities["digituniverse06711.history"]
+        if cap_hist then
+          local ev = cap_hist.history({ value = "대기 중" })
+          ev.state_change = true
+          dev:emit_event(ev)
+        end
+      end
+    }
+
+    -- 1) 도어폰 초기화
+    if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
+      CHILD_INIT_HANDLERS.doorphone(device)
+      return
+    end
+
+    -- 2) 동적 자식 기기 (조명/콘센트/난방/환기/가스/엘리베이터 등)
     if device:get_field("master_roll_timer") then
       device.thread:cancel_timer(device:get_field("master_roll_timer"))
       device:set_field("master_roll_timer", nil)
     end
     device:set_field("ticker_registry", nil)
 
-    -- 1. Outlet 초기화 (월초 리셋 검사 & 누적 전력량 복원)
     if device:supports_capability_by_id(capabilities.energyMeter.ID) then
-      local cur_month = os.date("%Y-%m")
-      local last_month = device:get_field("last_energy_month")
-      local monthly_kwh = device:get_field("monthly_energy_kwh") or 0.0
-
-      if last_month ~= cur_month then
-        monthly_kwh = 0.0
-        device:set_field("monthly_energy_kwh", 0.0, { persist = true })
-        device:set_field("last_energy_month", cur_month, { persist = true })
-      end
-
-      local kwh_val = math.floor(monthly_kwh * 1000 + 0.5) / 1000
-      device:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
+      CHILD_INIT_HANDLERS.outlet(device)
+    end
+    if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+      CHILD_INIT_HANDLERS.thermostat(device)
+    end
+    if device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
+      CHILD_INIT_HANDLERS.aircon(device)
+    end
+    if p_key:match("^dev_2c_") then
+      CHILD_INIT_HANDLERS.fcu(device)
+    end
+    if p_key:match("^dev_34_") then
+      CHILD_INIT_HANDLERS.elevator(device)
     end
 
-    -- 2. Thermostat 초기화 (지원 모드 메타데이터만 등록, 기존 상태는 보존)
-    if device:supports_capability_by_id(capabilities.thermostatMode.ID) then
-      device:emit_event(capabilities.thermostatMode.supportedThermostatModes({ "heat", "away", "off" }))
-    end
-
-    -- 3. Elevator 초기화 (상태 이력: 대기 중)
-    local cap_hist = capabilities["digituniverse06711.history"]
-    if cap_hist and p_key:match("^dev_34_") then
-      local ev = cap_hist.history({ value = "대기 중" })
-      ev.state_change = true
-      device:emit_event(ev)
-    end
-
+    log.info(string.format("Child Device initialized successfully: %s", p_key))
     return
   end
 
@@ -133,28 +232,39 @@ local function device_init(driver, device)
   end
 
   schedule_polling_timer(driver, device)
-  command_handlers.refresh_telemetry(driver, device)
+  -- 선행 refresh_telemetry 제거: 소켓이 연결되기 전에 호출하여 발생하는 "Gateway connection not ready" 에러 원천 차단
 
   -- CH6 실시간 푸시 이벤트 리스너 실행 (단 1회)
   if not device:get_field("listener_started") then
     device:set_field("listener_started", true)
     local ip = device.preferences.gatewayIp or "172.30.1.3"
     local port = tonumber(device.preferences.gatewayPort) or 8900
-    gateway_client.start_event_listener(driver, ip, port, function(d, event_data)
-      if event_data.event == "doorphone" then
-        telemetry_handler.handle_doorphone_event(d, event_data)
-      elseif event_data.event == "device_state" then
-        telemetry_handler.handle_device_state_event(d, event_data)
-      elseif event_data.event == "devices_updated" then
-        telemetry_handler.handle_devices_updated_event(d, event_data)
+    gateway_client.start_event_listener(
+      driver, ip, port,
+      function(d, event_data)
+        local handler = event_data and EVENT_HANDLERS[event_data.event]
+        if handler then
+          handler(d, event_data)
+        end
+      end,
+      function(d)
+        -- ★ TCP 소켓 연결 성공 즉시 1회 자동 텔레메트리 즉각 조회 (30초 공백 지연 0초로 단축)
+        log.info("🚀 [AUTO-SYNC] Connected to gateway! Querying telemetry immediately...")
+        command_handlers.refresh_telemetry(d, device)
       end
-    end)
+    )
   end
 end
 
 local function device_added(driver, device)
+  local p_key = device.parent_assigned_child_key or ""
+  if p_key ~= "" then
+    log.info(string.format("Child Device added to SmartThings: %s", p_key))
+    return
+  end
   log.info("ESP32 Gateway Device added to SmartThings")
-  device:set_field("ota_channel", device.preferences.otaChannel or "main")
+  local prefs = device.preferences or {}
+  device:set_field("ota_channel", prefs.otaChannel or "main")
 end
 
 local function device_info_changed(driver, device, event, args)
@@ -252,7 +362,17 @@ local function device_info_changed(driver, device, event, args)
 end
 
 local function device_removed(driver, device)
-  log.info("Device removed, canceling timers")
+  local p_key = device.parent_assigned_child_key or ""
+  if p_key ~= "" then
+    log.info(string.format("Child Device removed: %s", p_key))
+    if device:get_field("master_roll_timer") then
+      device.thread:cancel_timer(device:get_field("master_roll_timer"))
+      device:set_field("master_roll_timer", nil)
+    end
+    return
+  end
+
+  log.info("Parent Gateway Device removed, canceling timers and closing socket")
   if device:get_field("poll_timer") then
     device.thread:cancel_timer(device:get_field("poll_timer"))
     device:set_field("poll_timer", nil)
@@ -260,6 +380,12 @@ local function device_removed(driver, device)
   if device:get_field("master_roll_timer") then
     device.thread:cancel_timer(device:get_field("master_roll_timer"))
     device:set_field("master_roll_timer", nil)
+  end
+
+  local sock = device:get_field("tcp_client")
+  if sock then
+    pcall(function() sock:close() end)
+    device:set_field("tcp_client", nil)
   end
 end
 
@@ -301,14 +427,26 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     ["digituniverse06711.deviceManager"] = {
       ["setAction"] = command_handlers.handle_child_device_action
     },
+    ["digituniverse06711.heatingAway"] = {
+      ["setAway"] = command_handlers.handle_child_set_heating_away,
+      ["toggle"] = command_handlers.handle_child_set_heating_away,
+      ["on"] = command_handlers.handle_child_set_heating_away,
+      ["off"] = command_handlers.handle_child_set_heating_away
+    },
     [capabilities.momentary.ID] = {
       [capabilities.momentary.commands.push.NAME] = command_handlers.handle_momentary_push
     },
     [capabilities.thermostatHeatingSetpoint.ID] = {
       [capabilities.thermostatHeatingSetpoint.commands.setHeatingSetpoint.NAME] = command_handlers.handle_child_set_heating_setpoint
     },
+    [capabilities.thermostatCoolingSetpoint.ID] = {
+      [capabilities.thermostatCoolingSetpoint.commands.setCoolingSetpoint.NAME] = command_handlers.handle_child_set_cooling_setpoint
+    },
     [capabilities.thermostatMode.ID] = {
       [capabilities.thermostatMode.commands.setThermostatMode.NAME] = command_handlers.handle_child_set_thermostat_mode
+    },
+    [capabilities.airConditionerMode.ID] = {
+      [capabilities.airConditionerMode.commands.setAirConditionerMode.NAME] = command_handlers.handle_child_set_aircon_mode
     },
     [capabilities.fanSpeed.ID] = {
       [capabilities.fanSpeed.commands.setFanSpeed.NAME] = command_handlers.handle_child_set_fan_speed
@@ -322,8 +460,23 @@ local gateway_driver = Driver("esp32-wallpad-gateway", {
     ["digituniverse06711.ventspeed"] = {
       ["setVentSpeed"] = command_handlers.handle_child_set_vent_speed
     },
+    ["digituniverse06711.fcuSetpoint"] = {
+      ["setSetpoint"] = command_handlers.handle_fcu_set_setpoint
+    },
+    ["digituniverse06711.fcuMode"] = {
+      ["setMode"] = command_handlers.handle_fcu_set_mode
+    },
+    ["digituniverse06711.fcuFanSpeed"] = {
+      ["setFanSpeed"] = command_handlers.handle_fcu_set_fan_speed
+    },
+    ["digituniverse06711.fcuOscillation"] = {
+      ["setOscillation"] = command_handlers.handle_fcu_set_oscillation
+    },
     [capabilities.valve.ID] = {
       [capabilities.valve.commands.close.NAME] = command_handlers.handle_child_valve_close
+    },
+    [capabilities.fanOscillationMode.ID] = {
+      [capabilities.fanOscillationMode.commands.setFanOscillationMode.NAME] = command_handlers.handle_child_set_oscillation_mode
     }
   }
 })

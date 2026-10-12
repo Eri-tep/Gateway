@@ -14,9 +14,12 @@ def after_build(source, target, env):
     shutil.copyfile(bin_path, dest_bin)
     print(f"[POST-BUILD] Successfully updated: {dest_bin}")
     
-    # Extract FIRMWARE_VERSION from include/core/Config.h (fallback: include/Common.h)
+    # Extract FIRMWARE_VERSION from include/L0_Foundation/System_Config.h
     version = "unknown"
     search_files = [
+        os.path.join(project_dir, "include", "L0_Foundation", "System_Config.h"),
+        os.path.join(project_dir, "include", "Base", "SystemConfig.h"),
+        os.path.join(project_dir, "include", "Core.h"),
         os.path.join(project_dir, "include", "core", "Config.h"),
         os.path.join(project_dir, "include", "Common.h")
     ]

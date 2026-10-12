@@ -27,7 +27,13 @@ function GatewayClient.send_rpc(ip, port, cmd_table, timeout)
   local tx, rx = cosock.channel.new()
   pending_requests[cur_req_id] = tx
 
-  local payload = json.encode(cmd_table) .. "\n"
+  local ok_enc, encoded = pcall(json.encode, cmd_table)
+  if not ok_enc then
+    log.warn(string.format("⚠️ [RPC SEND] json.encode failed [ID:%d]: %s", cur_req_id, tostring(encoded)))
+    pending_requests[cur_req_id] = nil
+    return nil, "json encode error: " .. tostring(encoded)
+  end
+  local payload = encoded .. "\n"
   log.debug(string.format("🌐 [RPC SEND] (Single Session) [ID:%d] -> %s:%d | %s", cur_req_id, ip, port, payload:sub(1, -2)))
 
   local sent, send_err = persistent_tcp:send(payload)
@@ -66,7 +72,12 @@ function GatewayClient.send_fast_path(cmd_table)
     log.debug("ℹ️ [FAST PATH] persistent_tcp not connected yet")
     return false, "Gateway connection not ready"
   end
-  local payload = json.encode(cmd_table) .. "\n"
+  local ok_enc, encoded = pcall(json.encode, cmd_table)
+  if not ok_enc then
+    log.warn(string.format("⚠️ [FAST PATH] json.encode failed: %s", tostring(encoded)))
+    return false, "json encode error: " .. tostring(encoded)
+  end
+  local payload = encoded .. "\n"
   local sent, err = persistent_tcp:send(payload)
   if not sent then
     log.warn(string.format("⚠️ [FAST PATH] Send failed: %s", tostring(err)))
@@ -148,9 +159,9 @@ function GatewayClient.doorphone_action(ip, port, action)
   })
 end
 
-function GatewayClient.get_locked_devices(ip, port)
+function GatewayClient.get_devices(ip, port)
   return GatewayClient.send_rpc(ip, port, {
-    cmd = "get_locked_devices"
+    cmd = "get_devices"
   })
 end
 
@@ -172,37 +183,60 @@ function GatewayClient.device_control(ip, port, dev_id, sub1, sub2, action, valu
   return GatewayClient.send_rpc(ip, port, payload)
 end
 
+function GatewayClient.device_control_custom(ip, port, payload)
+  log.info(string.format("📡 [FCU SEND] Dispatching custom payload to %s:%d: %s", ip, port, json.encode(payload)))
+  local sent, err = GatewayClient.send_fast_path(payload)
+  if sent then return true end
+  log.warn(string.format("⚠️ [FCU SEND] Fast path failed (%s), falling back to send_rpc", tostring(err)))
+  return GatewayClient.send_rpc(ip, port, payload)
+end
+
 
 --- CH6 (8900) 실시간 푸시 이벤트 리스너 (백그라운드 지속 소켓 + 클라이언트 Heartbeat Ping + RPC 공유)
-function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
+function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_connected_cb)
   if not ip or not port then return end
 
-  local cosock = require "cosock"
   cosock.spawn(function()
     log.info(string.format("📡 [CH6 PUSH] Starting single persistent session on %s:%d", ip, port))
     while true do
-      local tcp, err = socket.tcp()
+      local tcp = socket.tcp()
       if tcp then
-        tcp:settimeout(nil) -- 블로킹 대기
+        tcp:settimeout(5) -- [H-7] 연결 시도 타임아웃 5초
         local ok, conn_err = tcp:connect(ip, port)
         if ok then
           pcall(function() tcp:setoption("tcp-nodelay", true) end)
+          tcp:settimeout(35) -- [H-7] 수신 타임아웃 35초 (15초 핑 주기 고려)
           log.info(string.format("✅ [CH6 PUSH] Connected to Gateway %s:%d (TCP_NODELAY Active)", ip, port))
           persistent_tcp = tcp
           local is_alive = true
 
+          -- [On-Connect Immediate Refresh] 연결 수립 즉시 텔레메트리 1회 즉시 동기화 트리거
+          if on_connected_cb then
+            cosock.spawn(function()
+              pcall(on_connected_cb, driver)
+            end, "on_connected_sync")
+          end
+
           -- [Heartbeat Ping Worker] 15초마다 게이트웨이로 Ping 전송하여 세션 활성화 유지 및 끊김 감지 (단축 포맷)
+          -- OTA 중 일시적 Wi-Fi 블로킹에 의한 오탐 방지: 2회 연속 실패 시에만 세션 파기
           cosock.spawn(function()
+            local ping_fail_count = 0
             while is_alive do
               cosock.socket.sleep(15)
               if not is_alive or not persistent_tcp then break end
               local ping_sent, ping_err = persistent_tcp:send("{\"c\":\"ping\"}\n")
               if not ping_sent then
-                log.warn(string.format("⚠️ [CH6 PING] Ping failed: %s (closing socket)", tostring(ping_err)))
-                is_alive = false
-                pcall(function() persistent_tcp:close() end)
-                persistent_tcp = nil
-                break
+                ping_fail_count = ping_fail_count + 1
+                log.warn(string.format("⚠️ [CH6 PING] Ping failed (%d/3): %s", ping_fail_count, tostring(ping_err)))
+                if ping_fail_count >= 3 then
+                  log.warn("[CH6 PING] 3 consecutive ping failures, closing socket.")
+                  is_alive = false
+                  pcall(function() persistent_tcp:close() end)
+                  persistent_tcp = nil
+                  break
+                end
+              else
+                ping_fail_count = 0 -- 성공 시 카운터 리셋
               end
             end
           end, "ch6_heartbeat_ping")
@@ -211,33 +245,41 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb)
           while is_alive do
             local line, recv_err = tcp:receive("*l")
             if not line then
-              log.warn(string.format("⚠️ [CH6 PUSH] Connection lost (%s), reconnecting...", tostring(recv_err)))
-              break
-            end
-            if #line > 0 then
-              local s_ok, data = pcall(json.decode, line)
-              if s_ok and type(data) == "table" then
-                local req_id = data.id
-                if req_id and pending_requests[req_id] then
-                  local ch = pending_requests[req_id]
-                  pending_requests[req_id] = nil
-                  ch:send(data)
-                elseif data.event and on_event_cb then
-                  on_event_cb(driver, data)
-                elseif data.pong then
-                  -- Heartbeat Pong 소비
+              if recv_err == "timeout" then
+                -- 타임아웃 시 연결 여부만 점검하고 루프 계속
+                if not is_alive then break end
+              else
+                log.warn(string.format("⚠️ [CH6 PUSH] Connection lost (%s), reconnecting...", tostring(recv_err)))
+                break
+              end
+            else
+              if #line > 0 then
+                local s_ok, data = pcall(json.decode, line)
+                if s_ok and type(data) == "table" then
+                  local req_id = data.id
+                  if req_id and pending_requests[req_id] then
+                    local ch = pending_requests[req_id]
+                    pending_requests[req_id] = nil
+                    ch:send(data)
+                  elseif data.event and on_event_cb then
+                    on_event_cb(driver, data)
+                  elseif data.pong then
+                    log.debug("📡 [CH6 PUSH] Heartbeat pong received")
+                  end
                 end
               end
             end
           end
 
           is_alive = false
-          persistent_tcp = nil
+          if persistent_tcp == tcp then
+            persistent_tcp = nil
+          end
           pcall(function() tcp:close() end)
           -- 남아있는 대기열 Fail-safe 언락
           for req_id, ch in pairs(pending_requests) do
             pending_requests[req_id] = nil
-            ch:send({ error = "Connection closed" })
+            pcall(function() ch:send({ error = "Connection closed" }) end)
           end
         else
           tcp:close()

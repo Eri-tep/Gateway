@@ -21,7 +21,7 @@ components:
         version: 1
       - id: digituniverse06711.catalogMatch
         version: 1
-      - id: digituniverse06711.blueprints
+      - id: digituniverse06711.deviceGroups
         version: 1
     categories:
       - name: Hub
@@ -250,4 +250,8 @@ preferences:
       minimum: 0
       maximum: 500
       default: 240
+
+metadata:
+  vid: "fc90b0b5-6461-3442-9ed0-139bdc51baaf"
+  mnmn: "SmartThingsCommunity"
 
