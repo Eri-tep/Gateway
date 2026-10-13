@@ -293,8 +293,8 @@ void Diag_DiagnoseStuck() {
   s_stage_marker = 0;
 
   static const char *const TASK_NAMES[Config::Task::TASK_COUNT] = {
-      "CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
-      "CH#4_WP#3", "Network",   "Telnet_CLI"};
+      "CH#1_Devs", "CH#2_WP#1", "CH#3_WP#2",
+      "CH#4_Door", "Network",   "Telnet_CLI"};
   static_assert(Config::Task::TASK_COUNT == 6, "Mismatch in TASK_COUNT");
   static_assert(Config::Task::WDT_ID_TELNET < Config::Task::TASK_COUNT,
                 "WDT_ID_TELNET out of bounds");
@@ -548,11 +548,11 @@ void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept {
 
   const uint16_t stacks[6] = {st.ch1_stack, st.ch2_stack, st.ch3_stack,
                               st.ch4_stack, st.net_stack, st.telnet_stack};
-  const char *names[6] = {"CH#1_IoT",  "CH#2_WP#1", "CH#3_WP#2",
-                          "CH#4_WP#3", "Network",   "Telnet_CLI"};
-  const char *scopes[6] = {"IoT Master Comm",    "Wallpad#1 HW Slave",
-                           "Wallpad#2 HW Slave", "Wallpad#3 SW Slave",
-                           "WiFi & TCP Manager", "Telnet CLI Server"};
+  const char *names[6] = {"CH#1_Devs", "CH#2_WP#1", "CH#3_WP#2",
+                          "CH#4_Door", "Network",   "Telnet_CLI"};
+  const char *scopes[6] = {"Device Master Comm",  "Wallpad#1 HW Slave",
+                           "Wallpad#2 HW Slave",  "Doorphone SW Slave",
+                           "WiFi & TCP Manager",  "Telnet CLI Server"};
 
   out.append(Fmt::DIV80);
   out.appendFormat("%-11s %-12s %-10s %-12s %-8s %-18s\r\n", "Task Name",

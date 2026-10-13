@@ -1131,7 +1131,7 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
                    "Uncache");
   out.append(DIV80);
 
-  const char *rs_n[] = {"CH#1_IoT", "CH#2_WP#1", "CH#3_WP#2", "CH#4_WP#3"};
+  const char *rs_n[] = {"CH#1_Devs", "CH#2_WP#1", "CH#3_WP#2", "CH#4_Door"};
   const ChanStats *rs_st[] = {&pkt.ch1, &pkt.ch2, &pkt.ch3, &pkt.ch4};
   FixedBuf<24> r_str;
   for (int i = 0; i < 4; ++i) {
@@ -1155,9 +1155,11 @@ void FormatRs485Stats(AppendBuf &out, const PktSnapshot &pkt) {
       continue;
 
     chan_name.reset();
-    chan_name.appendFormat("CH#5_%u",
-                           slot.target_port ? slot.target_port
-                                            : Config::TCP::EW11_SLOT_PORTS[s]);
+    if (s == 0) {
+      chan_name.append("CH#5_Elev");
+    } else {
+      chan_name.appendFormat("CH#5_AC#%d", s);
+    }
 
     uint32_t rx = slot.rx_pkts, crc = slot.crc_errors;
     r_str.reset();

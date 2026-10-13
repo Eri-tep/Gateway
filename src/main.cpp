@@ -355,7 +355,7 @@ static StackType_t s_stackCore1Ch1[Config::Task::STACK_SIZE_CORE1],
     s_telnetTaskStack[Config::Task::STACK_SIZE_TELNET];
 
 static const TaskSpawnDescriptor kTaskDescriptors[] = {
-    {Task_Ch1, "CH#1_IoT", Config::Task::STACK_SIZE_CORE1, nullptr,
+    {Task_Ch1, "CH#1_Devs", Config::Task::STACK_SIZE_CORE1, nullptr,
      TaskPriority::CH1_REALTIME, 1, s_stackCore1Ch1, &s_task_core1_ch1_buf,
      SystemTaskId::CH1, true, 1000},
     {Task_Ch2, "CH#2_WP#1", Config::Task::STACK_SIZE_CH2, &ch2_config,
@@ -364,7 +364,7 @@ static const TaskSpawnDescriptor kTaskDescriptors[] = {
     {Task_Ch3, "CH#3_WP#2", Config::Task::STACK_SIZE_CH3, &ch3_config,
      TaskPriority::WALLPAD_EMULATION, 1, s_stackCore1Slave2,
      &s_task_core1_slave2_buf, SystemTaskId::CH3, true, 1000},
-    {Task_Ch4, "CH#4_WP#3", Config::Task::STACK_SIZE_CH4, nullptr,
+    {Task_Ch4, "CH#4_Door", Config::Task::STACK_SIZE_CH4, nullptr,
      TaskPriority::CH4_SUBWALLPAD, 1, s_stackCore1Ch4, &s_task_core1_ch4_buf,
      SystemTaskId::CH4, true, 1000},
     {Transport::TcpReactor::runTask, "Network", Config::Task::STACK_SIZE_CORE0, nullptr,
