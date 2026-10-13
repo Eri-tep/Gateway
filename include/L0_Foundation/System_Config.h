@@ -10,7 +10,7 @@
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.2.0";
+constexpr const char *FIRMWARE_VERSION = "v1.2.1";
 } // namespace Config
 
 namespace Config::Task {
@@ -126,8 +126,8 @@ constexpr uint32_t DEFAULT_KEEPALIVE_CNT = 3;
 } // namespace Config::TCP
 
 namespace Config::FCU {
-constexpr uint32_t POLL_INTERVAL_MS = 1500;
-constexpr uint32_t RX_TIMEOUT_MS = 1200;
+constexpr uint32_t POLL_INTERVAL_MS = 2000;
+constexpr uint32_t RX_TIMEOUT_MS = 1500;
 constexpr uint32_t INTER_PACKET_DELAY_MS = 50;
 constexpr uint8_t MAX_TIMEOUT_COUNT = 3;
 constexpr uint8_t TEMP_MIN = 18;
