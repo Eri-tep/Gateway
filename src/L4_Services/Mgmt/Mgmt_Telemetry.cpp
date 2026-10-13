@@ -79,7 +79,13 @@ static void serializeSysMetrics(AppendBuf &out, uint8_t c0, uint8_t c1,
           ? "RTC_SRAM"
           : (diag_snap.wc_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
 
-  const char *cat_match_buf = diag_snap.vendor_name[0] ? diag_snap.vendor_name : "None";
+  char cat_match_buf[64] = "None";
+  size_t cat_dev_cnt = 0;
+  if (!ProtocolDiag_GetCatalogMatch(cat_match_buf, sizeof(cat_match_buf), cat_dev_cnt)) {
+    if (diag_snap.vendor_name[0]) {
+      snprintf(cat_match_buf, sizeof(cat_match_buf), "%s", diag_snap.vendor_name);
+    }
+  }
 
   char bp_buf[64];
   snprintf(bp_buf, sizeof(bp_buf), "%u Groups",

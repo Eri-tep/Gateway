@@ -230,8 +230,8 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   -- 4-0. Switch (진단 로그 초기화 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_logs, capabilities.switch.switch.off())
 
-  -- 4-1. Logview (Empty 시 통일 표기)
-  local log_display = "Empty"
+  -- 4-1. Logview (비어있을 시 '-' 표기)
+  local log_display = "-"
   if data.diagnostics and data.diagnostics.reboot_logs and #data.diagnostics.reboot_logs > 0 then
     local top = data.diagnostics.reboot_logs[1]
     local raw_reason = top.reason or "Unknown"
@@ -249,8 +249,8 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_logs, cap_rlog.history({ value = log_display }))
   end
 
-  -- 4-2. Crashdump (Empty 시 통일 표기)
-  local crash_display = "Empty"
+  -- 4-2. Crashdump (비어있을 시 '-' 표기)
+  local crash_display = "-"
   if data.diagnostics and data.diagnostics.coredump and data.diagnostics.coredump.valid then
     local cd = data.diagnostics.coredump
     crash_display = string.format("Panic Task %s", cd.task or "main")

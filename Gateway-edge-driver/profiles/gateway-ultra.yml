@@ -73,9 +73,9 @@ components:
         version: 1
       - id: digituniverse06711.version
         version: 1
-      - id: digituniverse06711.build
-        version: 1
       - id: digituniverse06711.uptime
+        version: 1
+      - id: digituniverse06711.build
         version: 1
     categories:
       - name: Hub
@@ -258,6 +258,6 @@ preferences:
       default: 240
 
 metadata:
-  vid: "eb9fc933-af48-3368-9c8b-f00d14c14cc6"
+  vid: "cb4dbcfe-1730-3451-9535-f5be85b084ff"
   mnmn: "SmartThingsCommunity"
 
