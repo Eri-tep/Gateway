@@ -306,10 +306,18 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     end,
     logs = function()
       log.info("🧹 [CMD] Clear Logs triggered from Logs switch!")
-      local cap_hist = capabilities["digituniverse06711.history"]
-      if cap_hist then
-        device:emit_component_event(comp, cap_hist.history({ value = "Empty Log" }))
-        telemetry_handler.register_ticker(device, comp, cap_hist, "history", "history", { "Empty Log", "Empty Crash" }, true)
+      local cap_rlog = capabilities["digituniverse06711.logHistory"]
+      if cap_rlog then
+        device:emit_component_event(comp, cap_rlog.history({ value = "-" }))
+      end
+      local cap_cd = capabilities["digituniverse06711.crashDump"]
+      if cap_cd then
+        device:emit_component_event(comp, cap_cd.details({ value = "-" }))
+      end
+      local reg = device:get_field("ticker_registry") or {}
+      if reg["history"] then
+        reg["history"] = nil
+        device:set_field("ticker_registry", reg)
       end
       cosock.spawn(function()
         local r1, e1 = gateway_client.clear_reboot_logs(ip, port)
