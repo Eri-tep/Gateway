@@ -363,12 +363,25 @@ bool Device_SetTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
 enum class TelemetryEventType : uint8_t {
   DEVICE_RESULT,
   DOORPHONE,
-  ELEVATOR
+  ELEVATOR,
+  FCU
+};
+
+struct FcuTelemetryData {
+  uint8_t slot_idx{0};
+  bool power{false};
+  uint8_t mode{1};
+  uint8_t fan_speed{0};
+  uint8_t swing{0};
+  uint8_t target_temp{24};
+  uint8_t room_temp{0};
+  uint8_t error{0};
 };
 
 struct TelemetryItem {
   TelemetryEventType type{TelemetryEventType::DEVICE_RESULT};
   DeviceUpdateResult device_res{};
+  FcuTelemetryData fcu{};
   uint8_t sub1{0};
   uint8_t sub2{0};
   uint8_t floor{0};
@@ -399,6 +412,11 @@ void Device_NotifyDoorphoneEvent(bool front_bell, bool lobby_bell) noexcept;
 void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
                                 uint8_t ho, uint8_t power,
                                 bool is_arrival) noexcept;
+
+/// Dispatch FCU state update to registered telemetry queue.
+void Device_NotifyFcuState(uint8_t slot_idx, bool power, uint8_t mode,
+                           uint8_t fan, uint8_t swing, uint8_t target_temp,
+                           uint8_t room_temp, uint8_t error) noexcept;
 
 // ── L4 Doorphone Control & State Facade API ──────────────────────────────────
 [[nodiscard]] bool Device_DoorphoneOpen(bool is_lobby = false) noexcept;

@@ -18,6 +18,17 @@ local STANDARD_AC_MODE_TO_VAL = {
 local FCU_FAN_MODE_TO_VAL = { low = 1, medium = 2, high = 3, auto = 4 }
 local FCU_SWING_TO_VAL    = { fixed = 0, all = 2, sweep = 2 }
 
+local VENT_SPEED_MAP = { ["low"] = 1, ["medium"] = 2, ["high"] = 3 }
+local VENT_SPEED_NAMES = { [1] = "low", [2] = "medium", [3] = "high" }
+local THERMO_MODE_TO_PWR = {
+  heat = 1,
+  away = 2,
+  eco = 2,
+  off = 0
+}
+
+local cached_gateway_ip = nil
+local cached_gateway_port = nil
 
 local function get_connection_info(device)
   local ip = device.preferences.gatewayIp or "172.30.1.3"
@@ -26,44 +37,84 @@ local function get_connection_info(device)
 end
 
 local function get_gateway_ip_port(driver)
+  if cached_gateway_ip and cached_gateway_port then
+    return cached_gateway_ip, cached_gateway_port
+  end
+
   local ip = "172.30.1.3"
   local port = 8900
   for _, d in ipairs(driver:get_devices()) do
     if d.device_network_id == "esp32_wallpad_gateway_ctrl" then
       ip = d.preferences.gatewayIp or ip
       port = tonumber(d.preferences.gatewayPort) or port
+      cached_gateway_ip = ip
+      cached_gateway_port = port
       break
     end
   end
   return ip, port
 end
 
+function CommandHandlers.update_gateway_cache(ip, port)
+  cached_gateway_ip = ip
+  cached_gateway_port = tonumber(port) or 8900
+end
+
+local PARSED_KEY_CACHE = {}
 local function parse_child_key(key)
   if not key then return nil end
+  local cached = PARSED_KEY_CACHE[key]
+  if cached then
+    return cached[1], cached[2], cached[3]
+  end
   local hex_id, s1, s2 = key:match("^dev_([0-9A-Fa-f]+)_(%d+)_(%d+)$")
   if hex_id and s1 and s2 then
-    return tonumber(hex_id, 16), tonumber(s1), tonumber(s2)
+    local d_id, sub1, sub2 = tonumber(hex_id, 16), tonumber(s1), tonumber(s2)
+    PARSED_KEY_CACHE[key] = { d_id, sub1, sub2 }
+    return d_id, sub1, sub2
   end
   return nil
 end
 
+local DEV_ID_TO_CLASS = {
+  [0x2C] = "fcu",
+  [0x28] = "thermostat",
+  [0x34] = "momentary",
+  [0x33] = "outlet",
+  [0x39] = "outlet",
+  [0x31] = "vent",
+  [0x36] = "gas",
+}
+
 local function resolve_child_class(d_id, p_key, device)
-  if d_id == 0x2C then return "fcu" end
-  if p_key:match("^dev_28_") or (device and device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID)) then
-    return "thermostat"
+  if d_id and DEV_ID_TO_CLASS[d_id] then
+    return DEV_ID_TO_CLASS[d_id]
   end
-  if p_key:match("^dev_34_") or (device and device:supports_capability_by_id(capabilities.momentary.ID)) then
-    return "momentary"
+  if p_key then
+    local pfx_id = p_key:match("^dev_([0-9A-Fa-f]+)_")
+    if pfx_id then
+      local parsed = tonumber(pfx_id, 16)
+      if parsed and DEV_ID_TO_CLASS[parsed] then
+        return DEV_ID_TO_CLASS[parsed]
+      end
+    end
   end
-  if (device and device:supports_capability_by_id(capabilities.energyMeter.ID)) or (d_id == 0x33 or d_id == 0x39) then
-    return "outlet"
-  end
-  local cap_vent = capabilities["digituniverse06711.ventmode"]
-  if device and cap_vent and device:supports_capability_by_id(cap_vent.ID) then
-    return "vent"
+  if device then
+    if device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+      return "thermostat"
+    elseif device:supports_capability_by_id(capabilities.momentary.ID) then
+      return "momentary"
+    elseif device:supports_capability_by_id(capabilities.energyMeter.ID) then
+      return "outlet"
+    end
+    local cap_vent = capabilities["digituniverse06711.ventmode"]
+    if cap_vent and device:supports_capability_by_id(cap_vent.ID) then
+      return "vent"
+    end
   end
   return "switch"
 end
+
 
 local CHILD_REFRESH_DISPATCH = {
   thermostat = function(driver, device)
@@ -90,11 +141,7 @@ local CHILD_REFRESH_DISPATCH = {
   outlet = function(driver, device)
     if device:supports_capability_by_id(capabilities.energyMeter.ID) then
       local m_kwh = device:get_field("monthly_energy_kwh") or 0.0
-      if m_kwh > 2.0 then
-        device:set_field("monthly_energy_kwh", 0.0, { persist = true })
-        device:emit_event(capabilities.energyMeter.energy({ value = 0.0, unit = "kWh" }))
-        log.info(string.format("🧹 [OUTLET] Cleared contaminated monthly energy (%.3f -> 0.0 kWh)", m_kwh))
-      end
+      device:emit_event(capabilities.energyMeter.energy({ value = m_kwh, unit = "kWh" }))
     end
   end,
 
@@ -130,6 +177,25 @@ local function refresh_telemetry(driver, device)
   end
 end
 
+local function reconcile_all_devices(driver)
+  local ip, port = get_gateway_ip_port(driver)
+  if not ip or not port then return end
+
+  log.info("🔄 [RECONCILE] Querying all device states from Gateway L3 State Cache...")
+  local res, err = gateway_client.get_devices(ip, port)
+  if res and res.devices then
+    log.info(string.format("🔄 [RECONCILE] Synchronizing %d device states...", #res.devices))
+    for _, dev_entry in ipairs(res.devices) do
+      telemetry_handler.handle_device_state_event(driver, dev_entry)
+    end
+    log.info("✅ [RECONCILE] Full device state reconciliation completed successfully.")
+  else
+    log.warn(string.format("⚠️ [RECONCILE] Failed to fetch device states: %s", tostring(err)))
+  end
+end
+
+CommandHandlers.reconcile_all_devices = reconcile_all_devices
+
 function CommandHandlers.handle_refresh(driver, device, command)
   log.info(string.format("🔄 [CMD] Refresh requested on: %s", tostring(device.label)))
   local p_key = device.parent_assigned_child_key or ""
@@ -164,6 +230,9 @@ function CommandHandlers.handle_refresh(driver, device, command)
   end
 
   refresh_telemetry(driver, device)
+  device.thread:call_with_delay(0.2, function()
+    reconcile_all_devices(driver)
+  end)
 end
 
 function CommandHandlers.handle_switch_on(driver, device, command)
@@ -219,14 +288,20 @@ function CommandHandlers.handle_switch_on(driver, device, command)
     wallpad = function()
       log.info("🔄 [CMD] Auto-Probing Reset triggered from Wallpad switch!")
       cosock.spawn(function()
-        gateway_client.cache_purge_rescan(ip, port)
+        local res, err = gateway_client.cache_purge_rescan(ip, port)
+        if not res then
+          log.error("❌ [CMD] Auto-Probing Reset failed: " .. tostring(err))
+        end
         CommandHandlers.refresh_telemetry(driver, device)
       end, "wallpad_reset_task")
     end,
     diagnostics = function()
       log.warn("⚠️  [CMD] System Remote Reboot triggered from Diagnostics switch!")
       cosock.spawn(function()
-        gateway_client.system_reboot(ip, port, "ST Diagnostics Switch")
+        local res, err = gateway_client.system_reboot(ip, port, "ST Diagnostics Switch")
+        if not res then
+          log.error("❌ [CMD] System Remote Reboot failed: " .. tostring(err))
+        end
       end, "system_reboot_task")
     end,
     logs = function()
@@ -237,8 +312,10 @@ function CommandHandlers.handle_switch_on(driver, device, command)
         telemetry_handler.register_ticker(device, comp, cap_hist, "history", "history", { "Empty Log", "Empty Crash" }, true)
       end
       cosock.spawn(function()
-        gateway_client.clear_reboot_logs(ip, port)
-        gateway_client.clear_coredump(ip, port)
+        local r1, e1 = gateway_client.clear_reboot_logs(ip, port)
+        if not r1 then log.error("❌ [CMD] Clear reboot logs failed: " .. tostring(e1)) end
+        local r2, e2 = gateway_client.clear_coredump(ip, port)
+        if not r2 then log.error("❌ [CMD] Clear coredump failed: " .. tostring(e2)) end
       end, "clear_logs_task")
     end,
     network = function()
@@ -506,6 +583,12 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
 
         if res and res.devices and #res.devices > 0 then
           log.info(string.format("📦 [CHILD] Found %d active devices on Gateway! Syncing...", #res.devices))
+          local existing_keys = {}
+          for _, ex_dev in ipairs(driver:get_devices()) do
+            local k = ex_dev.parent_assigned_child_key
+            if k then existing_keys[k] = true end
+          end
+
           for _, ldev in ipairs(res.devices) do
             local d_id = tonumber(ldev.dev_id) or 0
             local s1 = tonumber(ldev.sub1) or 0
@@ -514,15 +597,8 @@ function CommandHandlers.handle_child_device_action(driver, device, command)
             local d_name = ldev.name or string.format("Device %02X-%d-%d", d_id, s1, s2)
             local child_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
 
-            local exists = false
-            for _, ex_dev in ipairs(driver:get_devices()) do
-              if ex_dev.parent_assigned_child_key == child_key then
-                exists = true
-                break
-              end
-            end
-
-            if not exists then
+            if not existing_keys[child_key] then
+              existing_keys[child_key] = true
               local prof = CLASS_TO_PROFILE[d_cls] or "child-switch"
 
               log.info(string.format("✨ [CHILD] Creating Device '%s' (%s) with key '%s' [Profile: %s]...",
@@ -634,13 +710,15 @@ function CommandHandlers.handle_momentary_push(driver, device, command)
   end
 
   local action = (comp_id == "lobby") and "open_lobby" or "open_front"
-  log.info(string.format("🚪 [DOORPHONE] Dispatching 3-step sequence RPC: %s to %s:%d", action, ip, port))
-  local res, err = gateway_client.doorphone_action(ip, port, action)
-  if not res then
-    log.error("❌ [DOORPHONE] Doorphone action failed: " .. tostring(err))
-  else
-    log.info("✅ [DOORPHONE] Doorphone sequence successfully triggered via RPC!")
-  end
+  log.info(string.format("🚪 [DOORPHONE] Dispatching 3-step sequence RPC: %s to %s:%d (async)", action, ip, port))
+  cosock.spawn(function()
+    local res, err = gateway_client.doorphone_action(ip, port, action)
+    if not res then
+      log.error("❌ [DOORPHONE] Doorphone action failed: " .. tostring(err))
+    else
+      log.info("✅ [DOORPHONE] Doorphone sequence successfully triggered via RPC!")
+    end
+  end, "doorphone_action_task")
 end
 
 -- ============================================================================
@@ -674,20 +752,35 @@ local function handle_momentary_switch_off(device)
   end
 end
 
+local function build_fcu_restore_payload(device, d_id, s1, s2)
+  local target_mode = device:get_field("last_fcu_mode") or device:get_field("saved_fcu_mode") or "cool"
+  local m_val = FCU_AC_MODE_TO_VAL[target_mode] or 1
+
+  local target_temp = device:get_field("last_fcu_temp") or device:get_field("saved_fcu_temp") or 24
+  if target_temp < 18 or target_temp > 30 then target_temp = 24 end
+
+  local target_fan = device:get_field("last_fcu_fan") or device:get_field("saved_fcu_fan") or "auto"
+  local f_val = FCU_FAN_MODE_TO_VAL[target_fan] or 4
+
+  local target_osc = device:get_field("last_fcu_osc") or device:get_field("saved_fcu_osc") or "fixed"
+  local o_val = (target_osc == "swing") and 2 or 0
+
+  return {
+    c = "ctl",
+    d = d_id,
+    s1 = s1,
+    s2 = s2,
+    a = "power_restore",
+    mode = m_val,
+    fan = f_val,
+    swing = o_val,
+    temp = target_temp
+  }, target_mode, target_temp, target_fan, target_osc
+end
+
 local CHILD_SWITCH_ON_DISPATCH = {
   fcu = function(driver, device, d_id, s1, s2, ip, port)
-    local saved_mode = device:get_field("saved_fcu_mode") or "cool"
-    local val_map = { cool = 1, heat = 2, fanOnly = 3 }
-    local m_val = val_map[saved_mode] or 1
-
-    local saved_temp = device:get_field("saved_fcu_temp") or 24
-    if saved_temp < 18 or saved_temp > 30 then saved_temp = 24 end
-
-    local saved_fan = device:get_field("saved_fcu_fan") or "auto"
-    local f_val = FCU_FAN_MODE_TO_VAL[saved_fan] or 4
-
-    local saved_osc = device:get_field("saved_fcu_osc") or "fixed"
-    local o_val = (saved_osc == "swing") and 2 or 0
+    local payload, saved_mode, saved_temp, saved_fan, saved_osc = build_fcu_restore_payload(device, d_id, s1, s2)
 
     -- UI 상태 즉시 선반영
     local cap_m = capabilities["digituniverse06711.fcuMode"]
@@ -700,17 +793,6 @@ local CHILD_SWITCH_ON_DISPATCH = {
     if cap_o then device:emit_event(cap_o.oscillation(saved_osc)) end
 
     -- 단일 통합 RPC 발송
-    local payload = {
-      c = "ctl",
-      d = d_id,
-      s1 = s1,
-      s2 = s2,
-      a = "power_restore",
-      mode = m_val,
-      fan = f_val,
-      swing = o_val,
-      temp = saved_temp
-    }
     gateway_client.device_control_custom(ip, port, payload)
   end,
 
@@ -816,13 +898,47 @@ local function resolve_away_state(device, command)
   return (away_str == "on" or away_str == "true")
 end
 
+local function track_pending_control(device, attr_name, expected_val, prev_val, rollback_fn)
+  local existing_timer = device:get_field("__rollback_timer")
+  if existing_timer then
+    device.thread:cancel_timer(existing_timer)
+    device:set_field("__rollback_timer", nil)
+  end
+
+  local pending = {
+    attr = attr_name,
+    expected = expected_val,
+    prev = prev_val,
+  }
+  device:set_field("__pending_ctrl", pending)
+
+  local timer = device.thread:call_with_delay(3.5, function()
+    device:set_field("__rollback_timer", nil)
+    local cur_pending = device:get_field("__pending_ctrl")
+    if cur_pending and cur_pending.attr == attr_name and cur_pending.expected == expected_val then
+      device:set_field("__pending_ctrl", nil)
+      log.warn(string.format("⚠️ [ROLLBACK] %s Physical ACK timeout for %s=%s! Restoring UI to %s",
+                             tostring(device.label), attr_name, tostring(expected_val), tostring(prev_val)))
+      if rollback_fn then
+        pcall(rollback_fn, device, prev_val)
+      end
+    end
+  end)
+  device:set_field("__rollback_timer", timer)
+end
+
 function CommandHandlers.handle_child_switch_on(driver, device, command)
   local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
   if not d_id then return end
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("💡 [CHILD CMD] %s ON -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
 
+  local cur_sw = device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) or "off"
   device:emit_event(capabilities.switch.switch.on())
+
+  track_pending_control(device, "switch", "on", cur_sw, function(dev, prev)
+    dev:emit_event((prev == "on") and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+  end)
 
   local p_key = device.parent_assigned_child_key or ""
   local cls = resolve_child_class(d_id, p_key, device)
@@ -836,7 +952,12 @@ function CommandHandlers.handle_child_switch_off(driver, device, command)
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("💡 [CHILD CMD] %s OFF -> DevID 0x%02X (%d-%d)", device.label, d_id, s1, s2))
 
+  local cur_sw = device:get_latest_state("main", capabilities.switch.ID, capabilities.switch.switch.NAME) or "on"
   device:emit_event(capabilities.switch.switch.off())
+
+  track_pending_control(device, "switch", "off", cur_sw, function(dev, prev)
+    dev:emit_event((prev == "on") and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+  end)
 
   local p_key = device.parent_assigned_child_key or ""
   local cls = resolve_child_class(d_id, p_key, device)
@@ -914,12 +1035,8 @@ function CommandHandlers.handle_child_set_heating_setpoint(driver, device, comma
   device:set_field("heating_temp_timer", new_timer)
 end
 
-function CommandHandlers.handle_child_set_thermostat_mode(driver, device, command)
-  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
-  if not d_id then return end
-  local mode = (command.args and command.args.mode) or "off"
-
-  if d_id == 0x2C then
+local THERMO_MODE_HANDLERS = {
+  fcu = function(driver, device, d_id, s1, s2, mode)
     local val = FCU_AC_MODE_TO_VAL[mode] or 1
     local comp_mode = device.profile.components["mode"]
     if comp_mode then
@@ -929,21 +1046,23 @@ function CommandHandlers.handle_child_set_thermostat_mode(driver, device, comman
     end
     local ip, port = get_gateway_ip_port(driver)
     gateway_client.device_control(ip, port, d_id, s1, s2, "mode", val)
-    return
-  end
+  end,
+  thermostat = function(driver, device, d_id, s1, s2, mode)
+    local pwr = THERMO_MODE_TO_PWR[mode] or 0
+    local ip, port = get_gateway_ip_port(driver)
+    log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (pwr=%d, DevID 0x%02X %d-%d)", device.label, mode, pwr, d_id, s1, s2))
+    device:emit_event(capabilities.thermostatMode.thermostatMode(mode))
+    gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
+  end,
+}
 
-  local THERMO_MODE_TO_PWR = {
-    heat = 1,
-    away = 2,
-    eco = 2,
-    off = 0
-  }
-  local pwr = THERMO_MODE_TO_PWR[mode] or 0
-  local ip, port = get_gateway_ip_port(driver)
-  log.info(string.format("🔥 [CHILD CMD] %s SetMode -> %s (pwr=%d, DevID 0x%02X %d-%d)", device.label, mode, pwr, d_id, s1, s2))
-  device:emit_event(capabilities.thermostatMode.thermostatMode(mode))
-
-  gateway_client.device_control(ip, port, d_id, s1, s2, "power", pwr)
+function CommandHandlers.handle_child_set_thermostat_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local mode = (command.args and command.args.mode) or "off"
+  local cls = resolve_child_class(d_id, device.parent_assigned_child_key, device)
+  local handler = THERMO_MODE_HANDLERS[cls] or THERMO_MODE_HANDLERS.thermostat
+  handler(driver, device, d_id, s1, s2, mode)
 end
 
 function CommandHandlers.handle_child_set_cooling_setpoint(driver, device, command)
@@ -975,54 +1094,34 @@ function CommandHandlers.handle_child_set_cooling_setpoint(driver, device, comma
   device:set_field("cooling_temp_timer", new_timer)
 end
 
-function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
-  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
-  if not d_id then return end
-  local mode = (command.args and command.args.mode) or "cool"
-
-  if d_id == 0x2C then
+local AC_MODE_HANDLERS = {
+  fcu = function(driver, device, d_id, s1, s2, mode)
     local val = FCU_AC_MODE_TO_VAL[mode] or 1
     device:emit_event(capabilities.airConditionerMode.airConditionerMode(mode))
     local ip, port = get_gateway_ip_port(driver)
     gateway_client.device_control(ip, port, d_id, s1, s2, "mode", val)
-    return
-  end
+  end,
+  standard = function(driver, device, d_id, s1, s2, mode)
+    local mode_code = STANDARD_AC_MODE_TO_VAL[mode] or 1
+    local ip, port = get_gateway_ip_port(driver)
+    log.info(string.format("❄️ [AIRCON CMD] %s SetAirconMode -> %s (%d, DevID 0x%02X %d-%d)", device.label, mode, mode_code, d_id, s1, s2))
+    device:emit_event(capabilities.airConditionerMode.airConditionerMode(mode))
+    gateway_client.device_control(ip, port, d_id, s1, s2, "mode", mode_code)
+  end,
+}
 
-  local mode_code = STANDARD_AC_MODE_TO_VAL[mode] or 1
-
-  local ip, port = get_gateway_ip_port(driver)
-  log.info(string.format("❄️ [AIRCON CMD] %s SetAirconMode -> %s (%d, DevID 0x%02X %d-%d)", device.label, mode, mode_code, d_id, s1, s2))
-  device:emit_event(capabilities.airConditionerMode.airConditionerMode(mode))
-
-  gateway_client.device_control(ip, port, d_id, s1, s2, "mode", mode_code)
+function CommandHandlers.handle_child_set_aircon_mode(driver, device, command)
+  local d_id, s1, s2 = parse_child_key(device.parent_assigned_child_key)
+  if not d_id then return end
+  local mode = (command.args and command.args.mode) or "cool"
+  local cls = resolve_child_class(d_id, device.parent_assigned_child_key, device)
+  local handler = AC_MODE_HANDLERS[cls] or AC_MODE_HANDLERS.standard
+  handler(driver, device, d_id, s1, s2, mode)
 end
 
 local function dispatch_fcu_unified_restore(driver, device, d_id, s1, s2)
-  local target_mode = device:get_field("last_fcu_mode") or device:get_field("saved_fcu_mode") or "cool"
-  local val_map = { cool = 1, heat = 2, fanOnly = 3 }
-  local m_val = val_map[target_mode] or 1
-
-  local target_temp = device:get_field("last_fcu_temp") or device:get_field("saved_fcu_temp") or 24
-  if target_temp < 18 or target_temp > 30 then target_temp = 24 end
-
-  local target_fan = device:get_field("last_fcu_fan") or device:get_field("saved_fcu_fan") or "auto"
-  local f_val = FCU_FAN_MODE_TO_VAL[target_fan] or 4
-
-  local target_osc = device:get_field("last_fcu_osc") or device:get_field("saved_fcu_osc") or "fixed"
-  local o_val = (target_osc == "swing") and 2 or 0
-
+  local payload = build_fcu_restore_payload(device, d_id, s1, s2)
   local ip, port = get_gateway_ip_port(driver)
-  local payload = {
-    c = "ctl",
-    d = d_id,
-    s1 = s1,
-    s2 = s2,
-    a = "power_restore",
-    mode = m_val,
-    fan = f_val,
-    swing = o_val,
-    temp = target_temp
-  }
   gateway_client.device_control_custom(ip, port, payload)
 end
 
@@ -1258,10 +1357,8 @@ function CommandHandlers.handle_child_set_vent_speed(driver, device, command)
   end
   raw_speed = raw_speed or "low"
 
-  local speed_map = { ["low"] = 1, ["medium"] = 2, ["high"] = 3 }
-  local spd = speed_map[string.lower(tostring(raw_speed))] or 1
-  local speed_names = { [1] = "low", [2] = "medium", [3] = "high" }
-  local speed_str = speed_names[spd] or "low"
+  local spd = VENT_SPEED_MAP[string.lower(tostring(raw_speed))] or 1
+  local speed_str = VENT_SPEED_NAMES[spd] or "low"
 
   local ip, port = get_gateway_ip_port(driver)
   log.info(string.format("🌀 [CHILD CMD] %s SetVentSpeed -> %s (val=%d) (DevID 0x%02X %d-%d)", device.label, speed_str, spd, d_id, s1, s2))

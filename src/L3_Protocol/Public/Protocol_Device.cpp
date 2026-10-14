@@ -945,6 +945,22 @@ void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
   Telemetry_Enqueue(item);
 }
 
+void Device_NotifyFcuState(uint8_t slot_idx, bool power, uint8_t mode,
+                           uint8_t fan, uint8_t swing, uint8_t target_temp,
+                           uint8_t room_temp, uint8_t error) noexcept {
+  TelemetryItem item{};
+  item.type = TelemetryEventType::FCU;
+  item.fcu.slot_idx = slot_idx;
+  item.fcu.power = power;
+  item.fcu.mode = mode;
+  item.fcu.fan_speed = fan;
+  item.fcu.swing = swing;
+  item.fcu.target_temp = target_temp;
+  item.fcu.room_temp = room_temp;
+  item.fcu.error = error;
+  Telemetry_Enqueue(item);
+}
+
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept {
   DeviceUpdateResult res = s_device_repo.updateFromBus(ack_pkt);
   if (res.should_broadcast) {

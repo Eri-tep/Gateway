@@ -209,6 +209,11 @@ static void applyOptimisticState(uint8_t slot_idx, uint16_t mode, uint16_t fan,
   rt.last_active_swing = rt.snap.swing;
 
   syncDeviceRepository(slot_idx, rt.snap);
+  Device_NotifyFcuState(
+      slot_idx, rt.snap.power, static_cast<uint8_t>(rt.snap.mode),
+      static_cast<uint8_t>(rt.snap.fan_speed),
+      static_cast<uint8_t>(rt.snap.swing), rt.snap.target_temp,
+      rt.snap.room_temp, rt.snap.error_code);
 }
 
 static bool Fcu_SendRaw(uint8_t slot_idx, const uint8_t *pkt, size_t len) {
@@ -248,6 +253,11 @@ static bool executeRegisterWrite(uint8_t slot_idx, uint16_t reg, uint16_t val,
     auto &rt = s_fcu_slots[slot_idx];
     mutate(rt);
     syncDeviceRepository(slot_idx, rt.snap);
+    Device_NotifyFcuState(
+        slot_idx, rt.snap.power, static_cast<uint8_t>(rt.snap.mode),
+        static_cast<uint8_t>(rt.snap.fan_speed),
+        static_cast<uint8_t>(rt.snap.swing), rt.snap.target_temp,
+        rt.snap.room_temp, rt.snap.error_code);
   }
   return ok;
 }
@@ -269,6 +279,11 @@ void Fcu_HandleRx(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
     rt.timeout_count = 0;
     rt.is_online = true;
     rt.next_tx_ms = millis() + Config::FCU::INTER_PACKET_DELAY_MS;
+    Device_NotifyFcuState(
+        slot_idx, rt.snap.power, static_cast<uint8_t>(rt.snap.mode),
+        static_cast<uint8_t>(rt.snap.fan_speed),
+        static_cast<uint8_t>(rt.snap.swing), rt.snap.target_temp,
+        rt.snap.room_temp, rt.snap.error_code);
     return;
   }
 
@@ -281,6 +296,16 @@ void Fcu_HandleRx(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
     }
 
     const auto &new_snap = *parse_res;
+    const bool was_online = rt.is_online;
+    const bool state_changed = (!was_online ||
+                                rt.snap.power != new_snap.power ||
+                                rt.snap.mode != new_snap.mode ||
+                                rt.snap.fan_speed != new_snap.fan_speed ||
+                                rt.snap.swing != new_snap.swing ||
+                                rt.snap.target_temp != new_snap.target_temp ||
+                                rt.snap.room_temp != new_snap.room_temp ||
+                                rt.snap.error_code != new_snap.error_code);
+
     rt.waiting_response = false;
     rt.timeout_count = 0;
     rt.is_online = true;
@@ -310,6 +335,14 @@ void Fcu_HandleRx(uint8_t slot_idx, const uint8_t *data, size_t len) noexcept {
 
     rt.snap = new_snap;
     syncDeviceRepository(slot_idx, rt.snap, data, len);
+
+    if (state_changed) {
+      Device_NotifyFcuState(
+          slot_idx, rt.snap.power, static_cast<uint8_t>(rt.snap.mode),
+          static_cast<uint8_t>(rt.snap.fan_speed),
+          static_cast<uint8_t>(rt.snap.swing), rt.snap.target_temp,
+          rt.snap.room_temp, rt.snap.error_code);
+    }
   }
 }
 
