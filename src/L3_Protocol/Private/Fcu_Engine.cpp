@@ -408,10 +408,14 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
   s_last_tick_ms = now_ms;
 
   for (uint8_t slot_idx = 1; slot_idx < Config::TCP::MAX_EW11_SLOTS; ++slot_idx) {
-    if (!Bridge_IsSlotOnline(slot_idx))
-      continue;
-
     auto &rt = s_fcu_slots[slot_idx];
+
+    if (!Bridge_IsSlotOnline(slot_idx)) {
+      if (rt.waiting_response) {
+        rt.waiting_response = false;
+      }
+      continue;
+    }
 
     // Step 1: Inter-Packet Delay Gate
     if (static_cast<int32_t>(now_ms - rt.next_tx_ms) < 0) {
@@ -472,8 +476,6 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
     if (rt.last_poll_ms == 0 ||
         (now_ms - rt.last_poll_ms >= Config::FCU::POLL_INTERVAL_MS)) {
       rt.last_poll_ms = now_ms;
-      rt.query_sent_ms = now_ms;
-      rt.waiting_response = true;
 
       ProtocolDiag_PollingRegisterOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
                                           ModbusRtu::kQueryPkt.data(),
@@ -481,7 +483,9 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
       Router_RecordRoute(5, slot_idx, Config::FCU::DEV_ID, slot_idx, 0);
 
       if (Bridge_SendRaw(slot_idx, ModbusRtu::kQueryPkt.data(),
-                               ModbusRtu::kQueryPkt.size())) {
+                         ModbusRtu::kQueryPkt.size())) {
+        rt.query_sent_ms = now_ms;
+        rt.waiting_response = true;
         System_RecordCh5Tx();
         StaticPacket trace_pkt{5, static_cast<uint8_t>(ModbusRtu::kQueryPkt.size())};
         std::copy(ModbusRtu::kQueryPkt.begin(), ModbusRtu::kQueryPkt.end(), trace_pkt.data.begin());
