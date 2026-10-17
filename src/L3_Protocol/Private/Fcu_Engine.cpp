@@ -473,9 +473,17 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
     }
 
     // Step 5: Periodic Polling Scheduler (Independent physical adapter channels)
-    if (rt.last_poll_ms == 0 ||
-        (now_ms - rt.last_poll_ms >= Config::FCU::POLL_INTERVAL_MS)) {
+    const uint32_t stagger_delay_ms = static_cast<uint32_t>(slot_idx - 1) * 200;
+    if (rt.last_poll_ms == 0) {
+      if (now_ms < stagger_delay_ms) {
+        continue;
+      }
+      rt.last_poll_ms = (now_ms == 0) ? 1 : now_ms;
+    } else if (now_ms - rt.last_poll_ms < Config::FCU::POLL_INTERVAL_MS) {
+      continue;
+    } else {
       rt.last_poll_ms = now_ms;
+    }
 
       ProtocolDiag_PollingRegisterOrTouch(5, Config::FCU::DEV_ID, slot_idx, 0,
                                           ModbusRtu::kQueryPkt.data(),
@@ -491,7 +499,6 @@ void Fcu_PollTick(uint32_t now_ms) noexcept {
         std::copy(ModbusRtu::kQueryPkt.begin(), ModbusRtu::kQueryPkt.end(), trace_pkt.data.begin());
         System_TracePacket(5, true, TraceType::QRY, trace_pkt);
       }
-    }
   }
 }
 
