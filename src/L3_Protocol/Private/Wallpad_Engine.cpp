@@ -1817,6 +1817,13 @@ bool Wallpad_DoorphoneGetLockedFraming(uint8_t &stx, uint8_t &etx, uint8_t &len)
     len = s_doorphone_tracker.candidate_len.load(std::memory_order_relaxed);
     return true;
   }
+  const WallpadProfile *p = ProfileMatcher::getActiveProfile();
+  if (p && p->doorphone.stx != 0 && p->doorphone.etx != 0 && p->doorphone.len != 0) {
+    stx = p->doorphone.stx;
+    etx = p->doorphone.etx;
+    len = p->doorphone.len;
+    return true;
+  }
   return false;
 }
 

@@ -1009,33 +1009,53 @@ void Task_Ch4(void *pvParameters) {
       const int read_bytes = Uart_ReadSwSerial(temp, to_read);
       if (read_bytes > 0) {
         last_byte_ms = now;
-        if (buf_len + read_bytes > sizeof(buf)) {
-          uint8_t t_stx = 0, t_etx = 0, t_len = 0;
-          bool locked = s_dispatcher.onDoorphoneGetLockedFraming &&
-                        s_dispatcher.onDoorphoneGetLockedFraming(t_stx, t_etx, t_len);
-          if (locked && buf_len > 0) {
-            const void *hit = memchr(buf, t_stx, buf_len);
-            if (!hit) {
-              buf_len = 0;
-            } else {
-              size_t first_stx = static_cast<const uint8_t *>(hit) - buf;
-              if (first_stx > 0) {
-                memmove(buf, buf + first_stx, buf_len - first_stx);
-                buf_len -= first_stx;
-              } else {
-                memmove(buf, buf + 1, buf_len - 1);
-                buf_len -= 1;
-              }
-            }
+
+        uint8_t t_stx = 0, t_etx = 0, t_len = 0;
+        bool locked = s_dispatcher.onDoorphoneGetLockedFraming &&
+                      s_dispatcher.onDoorphoneGetLockedFraming(t_stx, t_etx, t_len);
+
+        const uint8_t *src_ptr = temp;
+        size_t src_len = static_cast<size_t>(read_bytes);
+
+        // Noise drain: If locked and buffer is currently empty, any leading byte
+        // before target_stx is line noise / floating glitch. Drain immediately.
+        if (locked && buf_len == 0) {
+          const void *hit = memchr(src_ptr, t_stx, src_len);
+          if (!hit) {
+            src_len = 0;
           } else {
-            const size_t overflow = (buf_len + read_bytes) - sizeof(buf);
-            memmove(buf, buf + overflow, buf_len - overflow);
-            buf_len -= overflow;
+            size_t skip = static_cast<const uint8_t *>(hit) - src_ptr;
+            src_ptr += skip;
+            src_len -= skip;
           }
         }
-        const size_t to_copy = std::min<size_t>(read_bytes, sizeof(buf) - buf_len);
-        memcpy(&buf[buf_len], temp, to_copy);
-        buf_len += to_copy;
+
+        if (src_len > 0) {
+          if (buf_len + src_len > sizeof(buf)) {
+            if (locked && buf_len > 0) {
+              const void *hit = memchr(buf, t_stx, buf_len);
+              if (!hit) {
+                buf_len = 0;
+              } else {
+                size_t first_stx = static_cast<const uint8_t *>(hit) - buf;
+                if (first_stx > 0) {
+                  memmove(buf, buf + first_stx, buf_len - first_stx);
+                  buf_len -= first_stx;
+                } else {
+                  memmove(buf, buf + 1, buf_len - 1);
+                  buf_len -= 1;
+                }
+              }
+            } else {
+              const size_t overflow = (buf_len + src_len) - sizeof(buf);
+              memmove(buf, buf + overflow, buf_len - overflow);
+              buf_len -= overflow;
+            }
+          }
+          const size_t to_copy = std::min<size_t>(src_len, sizeof(buf) - buf_len);
+          memcpy(&buf[buf_len], src_ptr, to_copy);
+          buf_len += to_copy;
+        }
       }
     }
 

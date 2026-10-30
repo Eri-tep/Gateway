@@ -15,6 +15,8 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
 #include <driver/uart.h>
+#include <driver/gpio.h>
+#include <driver/gpio_filter.h>
 
 // ── Static-sealed Doorphone SW Serial instance (L1 private) ─────────────────
 // Previously: `extern SoftwareSerial g_doorphone_serial;` in NetworkRouter.h
@@ -22,6 +24,31 @@
 static SoftwareSerial s_doorphone_serial;
 static int s_doorphone_rx_pin = Config::GPIO::RX_GPIO;
 static int s_doorphone_tx_pin = Config::GPIO::TX_GPIO;
+
+#if SOC_GPIO_SUPPORT_PIN_GLITCH_FILTER
+static gpio_glitch_filter_handle_t s_doorphone_glitch_filter = nullptr;
+#endif
+
+static void configureDoorphoneRxPin(int rx_pin) noexcept {
+  pinMode(rx_pin, INPUT_PULLUP);
+  gpio_pullup_en(static_cast<gpio_num_t>(rx_pin));
+  gpio_pulldown_dis(static_cast<gpio_num_t>(rx_pin));
+
+#if SOC_GPIO_SUPPORT_PIN_GLITCH_FILTER
+  if (s_doorphone_glitch_filter) {
+    gpio_glitch_filter_disable(s_doorphone_glitch_filter);
+    gpio_del_glitch_filter(s_doorphone_glitch_filter);
+    s_doorphone_glitch_filter = nullptr;
+  }
+  gpio_pin_glitch_filter_config_t filter_cfg = {
+      .clk_src = GLITCH_FILTER_CLK_SRC_DEFAULT,
+      .gpio_num = static_cast<gpio_num_t>(rx_pin),
+  };
+  if (gpio_new_pin_glitch_filter(&filter_cfg, &s_doorphone_glitch_filter) == ESP_OK) {
+    gpio_glitch_filter_enable(s_doorphone_glitch_filter);
+  }
+#endif
+}
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -69,7 +96,7 @@ esp_err_t Uart_InitSwSerial(int rx_pin, int tx_pin,
   s_doorphone_rx_pin = rx_pin;
   s_doorphone_tx_pin = tx_pin;
   s_doorphone_serial.begin(cfg.baud, toSwSerialConfig(cfg.framing), rx_pin, tx_pin);
-  pinMode(rx_pin, INPUT_PULLUP);
+  configureDoorphoneRxPin(rx_pin);
   return ESP_OK;
 }
 
@@ -93,7 +120,7 @@ esp_err_t Uart_ReconfigHw(uart_port_t port, const UartHwConfig &cfg) noexcept {
 esp_err_t Uart_ReconfigSwSerial(const UartHwConfig &cfg) noexcept {
   s_doorphone_serial.begin(cfg.baud, toSwSerialConfig(cfg.framing),
                            s_doorphone_rx_pin, s_doorphone_tx_pin);
-  pinMode(s_doorphone_rx_pin, INPUT_PULLUP);
+  configureDoorphoneRxPin(s_doorphone_rx_pin);
   return ESP_OK;
 }
 
