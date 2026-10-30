@@ -215,3 +215,9 @@ Uart_ReadSwSerial(uint8_t *buf, size_t max_len) noexcept {
 
 /// Flush HW UART RX ring buffer (discard pending bytes).
 void Uart_FlushHw(uart_port_t port) noexcept;
+
+/// Flush CH4 SW Serial RX buffer (discard pending bytes).
+void Uart_FlushSwSerial() noexcept;
+
+/// Check if CH4 SW Serial RX buffer experienced an overflow.
+[[nodiscard]] bool Uart_OverflowSwSerial() noexcept;

@@ -975,8 +975,13 @@ void Task_Ch4(void *pvParameters) {
     System_FeedWdt(Config::Task::WDT_ID_CH4);
   }
 
+  Uart_FlushSwSerial();
+
   for (;;) {
     System_FeedWdt(Config::Task::WDT_ID_CH4);
+    if (Uart_OverflowSwSerial()) [[unlikely]] {
+      Diag_RecordChannelInvalidFrame(4);
+    }
     if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
       if (g_system_event_group) {
         xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
@@ -1086,7 +1091,7 @@ void Task_Ch4(void *pvParameters) {
               frame_found = true;
               found_len = target_len;
             } else {
-              Ch4_DropInvalidFrame(&buf[p], buf_len - p);
+              // False STX / non-frame line noise: Silent drop, advance to next byte without polluting Inv Frm
               p++;
               continue;
             }

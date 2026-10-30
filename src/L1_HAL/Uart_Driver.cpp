@@ -97,6 +97,7 @@ esp_err_t Uart_InitSwSerial(int rx_pin, int tx_pin,
   s_doorphone_tx_pin = tx_pin;
   s_doorphone_serial.begin(cfg.baud, toSwSerialConfig(cfg.framing), rx_pin, tx_pin);
   configureDoorphoneRxPin(rx_pin);
+  Uart_FlushSwSerial();
   return ESP_OK;
 }
 
@@ -121,6 +122,7 @@ esp_err_t Uart_ReconfigSwSerial(const UartHwConfig &cfg) noexcept {
   s_doorphone_serial.begin(cfg.baud, toSwSerialConfig(cfg.framing),
                            s_doorphone_rx_pin, s_doorphone_tx_pin);
   configureDoorphoneRxPin(s_doorphone_rx_pin);
+  Uart_FlushSwSerial();
   return ESP_OK;
 }
 
@@ -176,6 +178,16 @@ size_t Uart_AvailableSwSerial() noexcept {
 
 void Uart_FlushHw(uart_port_t port) noexcept {
   uart_flush_input(port);
+}
+
+void Uart_FlushSwSerial() noexcept {
+  while (s_doorphone_serial.available() > 0) {
+    s_doorphone_serial.read();
+  }
+}
+
+bool Uart_OverflowSwSerial() noexcept {
+  return s_doorphone_serial.overflow();
 }
 
 // ── Utility (internal) ────────────────────────────────────────────────────────
