@@ -301,6 +301,7 @@ void demuxPacketStream(HubClientSlot *slot) {
     if (slot->rx_buf[p] != stx) {
       const void *stx_ptr = memchr(&slot->rx_buf[p], stx, slot->rx_len - p);
       if (!stx_ptr) {
+        p = slot->rx_len;
         break;
       }
       p = static_cast<const uint8_t *>(stx_ptr) - slot->rx_buf;
@@ -320,7 +321,19 @@ void demuxPacketStream(HubClientSlot *slot) {
       System_RecordCh5Dropped();
       slot->invalid_frames.fetch_add(1, std::memory_order_relaxed);
       slot->dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-      p++;
+
+      if (p + 1 < slot->rx_len) {
+        const void *next_stx = memchr(&slot->rx_buf[p + 1], stx, slot->rx_len - (p + 1));
+        if (next_stx) {
+          p = static_cast<const uint8_t *>(next_stx) - slot->rx_buf;
+        } else {
+          p = slot->rx_len;
+          break;
+        }
+      } else {
+        p = slot->rx_len;
+        break;
+      }
       continue;
     }
 
