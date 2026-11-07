@@ -897,6 +897,7 @@ static Foundation::SpinlockMpscRingBuffer<TelemetryItem, TELEMETRY_QUEUE_LEN> s_
 static std::atomic<uint32_t> s_telemetry_drop_count{0};
 static std::atomic<uint32_t> s_telemetry_high_watermark{0};
 
+static portMUX_TYPE s_throttle_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_last_broadcast_ms = 0;
 static uint8_t s_last_broadcast_dev = 0;
 static uint8_t s_last_broadcast_sub1 = 0;
@@ -945,22 +946,41 @@ void Device_NotifyElevatorEvent(uint8_t sub1, uint8_t sub2, uint8_t floor,
   Telemetry_Enqueue(item);
 }
 
+void Device_NotifyFcuState(uint8_t slot_idx, bool power, uint8_t mode,
+                           uint8_t fan, uint8_t swing, uint8_t target_temp,
+                           uint8_t room_temp, uint8_t error) noexcept {
+  TelemetryItem item{};
+  item.type = TelemetryEventType::FCU;
+  item.fcu.slot_idx = slot_idx;
+  item.fcu.power = power;
+  item.fcu.mode = mode;
+  item.fcu.fan_speed = fan;
+  item.fcu.swing = swing;
+  item.fcu.target_temp = target_temp;
+  item.fcu.room_temp = room_temp;
+  item.fcu.error = error;
+  Telemetry_Enqueue(item);
+}
+
 void Device_ProcessBusPacket(StaticPacket &ack_pkt) noexcept {
   DeviceUpdateResult res = s_device_repo.updateFromBus(ack_pkt);
   if (res.should_broadcast) {
     const uint32_t now = millis();
-    // 50ms throttle window: suppress rapid flapping of identical non-momentary device (bypass elevator 0x34)
-    if (res.dev_id != 0x34 &&
-        res.dev_id == s_last_broadcast_dev &&
-        res.sub1 == s_last_broadcast_sub1 &&
-        res.sub2 == s_last_broadcast_sub2 &&
-        (now - s_last_broadcast_ms < Config::Timing::DEVICE_BROADCAST_THROTTLE_MS)) {
-      return;
+    {
+      CriticalSectionLocker lock(&s_throttle_mux);
+      // 50ms throttle window: suppress rapid flapping of identical non-momentary device (bypass elevator 0x34)
+      if (res.dev_id != 0x34 &&
+          res.dev_id == s_last_broadcast_dev &&
+          res.sub1 == s_last_broadcast_sub1 &&
+          res.sub2 == s_last_broadcast_sub2 &&
+          (now - s_last_broadcast_ms < Config::Timing::DEVICE_BROADCAST_THROTTLE_MS)) {
+        return;
+      }
+      s_last_broadcast_ms = now;
+      s_last_broadcast_dev = res.dev_id;
+      s_last_broadcast_sub1 = res.sub1;
+      s_last_broadcast_sub2 = res.sub2;
     }
-    s_last_broadcast_ms = now;
-    s_last_broadcast_dev = res.dev_id;
-    s_last_broadcast_sub1 = res.sub1;
-    s_last_broadcast_sub2 = res.sub2;
 
     TelemetryItem item{};
     item.type = TelemetryEventType::DEVICE_RESULT;

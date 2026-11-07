@@ -5,54 +5,17 @@ local gateway_client = require "gateway_client"
 local telemetry_handler = require "telemetry_handler"
 local log = require "log"
 
-local _orig_info = log.info
-local _orig_debug = log.debug
-local _orig_trace = log.trace
-local _orig_warn = log.warn
-
-local NOOP = function() end
-
-local LOG_LEVEL_CONFIGS = {
-  WARN = {
-    trace = NOOP,
-    debug = NOOP,
-    info  = NOOP,
-    warn  = _orig_warn,
-  },
-  ERROR = {
-    trace = NOOP,
-    debug = NOOP,
-    info  = NOOP,
-    warn  = NOOP,
-  },
-  DEBUG = {
-    trace = _orig_trace,
-    debug = _orig_debug,
-    info  = _orig_info,
-    warn  = _orig_warn,
-  },
-  INFO = {
-    trace = NOOP,
-    debug = NOOP,
-    info  = _orig_info,
-    warn  = _orig_warn,
-  },
-}
-
 local function apply_log_level(level)
-  local cfg = LOG_LEVEL_CONFIGS[level] or LOG_LEVEL_CONFIGS.INFO
-  log.trace = cfg.trace
-  log.debug = cfg.debug
-  log.info  = cfg.info
-  log.warn  = cfg.warn
+  log.info(string.format("Driver log level configured: %s", tostring(level or "INFO")))
 end
 
 local function schedule_polling_timer(driver, device)
   local interval = device.preferences.pollingInterval or 30
   if interval < 5 then interval = 5 end
 
-  if device:get_field("poll_timer") then
-    device.thread:cancel_timer(device:get_field("poll_timer"))
+  local prev_poll = device:get_field("poll_timer")
+  if prev_poll then
+    device.thread:cancel_timer(prev_poll)
     device:set_field("poll_timer", nil)
   end
 
@@ -183,33 +146,54 @@ local function device_init(driver, device)
       end
     }
 
+    local CHILD_INIT_DISPATCH = {
+      [0x2C] = function(dev)
+        CHILD_INIT_HANDLERS.fcu(dev)
+        if dev:supports_capability_by_id(capabilities.airConditionerMode.ID) then
+          CHILD_INIT_HANDLERS.aircon(dev)
+        end
+      end,
+      [0x28] = CHILD_INIT_HANDLERS.thermostat,
+      [0x34] = CHILD_INIT_HANDLERS.elevator,
+      [0x33] = CHILD_INIT_HANDLERS.outlet,
+      [0x39] = CHILD_INIT_HANDLERS.outlet,
+    }
+
     -- 1) 도어폰 초기화
-    if p_key == "doorphone_front" or p_key == "doorphone_lobby" or p_key == "doorphone" then
+    if p_key:match("^doorphone") then
       CHILD_INIT_HANDLERS.doorphone(device)
-      return
+    else
+      -- 2) 동적 자식 기기 (조명/콘센트/난방/환기/가스/엘리베이터 등)
+      if device:get_field("master_roll_timer") then
+        device.thread:cancel_timer(device:get_field("master_roll_timer"))
+        device:set_field("master_roll_timer", nil)
+      end
+      device:set_field("ticker_registry", nil)
+
+      local d_hex = p_key:match("^dev_([0-9A-Fa-f]+)_")
+      local d_id = d_hex and tonumber(d_hex, 16)
+      local init_fn = d_id and CHILD_INIT_DISPATCH[d_id]
+      if init_fn then
+        init_fn(device)
+      else
+        if device:supports_capability_by_id(capabilities.energyMeter.ID) then
+          CHILD_INIT_HANDLERS.outlet(device)
+        elseif device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
+          CHILD_INIT_HANDLERS.thermostat(device)
+        elseif device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
+          CHILD_INIT_HANDLERS.aircon(device)
+        end
+      end
     end
 
-    -- 2) 동적 자식 기기 (조명/콘센트/난방/환기/가스/엘리베이터 등)
-    if device:get_field("master_roll_timer") then
-      device.thread:cancel_timer(device:get_field("master_roll_timer"))
-      device:set_field("master_roll_timer", nil)
-    end
-    device:set_field("ticker_registry", nil)
-
-    if device:supports_capability_by_id(capabilities.energyMeter.ID) then
-      CHILD_INIT_HANDLERS.outlet(device)
-    end
-    if p_key:match("^dev_28_") or device:supports_capability_by_id(capabilities.thermostatHeatingSetpoint.ID) then
-      CHILD_INIT_HANDLERS.thermostat(device)
-    end
-    if device:supports_capability_by_id(capabilities.airConditionerMode.ID) then
-      CHILD_INIT_HANDLERS.aircon(device)
-    end
-    if p_key:match("^dev_2c_") then
-      CHILD_INIT_HANDLERS.fcu(device)
-    end
-    if p_key:match("^dev_34_") then
-      CHILD_INIT_HANDLERS.elevator(device)
+    -- Register child device to Gateway's child_map for O(1) Fast-Path lookup
+    for _, g_dev in ipairs(driver:get_devices()) do
+      if g_dev.device_network_id == "esp32_wallpad_gateway_ctrl" then
+        local child_map = g_dev:get_field("child_map") or {}
+        child_map[p_key] = device
+        g_dev:set_field("child_map", child_map)
+        break
+      end
     end
 
     log.info(string.format("Child Device initialized successfully: %s", p_key))
@@ -248,9 +232,10 @@ local function device_init(driver, device)
         end
       end,
       function(d)
-        -- ★ TCP 소켓 연결 성공 즉시 1회 자동 텔레메트리 즉각 조회 (30초 공백 지연 0초로 단축)
-        log.info("🚀 [AUTO-SYNC] Connected to gateway! Querying telemetry immediately...")
+        -- ★ TCP 소켓 연결 성공 즉시 1회 자동 텔레메트리 및 전체 자식 기기 상태 즉시 동기화
+        log.info("🚀 [AUTO-SYNC] Connected to gateway! Querying telemetry and reconciling device states immediately...")
         command_handlers.refresh_telemetry(d, device)
+        command_handlers.reconcile_all_devices(d)
       end
     )
   end
@@ -284,6 +269,7 @@ local function device_info_changed(driver, device, event, args)
 
   local ip = new_prefs.gatewayIp or "172.30.1.3"
   local port = new_prefs.gatewayPort or 8900
+  command_handlers.update_gateway_cache(ip, port)
 
   -- -1. Log Level change (Hide INFO/DEBUG)
   if new_prefs.logLevel then
@@ -365,28 +351,51 @@ local function device_removed(driver, device)
   local p_key = device.parent_assigned_child_key or ""
   if p_key ~= "" then
     log.info(string.format("Child Device removed: %s", p_key))
-    if device:get_field("master_roll_timer") then
-      device.thread:cancel_timer(device:get_field("master_roll_timer"))
-      device:set_field("master_roll_timer", nil)
+    local CHILD_TIMERS = {
+      "heating_temp_timer",
+      "cooling_temp_timer",
+      "fcu_cmd_timer",
+      "fan_speed_timer",
+      "doorphone_motion_timer_main",
+      "doorphone_motion_timer_lobby",
+      "ev_arrival_timer",
+      "master_roll_timer",
+      "__rollback_timer",
+    }
+    for _, t_key in ipairs(CHILD_TIMERS) do
+      local t = device:get_field(t_key)
+      if t then
+        device.thread:cancel_timer(t)
+        device:set_field(t_key, nil)
+      end
+    end
+
+    for _, g_dev in ipairs(driver:get_devices()) do
+      if g_dev.device_network_id == "esp32_wallpad_gateway_ctrl" then
+        local child_map = g_dev:get_field("child_map")
+        if child_map and child_map[p_key] then
+          child_map[p_key] = nil
+          g_dev:set_field("child_map", child_map)
+        end
+        break
+      end
     end
     return
   end
 
   log.info("Parent Gateway Device removed, canceling timers and closing socket")
-  if device:get_field("poll_timer") then
-    device.thread:cancel_timer(device:get_field("poll_timer"))
+  local prev_poll = device:get_field("poll_timer")
+  if prev_poll then
+    device.thread:cancel_timer(prev_poll)
     device:set_field("poll_timer", nil)
   end
-  if device:get_field("master_roll_timer") then
-    device.thread:cancel_timer(device:get_field("master_roll_timer"))
+  local prev_roll = device:get_field("master_roll_timer")
+  if prev_roll then
+    device.thread:cancel_timer(prev_roll)
     device:set_field("master_roll_timer", nil)
   end
 
-  local sock = device:get_field("tcp_client")
-  if sock then
-    pcall(function() sock:close() end)
-    device:set_field("tcp_client", nil)
-  end
+  gateway_client.stop_event_listener()
 end
 
 local function discovery_handler(driver, _, should_continue)

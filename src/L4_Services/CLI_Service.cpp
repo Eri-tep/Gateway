@@ -839,7 +839,9 @@ void TelnetManager::onClientConnect(int new_sock,
   }
 
   int flags = fcntl(new_sock, F_GETFL, 0);
-  fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
+  if (flags >= 0) {
+    fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
+  }
   int nodelay = 1;
   setsockopt(new_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
   int sndbuf = 2048; // 2 KB Bounded Buffer (Bulkhead)
@@ -955,7 +957,9 @@ void TelnetManager::startServer() {
       int opt = 1;
       setsockopt(_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
       int flags = fcntl(_server_fd, F_GETFL, 0);
-      fcntl(_server_fd, F_SETFL, flags | O_NONBLOCK);
+      if (flags >= 0) {
+        fcntl(_server_fd, F_SETFL, flags | O_NONBLOCK);
+      }
 
       struct sockaddr_in server_addr;
       memset(&server_addr, 0, sizeof(server_addr));

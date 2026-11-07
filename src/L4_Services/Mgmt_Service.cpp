@@ -1,6 +1,7 @@
 #include "L4_Services/Mgmt_Service.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L0_Foundation/System_Config.h"
+#include "L0_Foundation/ThreadSafety.h"
 constexpr uint32_t POST_BOOT_LOG_DELAY_MS = 5000;
 
 #include <cstddef>
@@ -34,8 +35,8 @@ void Remote_StartWifiFallbackTest(const char *prev_ssid, const char *prev_pass) 
   s_wifi_guard.start_ms = millis();
   s_wifi_guard.testing.store(true, std::memory_order_release);
 }
-static MgmtSession s_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS];
 static SemaphoreHandle_t s_mgmt_mutex = nullptr;
+static MgmtSession s_mgmt_sessions[Config::TCP::MAX_MGMT_CLIENTS] GUARDED_BY(s_mgmt_mutex);
 static int s_mgmt_server_fd = -1;
 static uint32_t s_chk_ms = 0, s_met_ms = 0, s_tcp_ms = 0;
 static uint32_t s_last_sta_retry_ms = 0;
@@ -43,7 +44,7 @@ static bool s_last_net_ready = false;
 static uint32_t s_sta_retry_interval_ms = Config::Timing::WIFI_BACKGROUND_RETRY_INTERVAL_MS;
 constexpr uint32_t kMaxStaRetryIntervalMs = 60000;
 
-MgmtSession *Remote_GetSessions() { return s_mgmt_sessions; }
+MgmtSession *Remote_GetSessions() NO_THREAD_SAFETY_ANALYSIS { return s_mgmt_sessions; }
 SemaphoreHandle_t Remote_GetSessionMutex() { return s_mgmt_mutex; }
 
 IPAddress Remote_GetClientIp(int sock) {
@@ -60,6 +61,7 @@ void Mgmt_Init() {
   if (!s_mgmt_mutex) {
     s_mgmt_mutex = xSemaphoreCreateMutex();
   }
+  MutexLocker lock(s_mgmt_mutex);
   for (size_t i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
     s_mgmt_sessions[i].sock = -1;
     s_mgmt_sessions[i].len = 0;
@@ -151,7 +153,9 @@ int Tcp_AcceptAndAssignSlot(int server_fd, SessionType (&sessions)[N],
   }
 
   int flags = fcntl(new_sock, F_GETFL, 0);
-  fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
+  if (flags >= 0) {
+    fcntl(new_sock, F_SETFL, flags | O_NONBLOCK);
+  }
   int nodelay = 1;
   setsockopt(new_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
   int sockbuf = Config::TCP::SOCKET_BUFFER_SIZE;
@@ -425,7 +429,9 @@ void Remote_StartServer() noexcept {
     int opt = 1;
     setsockopt(s_mgmt_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     int flags = fcntl(s_mgmt_server_fd, F_GETFL, 0);
-    fcntl(s_mgmt_server_fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags >= 0) {
+      fcntl(s_mgmt_server_fd, F_SETFL, flags | O_NONBLOCK);
+    }
 
     struct sockaddr_in saddr;
     memset(&saddr, 0, sizeof(saddr));
@@ -469,10 +475,13 @@ void Remote_StopServer() noexcept {
 void Remote_Init() {
   // Phase 1: Pure static resource and timing initialization (Zero socket calls)
   s_mgmt_server_fd = -1;
-  for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
-    s_mgmt_sessions[i].sock = -1;
-    s_mgmt_sessions[i].len = 0;
-    s_mgmt_sessions[i].connected_at_ms = 0;
+  {
+    MutexLocker lock(s_mgmt_mutex);
+    for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+      s_mgmt_sessions[i].sock = -1;
+      s_mgmt_sessions[i].len = 0;
+      s_mgmt_sessions[i].connected_at_ms = 0;
+    }
   }
 
   s_chk_ms = millis();

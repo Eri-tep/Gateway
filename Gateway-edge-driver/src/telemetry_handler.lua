@@ -19,13 +19,31 @@ local function is_newer_version(new_v, cur_v)
   return n_pat > c_pat
 end
 
--- Helper to emit component event safely
+-- Helper to emit component event safely with smart value deduplication
 local function emit_event(device, comp, cap_event)
   if comp and cap_event then
-    cap_event.state_change = true
-    local ev, err = device:emit_component_event(comp, cap_event)
-    if err then
-      log.error(string.format("Failed to emit event: %s", tostring(err)))
+    local cache = device:get_field("__emit_cache")
+    if not cache then
+      cache = {}
+      device:set_field("__emit_cache", cache)
+    end
+
+    local c_id = comp.id or "main"
+    local cap_id = cap_event.capability
+    local attr = cap_event.attribute
+    local cache_key = c_id .. ":" .. tostring(cap_id) .. ":" .. tostring(attr)
+
+    local new_val = cap_event.value
+    local prev_val = cache[cache_key]
+
+    -- 값이 변경되었거나 캐시가 없는 경우에만 방출
+    if prev_val == nil or prev_val ~= new_val then
+      cache[cache_key] = new_val
+      cap_event.state_change = true
+      local ev, err = device:emit_component_event(comp, cap_event)
+      if err then
+        log.error(string.format("Failed to emit event: %s", tostring(err)))
+      end
     end
   end
 end
@@ -140,8 +158,8 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   -- 2-0. Switch (Auto-Probing Reset 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_wallpad, capabilities.switch.switch.off())
 
-  -- 2-1. Protocol Profile Name (The_Astin)
-  local slot = (data.profile and data.profile.active_slot) or 1
+  -- 2-1. Protocol Profile Name (Auto Detect / Custom Name)
+  local slot = (data.profile and data.profile.active_slot) or 0
   local raw_key = data.profile and data.profile.active_key
   local label_key
   if slot == 0 then
@@ -151,7 +169,6 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   else
     label_key = (raw_key and raw_key ~= "" and not raw_key:match("^Custom")) and raw_key or "Custom " .. tostring(slot)
   end
-  -- 2-1. Protocol Profile Name (Auto Detect)
   local final_profile_str = label_key
 
   local cap_pname = capabilities["digituniverse06711.profile"]
@@ -184,27 +201,26 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   -- 3-0. Switch (시스템 재부팅 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_diag, capabilities.switch.switch.off())
 
-  -- 3-1. Uptime: 1d 1h 1m 형식
-  local up_s = (data.system and data.system.uptime_s) or 0
-  local up_days = math.floor(up_s / 86400)
-  local up_hours = math.floor((up_s % 86400) / 3600)
-  local up_mins = math.floor((up_s % 3600) / 60)
-  local up_str = string.format("%dd %dh %dm", up_days, up_hours, up_mins)
-  local cap_uptime = capabilities["digituniverse06711.uptime"]
-  if cap_uptime then
-    emit_event(device, comp_diag, cap_uptime.uptime({ value = up_str }))
-  end
-
-  -- 3-2. Unified Resource (CPU -> RAM -> Flash 4초 순회)
+  -- 3-1. Cpu (접두사 제거: Core0(X%), Core1(Y%))
   local c0 = (data.system and data.system.cpu0_load) or 0
   local c1 = (data.system and data.system.cpu1_load) or 0
-  local cpu_str = string.format("CPU: Core0(%d%%), Core1(%d%%)", c0, c1)
+  local cpu_str = string.format("Core0(%d%%), Core1(%d%%)", c0, c1)
+  local cap_cpu = capabilities["digituniverse06711.cpu"]
+  if cap_cpu then
+    emit_event(device, comp_diag, cap_cpu.cpuLoad({ value = cpu_str }))
+  end
 
+  -- 3-2. Ram (접두사 제거: X% (Y / 320 KB))
   local free_heap = (data.system and data.system.free_heap_kb) or 77
   local used_heap = math.max(0, 320 - free_heap)
   local ram_pct = math.floor(math.max(0, math.min(100, used_heap * 100 / 320)))
-  local ram_str = string.format("RAM: %d%% (%d / 320 KB)", ram_pct, used_heap)
+  local ram_str = string.format("%d%% (%d / 320 KB)", ram_pct, used_heap)
+  local cap_ram = capabilities["digituniverse06711.ram"]
+  if cap_ram then
+    emit_event(device, comp_diag, cap_ram.ram({ value = ram_str }))
+  end
 
+  -- 3-3. Flash (접두사 제거: X% (Y / Z MB))
   local sys = data.system or {}
   local f_total = tonumber(sys.flash_total_mb or sys.flash_size_mb or sys.flash_total or sys.flash_mb)
   local f_used = tonumber(sys.flash_used_mb or sys.flash_used)
@@ -219,79 +235,21 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     f_used = f_used or 3.98
     rom_pct = rom_pct or 49
   end
-  local flash_str = string.format("Flash: %d%% (%.2f / %.2f MB)", rom_pct or 49, f_used or 3.98, f_total or 8.19)
-
-  register_ticker(device, comp_diag, capabilities["digituniverse06711.resource"], "resource", "resource",
-                  { cpu_str, ram_str, flash_str })
-
-  -- 3-3. Traffic Packet Stats (CH1 ~ CH4 10초 순회)
-  local function fmt_num(n)
-    n = tonumber(n) or 0
-    if n >= 1000000 then
-      return string.format("%.1fM", n / 1000000)
-    elseif n >= 1000 then
-      return string.format("%.1fk", n / 1000)
-    else
-      return tostring(n)
-    end
+  local flash_str = string.format("%d%% (%.2f / %.2f MB)", rom_pct or 49, f_used or 3.98, f_total or 8.19)
+  local cap_flash = capabilities["digituniverse06711.flash"]
+  if cap_flash then
+    emit_event(device, comp_diag, cap_flash.flash({ value = flash_str }))
   end
-
-  local channels = data.channels or {}
-  local ch1 = channels.ch1 or {}
-  local ch2 = channels.ch2 or {}
-  local ch3 = channels.ch3 or {}
-  local ch4 = channels.ch4 or {}
-
-  -- CH1: T <tx> / R <rx> (CRC <err>) -> 0 초과 시에만 (CRC N) 표기
-  local ch1_str = string.format("CH1: T %s / R %s", fmt_num(ch1.tx), fmt_num(ch1.rx))
-  local ch1_crc = tonumber(ch1.crc_err or ch1.crc_errors) or 0
-  if ch1_crc > 0 then
-    ch1_str = string.format("%s (CRC %d)", ch1_str, ch1_crc)
-  end
-
-  -- CH2: T <tx> / R <rx> (UnC <uncached>) -> 0 초과 시에만 (UnC N) 표기
-  local ch2_str = string.format("CH2: T %s / R %s", fmt_num(ch2.tx), fmt_num(ch2.rx))
-  local ch2_unc = tonumber(ch2.uncached or ch2.uncached_pkts) or 0
-  if ch2_unc > 0 then
-    ch2_str = string.format("%s (UnC %d)", ch2_str, ch2_unc)
-  end
-
-  -- CH3: T <tx> / R <rx> (UnC <uncached>) -> 0 초과 시에만 (UnC N) 표기
-  local ch3_str = string.format("CH3: T %s / R %s", fmt_num(ch3.tx), fmt_num(ch3.rx))
-  local ch3_unc = tonumber(ch3.uncached or ch3.uncached_pkts) or 0
-  if ch3_unc > 0 then
-    ch3_str = string.format("%s (UnC %d)", ch3_str, ch3_unc)
-  end
-
-  -- CH4: T <tx> / R <rx> (InV <invalid>) -> 0 초과 시에만 (InV N) 표기
-  local ch4_str = string.format("CH4: T %s / R %s", fmt_num(ch4.tx), fmt_num(ch4.rx))
-  local ch4_inv = tonumber(ch4.inv or ch4.invalid or ch4.invalid_frames or ch4.err) or 0
-  if ch4_inv > 0 then
-    ch4_str = string.format("%s (InV %d)", ch4_str, ch4_inv)
-  end
-
-  local ch_items = { ch1_str, ch2_str, ch3_str, ch4_str }
-  local ch5 = channels.ch5
-  if ch5 then
-    local ch5_str = string.format("CH5: T %s / R %s", fmt_num(ch5.tx), fmt_num(ch5.rx))
-    local ch5_drp = tonumber(ch5.dropped or ch5.dropped_pkts) or 0
-    if ch5_drp > 0 then
-      ch5_str = string.format("%s (Drp %d)", ch5_str, ch5_drp)
-    end
-    table.insert(ch_items, ch5_str)
-  end
-
-  register_ticker(device, comp_diag, capabilities["digituniverse06711.channel"], "channel", "channel", ch_items)
 
   -- ═══════════════════════════════════════════════════════════════════════════
-  -- CARD 4: Logs (진단 로그 & 코어 덤프 순회)
+  -- CARD 4: Logs (진단 로그 & 코어 덤프 개별 표기)
   -- ═══════════════════════════════════════════════════════════════════════════
 
   -- 4-0. Switch (진단 로그 초기화 스위치) 🟦 대표 파란 헤더
   emit_event(device, comp_logs, capabilities.switch.switch.off())
 
-  -- 4-1. History (Log & Crash Dump 10초 주기 롤링 순회 - 시간 부분 제외, Empty일 때 Empty Log / Empty Crash)
-  local log_display = "Empty Log"
+  -- 4-1. Logview (비어있을 시 '-' 표기)
+  local log_display = "-"
   if data.diagnostics and data.diagnostics.reboot_logs and #data.diagnostics.reboot_logs > 0 then
     local top = data.diagnostics.reboot_logs[1]
     local raw_reason = top.reason or "Unknown"
@@ -304,15 +262,21 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     end
     log_display = reason_short
   end
+  local cap_rlog = capabilities["digituniverse06711.logHistory"]
+  if cap_rlog then
+    emit_event(device, comp_logs, cap_rlog.history({ value = log_display }))
+  end
 
-  local crash_display = "Empty Crash"
+  -- 4-2. Crashdump (비어있을 시 '-' 표기)
+  local crash_display = "-"
   if data.diagnostics and data.diagnostics.coredump and data.diagnostics.coredump.valid then
     local cd = data.diagnostics.coredump
     crash_display = string.format("Panic Task %s", cd.task or "main")
   end
-
-  register_ticker(device, comp_logs, capabilities["digituniverse06711.history"], "history", "history",
-                  { log_display, crash_display })
+  local cap_cd = capabilities["digituniverse06711.crashDump"]
+  if cap_cd then
+    emit_event(device, comp_logs, cap_cd.details({ value = crash_display }))
+  end
 
   -- ═══════════════════════════════════════════════════════════════════════════
   -- CARD 5: Network (네트워크 정보 & WiFi 스캔)
@@ -333,7 +297,7 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     end
   end
 
-  -- 5-2. WiFi 정보 & Mode 순회 (Wi-Fi:, Mode: 접두사 없음)
+  -- 5-2. WiFi Info
   local wifi_data = data.wifi or {}
   local ssid = (wifi_data.ssid and wifi_data.ssid ~= "") and wifi_data.ssid or "Disconnected"
   local rssi = wifi_data.rssi or (sys and sys.wifi_rssi)
@@ -346,7 +310,12 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   else
     wifi_display = string.format("%s (70%%)", ssid)
   end
+  local cap_winfo = capabilities["digituniverse06711.wifi"]
+  if cap_winfo then
+    emit_event(device, comp_net, cap_winfo.wifiInfo({ value = wifi_display }))
+  end
 
+  -- 5-3. WiFi Mode
   local ip_addr = (data.wifi and data.wifi.ip and data.wifi.ip ~= "") and data.wifi.ip or "172.30.1.3"
   local ap_ip_str = "172.30.2.1"
   local raw_wmode = (data.wifi and data.wifi.mode) or "STA"
@@ -358,9 +327,10 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   else
     mode_str = string.format("STA (%s)", ip_addr)
   end
-
-  register_ticker(device, comp_net, capabilities["digituniverse06711.wifi"], "wifiInfo", "wifi",
-                  { wifi_display, mode_str })
+  local cap_wmode = capabilities["digituniverse06711.mode"]
+  if cap_wmode then
+    emit_event(device, comp_net, cap_wmode.wifiMode({ value = mode_str }))
+  end
 
   -- ═══════════════════════════════════════════════════════════════════════════
   -- CARD 6: Firmware & OTA (펌웨어 관리 & OTA)
@@ -401,6 +371,7 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   end
 
   -- 6-2. Build (순회 제거, Build: 접두사 제거, 단독 고정 표시)
+  local up_s = (data.system and data.system.uptime_s) or 0
   local stab_str = "Stable"
   if up_s < 120 then
     stab_str = "Pending"
@@ -414,6 +385,16 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
     emit_event(device, comp_ota, cap_ostate.build({ value = build_str }))
   end
 
+  -- 6-3. Uptime: Firmware 카드의 제일 하단에 배치 (1d 1h 1m 형식)
+  local up_days = math.floor(up_s / 86400)
+  local up_hours = math.floor((up_s % 86400) / 3600)
+  local up_mins = math.floor((up_s % 3600) / 60)
+  local up_str = string.format("%dd %dh %dm", up_days, up_hours, up_mins)
+  local cap_uptime = capabilities["digituniverse06711.uptime"]
+  if cap_uptime then
+    emit_event(device, comp_ota, cap_uptime.uptime({ value = up_str }))
+  end
+
   -- ═══════════════════════════════════════════════════════════════════════════
   -- DOORPHONE CHILD DEVICE: 호출 감지 상태 업데이트 (세대 도어 & 로비 도어)
   -- ═══════════════════════════════════════════════════════════════════════════
@@ -424,6 +405,48 @@ function TelemetryHandler.handle_telemetry(driver, device, data)
   log.info("📊 ═══════════════════════════════════════════════════════════════════════")
 end
 
+-- Module-level doorphone motion helper (Zero per-event closure allocation)
+local function update_door_motion(dev, comp, is_active, comp_name, log_name)
+  if not (dev and comp) then return end
+  local cap_motion = capabilities.motionSensor
+  if not cap_motion then return end
+
+  local field_name = "doorphone_motion_timer_" .. comp_name
+  local prev_timer = dev:get_field(field_name)
+  if prev_timer then
+    dev.thread:cancel_timer(prev_timer)
+    dev:set_field(field_name, nil)
+  end
+
+  if is_active then
+    log.info(string.format("🚪 [DOORPHONE REALTIME] %s Motion -> ACTIVE (호출 중)", log_name))
+    dev:emit_component_event(comp, cap_motion.motion.active({ state_change = true }))
+    local t = dev.thread:call_with_delay(30, function()
+      dev:set_field(field_name, nil)
+      log.info(string.format("🚪 [DOORPHONE AUTO-RESET] %s Motion -> INACTIVE (30s 타임아웃 자동 복구)", log_name))
+      dev:emit_component_event(comp, cap_motion.motion.inactive({ state_change = true }))
+    end)
+    dev:set_field(field_name, t)
+  else
+    log.info(string.format("🚪 [DOORPHONE REALTIME] %s Motion -> INACTIVE (대기)", log_name))
+    dev:emit_component_event(comp, cap_motion.motion.inactive({ state_change = true }))
+  end
+end
+
+local DOORPHONE_HANDLERS = {
+  doorphone_front = function(dev, c_main, front_bell, lobby_bell)
+    update_door_motion(dev, c_main, front_bell, "main", "Front Door")
+  end,
+  doorphone_lobby = function(dev, c_main, front_bell, lobby_bell)
+    update_door_motion(dev, c_main, lobby_bell, "main", "Lobby Door")
+  end,
+  doorphone = function(dev, c_main, front_bell, lobby_bell)
+    local c_lobby = dev.profile.components["lobby"]
+    update_door_motion(dev, c_main, front_bell, "main", "Front Door")
+    update_door_motion(dev, c_lobby, lobby_bell, "lobby", "Lobby Door")
+  end
+}
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 실시간 도어폰 이벤트 핸들러 (CH6 Server Push 즉시 처리)
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -431,53 +454,13 @@ function TelemetryHandler.handle_doorphone_event(driver, event_data)
   if not event_data then return end
   local front_bell = event_data.front_bell
   local lobby_bell = event_data.lobby_bell
-  local cap_motion = capabilities.motionSensor
-  if not cap_motion then return end
-
-  local function update_door_motion(dev, comp, is_active, comp_name, log_name)
-    if not (dev and comp) then return end
-    local field_name = "doorphone_motion_timer_" .. comp_name
-    local prev_timer = dev:get_field(field_name)
-    if prev_timer then
-      dev.thread:cancel_timer(prev_timer)
-      dev:set_field(field_name, nil)
-    end
-
-    if is_active then
-      log.info(string.format("🚪 [DOORPHONE REALTIME] %s Motion -> ACTIVE (호출 중)", log_name))
-      dev:emit_component_event(comp, cap_motion.motion.active({ state_change = true }))
-      local t = dev.thread:call_with_delay(30, function()
-        dev:set_field(field_name, nil)
-        log.info(string.format("🚪 [DOORPHONE AUTO-RESET] %s Motion -> INACTIVE (30s 타임아웃 자동 복구)", log_name))
-        dev:emit_component_event(comp, cap_motion.motion.inactive({ state_change = true }))
-      end)
-      dev:set_field(field_name, t)
-    else
-      log.info(string.format("🚪 [DOORPHONE REALTIME] %s Motion -> INACTIVE (대기)", log_name))
-      dev:emit_component_event(comp, cap_motion.motion.inactive({ state_change = true }))
-    end
-  end
-
-  local DOORPHONE_HANDLERS = {
-    doorphone_front = function(dev, c_main)
-      update_door_motion(dev, c_main, front_bell, "main", "Front Door")
-    end,
-    doorphone_lobby = function(dev, c_main)
-      update_door_motion(dev, c_main, lobby_bell, "main", "Lobby Door")
-    end,
-    doorphone = function(dev, c_main)
-      local c_lobby = dev.profile.components["lobby"]
-      update_door_motion(dev, c_main, front_bell, "main", "Front Door")
-      update_door_motion(dev, c_lobby, lobby_bell, "lobby", "Lobby Door")
-    end
-  }
 
   for _, dev in ipairs(driver:get_devices()) do
     local p_key = dev.parent_assigned_child_key
     local c_main = dev.profile.components["main"]
     local h = DOORPHONE_HANDLERS[p_key]
     if h then
-      h(dev, c_main)
+      h(dev, c_main, front_bell, lobby_bell)
     end
   end
 end
@@ -485,6 +468,18 @@ end
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 장치 클래스별 텔레메트리 디스패치 테이블 및 핸들러 (Table-Driven Pattern)
 -- ═══════════════════════════════════════════════════════════════════════════
+
+local FCU_VAL_TO_THERMO_MODE = { [1] = "cool", [2] = "heat", [3] = "fanOnly" }
+local FCU_VAL_TO_FAN_MODE = { [1] = "low", [2] = "medium", [3] = "high", [4] = "auto" }
+local FCU_ERR_MAP = {
+  [0] = "정상",
+  [1] = "실내센서 이상 (E1)",
+  [2] = "배관센서 이상 (E2)",
+  [3] = "드레인 수위 경보 (E3)",
+  [4] = "팬 모터 이상 (E4)",
+  [5] = "통신 이상 (E5)",
+  [6] = "동결 방지 보호 (E6)",
+}
 
 local ELEVATOR_FSM = {
   [1] = { -- Calling 상태 (pwr == 1)
@@ -553,9 +548,9 @@ end
 local DEVICE_TELEMETRY_HANDLERS = {
   ["switch"] = function(dev, event_data)
     if event_data.power ~= nil and capabilities.switch then
+      local comp_main = dev.profile.components["main"]
       local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
-      sw_evt.state_change = true
-      dev:emit_event(sw_evt)
+      emit_event(dev, comp_main, sw_evt)
     end
   end,
 
@@ -565,10 +560,10 @@ local DEVICE_TELEMETRY_HANDLERS = {
   end,
 
   ["outlet"] = function(dev, event_data)
+    local comp_main = dev.profile.components["main"]
     if event_data.power ~= nil and capabilities.switch then
       local sw_evt = (event_data.power == 1) and capabilities.switch.switch.on() or capabilities.switch.switch.off()
-      sw_evt.state_change = true
-      dev:emit_event(sw_evt)
+      emit_event(dev, comp_main, sw_evt)
     end
 
     local cur_month = os.date("%Y-%m")
@@ -592,86 +587,85 @@ local DEVICE_TELEMETRY_HANDLERS = {
       local is_power_on = (event_data.power == 1) or (event_data.power == nil and p_w > 0.5)
       if dt > 0 and dt <= 30 and p_w > 0.5 and is_power_on then
         monthly_kwh = monthly_kwh + (p_w * dt / 3600000.0)
+        -- 인메모리 필드로 실시간 누적 (Flash wear 방지)
+        dev:set_field("monthly_energy_kwh", monthly_kwh)
+
+        -- 5분 주기(300초) 또는 최초 1회만 Flash에 동기화
+        local last_persist_ts = dev:get_field("last_energy_persist_ts") or 0
+        if (now_ts - last_persist_ts) >= 300 then
+          dev:set_field("monthly_energy_kwh", monthly_kwh, { persist = true })
+          dev:set_field("last_energy_persist_ts", now_ts)
+        end
+      elseif not is_power_on then
+        -- 전원이 꺼질 때 최종 누적량 Flash 커밋
         dev:set_field("monthly_energy_kwh", monthly_kwh, { persist = true })
       end
-      dev:set_field("last_power_ts", now_ts, { persist = true })
+      dev:set_field("last_power_ts", now_ts)
 
       if capabilities.powerMeter then
-        dev:emit_event(capabilities.powerMeter.power({ value = p_w, unit = "W" }))
+        emit_event(dev, comp_main, capabilities.powerMeter.power({ value = p_w, unit = "W" }))
       end
       if capabilities.energyMeter then
         local kwh_val = math.floor(monthly_kwh * 1000 + 0.5) / 1000
-        dev:emit_event(capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
+        emit_event(dev, comp_main, capabilities.energyMeter.energy({ value = kwh_val, unit = "kWh" }))
       end
     end
   end,
 
   ["thermostat"] = function(dev, event_data)
+    local comp_main = dev.profile.components["main"]
     local is_away = (event_data.power == 2)
     local is_on = (event_data.power == 1 or is_away)
 
     if event_data.power ~= nil then
       if dev:supports_capability_by_id(capabilities.switch.ID) then
-        dev:emit_event(is_on and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+        emit_event(dev, comp_main, is_on and capabilities.switch.switch.on() or capabilities.switch.switch.off())
       end
       local cap_away = capabilities["digituniverse06711.heatingAway"]
       if cap_away and dev:supports_capability_by_id(cap_away.ID) then
-        dev:emit_event(cap_away.away(is_away and "on" or "off"))
+        emit_event(dev, comp_main, cap_away.away(is_away and "on" or "off"))
       end
       if capabilities.thermostatMode and dev:supports_capability_by_id(capabilities.thermostatMode.ID) then
         local mode_str = (event_data.power == 1) and "heat" or (is_away and "away" or "off")
-        dev:emit_event(capabilities.thermostatMode.thermostatMode(mode_str))
+        emit_event(dev, comp_main, capabilities.thermostatMode.thermostatMode(mode_str))
       end
     end
 
-    local comp_temp = dev.profile.components["temperature"]
+    local comp_temp = dev.profile.components["temperature"] or comp_main
 
-    -- 월패드에서 전달된 실제 target_temp 처리 (임의의 10도/22도 강제 주입 완전 배제)
+    -- 월패드에서 전달된 실제 target_temp 처리
     local target_temp = event_data.target_temp
     if target_temp and target_temp >= 10 and target_temp <= 35 then
       if capabilities.thermostatHeatingSetpoint then
         local sp_evt = capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = target_temp, unit = "C" })
-        sp_evt.state_change = true
-        if comp_temp then
-          dev:emit_component_event(comp_temp, sp_evt)
-        else
-          dev:emit_event(sp_evt)
-        end
+        emit_event(dev, comp_temp, sp_evt)
       end
     end
 
     if event_data.current_temp and event_data.current_temp > 0 then
       if capabilities.temperatureMeasurement then
         local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.current_temp, unit = "C" })
-        cur_evt.state_change = true
-        if comp_temp then
-          dev:emit_component_event(comp_temp, cur_evt)
-        else
-          dev:emit_event(cur_evt)
-        end
+        emit_event(dev, comp_temp, cur_evt)
       end
     end
   end,
 
   ["vent"] = function(dev, event_data)
+    local comp_main = dev.profile.components["main"]
     local has_fan_speed = capabilities.fanSpeed and dev:supports_capability_by_id(capabilities.fanSpeed.ID)
     local cap_vent = capabilities["digituniverse06711.ventmode"]
     local cap_speed = capabilities["digituniverse06711.ventspeed"]
 
     if event_data.power == 0 then
       if capabilities.switch then
-        local sw_off = capabilities.switch.switch.off()
-        sw_off.state_change = true
-        dev:emit_event(sw_off)
+        emit_event(dev, comp_main, capabilities.switch.switch.off())
       end
       if has_fan_speed then
-        dev:emit_event(capabilities.fanSpeed.fanSpeed(0))
+        emit_event(dev, comp_main, capabilities.fanSpeed.fanSpeed(0))
       end
     else
       if capabilities.switch then
-        local sw_on = capabilities.switch.switch.on()
-        sw_on.state_change = true
-        dev:emit_event(sw_on)
+        emit_event(dev, comp_main, capabilities.switch.switch.on())
       end
 
       -- 1. 풍량 상태 (ventspeed: low, medium, high / fanSpeed: 1~3)
@@ -680,10 +674,10 @@ local DEVICE_TELEMETRY_HANDLERS = {
       local spd_map = { [1] = "low", [2] = "medium", [3] = "high" }
       local spd_str = spd_map[spd] or "low"
       if cap_speed and dev:supports_capability_by_id(cap_speed.ID) then
-        dev:emit_event(cap_speed.ventSpeed(spd_str))
+        emit_event(dev, comp_main, cap_speed.ventSpeed(spd_str))
       end
       if has_fan_speed then
-        dev:emit_event(capabilities.fanSpeed.fanSpeed(spd))
+        emit_event(dev, comp_main, capabilities.fanSpeed.fanSpeed(spd))
       end
 
       -- 2. 운전 모드 상태 (1: normal, 2: bypass, 3: auto, 4: clean)
@@ -691,85 +685,78 @@ local DEVICE_TELEMETRY_HANDLERS = {
       local mode_map = { [1] = "normal", [2] = "bypass", [3] = "auto", [4] = "clean" }
       local mode_str = mode_map[mode_num] or "normal"
       if cap_vent and dev:supports_capability_by_id(cap_vent.ID) then
-        pcall(function()
-          dev:emit_event(cap_vent.ventMode({ value = mode_str }))
-        end)
+        emit_event(dev, comp_main, cap_vent.ventMode({ value = mode_str }))
       end
     end
   end,
 
   ["gas"] = function(dev, event_data)
+    local comp_main = dev.profile.components["main"]
     if capabilities.valve then
       local v_evt = (event_data.valve == "closed") and capabilities.valve.valve.closed() or capabilities.valve.valve.open()
-      dev:emit_event(v_evt)
+      emit_event(dev, comp_main, v_evt)
     end
   end,
 
   ["fcu"] = function(dev, event_data)
-    local FCU_VAL_TO_THERMO_MODE = { [1] = "cool", [2] = "heat", [3] = "fanOnly" }
-    local FCU_VAL_TO_FAN_MODE = { [1] = "low", [2] = "medium", [3] = "high", [4] = "auto" }
-
+    local comp_main = dev.profile.components["main"]
     -- 1. 전원 상태 (main component)
     if event_data.power == 1 then
-      dev:emit_event(capabilities.switch.switch.on())
+      emit_event(dev, comp_main, capabilities.switch.switch.on())
 
       -- 운전 모드 (digituniverse06711.fcuMode: cool/heat/fanOnly)
       local cap_mode = capabilities["digituniverse06711.fcuMode"]
       if cap_mode and event_data.mode ~= nil then
         local mode_str = FCU_VAL_TO_THERMO_MODE[event_data.mode] or dev:get_field("saved_fcu_mode") or "cool"
-        dev:emit_event(cap_mode.mode(mode_str))
+        emit_event(dev, comp_main, cap_mode.mode(mode_str))
       end
 
       -- 풍량 (digituniverse06711.fcuFanSpeed: auto/high/medium/low)
       local cap_fan = capabilities["digituniverse06711.fcuFanSpeed"]
       if cap_fan and event_data.fan_speed ~= nil then
         local fan_str = FCU_VAL_TO_FAN_MODE[event_data.fan_speed] or dev:get_field("saved_fcu_fan") or "auto"
-        dev:emit_event(cap_fan.fanSpeed(fan_str))
+        emit_event(dev, comp_main, cap_fan.fanSpeed(fan_str))
       end
 
       -- 희망 설정 온도 (digituniverse06711.fcuSetpoint) - 켜져 있을 때만 실제 에어컨 세팅값 반영
       local cap_sp = capabilities["digituniverse06711.fcuSetpoint"]
       if event_data.target_temp and cap_sp then
-        local sp_evt = cap_sp.setpoint({ value = event_data.target_temp, unit = "°C" })
-        sp_evt.state_change = true
-        dev:emit_event(sp_evt)
+        emit_event(dev, comp_main, cap_sp.setpoint({ value = event_data.target_temp, unit = "°C" }))
       end
 
       -- 바람 방향 (digituniverse06711.fcuOscillation: fixed / swing) - 켜져 있을 때만 실제 에어컨 스윙 반영
       local cap_osc = capabilities["digituniverse06711.fcuOscillation"]
       if cap_osc and event_data.swing ~= nil then
         local swing_str = (event_data.swing == 2) and "swing" or "fixed"
-        local ev = cap_osc.oscillation(swing_str)
-        ev.state_change = true
-        dev:emit_event(ev)
+        emit_event(dev, comp_main, cap_osc.oscillation(swing_str))
       end
     else
-      dev:emit_event(capabilities.switch.switch.off())
+      emit_event(dev, comp_main, capabilities.switch.switch.off())
     end
 
     -- 4. 실내 측정 온도 (temperatureMeasurement)
     if event_data.current_temp and capabilities.temperatureMeasurement then
-      local cur_evt = capabilities.temperatureMeasurement.temperature({ value = event_data.current_temp, unit = "C" })
-      cur_evt.state_change = true
-      dev:emit_event(cur_evt)
+      emit_event(dev, comp_main, capabilities.temperatureMeasurement.temperature({ value = event_data.current_temp, unit = "C" }))
     end
 
     -- 5. 켜져 있고(power==1) 송풍(fanOnly) 외 유효한 냉방/난방 모드일 때만 '원복용 마지막 정상 상태' 격리 보존
     local is_cool_heat = (event_data.mode == 1 or event_data.mode == 2)
     if event_data.power == 1 and is_cool_heat then
       local valid_mode = FCU_VAL_TO_THERMO_MODE[event_data.mode]
-      if valid_mode then
+      if valid_mode and dev:get_field("saved_fcu_mode") ~= valid_mode then
         dev:set_field("saved_fcu_mode", valid_mode, { persist = true })
       end
       if event_data.target_temp and event_data.target_temp >= 18 and event_data.target_temp <= 30 then
-        dev:set_field("saved_fcu_temp", event_data.target_temp, { persist = true })
+        if dev:get_field("saved_fcu_temp") ~= event_data.target_temp then
+          dev:set_field("saved_fcu_temp", event_data.target_temp, { persist = true })
+        end
       end
       local valid_fan = FCU_VAL_TO_FAN_MODE[event_data.fan_speed]
-      if valid_fan then
+      if valid_fan and dev:get_field("saved_fcu_fan") ~= valid_fan then
         dev:set_field("saved_fcu_fan", valid_fan, { persist = true })
       end
       -- 기기가 실제로 swing == 2(회전)로 구동 완료되었을 때만 saved_fcu_osc를 갱신
-      if event_data.swing == 2 then
+      if event_data.swing == 2 and dev:get_field("saved_fcu_osc") ~= "swing" then
         dev:set_field("saved_fcu_osc", "swing", { persist = true })
       end
     end
@@ -777,24 +764,33 @@ local DEVICE_TELEMETRY_HANDLERS = {
     -- 5. FCU 정보 및 에러 코드 모니터링 (digituniverse06711.fcuInfo)
     local cap_info = capabilities["digituniverse06711.fcuInfo"]
     if cap_info and event_data.error ~= nil then
-      local FCU_ERR_MAP = {
-        [0] = "정상",
-        [1] = "실내센서 이상 (E1)",
-        [2] = "배관센서 이상 (E2)",
-        [3] = "드레인 수위 경보 (E3)",
-        [4] = "팬 모터 이상 (E4)",
-        [5] = "통신 이상 (E5)",
-        [6] = "동결 방지 보호 (E6)",
-      }
       local code = tonumber(event_data.error) or 0
       local info_str = FCU_ERR_MAP[code] or string.format("기타 이상 (Code %d)", code)
       dev:set_field("last_fcu_info", info_str, { persist = true })
-      local ev = cap_info.info(info_str)
-      ev.state_change = true
-      dev:emit_event(ev)
+      emit_event(dev, comp_main, cap_info.info(info_str))
     end
   end
 }
+
+local DEV_KEY_CACHE = {}
+local function get_memoized_dev_key(d_id, s1, s2)
+  local k1 = DEV_KEY_CACHE[d_id]
+  if not k1 then
+    k1 = {}
+    DEV_KEY_CACHE[d_id] = k1
+  end
+  local k2 = k1[s1]
+  if not k2 then
+    k2 = {}
+    k1[s1] = k2
+  end
+  local key = k2[s2]
+  if not key then
+    key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+    k2[s2] = key
+  end
+  return key
+end
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- 실시간 기기 상태 이벤트 핸들러 (CH6 Server Push)
@@ -806,18 +802,57 @@ function TelemetryHandler.handle_device_state_event(driver, event_data)
   local s2 = tonumber(event_data.sub2)
   if not d_id or not s1 or not s2 then return end
 
-  local target_key = string.format("dev_%02X_%d_%d", d_id, s1, s2)
+  local target_key = get_memoized_dev_key(d_id, s1, s2)
   local d_cls = event_data.class or "switch"
 
-  for _, dev in ipairs(driver:get_devices()) do
-    if dev.parent_assigned_child_key == target_key then
-      log.info(string.format("📡 [DEVICE STATE] %s (%s) State Update: Power=%s, Class=%s",
-                             dev.label, target_key, tostring(event_data.power), d_cls))
-
-      local handler = DEVICE_TELEMETRY_HANDLERS[d_cls] or DEVICE_TELEMETRY_HANDLERS["switch"]
-      handler(dev, event_data)
+  -- Fast-Path O(1) lookup via gateway child_map cache
+  local dev = nil
+  for _, g_dev in ipairs(driver:get_devices()) do
+    if g_dev.device_network_id == "esp32_wallpad_gateway_ctrl" then
+      local child_map = g_dev:get_field("child_map")
+      if child_map then
+        dev = child_map[target_key]
+      end
       break
     end
+  end
+
+  -- Fallback to linear search if cache miss (e.g. newly added device)
+  if not dev then
+    for _, d in ipairs(driver:get_devices()) do
+      if d.parent_assigned_child_key == target_key then
+        dev = d
+        break
+      end
+    end
+  end
+
+  if dev then
+    log.info(string.format("📡 [DEVICE STATE] %s (%s) State Update: Power=%s, Class=%s",
+                           dev.label, target_key, tostring(event_data.power), d_cls))
+
+    -- Physical ACK confirmation check: cancel rollback timer if pending control matches
+    local pending = dev:get_field("__pending_ctrl")
+    if pending then
+      local is_match = false
+      if pending.attr == "switch" and event_data.power ~= nil then
+        local p_str = (event_data.power == 1) and "on" or "off"
+        is_match = (p_str == pending.expected)
+      end
+      if is_match then
+        local t = dev:get_field("__rollback_timer")
+        if t then
+          dev.thread:cancel_timer(t)
+          dev:set_field("__rollback_timer", nil)
+        end
+        dev:set_field("__pending_ctrl", nil)
+        log.info(string.format("🎯 [PHYSICAL ACK] %s Confirmed %s=%s (Rollback timer disarmed)",
+                               tostring(dev.label), pending.attr, pending.expected))
+      end
+    end
+
+    local handler = DEVICE_TELEMETRY_HANDLERS[d_cls] or DEVICE_TELEMETRY_HANDLERS["switch"]
+    handler(dev, event_data)
   end
 end
 

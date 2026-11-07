@@ -5,6 +5,7 @@
 
 #include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Platform.h"
+#include "L0_Foundation/ThreadSafety.h"
 
 #include <Preferences.h>
 #include <algorithm>
@@ -21,6 +22,8 @@
 
 static const char *TAG = "EW11";
 
+static SemaphoreHandle_t s_ch5_mutex = nullptr;
+
 struct HubClientSlot {
   std::atomic<bool> enabled{false};
   char name[16]{""};
@@ -31,7 +34,7 @@ struct HubClientSlot {
   uint8_t frame_etx{0};
   uint8_t frame_len{0};
   bool frame_locked{false};
-  int sock{-1};
+  int sock GUARDED_BY(s_ch5_mutex){-1};
   std::atomic<bool> is_connected{false};
   uint32_t last_reconnect_ms{0};
   uint8_t rx_buf[Config::TCP::HUB_RX_BUFFER_SIZE]{0};
@@ -44,13 +47,12 @@ struct HubClientSlot {
   std::atomic<uint32_t> timeouts{0};
   std::atomic<uint32_t> uncached_pkts{0};
   std::atomic<uint32_t> dropped_pkts{0};
-  uint8_t last_query_data[64]{0};
-  uint8_t last_query_len{0};
+  uint8_t last_query_data[64] GUARDED_BY(s_ch5_mutex){0};
+  uint8_t last_query_len GUARDED_BY(s_ch5_mutex){0};
 };
 
-static HubClientSlot s_hub_slots[Config::TCP::MAX_EW11_SLOTS];
 static StaticSemaphore_t s_ch5_mutex_buf;
-static SemaphoreHandle_t s_ch5_mutex = nullptr;
+static HubClientSlot s_hub_slots[Config::TCP::MAX_EW11_SLOTS];
 static int s_ew11_server_fds[Config::TCP::MAX_EW11_SLOTS] = {-1, -1, -1, -1,
                                                              -1};
 static std::atomic<int> s_hub_active_socks[Config::TCP::MAX_EW11_SLOTS]{-1, -1, -1, -1, -1};
@@ -61,7 +63,7 @@ static inline void SetActiveSock(size_t slot, int fd) noexcept {
   }
 }
 
-static inline void InvalidateAndCloseSock(HubClientSlot &slot, size_t slot_idx) noexcept {
+static inline void InvalidateAndCloseSock(HubClientSlot &slot, size_t slot_idx) noexcept REQUIRES(s_ch5_mutex) {
   SetActiveSock(slot_idx, -1);
   if (slot.sock >= 0) {
     int old_fd = slot.sock;
@@ -301,6 +303,7 @@ void demuxPacketStream(HubClientSlot *slot) {
     if (slot->rx_buf[p] != stx) {
       const void *stx_ptr = memchr(&slot->rx_buf[p], stx, slot->rx_len - p);
       if (!stx_ptr) {
+        p = slot->rx_len;
         break;
       }
       p = static_cast<const uint8_t *>(stx_ptr) - slot->rx_buf;
@@ -320,7 +323,19 @@ void demuxPacketStream(HubClientSlot *slot) {
       System_RecordCh5Dropped();
       slot->invalid_frames.fetch_add(1, std::memory_order_relaxed);
       slot->dropped_pkts.fetch_add(1, std::memory_order_relaxed);
-      p++;
+
+      if (p + 1 < slot->rx_len) {
+        const void *next_stx = memchr(&slot->rx_buf[p + 1], stx, slot->rx_len - (p + 1));
+        if (next_stx) {
+          p = static_cast<const uint8_t *>(next_stx) - slot->rx_buf;
+        } else {
+          p = slot->rx_len;
+          break;
+        }
+      } else {
+        p = slot->rx_len;
+        break;
+      }
       continue;
     }
 
@@ -490,7 +505,9 @@ void processStream(size_t slot_idx, HubClientSlot *slot) {
 
 static void configureClientSocket(int sock) {
   int flags = fcntl(sock, F_GETFL, 0);
-  fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+  if (flags >= 0) {
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+  }
   int nodelay = 1;
   setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
   int sockbuf = Config::TCP::SOCKET_BUFFER_SIZE;
@@ -578,7 +595,7 @@ void Hub_ProcessPacket(HubClientSlot *slot, const uint8_t *pkt_data,
 }
 
 void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
-  if (!slot || slot->sock < 0 || !data || len == 0)
+  if (!slot || !slot->is_connected.load(std::memory_order_relaxed) || !data || len == 0)
     return;
 
   slot->last_rx_ms.store(millis(), std::memory_order_relaxed);
@@ -863,7 +880,9 @@ void Bridge_StartServer() noexcept {
       setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
       int flags = fcntl(sfd, F_GETFL, 0);
-      fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
+      if (flags >= 0) {
+        fcntl(sfd, F_SETFL, flags | O_NONBLOCK);
+      }
 
       struct sockaddr_in saddr;
       memset(&saddr, 0, sizeof(saddr));
@@ -922,12 +941,15 @@ void Bridge_Init() {
   Ew11Manager::init();
   Hub_LoadConfig();
 
-  for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
-    s_ew11_server_fds[s] = -1;
-    s_hub_slots[s].sock = -1;
-    s_hub_slots[s].is_connected = false;
-    s_hub_slots[s].rx_len = 0;
-    SetActiveSock(s, -1);
+  {
+    MutexLocker lock(s_ch5_mutex);
+    for (int s = 0; s < Config::TCP::MAX_EW11_SLOTS; s++) {
+      s_ew11_server_fds[s] = -1;
+      s_hub_slots[s].sock = -1;
+      s_hub_slots[s].is_connected = false;
+      s_hub_slots[s].rx_len = 0;
+      SetActiveSock(s, -1);
+    }
   }
 }
 

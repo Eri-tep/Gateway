@@ -1,0 +1,8 @@
+#!/bin/sh
+# ============================================================================
+# E-ASTG Pre-Commit Hook: Automated Architectural AST Guard
+# Prevents committing Layer Violations, Hot-Path Heaps, Reactor Blocks,
+# and Critical Section impurities in sub-0.1 seconds.
+# ============================================================================
+
+exec python3 scripts/ast_guard/run_guard.py --staged

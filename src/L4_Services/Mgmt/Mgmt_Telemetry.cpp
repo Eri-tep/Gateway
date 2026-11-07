@@ -79,7 +79,13 @@ static void serializeSysMetrics(AppendBuf &out, uint8_t c0, uint8_t c1,
           ? "RTC_SRAM"
           : (diag_snap.wc_source == 2 ? "NVS_FLASH" : "COLD_BOOT");
 
-  const char *cat_match_buf = diag_snap.vendor_name[0] ? diag_snap.vendor_name : "None";
+  char cat_match_buf[64] = "None";
+  size_t cat_dev_cnt = 0;
+  if (!ProtocolDiag_GetCatalogMatch(cat_match_buf, sizeof(cat_match_buf), cat_dev_cnt)) {
+    if (diag_snap.vendor_name[0]) {
+      snprintf(cat_match_buf, sizeof(cat_match_buf), "%s", diag_snap.vendor_name);
+    }
+  }
 
   char bp_buf[64];
   snprintf(bp_buf, sizeof(bp_buf), "%u Groups",
@@ -354,7 +360,7 @@ void Mgmt_SerializeDevices(AppendBuf &out, long req_id) {
   size_t total_count = Device_GetCount();
   size_t locked_count = 0;
 
-  constexpr size_t kChunkSize = 8;
+  constexpr size_t kChunkSize = 4;
   DeviceStateEntry chunk[kChunkSize];
 
   for (size_t start = 0; start < total_count; start += kChunkSize) {
@@ -579,6 +585,27 @@ void Mgmt_DrainTelemetryQueue() noexcept {
       } else {
         Mgmt_BroadcastDeviceState(0x34, item.sub1, item.sub2, DeviceClass::MOMENTARY, item.power,
                                   0, 0, 0, nullptr, 0.0f, 15, 0, 0);
+      }
+      break;
+    }
+    case TelemetryEventType::FCU: {
+      char buf[256];
+      int len = snprintf(
+          buf, sizeof(buf),
+          "{\"event\":\"device_state\",\"dev_id\":%u,\"sub1\":%u,\"sub2\":0,"
+          "\"class\":\"fcu\",\"power\":%d,\"mode\":%u,\"fan_speed\":%u,"
+          "\"swing\":%u,\"target_temp\":%u,\"current_temp\":%u,\"error\":%u}\n",
+          Config::FCU::DEV_ID, item.fcu.slot_idx, item.fcu.power ? 1 : 0,
+          item.fcu.mode, item.fcu.fan_speed, item.fcu.swing,
+          item.fcu.target_temp, item.fcu.room_temp, item.fcu.error);
+      if (len > 0 && Remote_GetSessionMutex()) {
+        MutexLocker lock(Remote_GetSessionMutex());
+        for (int i = 0; i < Config::TCP::MAX_MGMT_CLIENTS; i++) {
+          if (Remote_GetSessions()[i].sock >= 0) {
+            send(Remote_GetSessions()[i].sock, buf, len, MSG_DONTWAIT);
+            System_RecordCh6Tx();
+          }
+        }
       }
       break;
     }

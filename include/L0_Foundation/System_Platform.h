@@ -29,6 +29,7 @@
 #include <IPAddress.h>
 #include <Preferences.h>
 #include "Supervisor.h"
+#include "ThreadSafety.h"
 
 // ── RAII FreeRTOS Synchronization Primitives ──
 class [[nodiscard]] CriticalSectionLocker {
@@ -53,7 +54,7 @@ public:
   CriticalSectionLocker &operator=(CriticalSectionLocker &&) = delete;
 };
 
-class [[nodiscard]] MutexLocker {
+class [[nodiscard]] SCOPED_CAPABILITY MutexLocker {
 private:
   SemaphoreHandle_t _mutex{nullptr};
   bool _locked{false};
@@ -62,6 +63,7 @@ private:
 public:
   explicit MutexLocker(SemaphoreHandle_t mutex,
                        TickType_t timeout = portMAX_DELAY) noexcept
+      ACQUIRE(mutex)
       : _mutex(mutex) {
     if (_mutex) {
       if (xSemaphoreTake(_mutex, 0) == pdTRUE) {
@@ -80,7 +82,7 @@ public:
       }
     }
   }
-  ~MutexLocker() noexcept {
+  ~MutexLocker() noexcept RELEASE() {
     if (_mutex && _locked) {
       uint32_t hold_ms = millis() - _acquired_ms;
       if (hold_ms >= 50) { // Config::Timing::MAX_LOCK_HOLD_MS (50ms)

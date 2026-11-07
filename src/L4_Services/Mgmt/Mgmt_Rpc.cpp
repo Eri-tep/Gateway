@@ -4,6 +4,7 @@
 
 #include "L4_Services/Mgmt_Service.h"
 static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
+#include "L0_Foundation/Supervisor.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include <cstddef>
@@ -291,8 +292,22 @@ static void HandleRpc_ClearRebootLogs(int sock, long req_id,
   sendRpcResponse(sock, req_id, "ok", "Reboot logs cleared from NVS");
 }
 
-static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
-                               const IPAddress & /*client_ip*/) {
+namespace {
+static std::atomic<bool> s_rpc_scan_running{false};
+
+struct RpcScanParams {
+  int sock{-1};
+  long req_id{-1};
+};
+static RpcScanParams s_scan_params;
+
+static void Task_RpcWifiScanWorker(void * /*pvParameters*/) {
+  const int sock = s_scan_params.sock;
+  const long req_id = s_scan_params.req_id;
+
+  Supervisor::ExemptGuard scan_guard;
+  vTaskDelay(pdMS_TO_TICKS(50));
+
   int n = WiFi.scanNetworks(false, true);
   if (n <= 0) {
     WiFi.scanDelete();
@@ -307,7 +322,11 @@ static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
                "{\"res\":\"ok\",\"count\":0,\"ap_count\":0,\"aps\":[],\"msg\":"
                "\"No Networks Found\"}\n");
     }
-    send(sock, no_ap_msg, strlen(no_ap_msg), MSG_DONTWAIT);
+    if (sock >= 0) {
+      send(sock, no_ap_msg, strlen(no_ap_msg), MSG_DONTWAIT);
+    }
+    s_rpc_scan_running.store(false, std::memory_order_release);
+    vTaskDelete(nullptr);
     return;
   }
 
@@ -387,7 +406,34 @@ static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
       break;
   }
   snprintf(resp + offset, sizeof(resp) - offset, "]}\n");
-  send(sock, resp, strlen(resp), MSG_DONTWAIT);
+  if (sock >= 0) {
+    send(sock, resp, strlen(resp), MSG_DONTWAIT);
+  }
+
+  s_rpc_scan_running.store(false, std::memory_order_release);
+  vTaskDelete(nullptr);
+}
+} // anonymous namespace
+
+static void HandleRpc_WifiScan(int sock, long req_id, const char * /*json_str*/,
+                               const IPAddress & /*client_ip*/) {
+  bool expected = false;
+  if (!s_rpc_scan_running.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel)) {
+    sendRpcResponse(sock, req_id, "busy", "Wi-Fi scan already in progress");
+    return;
+  }
+
+  s_scan_params.sock = sock;
+  s_scan_params.req_id = req_id;
+
+  BaseType_t res = xTaskCreatePinnedToCore(
+      Task_RpcWifiScanWorker, "RpcWifiScan", 4096, nullptr, 2, nullptr, 0);
+
+  if (res != pdPASS) {
+    s_rpc_scan_running.store(false, std::memory_order_release);
+    sendRpcResponse(sock, req_id, "error", "Failed to spawn Wi-Fi scan worker");
+  }
 }
 
 static void HandleRpc_StartOta(int sock, long req_id, const char *json_str,

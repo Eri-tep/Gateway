@@ -222,30 +222,28 @@ void ProtocolDiag_GetProfileSummary(char *out_buf, size_t max_len) noexcept {
   if (!out_buf || max_len == 0)
     return;
 
-  auto &active = Universal_GetEngine();
-  auto desc = AutoProbe_GetEngine().getDescriptor();
-  char vendor_name_buf[64] = "Unknown";
-  active.getVendorName(vendor_name_buf, sizeof(vendor_name_buf));
-  const char *catalog_vendor = vendor_name_buf;
+  char cat_vendor[64] = {0};
+  size_t cat_devs = 0;
+  bool has_cat = ProtocolDiag_GetCatalogMatch(cat_vendor, sizeof(cat_vendor), cat_devs);
 
   if (Config_GetWallpadProfile() == 0) {
-    snprintf(out_buf, max_len,
-             desc.is_locked ? "Auto Detect (%s)" : "Auto Detect (Learning...)",
-             catalog_vendor);
+    auto desc = AutoProbe_GetEngine().getDescriptor();
+    if (has_cat && cat_vendor[0] != '\0') {
+      snprintf(out_buf, max_len, "Auto Detect (%s)", cat_vendor);
+    } else if (desc.is_locked) {
+      char raw_vendor[64] = "Unknown";
+      Universal_GetEngine().getVendorName(raw_vendor, sizeof(raw_vendor));
+      snprintf(out_buf, max_len, "Auto Detect (%s)", raw_vendor);
+    } else {
+      snprintf(out_buf, max_len, "Auto Detect (Learning...)");
+    }
   } else {
     VendorProfileDescriptor cur_p;
-    const char *p_name = ProfileRepository::getActiveProfile(cur_p)
-                             ? (cur_p.name[0] ? cur_p.name : cur_p.key)
-                             : nullptr;
-    if (p_name) {
-      if (strcmp(catalog_vendor, "Unknown") != 0 &&
-          strcmp(p_name, catalog_vendor) != 0) {
-        snprintf(out_buf, max_len, "%s (%s)", p_name, catalog_vendor);
-      } else {
-        snprintf(out_buf, max_len, "%s", p_name);
-      }
+    if (ProfileRepository::getActiveProfile(cur_p)) {
+      const char *p_name = cur_p.key[0] ? cur_p.key : (cur_p.name[0] ? cur_p.name : "Custom");
+      snprintf(out_buf, max_len, "%s (Manual Fixed)", p_name);
     } else {
-      snprintf(out_buf, max_len, "%s", catalog_vendor);
+      snprintf(out_buf, max_len, "Custom (Manual Fixed)");
     }
   }
 }

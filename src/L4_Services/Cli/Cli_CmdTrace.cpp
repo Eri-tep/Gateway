@@ -33,11 +33,12 @@ void wallpadPrintStatus(AppendBuf &out) {
   };
 
   const uint8_t active_prof = Config_GetWallpadProfile();
-  print_meta("Active Profile  : %s (ID: %u)", prof_key_buf,
-             static_cast<unsigned>(active_prof));
   if (active_prof == 0) {
+    print_meta("Active Profile  : Auto Detect (ID: 0)");
     print_meta("Profile Mode    : Auto Adaptive [%s]", phase_str);
   } else {
+    print_meta("Active Profile  : %s (ID: %u)", prof_key_buf,
+               static_cast<unsigned>(active_prof));
     print_meta("Profile Mode    : Manual Fixed");
   }
   char cat_vendor[64] = {0};
