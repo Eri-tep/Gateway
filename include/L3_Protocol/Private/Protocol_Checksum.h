@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <span>
 
 // ============================================================================
 // Protocol_Checksum: Pure Stateless Checksum Engine (L3 Private Leaf)

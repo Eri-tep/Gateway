@@ -24,7 +24,6 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L1_HAL/Uart_Driver.h"
 #include <span>

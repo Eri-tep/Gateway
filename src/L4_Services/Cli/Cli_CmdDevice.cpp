@@ -1,7 +1,6 @@
 #include "L4_Services/CLI_Commands.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
-#include <WiFi.h>
 
 namespace WallpadCli {
 static void formatSources(uint8_t src_mask, AppendBuf &buf) {

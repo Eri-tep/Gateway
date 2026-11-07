@@ -7,11 +7,10 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <algorithm>
-#include <cinttypes>
-#include <cstdarg>
 #include <cstdio>
 #include <driver/uart.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 #include <esp_wifi.h>
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
 #include <esp_core_dump.h>

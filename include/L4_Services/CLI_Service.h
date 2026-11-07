@@ -9,7 +9,6 @@
 #include <lwip/sockets.h>
 #include <span>
 #include <sys/time.h>
-#include <utility>
 
 // ============================================================================
 // SECTION 1: TELNET PROTOCOL & IAC ENUMS

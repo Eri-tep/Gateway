@@ -5,7 +5,6 @@
 // Encapsulated ESP32 RF/PHY Hardware Driver & Lifecycle Manager
 // ============================================================================
 
-#include "L0_Foundation/System_Platform.h"
 #include <WiFi.h>
 
 struct WifiHwConfig {

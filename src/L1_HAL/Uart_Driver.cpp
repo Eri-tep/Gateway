@@ -10,7 +10,6 @@
 // ============================================================================
 
 #include "L1_HAL/Uart_Driver.h"
-#include "L0_Foundation/System_Config.h"
 
 #include <Arduino.h>
 #include <SoftwareSerial.h>

@@ -5,7 +5,6 @@
 #include <WiFi.h>
 #include <algorithm>
 #include <esp_core_dump.h>
-#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
 

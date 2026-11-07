@@ -13,7 +13,6 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <algorithm>
-#include <array>
 #include <cstdio>
 #include <cstring>
 #include <esp_task_wdt.h>

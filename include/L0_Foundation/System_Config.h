@@ -5,12 +5,11 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Platform.h"
-#include <atomic>
 #include <expected>
 #include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.2.1";
+constexpr const char *FIRMWARE_VERSION = "v1.2.2";
 } // namespace Config
 
 namespace Config::Task {

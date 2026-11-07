@@ -8,7 +8,6 @@
 #include <iterator>
 
 #include <Preferences.h>
-#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"

@@ -4,9 +4,7 @@
 // SystemOta: Level 1 System-Level Cloud & HTTP(S) Firmware OTA Engine
 // ============================================================================
 
-#include <Arduino.h>
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
 
 enum class OtaStage : uint8_t {

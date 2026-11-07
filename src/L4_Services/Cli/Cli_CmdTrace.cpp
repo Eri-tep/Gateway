@@ -2,7 +2,6 @@
 #include "L3_Protocol/Public/Protocol_Facade.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L0_Foundation/System_Platform.h"
-#include <WiFi.h>
 
 namespace WallpadCli {
 

@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <esp_cpu.h>
 #include <esp_system.h>
-#include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 

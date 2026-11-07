@@ -14,7 +14,6 @@
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/Bridge_CH.h"
 #include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/Seqlock.h"
 
 #include <Arduino.h>

@@ -6,7 +6,6 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>

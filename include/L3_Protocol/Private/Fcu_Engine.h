@@ -6,7 +6,6 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>

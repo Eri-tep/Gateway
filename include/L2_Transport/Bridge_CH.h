@@ -5,12 +5,12 @@
 // Transport Independent Leaf (AGENTS.md Rule 17)
 // ============================================================================
 
-#include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <sys/select.h>
+
+struct StaticPacket;
 
 enum class HubDeviceType : uint8_t {
   WALLPAD_COMPATIBLE = 0,

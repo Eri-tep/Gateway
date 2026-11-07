@@ -12,7 +12,6 @@
 #include "L4_Services/Benchmark_Harness.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
 
@@ -21,7 +20,6 @@
 #include <esp_cpu.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
-#include <esp_app_desc.h>
 #include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>

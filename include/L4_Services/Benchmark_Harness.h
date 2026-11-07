@@ -12,7 +12,6 @@
 #if defined(BENCHMARK_BUILD)
 
 #include "L0_Foundation/System_Buffer.h"
-#include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L4_Services/CLI_Service.h"

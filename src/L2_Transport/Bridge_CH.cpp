@@ -4,6 +4,8 @@
 // ============================================================================
 
 #include "L2_Transport/Bridge_CH.h"
+#include "L0_Foundation/System_Buffer.h"
+#include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L0_Foundation/ThreadSafety.h"
 

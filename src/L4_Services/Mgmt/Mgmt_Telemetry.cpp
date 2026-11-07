@@ -8,7 +8,6 @@
 #include "L3_Protocol/Public/Protocol_Facade.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -16,7 +15,6 @@
 #include <cstring>
 #include <esp_wifi.h>
 #include <lwip/sockets.h>
-#include <span>
 
 // ── JSON-RPC & TCP Management Server (formerly Service.cpp) ──
 // ============================================================================

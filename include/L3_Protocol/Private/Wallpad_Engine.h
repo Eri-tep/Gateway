@@ -7,12 +7,10 @@
 // and Doorphone FSM into a single, cohesive private domain for Level 3 Protocol.
 // ============================================================================
 
-#include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
 #include "L3_Protocol/Private/Wallpad_Learning.h"
 
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>

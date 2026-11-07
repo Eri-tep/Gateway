@@ -6,7 +6,6 @@
 // ── L2 Transport Channels ──
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/TCP_CH.h"
-#include "L2_Transport/Bridge_CH.h"
 
 // ── L3 Protocol Routing ──
 #include "L3_Protocol/Public/Protocol_Facade.h"
@@ -15,8 +14,8 @@
 #include "L4_Services/Mgmt_Service.h"
 #include "L4_Services/CLI_Service.h"
 
-#include "esp_idf_version.h"
 #include "esp_ota_ops.h"
+#include "esp_task_wdt.h"
 #include "nvs_flash.h"
 
 // ============================================================================

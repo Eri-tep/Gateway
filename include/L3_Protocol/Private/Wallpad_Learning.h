@@ -15,7 +15,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <span>

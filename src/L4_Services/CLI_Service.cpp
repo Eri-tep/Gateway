@@ -21,7 +21,6 @@
 #include <esp_task_wdt.h>
 #include <initializer_list>
 #include <lwip/sockets.h>
-#include <span>
 #include <string_view>
 
 // ============================================================================
