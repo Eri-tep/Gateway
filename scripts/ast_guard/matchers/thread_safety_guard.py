@@ -64,6 +64,8 @@ def audit_thread_safety(project_root: str, target_files: Optional[List[str]] = N
         candidate_rel_files = [
             "src/L4_Services/Mgmt_Service.cpp",
             "src/L2_Transport/Bridge_CH.cpp",
+            "src/L3_Protocol/Private/Wallpad_Learning.cpp",
+            "src/L3_Protocol/Public/Protocol_Device.cpp",
         ]
     else:
         candidate_rel_files = target_files

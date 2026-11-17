@@ -341,14 +341,14 @@ public:
   }
 
 private:
-  GroupControlTemplate _groups[MAX_GROUPS];
-  size_t _group_count{0};
+  GroupControlTemplate _groups[MAX_GROUPS] GUARDED_BY(_mutex);
+  size_t _group_count GUARDED_BY(_mutex){0};
   mutable StaticSemaphore_t _mutex_storage{};
   mutable SemaphoreHandle_t _mutex{nullptr};
   mutable StaticSemaphore_t _nvs_mutex_storage{};
-  mutable SemaphoreHandle_t _nvs_mutex{nullptr};
+  mutable SemaphoreHandle_t _nvs_mutex ACQUIRED_BEFORE(_mutex){nullptr};
   mutable StaticSemaphore_t _commit_mutex_storage{};
-  mutable SemaphoreHandle_t _commit_mutex{nullptr};
+  mutable SemaphoreHandle_t _commit_mutex ACQUIRED_BEFORE(_nvs_mutex){nullptr};
   mutable portMUX_TYPE _snap_mux = portMUX_INITIALIZER_UNLOCKED;
 
   std::atomic<bool> _nvs_dirty{false};
@@ -360,10 +360,10 @@ private:
   uint32_t _last_committed_crc32{0};
   bool _has_committed_crc{false};
 
-  void rebuildNormSub1LutLocked() noexcept;
+  void rebuildNormSub1LutLocked() noexcept REQUIRES(_mutex);
   void autoAssignGroupName(GroupControlTemplate &group);
   GroupControlTemplate *registerOrTouchUnlocked(uint8_t dev_id,
-                                                const char *name = nullptr);
+                                                const char *name = nullptr) REQUIRES(_mutex);
 };
 
 ControlTemplateRegistry &Control_GetRegistry() noexcept;

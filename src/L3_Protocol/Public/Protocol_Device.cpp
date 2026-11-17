@@ -38,7 +38,7 @@ static_assert(sizeof(DeviceStateEntry) % sizeof(uint32_t) == 0,
               "DeviceStateEntry must be 32-bit word aligned");
 
 static inline void copyEntryDirectSeqlock(DeviceStateEntry &dst,
-                                          const DeviceStateEntry &src) noexcept {
+                                          const DeviceStateEntry &src) noexcept NO_THREAD_SAFETY_ANALYSIS {
   static_cast<DeviceMetadata &>(dst) = static_cast<const DeviceMetadata &>(src);
   dst.shadow_packed_state = src.shadow_packed_state;
   dst.last_target_temp = src.last_target_temp;
@@ -60,61 +60,64 @@ static inline void copyEntryDirectSeqlock(DeviceStateEntry &dst,
 class DeviceRepository {
 private:
   static constexpr size_t MAX_DEVICES = 48;
-  DeviceStateEntry cache[MAX_DEVICES]{};
-  int8_t dev_lookup_map[256]{};
+  DeviceStateEntry cache[MAX_DEVICES] GUARDED_BY(_cache_mux){};
+  int8_t dev_lookup_map[256] GUARDED_BY(_cache_mux){};
   std::atomic<size_t> _device_count{0};
   std::atomic<size_t> _online_count{0};
-  mutable portMUX_TYPE _cache_mux = portMUX_INITIALIZER_UNLOCKED;
+  mutable PortMuxLock _cache_mux;
   mutable Gateway::Foundation::SequenceLock _seqlock;
 
   const DeviceStateEntry *findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
-                                           uint8_t sub2, uint8_t h) const noexcept;
+                                           uint8_t sub2, uint8_t h) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   DeviceStateEntry *findInternalFast(uint8_t dev_id, uint8_t norm_sub1,
-                                     uint8_t sub2, uint8_t h) noexcept;
+                                     uint8_t sub2, uint8_t h) noexcept NO_THREAD_SAFETY_ANALYSIS;
 
   const DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
-                                       uint8_t sub2) const noexcept;
+                                       uint8_t sub2) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   DeviceStateEntry *findInternal(uint8_t dev_id, uint8_t sub1,
-                                 uint8_t sub2) noexcept;
+                                 uint8_t sub2) noexcept NO_THREAD_SAFETY_ANALYSIS;
 
 public:
   DeviceStateEntry *findMutableFast(uint8_t dev_id, uint8_t norm_sub1,
                                     uint8_t sub2, uint8_t h,
-                                    bool auto_create = false) noexcept;
+                                    bool auto_create = false) noexcept REQUIRES(_cache_mux);
   DeviceStateEntry *findMutable(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                bool auto_create = false) noexcept;
-  void initDevices();
-  void clear();
+                                bool auto_create = false) noexcept REQUIRES(_cache_mux);
+  void initDevices() EXCLUDES(_cache_mux);
+  void clear() EXCLUDES(_cache_mux);
   [[nodiscard]] bool findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                              DeviceStateEntry &out_copy) const noexcept;
+                              DeviceStateEntry &out_copy) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   [[nodiscard]] bool exists(uint8_t dev_id, uint8_t sub1,
-                            uint8_t sub2) const noexcept;
+                            uint8_t sub2) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   [[nodiscard]] bool getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                    uint64_t &out_packed) const noexcept;
+                                    uint64_t &out_packed) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   [[nodiscard]] bool getMetadata(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                 DeviceMetadata &out_meta) const noexcept;
+                                 DeviceMetadata &out_meta) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   [[nodiscard]] bool getSnapshot(size_t index,
-                                 DeviceStateEntry &out_copy) const noexcept;
+                                 DeviceStateEntry &out_copy) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   [[nodiscard]] bool getAtMetadata(size_t index,
-                                   DeviceMetadata &out_meta) const noexcept;
+                                   DeviceMetadata &out_meta) const noexcept NO_THREAD_SAFETY_ANALYSIS;
   [[nodiscard]] size_t getSnapshotChunk(size_t start_idx,
                                         DeviceStateEntry *out_buf,
-                                        size_t max_count) const noexcept;
+                                        size_t max_count) const noexcept EXCLUDES(_cache_mux);
   [[nodiscard]] size_t count() const noexcept;
   [[nodiscard]] size_t getOnlineCount() const noexcept;
   void setLastStalePollMs(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                          uint32_t ms) noexcept;
-  void setLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept;
+                          uint32_t ms) noexcept EXCLUDES(_cache_mux);
+  void setLastStalePollMsByIndex(size_t index, uint32_t ms) noexcept EXCLUDES(_cache_mux);
   bool setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                     uint8_t temp) noexcept;
-  DeviceUpdateResult updateFromBus(StaticPacket &ack);
-  void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2);
+                     uint8_t temp) noexcept EXCLUDES(_cache_mux);
+  DeviceUpdateResult updateFromBus(StaticPacket &ack) EXCLUDES(_cache_mux);
+  void handlePollingTimeout(uint8_t dev_id, uint8_t sub1, uint8_t sub2) EXCLUDES(_cache_mux);
   [[nodiscard]] bool copyVirtualAck(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
-                                    StaticPacket &out) noexcept;
+                                    StaticPacket &out) noexcept EXCLUDES(_cache_mux);
   void syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8_t room_temp,
-                    bool is_online, const uint8_t *raw_pkt, size_t raw_len) noexcept;
+                    bool is_online, const uint8_t *raw_pkt, size_t raw_len) noexcept EXCLUDES(_cache_mux);
+  void registerFcu(uint8_t slot_idx) noexcept EXCLUDES(_cache_mux);
+  bool handleLegacyThermostatBroadcast(const StaticPacket &ack,
+                                       DeviceUpdateResult &out_res) EXCLUDES(_cache_mux);
 #if defined(BENCHMARK_BUILD)
-  [[nodiscard]] portMUX_TYPE *getMux() const noexcept { return &_cache_mux; }
+  [[nodiscard]] portMUX_TYPE *getMux() const noexcept { return _cache_mux.get(); }
   [[nodiscard]] Gateway::Foundation::SequenceLock &getSeqlock() const noexcept { return _seqlock; }
 #endif
 };
@@ -260,7 +263,7 @@ bool DeviceRepository::findCopy(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
     }
   }
 
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
   if (!e) [[unlikely]]
     return false;
@@ -287,7 +290,7 @@ bool DeviceRepository::exists(uint8_t dev_id, uint8_t sub1,
     }
   }
 
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   return findInternalFast(dev_id, norm_sub1, sub2, h) != nullptr;
 }
 
@@ -312,7 +315,7 @@ bool DeviceRepository::getPackedState(uint8_t dev_id, uint8_t sub1, uint8_t sub2
     }
   }
 
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
   if (!e) [[unlikely]]
     return false;
@@ -341,7 +344,7 @@ bool DeviceRepository::getMetadata(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
     }
   }
 
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   const DeviceStateEntry *e = findInternalFast(dev_id, norm_sub1, sub2, h);
   if (!e) [[unlikely]]
     return false;
@@ -365,7 +368,7 @@ bool DeviceRepository::getSnapshot(size_t index,
     }
   }
 
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   if (index >= _device_count.load(std::memory_order_relaxed))
     return false;
   copyEntryDirectSeqlock(out_copy, cache[index]);
@@ -389,7 +392,7 @@ bool DeviceRepository::getAtMetadata(size_t index,
     }
   }
 
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   if (index >= _device_count.load(std::memory_order_relaxed))
     return false;
   out_meta = static_cast<const DeviceMetadata&>(cache[index]);
@@ -401,7 +404,7 @@ size_t DeviceRepository::getSnapshotChunk(size_t start_idx,
                                           size_t max_count) const noexcept {
   if (!out_buf || max_count == 0)
     return 0;
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   const size_t cnt = _device_count.load(std::memory_order_relaxed);
   if (start_idx >= cnt)
     return 0;
@@ -417,7 +420,7 @@ bool DeviceRepository::setTargetTemp(uint8_t dev_id, uint8_t sub1, uint8_t sub2,
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
 
-  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+  Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
   auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev) {
     dev->last_target_temp = temp;
@@ -453,7 +456,7 @@ bool DeviceRepository::copyVirtualAck(uint8_t dev_id, uint8_t sub1,
     }
   }
 
-  CriticalSectionLocker lock(&_cache_mux);
+  SpinlockLocker lock(_cache_mux);
   const auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev && dev->last_ack_len > 0) {
     const size_t copy_len = std::min({static_cast<size_t>(dev->last_ack_len),
@@ -472,7 +475,7 @@ void DeviceRepository::syncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8
   const uint8_t h = Device_Hash(Config::FCU::DEV_ID, norm_sub1, 0);
   const uint32_t now = millis();
 
-  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+  Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
   DeviceStateEntry *dev = findMutableFast(Config::FCU::DEV_ID, norm_sub1, 0, h, true);
   if (!dev) return;
 
@@ -501,7 +504,7 @@ void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
 
-  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+  Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
   auto *dev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
   if (dev) {
     dev->last_stale_poll_ms = ms;
@@ -511,7 +514,7 @@ void DeviceRepository::setLastStalePollMs(uint8_t dev_id, uint8_t sub1,
 void DeviceRepository::setLastStalePollMsByIndex(size_t index,
                                                  uint32_t ms) noexcept {
   if (index < _device_count.load(std::memory_order_relaxed)) {
-    Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+    Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
     if (index < _device_count.load(std::memory_order_relaxed)) {
       cache[index].last_stale_poll_ms = ms;
     }
@@ -519,25 +522,26 @@ void DeviceRepository::setLastStalePollMsByIndex(size_t index,
 }
 
 void DeviceRepository::initDevices() {
-  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+  Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   _device_count.store(0, std::memory_order_relaxed);
   _online_count.store(0, std::memory_order_relaxed);
 }
 
 void DeviceRepository::clear() {
-  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+  Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
   memset(dev_lookup_map, -1, sizeof(dev_lookup_map));
   _device_count.store(0, std::memory_order_relaxed);
   _online_count.store(0, std::memory_order_relaxed);
 }
 
-namespace {
-static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
-                                            const StaticPacket &ack,
-                                            portMUX_TYPE &mux,
-                                            Gateway::Foundation::SequenceLock &seq,
-                                            DeviceUpdateResult &out_res) {
+void DeviceRepository::registerFcu(uint8_t slot_idx) noexcept {
+  Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
+  findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
+}
+
+bool DeviceRepository::handleLegacyThermostatBroadcast(const StaticPacket &ack,
+                                                       DeviceUpdateResult &out_res) {
   if (ack.length != 34 || ack.data[3] != 0x18 || ack.data[4] != 0x04)
     return false;
 
@@ -560,8 +564,8 @@ static bool handleLegacyThermostatBroadcast(DeviceRepository &repo,
     const uint8_t r_norm_sub1 = Device_NormSub1(0x18, r_sub1);
     const uint8_t r_h = Device_Hash(0x18, r_norm_sub1, 0);
     {
-      Gateway::Foundation::CriticalSeqWriterGuard lock(mux, seq);
-      DeviceStateEntry *r_dev = repo.findMutableFast(0x18, r_norm_sub1, 0, r_h, true);
+      Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
+      DeviceStateEntry *r_dev = findMutableFast(0x18, r_norm_sub1, 0, r_h, true);
       if (r_dev) {
         r_dev->last_updated_ms = now;
         r_dev->timeout_count = 0;
@@ -613,7 +617,6 @@ static inline void handleElevatorSpecialState(DeviceStateEntry *dev,
     dev->last_ack_data[1] = static_cast<uint8_t>(st.ho);
   }
 }
-} // namespace
 
 DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
   DeviceUpdateResult res{};
@@ -628,7 +631,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
 
   // 구형(Legacy) 34B 난방 브로드캐스트 처리 (Packet[1]==0x22 && Dev==0x18 &&
   // Opcode==0x04)
-  if (handleLegacyThermostatBroadcast(*this, ack, _cache_mux, _seqlock, res)) {
+  if (handleLegacyThermostatBroadcast(ack, res)) {
     return res;
   }
 
@@ -672,7 +675,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
       std::min(static_cast<size_t>(ack.length), sizeof(dev_snap.last_ack_data));
 
   {
-    Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+    Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
     DeviceStateEntry *dev = findMutableFast(dev_id, norm_sub1, sub2, h, true);
     if (UNLIKELY(!dev)) {
       return res;
@@ -729,7 +732,7 @@ DeviceUpdateResult DeviceRepository::updateFromBus(StaticPacket &ack) {
                                 (st.direction != prev_dir) || (st.ho != prev_ho);
         if (ev_state_changed) {
           st.should_broadcast = true;
-          Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+          Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
           auto *mdev = findMutableFast(dev_id, norm_sub1, sub2, h, false);
           if (mdev) {
             mdev->last_current_temp = static_cast<uint8_t>(st.floor);
@@ -759,7 +762,7 @@ void DeviceRepository::handlePollingTimeout(uint8_t dev_id, uint8_t sub1,
   const uint8_t norm_sub1 = Device_NormSub1(dev_id, sub1);
   const uint8_t h = Device_Hash(dev_id, norm_sub1, sub2);
 
-  Gateway::Foundation::CriticalSeqWriterGuard lock(&_cache_mux, _seqlock);
+  Gateway::Foundation::SpinlockSeqWriterGuard lock(_cache_mux, _seqlock);
   auto *mdev = findMutableFast(dev_id, norm_sub1, sub2, h, true);
   if (mdev && mdev->is_online && ++mdev->timeout_count >= 3) {
     mdev->is_online = false;
@@ -848,7 +851,7 @@ bool Device_GetAtMetadata(size_t index, DeviceMetadata &out_meta) noexcept {
 }
 
 void Device_RegisterFcu(uint8_t slot_idx) noexcept {
-  s_device_repo.findMutable(Config::FCU::DEV_ID, slot_idx, 0, true);
+  s_device_repo.registerFcu(slot_idx);
 }
 
 void Device_SyncFcuState(uint8_t slot_idx, uint8_t target_temp, uint8_t room_temp,

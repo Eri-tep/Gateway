@@ -663,6 +663,8 @@ void Task_Ch1(void *pvParameters) {
   if (g_system_event_group) {
     xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
                         pdFALSE, portMAX_DELAY);
+    // Staged Booting: Allow NVS restore and Core 0 network settling before initiating CH1 polling bursts
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
   StaticPacket ctrlPacket;
   size_t current_dev_idx = 0;

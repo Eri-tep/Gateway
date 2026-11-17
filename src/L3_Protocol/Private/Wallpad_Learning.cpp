@@ -1933,13 +1933,16 @@ bool ControlTemplateRegistry::commitNvsIfPending() noexcept {
   memset(&s_nvs_transfer_buf, 0, sizeof(s_nvs_transfer_buf));
 
   size_t save_count = 0;
-  portENTER_CRITICAL(&_snap_mux);
-  for (size_t i = 0; i < _group_count; ++i) {
-    if (_groups[i].dev_id != 0) {
-      s_nvs_transfer_buf[save_count++] = _groups[i];
+  {
+    MutexLocker ram_lock(_mutex, kQueryLockTimeout);
+    portENTER_CRITICAL(&_snap_mux);
+    for (size_t i = 0; i < _group_count; ++i) {
+      if (_groups[i].dev_id != 0) {
+        s_nvs_transfer_buf[save_count++] = _groups[i];
+      }
     }
+    portEXIT_CRITICAL(&_snap_mux);
   }
-  portEXIT_CRITICAL(&_snap_mux);
 
   const uint32_t current_crc = FastCrc32(
       reinterpret_cast<const uint8_t *>(s_nvs_transfer_buf),
@@ -2013,13 +2016,16 @@ bool ControlTemplateRegistry::forceFlush(uint32_t timeout_ms) noexcept {
   memset(&s_nvs_transfer_buf, 0, sizeof(s_nvs_transfer_buf));
 
   size_t save_count = 0;
-  portENTER_CRITICAL(&_snap_mux);
-  for (size_t i = 0; i < _group_count; ++i) {
-    if (_groups[i].dev_id != 0) {
-      s_nvs_transfer_buf[save_count++] = _groups[i];
+  {
+    MutexLocker ram_lock(_mutex, kQueryLockTimeout);
+    portENTER_CRITICAL(&_snap_mux);
+    for (size_t i = 0; i < _group_count; ++i) {
+      if (_groups[i].dev_id != 0) {
+        s_nvs_transfer_buf[save_count++] = _groups[i];
+      }
     }
+    portEXIT_CRITICAL(&_snap_mux);
   }
-  portEXIT_CRITICAL(&_snap_mux);
 
   const uint32_t current_crc = FastCrc32(
       reinterpret_cast<const uint8_t *>(s_nvs_transfer_buf),

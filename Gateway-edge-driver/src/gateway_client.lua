@@ -9,6 +9,7 @@ local persistent_tcp = nil
 local pending_requests = {} -- [req_id] = cosock.channel
 local next_req_id = 1
 local DEFAULT_TIMEOUT_SEC = 5
+local listener_running = false
 
 function GatewayClient.send_rpc(ip, port, cmd_table, timeout)
   local sock = persistent_tcp
@@ -215,6 +216,7 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_co
           log.info(string.format("✅ [CH6 PUSH] Connected to Gateway %s:%d (TCP_NODELAY Active)", ip, port))
           persistent_tcp = tcp
           local is_alive = true
+          local last_pong_time = os.time()
 
           -- [On-Connect Immediate Refresh] 연결 수립 즉시 텔레메트리 1회 즉시 동기화 트리거
           if on_connected_cb then
@@ -223,12 +225,23 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_co
             end, "on_connected_sync")
           end
 
-          -- [Heartbeat Ping Worker] 15초마다 게이트웨이로 Ping 전송하여 세션 활성화 유지 및 끊김 감지
+          -- [Heartbeat Ping-Pong Watchdog Worker] 15초마다 게이트웨이로 Ping 전송 및 Pong 응답 타임아웃 감시
           cosock.spawn(function()
             local ping_fail_count = 0
             while is_alive and listener_running do
               cosock.socket.sleep(15)
               if not is_alive or not listener_running or not persistent_tcp then break end
+
+              -- 35초 이상 pong 미수신 시 Half-Open 고스트 세션으로 판정하여 소켓 강제 리셋
+              local now = os.time()
+              if now - last_pong_time > 35 then
+                log.warn(string.format("⚠️ [CH6 PING] Pong watchdog timeout (%ds > 35s), closing half-open ghost socket.", now - last_pong_time))
+                is_alive = false
+                pcall(function() persistent_tcp:close() end)
+                persistent_tcp = nil
+                break
+              end
+
               local ok_send, ping_sent, ping_err = pcall(function()
                 return persistent_tcp:send("{\"c\":\"ping\"}\n")
               end)
@@ -273,8 +286,9 @@ function GatewayClient.start_event_listener(driver, ip, port, on_event_cb, on_co
                     if not cb_ok then
                       log.error(string.format("❌ [CH6 PUSH] Error in event callback (%s): %s", tostring(data.event), tostring(cb_err)))
                     end
-                  elseif data.pong then
-                    log.debug("📡 [CH6 PUSH] Heartbeat pong received")
+                  elseif data.pong or (data.res == "ok" and data.pong) then
+                    last_pong_time = os.time()
+                    log.debug("📡 [CH6 PUSH] Heartbeat pong received (Watchdog refreshed)")
                   end
                 end
               end

@@ -184,11 +184,25 @@ local function reconcile_all_devices(driver)
   log.info("🔄 [RECONCILE] Querying all device states from Gateway L3 State Cache...")
   local res, err = gateway_client.get_devices(ip, port)
   if res and res.devices then
-    log.info(string.format("🔄 [RECONCILE] Synchronizing %d device states...", #res.devices))
-    for _, dev_entry in ipairs(res.devices) do
-      telemetry_handler.handle_device_state_event(driver, dev_entry)
+    log.info(string.format("🔄 [RECONCILE] Synchronizing %d device states (staggered 50ms)...", #res.devices))
+    local main_gw = nil
+    for _, d in ipairs(driver:get_devices()) do
+      if d.device_network_id == "esp32_wallpad_gateway_ctrl" then
+        main_gw = d
+        break
+      end
     end
-    log.info("✅ [RECONCILE] Full device state reconciliation completed successfully.")
+
+    for idx, dev_entry in ipairs(res.devices) do
+      if main_gw and main_gw.thread then
+        main_gw.thread:call_with_delay((idx - 1) * 0.05, function()
+          telemetry_handler.handle_device_state_event(driver, dev_entry)
+        end)
+      else
+        telemetry_handler.handle_device_state_event(driver, dev_entry)
+      end
+    end
+    log.info("✅ [RECONCILE] Full device state reconciliation scheduled successfully.")
   else
     log.warn(string.format("⚠️ [RECONCILE] Failed to fetch device states: %s", tostring(err)))
   end

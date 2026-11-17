@@ -31,6 +31,23 @@
 #include "Supervisor.h"
 #include "ThreadSafety.h"
 
+// ── Type-Safe Clang TSA Capability Wrapper for FreeRTOS Spinlocks ──
+class CAPABILITY("mutex") PortMuxLock {
+private:
+  portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+
+public:
+  constexpr PortMuxLock() noexcept = default;
+  [[nodiscard]] inline portMUX_TYPE *get() noexcept { return &_mux; }
+  [[nodiscard]] inline const portMUX_TYPE *get() const noexcept { return &_mux; }
+  [[nodiscard]] inline portMUX_TYPE &raw() noexcept { return _mux; }
+  [[nodiscard]] inline const portMUX_TYPE &raw() const noexcept { return _mux; }
+  inline operator portMUX_TYPE *() noexcept { return &_mux; }
+  inline operator const portMUX_TYPE *() const noexcept { return &_mux; }
+  inline operator portMUX_TYPE &() noexcept { return _mux; }
+  inline operator const portMUX_TYPE &() const noexcept { return _mux; }
+};
+
 // ── RAII FreeRTOS Synchronization Primitives ──
 class [[nodiscard]] CriticalSectionLocker {
 private:
@@ -52,6 +69,23 @@ public:
   CriticalSectionLocker &operator=(const CriticalSectionLocker &) = delete;
   CriticalSectionLocker(CriticalSectionLocker &&) = delete;
   CriticalSectionLocker &operator=(CriticalSectionLocker &&) = delete;
+};
+
+class [[nodiscard]] SCOPED_CAPABILITY SpinlockLocker {
+private:
+  PortMuxLock &_mux;
+
+public:
+  explicit SpinlockLocker(PortMuxLock &mux) noexcept ACQUIRE(mux) : _mux(mux) {
+    portENTER_CRITICAL(mux.get());
+  }
+  ~SpinlockLocker() noexcept RELEASE() {
+    portEXIT_CRITICAL(_mux.get());
+  }
+  SpinlockLocker(const SpinlockLocker &) = delete;
+  SpinlockLocker &operator=(const SpinlockLocker &) = delete;
+  SpinlockLocker(SpinlockLocker &&) = delete;
+  SpinlockLocker &operator=(SpinlockLocker &&) = delete;
 };
 
 class [[nodiscard]] SCOPED_CAPABILITY MutexLocker {

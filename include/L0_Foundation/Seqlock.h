@@ -125,4 +125,57 @@ public:
   CriticalSeqWriterGuard &operator=(CriticalSeqWriterGuard &&) = delete;
 };
 
+/**
+ * @brief Clang TSA Annotated Spinlock + Seqlock Writer Guard.
+ */
+class [[nodiscard]] SCOPED_CAPABILITY SpinlockSeqWriterGuard {
+private:
+  PortMuxLock &_mux;
+  SequenceLock &_seq;
+
+public:
+  explicit SpinlockSeqWriterGuard(PortMuxLock &mux, SequenceLock &seq) noexcept
+      ACQUIRE(mux)
+      : _mux(mux), _seq(seq) {
+    portENTER_CRITICAL(mux.get());
+    _seq.write_begin();
+  }
+
+  ~SpinlockSeqWriterGuard() noexcept RELEASE() {
+    _seq.write_end();
+    portEXIT_CRITICAL(_mux.get());
+  }
+
+  SpinlockSeqWriterGuard(const SpinlockSeqWriterGuard &) = delete;
+  SpinlockSeqWriterGuard &operator=(const SpinlockSeqWriterGuard &) = delete;
+  SpinlockSeqWriterGuard(SpinlockSeqWriterGuard &&) = delete;
+  SpinlockSeqWriterGuard &operator=(SpinlockSeqWriterGuard &&) = delete;
+};
+
+/**
+ * @brief Type-enforced RAII Sequence Lock Writer Guard.
+ * Enforces at compile-time that an external lock guard is actively held.
+ */
+template <typename LockGuard>
+class [[nodiscard]] SeqlockWriteGuard {
+private:
+  SequenceLock &_seq;
+
+public:
+  explicit SeqlockWriteGuard([[maybe_unused]] const LockGuard &lock_held,
+                             SequenceLock &seq) noexcept
+      : _seq(seq) {
+    _seq.write_begin();
+  }
+
+  ~SeqlockWriteGuard() noexcept {
+    _seq.write_end();
+  }
+
+  SeqlockWriteGuard(const SeqlockWriteGuard &) = delete;
+  SeqlockWriteGuard &operator=(const SeqlockWriteGuard &) = delete;
+  SeqlockWriteGuard(SeqlockWriteGuard &&) = delete;
+  SeqlockWriteGuard &operator=(SeqlockWriteGuard &&) = delete;
+};
+
 } // namespace Gateway::Foundation
