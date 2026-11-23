@@ -373,8 +373,10 @@ struct BurstTxFsm {
   StaticPacket pkt{};
   uint8_t target_slot{0};
   uint8_t remaining_count{0};
-  uint32_t silence_ms{20};
+  uint32_t gap_ms{30};           // 패킷 간 전송 간격 (기본 30ms)
+  uint32_t silence_req_ms{10};   // 회선 유휴시간 판정 기준 (기본 10ms)
   uint32_t last_tx_ms{0};
+  uint32_t wait_start_ms{0};     // 현재 패킷 무음 대기 시작 타임스탬프 (Max 50ms 가드용)
   esp_timer_handle_t timer{nullptr};
 };
 
@@ -384,8 +386,10 @@ static void onBurstTimer(void *arg) {
   (void)arg;
   StaticPacket tx_pkt{};
   uint8_t slot = 0;
-  uint32_t silence_req_ms = 20;
+  uint32_t gap_ms = 30;
+  uint32_t silence_req_ms = 10;
   uint32_t last_tx = 0;
+  uint32_t wait_start = 0;
 
   {
     CriticalSectionLocker lock(&s_burst_fsm.mux);
@@ -394,11 +398,12 @@ static void onBurstTimer(void *arg) {
     }
     tx_pkt = s_burst_fsm.pkt;
     slot = s_burst_fsm.target_slot;
-    silence_req_ms = s_burst_fsm.silence_ms;
+    gap_ms = s_burst_fsm.gap_ms;
+    silence_req_ms = s_burst_fsm.silence_req_ms;
     last_tx = s_burst_fsm.last_tx_ms;
+    wait_start = s_burst_fsm.wait_start_ms;
   }
 
-  uint32_t last_rx = 0;
   if (!s_hub_slots[slot].enabled.load(std::memory_order_relaxed) ||
       s_hub_active_socks[slot].load(std::memory_order_acquire) < 0 ||
       !s_hub_slots[slot].is_connected.load(std::memory_order_relaxed)) {
@@ -406,18 +411,32 @@ static void onBurstTimer(void *arg) {
     s_burst_fsm.remaining_count = 0;
     return;
   }
-  last_rx = s_hub_slots[slot].last_rx_ms.load(std::memory_order_relaxed);
+  const uint32_t last_rx =
+      s_hub_slots[slot].last_rx_ms.load(std::memory_order_relaxed);
 
-  uint32_t now = millis();
-  uint32_t rx_elapsed = (now >= last_rx) ? (now - last_rx) : 0;
-  uint32_t tx_elapsed = (now >= last_tx) ? (now - last_tx) : 0;
+  const uint32_t now = millis();
+  const uint32_t wait_elapsed = (now >= wait_start) ? (now - wait_start) : 0;
+  constexpr uint32_t MAX_WAIT_GUARD_MS = 50;
 
-  uint32_t rx_rem_ms =
-      (rx_elapsed < silence_req_ms) ? (silence_req_ms - rx_elapsed) : 0;
-  uint32_t tx_rem_ms = (last_tx > 0 && tx_elapsed < silence_req_ms)
-                           ? (silence_req_ms - tx_elapsed)
-                           : 0;
-  uint32_t wait_ms = std::max(rx_rem_ms, tx_rem_ms);
+  uint32_t wait_ms = 0;
+
+  // 최대 50ms 대기 한도(Max Wait Guard): 대기 시간이 50ms에 도달하면 무음 체크 바이패스
+  if (wait_elapsed < MAX_WAIT_GUARD_MS) {
+    const uint32_t rx_elapsed = (now >= last_rx) ? (now - last_rx) : 0;
+    const uint32_t tx_elapsed = (now >= last_tx) ? (now - last_tx) : 0;
+
+    const uint32_t rx_rem_ms =
+        (rx_elapsed < silence_req_ms) ? (silence_req_ms - rx_elapsed) : 0;
+    const uint32_t tx_rem_ms = (last_tx > 0 && tx_elapsed < gap_ms)
+                                   ? (gap_ms - tx_elapsed)
+                                   : 0;
+    wait_ms = std::max(rx_rem_ms, tx_rem_ms);
+
+    // 잔여 대기시간이 50ms 한도를 초과하지 않도록 클램핑
+    if (wait_elapsed + wait_ms > MAX_WAIT_GUARD_MS) {
+      wait_ms = MAX_WAIT_GUARD_MS - wait_elapsed;
+    }
+  }
 
   if (wait_ms > 0) {
     esp_timer_start_once(s_burst_fsm.timer,
@@ -426,19 +445,22 @@ static void onBurstTimer(void *arg) {
   }
 
   const bool sent = Hub_SendPacket(slot, tx_pkt);
-  now = millis();
+  const uint32_t tx_done_now = millis();
   System_TracePacket(5, true, sent ? TraceType::CTL : TraceType::DRP, tx_pkt);
 
   bool schedule_next = false;
-  uint32_t next_gap_ms = 20;
+  uint32_t next_gap_ms = gap_ms;
   {
     CriticalSectionLocker lock(&s_burst_fsm.mux);
-    s_burst_fsm.last_tx_ms = now;
+    s_burst_fsm.last_tx_ms = tx_done_now;
     if (s_burst_fsm.remaining_count > 0) {
       s_burst_fsm.remaining_count--;
     }
     schedule_next = (s_burst_fsm.remaining_count > 0);
-    next_gap_ms = s_burst_fsm.silence_ms;
+    if (schedule_next) {
+      s_burst_fsm.wait_start_ms = tx_done_now;
+      next_gap_ms = s_burst_fsm.gap_ms;
+    }
   }
 
   if (schedule_next) {
@@ -460,7 +482,7 @@ void init() {
 }
 
 bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count,
-                     uint32_t silence_ms) {
+                     uint32_t gap_ms, uint32_t silence_req_ms) {
   if (slot_idx >= Config::TCP::MAX_EW11_SLOTS || count == 0)
     return false;
   if (!s_burst_fsm.timer)
@@ -479,8 +501,10 @@ bool sendBurstPacket(uint8_t slot_idx, const StaticPacket &pkt, uint8_t count,
     s_burst_fsm.pkt = pkt;
     s_burst_fsm.target_slot = slot_idx;
     s_burst_fsm.remaining_count = count;
-    s_burst_fsm.silence_ms = silence_ms;
+    s_burst_fsm.gap_ms = gap_ms;
+    s_burst_fsm.silence_req_ms = silence_req_ms;
     s_burst_fsm.last_tx_ms = 0;
+    s_burst_fsm.wait_start_ms = millis();
   }
 
   esp_timer_start_once(s_burst_fsm.timer, 1000);
@@ -625,7 +649,7 @@ void Hub_Data(HubClientSlot *slot, const uint8_t *data, size_t len) {
 bool Bridge_ForwardPacket(uint8_t slot_idx, const StaticPacket &pkt,
                           bool burst) noexcept {
   if (burst || slot_idx == 0) {
-    return Ew11Manager::sendBurstPacket(slot_idx, pkt, 2, 20);
+    return Ew11Manager::sendBurstPacket(slot_idx, pkt, 4, 30, 10);
   } else {
     const bool sent = Hub_SendPacket(slot_idx, pkt);
     System_TracePacket(5, true, sent ? TraceType::CTL : TraceType::DRP, pkt);
