@@ -800,6 +800,42 @@ using Hash::fnv1a32_ci_rt;
 static constexpr auto fnv1a_32_ci = Hash::fnv1a32_ci;
 static inline auto fnv1a_32_ci_rt = Hash::fnv1a32_ci_rt;
 
+struct RpcRoute {
+  uint32_t hash;
+  RpcHandlerFunc handler;
+  bool is_dangerous;
+  bool lock_hub_ip;
+};
+
+static constexpr RpcRoute kRpcRoutes[] = {
+    {fnv1a_32_ci("get_telemetry"), HandleRpc_GetTelemetry, false, true},
+    {fnv1a_32_ci("ping"), HandleRpc_Ping, false, false},
+    {fnv1a_32_ci("wifi_scan"), HandleRpc_WifiScan, false, false},
+    {fnv1a_32_ci("set_wifi_mode"), HandleRpc_SetWifiMode, false, false},
+    {fnv1a_32_ci("set_ew11"), HandleRpc_SetEw11, false, false},
+    {fnv1a_32_ci("get_devices"), HandleRpc_GetDevices, false, false},
+    {fnv1a_32_ci("gd"), HandleRpc_GetDevices, false, false},
+    {fnv1a_32_ci("get_locked_devices"), HandleRpc_GetDevices, false, false},
+    {fnv1a_32_ci("gld"), HandleRpc_GetDevices, false, false},
+    // ── Dangerous Commands (Require Trusted Hub Verification) ──
+    {fnv1a_32_ci("set_profile"), HandleRpc_SetProfile, true, false},
+    {fnv1a_32_ci("save_auto_to_slot"), HandleRpc_SaveAutoToSlot, true, false},
+    {fnv1a_32_ci("set_timing"), HandleRpc_SetTiming, true, false},
+    {fnv1a_32_ci("cache_sync"), HandleRpc_CacheSync, true, false},
+    {fnv1a_32_ci("cache_purge_rescan"), HandleRpc_CachePurgeRescan, true, false},
+    {fnv1a_32_ci("wallpad_reset"), HandleRpc_WallpadReset, true, false},
+    {fnv1a_32_ci("clear_coredump"), HandleRpc_ClearCoredump, true, false},
+    {fnv1a_32_ci("clear_reboot_logs"), HandleRpc_ClearRebootLogs, true, false},
+    {fnv1a_32_ci("start_ota"), HandleRpc_StartOta, true, false},
+    {fnv1a_32_ci("system_reboot"), HandleRpc_SystemReboot, true, false},
+    {fnv1a_32_ci("set_wifi"), HandleRpc_SetWifi, true, false},
+    {fnv1a_32_ci("set_uart"), HandleRpc_SetUart, true, false},
+    {fnv1a_32_ci("doorphone_action"), HandleRpc_DoorphoneAction, true, false},
+    {fnv1a_32_ci("device_control"), HandleRpc_DeviceControl, true, false},
+    {fnv1a_32_ci("ctl"), HandleRpc_DeviceControl, true, false},
+    {fnv1a_32_ci("control"), HandleRpc_DeviceControl, true, false},
+};
+
 void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   if (sock < 0 || !json_str)
     return;
@@ -819,124 +855,28 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
   const IPAddress client_ip = Remote_GetClientIp(sock);
   const uint32_t cmd_hash = fnv1a_32_ci_rt(cmd);
 
-  RpcHandlerFunc handler = nullptr;
-  bool is_dangerous = false;
-
-  switch (cmd_hash) {
-  case fnv1a_32_ci("get_telemetry"):
-    // SmartThings Edge Driver가 주기적으로 telemetry 요청 시 허브 IP 자동 학습 및 Lock-in
-    if (client_ip != IPAddress(0, 0, 0, 0) &&
-        s_trusted_hub_ip == IPAddress(0, 0, 0, 0)) {
-      s_trusted_hub_ip = client_ip;
-      ESP_LOGI("NET", "[RPC] Trusted Hub IP locked to %u.%u.%u.%u",
-               s_trusted_hub_ip[0], s_trusted_hub_ip[1],
-               s_trusted_hub_ip[2], s_trusted_hub_ip[3]);
+  const RpcRoute *matched = nullptr;
+  for (const auto &route : kRpcRoutes) {
+    if (route.hash == cmd_hash) {
+      matched = &route;
+      break;
     }
-    handler = HandleRpc_GetTelemetry;
-    break;
-
-  case fnv1a_32_ci("ping"):
-    handler = HandleRpc_Ping;
-    break;
-
-  case fnv1a_32_ci("wifi_scan"):
-    handler = HandleRpc_WifiScan;
-    break;
-
-  case fnv1a_32_ci("set_wifi_mode"):
-    handler = HandleRpc_SetWifiMode;
-    break;
-
-  case fnv1a_32_ci("set_ew11"):
-    handler = HandleRpc_SetEw11;
-    break;
-
-  case fnv1a_32_ci("get_devices"):
-  case fnv1a_32_ci("gd"):
-  case fnv1a_32_ci("get_locked_devices"):
-  case fnv1a_32_ci("gld"):
-    handler = HandleRpc_GetDevices;
-    break;
-
-  // ── Dangerous Commands (Require Trusted Hub Verification) ──
-  case fnv1a_32_ci("set_profile"):
-    handler = HandleRpc_SetProfile;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("save_auto_to_slot"):
-    handler = HandleRpc_SaveAutoToSlot;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("set_timing"):
-    handler = HandleRpc_SetTiming;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("cache_sync"):
-    handler = HandleRpc_CacheSync;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("cache_purge_rescan"):
-    handler = HandleRpc_CachePurgeRescan;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("wallpad_reset"):
-    handler = HandleRpc_WallpadReset;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("clear_coredump"):
-    handler = HandleRpc_ClearCoredump;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("clear_reboot_logs"):
-    handler = HandleRpc_ClearRebootLogs;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("start_ota"):
-    handler = HandleRpc_StartOta;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("system_reboot"):
-    handler = HandleRpc_SystemReboot;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("set_wifi"):
-    handler = HandleRpc_SetWifi;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("set_uart"):
-    handler = HandleRpc_SetUart;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("doorphone_action"):
-    handler = HandleRpc_DoorphoneAction;
-    is_dangerous = true;
-    break;
-
-  case fnv1a_32_ci("device_control"):
-  case fnv1a_32_ci("ctl"):
-  case fnv1a_32_ci("control"):
-    handler = HandleRpc_DeviceControl;
-    is_dangerous = true;
-    break;
-
-  default:
+  }
+  if (!matched) {
     sendRpcResponse(sock, req_id, "error", "Unknown command");
     return;
   }
 
-  if (is_dangerous) {
+  if (matched->lock_hub_ip && client_ip != IPAddress(0, 0, 0, 0) &&
+      s_trusted_hub_ip == IPAddress(0, 0, 0, 0)) {
+    // SmartThings Edge Driver가 주기적으로 telemetry 요청 시 허브 IP 자동 학습 및 Lock-in
+    s_trusted_hub_ip = client_ip;
+    ESP_LOGI("NET", "[RPC] Trusted Hub IP locked to %u.%u.%u.%u",
+             s_trusted_hub_ip[0], s_trusted_hub_ip[1],
+             s_trusted_hub_ip[2], s_trusted_hub_ip[3]);
+  }
+
+  if (matched->is_dangerous) {
     // 보안 검증:
     // 1) 아직 허브가 등록되지 않은 상태(0.0.0.0)에서는 위험 명령 원천 거부 (부팅 직후 바이패스 차단)
     // 2) 등록된 허브 IP와 불일치하는 제3자의 위험 명령 차단 (탈취 및 임의 조작 방어)
@@ -948,7 +888,7 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     }
   }
 
-  handler(sock, req_id, json_str, client_ip);
+  matched->handler(sock, req_id, json_str, client_ip);
 }
 
 void Mgmt_Data(MgmtSession *s, std::span<const uint8_t> data) {

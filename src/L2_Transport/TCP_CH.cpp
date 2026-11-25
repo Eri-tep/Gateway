@@ -36,7 +36,7 @@ void TcpReactor::runTask(void * /*pvParameters*/) {
     System_FeedWdt(Config::Task::WDT_ID_NET);
     SystemOta_Handle();
 
-    const bool ota_now = g_ota_in_progress.load(std::memory_order_relaxed);
+    const bool ota_now = System_IsOtaInProgress();
     const uint32_t now_ms = millis();
 
     System_CheckOtaHealth();

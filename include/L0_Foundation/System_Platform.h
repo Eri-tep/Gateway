@@ -367,23 +367,18 @@ struct StaticPacket {
   std::array<uint8_t, 64> data;
 };
 
-// ── System Lifecycle & Synchronization Primitives ──
-extern EventGroupHandle_t g_system_event_group;
-extern std::atomic<bool> g_ota_in_progress;
+// ── System Lifecycle & Synchronization Primitives (100% Static-Sealed) ───────
+void System_EnsureEventGroup() noexcept;
+[[nodiscard]] EventGroupHandle_t System_GetEventGroup() noexcept;
+void System_SetEventGroup(EventGroupHandle_t eg) noexcept;
+void System_SetEventBits(EventBits_t bits) noexcept;
+void System_ClearEventBits(EventBits_t bits) noexcept;
+[[nodiscard]] EventBits_t System_GetEventBits() noexcept;
+bool System_WaitEventBits(EventBits_t bits, TickType_t ticks_to_wait,
+                          EventBits_t *out_bits = nullptr) noexcept;
 
-inline EventGroupHandle_t System_GetEventGroup() noexcept {
-  return g_system_event_group;
-}
-inline void System_SetEventGroup(EventGroupHandle_t eg) noexcept {
-  g_system_event_group = eg;
-}
-
-inline bool System_IsOtaInProgress() noexcept {
-  return g_ota_in_progress.load(std::memory_order_relaxed);
-}
-inline void System_SetOtaInProgress(bool in_prog) noexcept {
-  g_ota_in_progress.store(in_prog, std::memory_order_relaxed);
-}
+[[nodiscard]] bool System_IsOtaInProgress() noexcept;
+void System_SetOtaInProgress(bool in_prog) noexcept;
 
 inline void System_DelayMs(uint32_t ms) noexcept {
   vTaskDelay(pdMS_TO_TICKS(ms) > 0 ? pdMS_TO_TICKS(ms) : 1);
@@ -401,10 +396,7 @@ constexpr EventBits_t SYS_EVT_CACHE_READY = (1 << 1);
 constexpr EventBits_t SYS_EVT_SYSTEM_RUNNING = (1 << 2);
 constexpr EventBits_t SYS_EVT_NETWORK_READY = (1 << 3);
 
-inline bool System_IsNetworkReady() noexcept {
-  return (g_system_event_group != nullptr) &&
-         ((xEventGroupGetBits(g_system_event_group) & SYS_EVT_NETWORK_READY) != 0);
-}
+[[nodiscard]] bool System_IsNetworkReady() noexcept;
 
 void System_Restart(const char *reason);
 void System_CheckOtaHealth();

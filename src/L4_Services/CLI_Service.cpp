@@ -2,6 +2,7 @@
 // ConsoleCli: Level 4 Telnet Socket Server & Interactive Console Engine
 // Implementation
 // ============================================================================
+// SRP_COHESIVE: CliWriter, TableRenderer, TelnetManager, TelnetTracer form one unified Telnet CLI domain sharing internal stream/socket helpers.
 
 #include "L4_Services/CLI_Service.h"
 #include "L0_Foundation/System_Platform.h"
@@ -1149,10 +1150,7 @@ void Task_Telnet(void *pvParameters) {
       // 네트워크 비트가 켜질 때까지 슬립 (WDT 피딩을 위해 1초 단위 블로킹 대기)
       while (!System_IsNetworkReady()) {
         feed_twdt();
-        if (g_system_event_group) {
-          xEventGroupWaitBits(g_system_event_group, SYS_EVT_NETWORK_READY,
-                              pdFALSE, pdTRUE, pdMS_TO_TICKS(1000));
-        } else {
+        if (!System_WaitEventBits(SYS_EVT_NETWORK_READY, pdMS_TO_TICKS(1000))) {
           vTaskDelay(pdMS_TO_TICKS(100));
         }
       }
@@ -1163,7 +1161,7 @@ void Task_Telnet(void *pvParameters) {
     // ── 아래부터는 무조건 '네트워크 가용(Online)' 상태 보장 ──
 
     // 1. OTA 진행 가드
-    if (g_ota_in_progress.load(std::memory_order_acquire)) {
+    if (System_IsOtaInProgress()) {
       TSTAGE(4);
       if (!ota_notice_sent) {
         ota_notice_sent = s_telnet_manager.broadcastNoticeNonBlocking(
@@ -1305,6 +1303,159 @@ static ChannelTracker s_trackers[7] = {};
 static struct timeval s_last_pkt_tv = {0, 0};
 static const char *const kCmdTags[7] = {
     nullptr, nullptr, "CMD_CH2", "CMD_CH3", "PASSTHRU", nullptr, "CMD_CH6"};
+
+static void matchWaitingChannelDelay(const TracePacketEntry &entry,
+                                     uint8_t dev_id, const char *tag,
+                                     long &delay_ms, const char *&delay_tag) {
+  for (uint8_t wch : {2, 3, 6}) {
+    if (s_trackers[wch].active && s_trackers[wch].dev_id == dev_id) {
+      delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[wch].tv);
+      delay_tag = tag;
+      s_trackers[wch].active = false;
+      break;
+    }
+  }
+}
+
+static void resolveTraceDelay(const TracePacketEntry &entry, uint8_t dev_id,
+                              long &delay_ms, bool &is_new_req,
+                              const char *&delay_tag) {
+  const uint8_t ch = entry.channel;
+  switch (ch) {
+  case 2:
+  case 3:
+  case 6:
+    if (!entry.is_tx) {
+      is_new_req = true;
+      s_trackers[ch] = {dev_id, entry.tv, (entry.type == TraceType::QRY),
+                        (entry.type == TraceType::CTL), true};
+      if (entry.type == TraceType::CTL) {
+        delay_tag = kCmdTags[ch];
+        delay_ms = -2;
+      }
+    } else if (entry.type == TraceType::ACK) {
+      if (ch == 6 && s_trackers[5].active && s_trackers[5].dev_id == dev_id) {
+        delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[5].tv);
+        delay_tag = "PASSTHRU";
+        s_trackers[5].active = false;
+      } else if (s_trackers[ch].active) {
+        delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[ch].tv);
+        delay_tag = s_trackers[ch].is_query ? "CACHE  " : "FWD ACK";
+        s_trackers[ch].active = false;
+      }
+    }
+    break;
+
+  case 4:
+    if (!entry.is_tx) {
+      is_new_req = true;
+      s_trackers[4] = {dev_id, entry.tv, false, false, true};
+      delay_tag = "PASSTHRU";
+      delay_ms = -2;
+    } else {
+      delay_tag = "INJECT ";
+      if (s_trackers[4].active) {
+        delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[4].tv);
+        s_trackers[4].active = false;
+      } else {
+        delay_ms = -2;
+      }
+    }
+    break;
+
+  case 5:
+    if (!entry.is_tx) {
+      is_new_req = true;
+      s_trackers[5] = {dev_id, entry.tv, false, false, true};
+    } else {
+      matchWaitingChannelDelay(entry, dev_id, "INJECT ", delay_ms, delay_tag);
+    }
+    break;
+
+  case 1:
+    if (entry.is_tx) {
+      is_new_req = true;
+      s_trackers[1] = {dev_id, entry.tv, false,
+                       (entry.type == TraceType::CTL), true};
+      if (entry.type == TraceType::CTL)
+        matchWaitingChannelDelay(entry, dev_id, "GW FWD ", delay_ms, delay_tag);
+    } else if (entry.type == TraceType::ACK) {
+      if (s_trackers[1].active && s_trackers[1].dev_id == dev_id) {
+        delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[1].tv);
+        delay_tag = "DEV ACK";
+        s_trackers[1].active = false;
+      }
+    }
+    break;
+
+  default:
+    break;
+  }
+}
+
+static void formatAndSendTraceLine(int c_fd, const TracePacketEntry &entry,
+                                   long delay_ms, const char *delay_tag) {
+  char line_buf[320];
+  struct tm timeinfo;
+  time_t sec = static_cast<time_t>(entry.tv.tv_sec);
+  localtime_r(&sec, &timeinfo);
+
+  size_t idx = snprintf(line_buf, sizeof(line_buf), "%02d:%02d:%02d.%03ld   ",
+                        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+                        entry.tv.tv_usec / 1000);
+  if (idx >= sizeof(line_buf))
+    idx = sizeof(line_buf) - 1;
+
+  if (entry.type == TraceType::MSG) {
+    int n = snprintf(line_buf + idx, sizeof(line_buf) - idx, "[SYSTEM MSG]  ");
+    if (n > 0)
+      idx = std::min(idx + static_cast<size_t>(n), sizeof(line_buf) - 1);
+    if (idx < sizeof(line_buf) - entry.len) {
+      memcpy(line_buf + idx, entry.data.data(), entry.len);
+      idx += entry.len;
+    }
+  } else {
+    const char *type_str = (entry.type == TraceType::QRY)   ? "QRY"
+                           : (entry.type == TraceType::CTL) ? "CTL"
+                           : (entry.type == TraceType::ACK) ? "ACK"
+                           : (entry.type == TraceType::DRP) ? "DRP"
+                           : (entry.channel == 5)           ? "TCP"
+                                                            : "RMT";
+    idx += snprintf(line_buf + idx, sizeof(line_buf) - idx,
+                    "[CH#%u]  %s %s   ", entry.channel,
+                    entry.is_tx ? "==>" : "<==", type_str);
+
+    for (size_t j = 0; j < entry.len && idx < sizeof(line_buf) - 25; j++) {
+      uint8_t b = entry.data[j];
+      line_buf[idx++] = HexLUT::LUT[b][0];
+      line_buf[idx++] = HexLUT::LUT[b][1];
+      line_buf[idx++] = ' ';
+    }
+  }
+
+  if (delay_tag) {
+    size_t display_cols = idx;
+    constexpr size_t ALIGN_COLUMN = 104;
+    while (display_cols++ < ALIGN_COLUMN && idx < sizeof(line_buf) - 30) {
+      line_buf[idx++] = ' ';
+    }
+    if (display_cols >= ALIGN_COLUMN) {
+      for (int k = 0; k < 4 && idx < sizeof(line_buf) - 30; k++)
+        line_buf[idx++] = ' ';
+    }
+    if (delay_ms >= 0 || delay_ms == -2) {
+      idx += (delay_ms >= 0)
+                 ? snprintf(line_buf + idx, sizeof(line_buf) - idx,
+                            "[%s : +%3ldms]", delay_tag, delay_ms)
+                 : snprintf(line_buf + idx, sizeof(line_buf) - idx, "[%s]",
+                            delay_tag);
+    }
+  }
+
+  idx += snprintf(line_buf + idx, sizeof(line_buf) - idx, "\r\n");
+  TSTAGE(13);
+  send(c_fd, line_buf, idx, MSG_DONTWAIT);
+}
 } // anonymous namespace
 
 void TelnetTracer::resetTrackers() noexcept {
@@ -1360,95 +1511,7 @@ void TelnetTracer::flushToClient() {
     long delay_ms = -1;
     bool is_new_req = false;
     const char *delay_tag = nullptr;
-
-    uint8_t ch = entry.channel;
-    auto find_wch = [&](const char *tag) {
-      for (uint8_t wch : {2, 3, 6}) {
-        if (s_trackers[wch].active && s_trackers[wch].dev_id == dev_id) {
-          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[wch].tv);
-          delay_tag = tag;
-          s_trackers[wch].active = false;
-          break;
-        }
-      }
-    };
-
-    switch (ch) {
-    case 2:
-    case 3:
-    case 6:
-      if (!entry.is_tx) {
-        is_new_req = true;
-        s_trackers[ch] = {dev_id, entry.tv, (entry.type == TraceType::QRY),
-                          (entry.type == TraceType::CTL), true};
-        if (entry.type == TraceType::CTL) {
-          delay_tag = kCmdTags[ch];
-          delay_ms = -2;
-        }
-      } else {
-        if (entry.type == TraceType::ACK) {
-          if (ch == 6 && s_trackers[5].active && s_trackers[5].dev_id == dev_id) {
-            delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[5].tv);
-            delay_tag = "PASSTHRU";
-            s_trackers[5].active = false;
-          } else {
-            if (s_trackers[ch].active) {
-              delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[ch].tv);
-              delay_tag = s_trackers[ch].is_query ? "CACHE  " : "FWD ACK";
-              s_trackers[ch].active = false;
-            }
-          }
-        }
-      }
-      break;
-
-    case 4:
-      if (!entry.is_tx) {
-        is_new_req = true;
-        s_trackers[4] = {dev_id, entry.tv, false, false, true};
-        delay_tag = "PASSTHRU";
-        delay_ms = -2;
-      } else {
-        delay_tag = "INJECT ";
-        if (s_trackers[4].active) {
-          delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[4].tv);
-          s_trackers[4].active = false;
-        } else {
-          delay_ms = -2;
-        }
-      }
-      break;
-
-    case 5:
-      if (!entry.is_tx) {
-        is_new_req = true;
-        s_trackers[5] = {dev_id, entry.tv, false, false, true};
-      } else {
-        find_wch("INJECT ");
-      }
-      break;
-
-    case 1:
-      if (entry.is_tx) {
-        is_new_req = true;
-        s_trackers[1] = {dev_id, entry.tv, false,
-                         (entry.type == TraceType::CTL), true};
-        if (entry.type == TraceType::CTL)
-          find_wch("GW FWD ");
-      } else {
-        if (entry.type == TraceType::ACK) {
-          if (s_trackers[1].active && s_trackers[1].dev_id == dev_id) {
-            delay_ms = TimeUtils::elapsedMs(entry.tv, s_trackers[1].tv);
-            delay_tag = "DEV ACK";
-            s_trackers[1].active = false;
-          }
-        }
-      }
-      break;
-
-    default:
-      break;
-    }
+    resolveTraceDelay(entry, dev_id, delay_ms, is_new_req, delay_tag);
 
     if (is_new_req && s_last_pkt_tv.tv_sec > 0) {
       long gap = TimeUtils::elapsedMs(entry.tv, s_last_pkt_tv);
@@ -1459,72 +1522,6 @@ void TelnetTracer::flushToClient() {
     }
     s_last_pkt_tv = entry.tv;
 
-    char line_buf[320];
-    struct tm timeinfo;
-    time_t sec = static_cast<time_t>(entry.tv.tv_sec);
-    localtime_r(&sec, &timeinfo);
-
-    size_t idx = snprintf(line_buf, sizeof(line_buf), "%02d:%02d:%02d.%03ld   ",
-                          timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
-                          entry.tv.tv_usec / 1000);
-    if (idx >= sizeof(line_buf))
-      idx = sizeof(line_buf) - 1;
-
-    if (entry.type == TraceType::MSG) {
-      auto safe_append = [&](const char *fmt, auto... args) {
-        if (idx >= sizeof(line_buf))
-          return;
-        int n = snprintf(line_buf + idx, sizeof(line_buf) - idx, fmt, args...);
-        if (n > 0)
-          idx = std::min(idx + (size_t)n, sizeof(line_buf) - 1);
-      };
-      safe_append("[SYSTEM MSG]  ");
-      if (idx < sizeof(line_buf) - entry.len) {
-        memcpy(line_buf + idx, entry.data.data(), entry.len);
-        idx += entry.len;
-      }
-    } else {
-      const char *type_str = (entry.type == TraceType::QRY)   ? "QRY"
-                             : (entry.type == TraceType::CTL) ? "CTL"
-                             : (entry.type == TraceType::ACK) ? "ACK"
-                             : (entry.type == TraceType::DRP) ? "DRP"
-                             : (entry.channel == 5)           ? "TCP"
-                                                              : "RMT";
-      idx +=
-          snprintf(line_buf + idx, sizeof(line_buf) - idx, "[CH#%u]  %s %s   ",
-                   entry.channel, entry.is_tx ? "==>" : "<==", type_str);
-
-      for (size_t j = 0; j < entry.len && idx < sizeof(line_buf) - 25; j++) {
-        uint8_t b = entry.data[j];
-        line_buf[idx++] = HexLUT::LUT[b][0];
-        line_buf[idx++] = HexLUT::LUT[b][1];
-        line_buf[idx++] = ' ';
-      }
-    }
-
-    if (delay_tag) {
-      size_t display_cols = idx;
-      constexpr size_t ALIGN_COLUMN = 104;
-
-      while (display_cols++ < ALIGN_COLUMN && idx < sizeof(line_buf) - 30) {
-        line_buf[idx++] = ' ';
-      }
-      if (display_cols >= ALIGN_COLUMN) {
-        for (int k = 0; k < 4 && idx < sizeof(line_buf) - 30; k++)
-          line_buf[idx++] = ' ';
-      }
-
-      if (delay_ms >= 0 || delay_ms == -2) {
-        idx += (delay_ms >= 0)
-                   ? snprintf(line_buf + idx, sizeof(line_buf) - idx,
-                              "[%s : +%3ldms]", delay_tag, delay_ms)
-                   : snprintf(line_buf + idx, sizeof(line_buf) - idx, "[%s]",
-                              delay_tag);
-      }
-    }
-
-    idx += snprintf(line_buf + idx, sizeof(line_buf) - idx, "\r\n");
-    TSTAGE(13);
-    send(c_fd, line_buf, idx, MSG_DONTWAIT);
+    formatAndSendTraceLine(c_fd, entry, delay_ms, delay_tag);
   }
 }

@@ -269,9 +269,132 @@ static inline void Uart_FlushChannelInput(uart_port_t u_num) {
   }
 }
 
+static bool Uart_TryConsumeStreamFrame(uart_port_t u_num, uint8_t *stream,
+                                       size_t &stream_len, uint32_t &last_rx_ms,
+                                       bool is_auto_unlocked, uint8_t stx,
+                                       const StaticPacket *echo_match,
+                                       StaticPacket &out) {
+  if (stream_len < 3)
+    return false;
+
+  if (is_auto_unlocked) {
+    if (last_rx_ms == 0 ||
+        !TimeUtils::isElapsed(last_rx_ms, Config::Timing::WALLPAD_AUTO_IPG_MS))
+      return false;
+
+    if (s_dispatcher.onFeedAutoFrame) {
+      s_dispatcher.onFeedAutoFrame(
+          std::span<const uint8_t>(stream, stream_len));
+    }
+
+    if (echo_match && echo_match->length == stream_len &&
+        memcmp(echo_match->data.data(), stream, stream_len) == 0) {
+      stream_len = 0;
+      last_rx_ms = 0;
+      return false;
+    }
+
+    const size_t copy_len = std::min(stream_len, out.data.size());
+    out.length = static_cast<uint8_t>(copy_len);
+    memcpy(out.data.data(), stream, copy_len);
+    stream_len = 0;
+    last_rx_ms = 0;
+    return true;
+  }
+
+  size_t idx = 0;
+  while (idx < stream_len) {
+    if (stream[idx] != stx) {
+      const void *stx_ptr = memchr(&stream[idx], stx, stream_len - idx);
+      if (!stx_ptr)
+        break;
+      idx = static_cast<const uint8_t *>(stx_ptr) - stream;
+    }
+
+    const int len_res =
+        s_dispatcher.onExtractLength
+            ? s_dispatcher.onExtractLength(stream, stream_len, idx)
+            : -1;
+    if (len_res == 0) [[unlikely]]
+      break;
+    if (len_res < 0) [[unlikely]] {
+      idx++;
+      continue;
+    }
+
+    const uint8_t pkt_len = static_cast<uint8_t>(len_res);
+    uint8_t *pkt = &stream[idx];
+    std::span<const uint8_t> pkt_span(pkt, pkt_len);
+    if (s_dispatcher.onValidatePacket &&
+        !s_dispatcher.onValidatePacket(pkt_span)) [[unlikely]] {
+      const uint8_t ch = (u_num == UART_NUM_0)   ? 1
+                         : (u_num == UART_NUM_1) ? 2
+                                                 : 3;
+      StaticPacket drp_pkt{ch, pkt_len};
+      memcpy(drp_pkt.data.data(), pkt, pkt_len);
+      System_TracePacket(ch, false, TraceType::DRP, drp_pkt);
+      idx++;
+      continue;
+    }
+
+    if (echo_match && echo_match->length == pkt_len &&
+        memcmp(echo_match->data.data(), pkt, pkt_len) == 0) {
+      idx += pkt_len;
+      continue;
+    }
+
+    out.length = pkt_len;
+    memcpy(out.data.data(), pkt, pkt_len);
+    const size_t consumed = idx + pkt_len;
+    if (consumed < stream_len)
+      memmove(stream, stream + consumed, stream_len - consumed);
+    stream_len = (consumed < stream_len) ? (stream_len - consumed) : 0;
+    return true;
+  }
+
+  if (idx > 0) {
+    if (idx < stream_len)
+      memmove(stream, stream + idx, stream_len - idx);
+    stream_len = (idx < stream_len) ? (stream_len - idx) : 0;
+  }
+  return false;
+}
+
+static void Uart_WaitAndDrainEvent(uart_port_t u_num, QueueHandle_t evt_q,
+                                   uint8_t *stream, size_t &stream_len,
+                                   size_t max_stream_buf, uint32_t &last_rx_ms,
+                                   uint32_t wait_ms) {
+  bool received_new_bytes = false;
+  if (evt_q) {
+    uart_event_t evt;
+    if (xQueueReceive(evt_q, &evt, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+      switch (evt.type) {
+      case UART_DATA:
+        received_new_bytes = Uart_DrainToStreamBuffer(
+            u_num, stream, stream_len, max_stream_buf, last_rx_ms);
+        break;
+      case UART_FIFO_OVF:
+      case UART_BUFFER_FULL:
+        Uart_FlushChannelInput(u_num);
+        xQueueReset(evt_q);
+        break;
+      default:
+        break;
+      }
+    }
+  } else {
+    vTaskDelay(pdMS_TO_TICKS(std::min<uint32_t>(wait_ms, 2)));
+  }
+
+  if (!received_new_bytes) {
+    Uart_DrainToStreamBuffer(u_num, stream, stream_len, max_stream_buf,
+                             last_rx_ms);
+  }
+}
+
 UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
-                                       uint32_t tout_ms, UartPollCallback on_poll,
-                                       void *poll_ctx, const StaticPacket *echo_match) {
+                             uint32_t tout_ms, UartPollCallback on_poll,
+                             void *poll_ctx, const StaticPacket *echo_match) {
   size_t u_idx = static_cast<size_t>(u_num);
   if (u_idx >= 3)
     return UartRxStatus::TIMEOUT;
@@ -282,7 +405,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
   uint32_t &last_rx_ms = rx_ctx.last_rx_ms;
   constexpr size_t max_stream_buf = sizeof(rx_ctx.stream);
 
-  uint32_t start_ms = millis();
+  const uint32_t start_ms = millis();
   const bool is_auto_unlocked =
       s_dispatcher.onIsAutoUnlocked ? s_dispatcher.onIsAutoUnlocked() : false;
   const uint8_t stx =
@@ -291,127 +414,22 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
 
   while (millis() - start_ms < tout_ms) {
     esp_task_wdt_reset();
-    uint32_t poll_max_wait = 25;
-    if (on_poll)
-      poll_max_wait = on_poll(poll_ctx);
+    const uint32_t poll_max_wait = on_poll ? on_poll(poll_ctx) : 25;
 
-    if (stream_len >= 3) {
-      if (is_auto_unlocked) {
-        if (last_rx_ms > 0 &&
-            TimeUtils::isElapsed(last_rx_ms,
-                                 Config::Timing::WALLPAD_AUTO_IPG_MS)) {
-          if (s_dispatcher.onFeedAutoFrame) {
-            s_dispatcher.onFeedAutoFrame(
-                std::span<const uint8_t>(stream, stream_len));
-          }
-
-          if (echo_match && echo_match->length == stream_len &&
-              memcmp(echo_match->data.data(), stream, stream_len) == 0) {
-            stream_len = 0;
-            last_rx_ms = 0;
-            continue;
-          }
-
-          size_t copy_len = std::min(stream_len, out.data.size());
-          out.length = static_cast<uint8_t>(copy_len);
-          memcpy(out.data.data(), stream, copy_len);
-          stream_len = 0;
-          last_rx_ms = 0;
-          return UartRxStatus::SUCCESS;
-        }
-      } else {
-        size_t idx = 0;
-        while (idx < stream_len) {
-          if (stream[idx] != stx) {
-            const void *stx_ptr = memchr(&stream[idx], stx, stream_len - idx);
-            if (!stx_ptr) {
-              break;
-            }
-            idx = static_cast<const uint8_t *>(stx_ptr) - stream;
-          }
-
-          int len_res =
-              s_dispatcher.onExtractLength
-                  ? s_dispatcher.onExtractLength(stream, stream_len, idx)
-                  : -1;
-          if (len_res == 0) [[unlikely]] {
-            break;
-          }
-          if (len_res < 0) [[unlikely]] {
-            idx++;
-            continue;
-          }
-
-          uint8_t pkt_len = static_cast<uint8_t>(len_res);
-          uint8_t *pkt = &stream[idx];
-          std::span<const uint8_t> pkt_span(pkt, pkt_len);
-          if (s_dispatcher.onValidatePacket &&
-              !s_dispatcher.onValidatePacket(pkt_span)) [[unlikely]] {
-            uint8_t ch = (u_num == UART_NUM_0)   ? 1
-                         : (u_num == UART_NUM_1) ? 2
-                                                 : 3;
-            StaticPacket drp_pkt{ch, pkt_len};
-            memcpy(drp_pkt.data.data(), pkt, pkt_len);
-            System_TracePacket(ch, false, TraceType::DRP, drp_pkt);
-            idx++;
-            continue;
-          }
-
-          if (echo_match && echo_match->length == pkt_len &&
-              memcmp(echo_match->data.data(), pkt, pkt_len) == 0) {
-            idx += pkt_len;
-            continue;
-          }
-
-          out.length = pkt_len;
-          memcpy(out.data.data(), pkt, pkt_len);
-          size_t consumed = idx + pkt_len;
-          if (consumed < stream_len)
-            memmove(stream, stream + consumed, stream_len - consumed);
-          stream_len = (consumed < stream_len) ? (stream_len - consumed) : 0;
-          return UartRxStatus::SUCCESS;
-        }
-
-        if (idx > 0) {
-          if (idx < stream_len)
-            memmove(stream, stream + idx, stream_len - idx);
-          stream_len = (idx < stream_len) ? (stream_len - idx) : 0;
-        }
-      }
+    if (Uart_TryConsumeStreamFrame(u_num, stream, stream_len, last_rx_ms,
+                                   is_auto_unlocked, stx, echo_match, out)) {
+      return UartRxStatus::SUCCESS;
     }
 
-    uint32_t elapsed = millis() - start_ms;
+    const uint32_t elapsed = millis() - start_ms;
     if (elapsed >= tout_ms)
       break;
-    uint32_t rem_ms = tout_ms - elapsed;
-    uint32_t wait_ms = std::min<uint32_t>(rem_ms, std::max<uint32_t>(1, poll_max_wait));
+    const uint32_t rem_ms = tout_ms - elapsed;
+    const uint32_t wait_ms =
+        std::min<uint32_t>(rem_ms, std::max<uint32_t>(1, poll_max_wait));
 
-    bool received_new_bytes = false;
-    if (evt_q) {
-      uart_event_t evt;
-      if (xQueueReceive(evt_q, &evt, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
-        switch (evt.type) {
-        case UART_DATA:
-          received_new_bytes = Uart_DrainToStreamBuffer(
-              u_num, stream, stream_len, max_stream_buf, last_rx_ms);
-          break;
-        case UART_FIFO_OVF:
-        case UART_BUFFER_FULL:
-          Uart_FlushChannelInput(u_num);
-          xQueueReset(evt_q);
-          break;
-        default:
-          break;
-        }
-      }
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(std::min<uint32_t>(wait_ms, 2)));
-    }
-
-    if (!received_new_bytes) {
-      Uart_DrainToStreamBuffer(u_num, stream, stream_len, max_stream_buf,
-                               last_rx_ms);
-    }
+    Uart_WaitAndDrainEvent(u_num, evt_q, stream, stream_len, max_stream_buf,
+                           last_rx_ms, wait_ms);
   }
 
   if (stream_len >= 3 && is_auto_unlocked) {
@@ -420,7 +438,7 @@ UartRxStatus Uart_RecvPacket(uart_port_t u_num, StaticPacket &out,
     }
     if (!(echo_match && echo_match->length == stream_len &&
           memcmp(echo_match->data.data(), stream, stream_len) == 0)) {
-      size_t copy_len = std::min(stream_len, out.data.size());
+      const size_t copy_len = std::min(stream_len, out.data.size());
       out.length = static_cast<uint8_t>(copy_len);
       memcpy(out.data.data(), stream, copy_len);
       return UartRxStatus::SUCCESS;
@@ -659,9 +677,7 @@ void Ch1_PollNext(size_t &current_dev_idx) {
 
 void Task_Ch1(void *pvParameters) {
   esp_task_wdt_add(nullptr);
-  if (g_system_event_group) {
-    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
-                        pdFALSE, portMAX_DELAY);
+  if (System_WaitEventBits(SYS_EVT_SYSTEM_RUNNING, portMAX_DELAY)) {
     // Staged Booting: Allow NVS restore and Core 0 network settling before initiating CH1 polling bursts
     vTaskDelay(pdMS_TO_TICKS(100));
   }
@@ -672,12 +688,9 @@ void Task_Ch1(void *pvParameters) {
 
   for (;;) {
     System_FeedWdt(Config::Task::WDT_ID_CH1);
-    if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
+    if (UNLIKELY(System_IsOtaInProgress())) {
       Ch1_SetState(current_state, Ch1State::IDLE);
-      if (g_system_event_group) {
-        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
-                            pdFALSE, pdMS_TO_TICKS(1000));
-      } else {
+      if (!System_WaitEventBits(SYS_EVT_OTA_IDLE, pdMS_TO_TICKS(1000))) {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
       next_poll_due_ms = millis();
@@ -818,21 +831,15 @@ static void RunSlaveChannelLoop(WallpadChannelConfig *cfg, size_t task_idx) {
   Uart_FlushChannelInput(cfg->uart_num);
   TimestampedPacketQueue<8, false> ack_queue;
 
-  if (g_system_event_group) {
-    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
-                        pdFALSE, portMAX_DELAY);
-  }
+  System_WaitEventBits(SYS_EVT_SYSTEM_RUNNING, portMAX_DELAY);
 
   SemaphoreHandle_t u_mux = (cfg->uart_num == UART_NUM_1) ? s_uart1_mutex : s_uart2_mutex;
   TaskAckPollContext poll_ctx{&ack_queue, cfg, stats, u_mux};
 
   for (;;) {
     System_FeedWdt(task_idx);
-    if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
-      if (g_system_event_group) {
-        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
-                            pdFALSE, pdMS_TO_TICKS(1000));
-      } else {
+    if (UNLIKELY(System_IsOtaInProgress())) {
+      if (!System_WaitEventBits(SYS_EVT_OTA_IDLE, pdMS_TO_TICKS(1000))) {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
       continue;
@@ -944,6 +951,151 @@ static inline void Ch4_HandleDoorphoneEvent(const StaticPacket &packet,
   Diag_RecordChannelInvalidFrame(4);
 }
 
+static void Ch4_PollSwSerialBytes(uint8_t *buf, size_t max_buf,
+                                  size_t &buf_len, uint32_t &last_byte_ms) {
+  const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
+      Config_Get().doorphone_baud_rate);
+  const int avail = Uart_AvailableSwSerial();
+  if (avail <= 0)
+    return;
+
+  const uint32_t now = millis();
+  if (buf_len > 0 && last_byte_ms > 0 &&
+      TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
+    buf_len = 0;
+  }
+
+  uint8_t temp[32];
+  const int to_read = std::min(avail, static_cast<int>(sizeof(temp)));
+  const int read_bytes = Uart_ReadSwSerial(temp, to_read);
+  if (read_bytes <= 0)
+    return;
+
+  last_byte_ms = now;
+
+  uint8_t t_stx = 0, t_etx = 0, t_len = 0;
+  const bool locked =
+      s_dispatcher.onDoorphoneGetLockedFraming &&
+      s_dispatcher.onDoorphoneGetLockedFraming(t_stx, t_etx, t_len);
+
+  const uint8_t *src_ptr = temp;
+  size_t src_len = static_cast<size_t>(read_bytes);
+
+  // Noise drain: If locked and buffer is currently empty, any leading byte
+  // before target_stx is line noise / floating glitch. Drain immediately.
+  if (locked && buf_len == 0) {
+    const void *hit = memchr(src_ptr, t_stx, src_len);
+    if (!hit) {
+      src_len = 0;
+    } else {
+      const size_t skip = static_cast<const uint8_t *>(hit) - src_ptr;
+      src_ptr += skip;
+      src_len -= skip;
+    }
+  }
+
+  if (src_len == 0)
+    return;
+
+  if (buf_len + src_len > max_buf) {
+    if (locked && buf_len > 0) {
+      const void *hit = memchr(buf, t_stx, buf_len);
+      if (!hit) {
+        buf_len = 0;
+      } else {
+        const size_t first_stx = static_cast<const uint8_t *>(hit) - buf;
+        const size_t drop = (first_stx > 0) ? first_stx : 1;
+        memmove(buf, buf + drop, buf_len - drop);
+        buf_len -= drop;
+      }
+    } else {
+      const size_t overflow = (buf_len + src_len) - max_buf;
+      memmove(buf, buf + overflow, buf_len - overflow);
+      buf_len -= overflow;
+    }
+  }
+  const size_t to_copy = std::min<size_t>(src_len, max_buf - buf_len);
+  memcpy(&buf[buf_len], src_ptr, to_copy);
+  buf_len += to_copy;
+}
+
+static void Ch4_ProcessLockedFrames(uint8_t *buf, size_t &buf_len,
+                                    uint32_t &last_byte_ms,
+                                    const StaticPacket &last_tx_pkt,
+                                    uint32_t last_tx_ms,
+                                    StaticPacket &last_pkt,
+                                    uint32_t &last_pkt_ms, uint8_t target_stx,
+                                    uint8_t target_etx, uint8_t target_len) {
+  size_t p = 0;
+  while (p < buf_len) {
+    if (buf[p] != target_stx) {
+      const void *hit = memchr(&buf[p], target_stx, buf_len - p);
+      if (!hit)
+        break;
+      p = static_cast<const uint8_t *>(hit) - buf;
+    }
+
+    bool frame_found = false;
+    size_t found_len = 0;
+
+    if (target_len >= 3 && target_len <= 64) {
+      if (buf_len - p < target_len)
+        break;
+      if (buf[p + target_len - 1] == target_etx) {
+        frame_found = true;
+        found_len = target_len;
+      } else {
+        // False STX / non-frame line noise: Silent drop, advance to next byte without polluting Inv Frm
+        p++;
+        continue;
+      }
+    } else {
+      const size_t search_limit = std::min(buf_len, p + 64);
+      if (search_limit > p + 2) {
+        const void *etx_hit =
+            memchr(&buf[p + 2], target_etx, search_limit - (p + 2));
+        if (etx_hit) {
+          frame_found = true;
+          found_len = (static_cast<const uint8_t *>(etx_hit) - &buf[p]) + 1;
+        }
+      }
+    }
+
+    if (frame_found) {
+      if (last_tx_pkt.length == found_len &&
+          memcmp(last_tx_pkt.data.data(), &buf[p], found_len) == 0 &&
+          last_tx_ms > 0 && !TimeUtils::isElapsed(last_tx_ms, 250)) {
+        p += found_len;
+        last_byte_ms = 0;
+        continue;
+      }
+
+      StaticPacket packet{4, static_cast<uint8_t>(found_len)};
+      memcpy(packet.data.data(), &buf[p], found_len);
+      Ch4_HandleDoorphoneEvent(packet, last_pkt, last_pkt_ms, millis());
+
+      p += found_len;
+      last_byte_ms = 0;
+    } else {
+      if (buf_len - p >= 64) {
+        Ch4_DropInvalidFrame(&buf[p], buf_len - p);
+        p++;
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (p > 0) {
+    if (p < buf_len) {
+      memmove(buf, buf + p, buf_len - p);
+      buf_len -= p;
+    } else {
+      buf_len = 0;
+    }
+  }
+}
+
 void Task_Ch4(void *pvParameters) {
   esp_task_wdt_add(nullptr);
   StaticPacket packet_to_tx;
@@ -956,22 +1108,17 @@ void Task_Ch4(void *pvParameters) {
   StaticPacket last_pkt{};
   uint32_t last_pkt_ms = 0;
 
-  if (g_system_event_group) {
-    xEventGroupWaitBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING, pdFALSE,
-                        pdFALSE, portMAX_DELAY);
-  }
+  System_WaitEventBits(SYS_EVT_SYSTEM_RUNNING, portMAX_DELAY);
 
-  if (g_system_event_group) {
+  if (System_GetEventGroup() != nullptr) {
     const uint32_t wait_start = millis();
     while (millis() - wait_start <
            Config::Timing::INITIAL_CACHING_GRACE_PERIOD_MS) {
       System_FeedWdt(Config::Task::WDT_ID_CH4);
-      EventBits_t bits = xEventGroupWaitBits(
-          g_system_event_group, SYS_EVT_CACHE_READY, pdFALSE, pdFALSE,
-          pdMS_TO_TICKS(200));
-      if (bits & SYS_EVT_CACHE_READY) {
+      EventBits_t bits = 0;
+      (void)System_WaitEventBits(SYS_EVT_CACHE_READY, pdMS_TO_TICKS(200), &bits);
+      if (bits & SYS_EVT_CACHE_READY)
         break;
-      }
     }
     System_FeedWdt(Config::Task::WDT_ID_CH4);
   }
@@ -983,11 +1130,8 @@ void Task_Ch4(void *pvParameters) {
     if (Uart_OverflowSwSerial()) [[unlikely]] {
       Diag_RecordChannelInvalidFrame(4);
     }
-    if (UNLIKELY(g_ota_in_progress.load(std::memory_order_relaxed))) {
-      if (g_system_event_group) {
-        xEventGroupWaitBits(g_system_event_group, SYS_EVT_OTA_IDLE, pdFALSE,
-                            pdFALSE, pdMS_TO_TICKS(1000));
-      } else {
+    if (UNLIKELY(System_IsOtaInProgress())) {
+      if (!System_WaitEventBits(SYS_EVT_OTA_IDLE, pdMS_TO_TICKS(1000))) {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
       continue;
@@ -1000,179 +1144,40 @@ void Task_Ch4(void *pvParameters) {
       Ch4_SendPassthrough(packet_to_tx, last_tx_pkt, last_tx_ms);
     }
 
-    const uint32_t ib_timeout = Config::Timing::getDoorphoneInterByteTimeoutMs(
-        Config_Get().doorphone_baud_rate);
-    const int avail = Uart_AvailableSwSerial();
-    if (avail > 0) {
-      const uint32_t now = millis();
-      if (buf_len > 0 && last_byte_ms > 0 &&
-          TimeUtils::isElapsed(last_byte_ms, ib_timeout)) {
-        buf_len = 0;
-      }
+    Ch4_PollSwSerialBytes(buf, sizeof(buf), buf_len, last_byte_ms);
 
-      uint8_t temp[32];
-      const int to_read = std::min(avail, static_cast<int>(sizeof(temp)));
-      const int read_bytes = Uart_ReadSwSerial(temp, to_read);
-      if (read_bytes > 0) {
-        last_byte_ms = now;
-
-        uint8_t t_stx = 0, t_etx = 0, t_len = 0;
-        bool locked = s_dispatcher.onDoorphoneGetLockedFraming &&
-                      s_dispatcher.onDoorphoneGetLockedFraming(t_stx, t_etx, t_len);
-
-        const uint8_t *src_ptr = temp;
-        size_t src_len = static_cast<size_t>(read_bytes);
-
-        // Noise drain: If locked and buffer is currently empty, any leading byte
-        // before target_stx is line noise / floating glitch. Drain immediately.
-        if (locked && buf_len == 0) {
-          const void *hit = memchr(src_ptr, t_stx, src_len);
-          if (!hit) {
-            src_len = 0;
-          } else {
-            size_t skip = static_cast<const uint8_t *>(hit) - src_ptr;
-            src_ptr += skip;
-            src_len -= skip;
-          }
-        }
-
-        if (src_len > 0) {
-          if (buf_len + src_len > sizeof(buf)) {
-            if (locked && buf_len > 0) {
-              const void *hit = memchr(buf, t_stx, buf_len);
-              if (!hit) {
-                buf_len = 0;
-              } else {
-                size_t first_stx = static_cast<const uint8_t *>(hit) - buf;
-                if (first_stx > 0) {
-                  memmove(buf, buf + first_stx, buf_len - first_stx);
-                  buf_len -= first_stx;
-                } else {
-                  memmove(buf, buf + 1, buf_len - 1);
-                  buf_len -= 1;
-                }
-              }
-            } else {
-              const size_t overflow = (buf_len + src_len) - sizeof(buf);
-              memmove(buf, buf + overflow, buf_len - overflow);
-              buf_len -= overflow;
-            }
-          }
-          const size_t to_copy = std::min<size_t>(src_len, sizeof(buf) - buf_len);
-          memcpy(&buf[buf_len], src_ptr, to_copy);
-          buf_len += to_copy;
-        }
-      }
-    }
-
-    uint8_t target_stx = 0;
-    uint8_t target_etx = 0;
-    uint8_t target_len = 0;
-    bool is_locked = s_dispatcher.onDoorphoneGetLockedFraming
-        ? s_dispatcher.onDoorphoneGetLockedFraming(target_stx, target_etx, target_len)
-        : false;
+    uint8_t target_stx = 0, target_etx = 0, target_len = 0;
+    const bool is_locked =
+        s_dispatcher.onDoorphoneGetLockedFraming
+            ? s_dispatcher.onDoorphoneGetLockedFraming(target_stx, target_etx,
+                                                       target_len)
+            : false;
 
     if (is_locked && buf_len >= 3) {
-      size_t p = 0;
-      while (p < buf_len) {
-        if (buf[p] != target_stx) {
-          const void *hit = memchr(&buf[p], target_stx, buf_len - p);
-          if (!hit) {
-            break;
-          }
-          p = static_cast<const uint8_t *>(hit) - buf;
-        }
-
-        bool frame_found = false;
-        size_t found_len = 0;
-
-        if (target_len >= 3 && target_len <= 64) {
-          if (buf_len - p >= target_len) {
-            if (buf[p + target_len - 1] == target_etx) {
-              frame_found = true;
-              found_len = target_len;
-            } else {
-              // False STX / non-frame line noise: Silent drop, advance to next byte without polluting Inv Frm
-              p++;
-              continue;
-            }
-          } else {
-            break;
-          }
-        } else {
-          const size_t search_limit = std::min(buf_len, p + 64);
-          if (search_limit > p + 2) {
-            const void *etx_hit = memchr(&buf[p + 2], target_etx, search_limit - (p + 2));
-            if (etx_hit) {
-              frame_found = true;
-              found_len = (static_cast<const uint8_t *>(etx_hit) - &buf[p]) + 1;
-            }
-          }
-        }
-
-        if (frame_found) {
-          if (last_tx_pkt.length == found_len &&
-              memcmp(last_tx_pkt.data.data(), &buf[p], found_len) == 0 &&
-              last_tx_ms > 0 && !TimeUtils::isElapsed(last_tx_ms, 250)) {
-            p += found_len;
-            last_byte_ms = 0;
-            continue;
-          }
-
-          StaticPacket packet{4, static_cast<uint8_t>(found_len)};
-          memcpy(packet.data.data(), &buf[p], found_len);
-
-          Ch4_HandleDoorphoneEvent(packet, last_pkt, last_pkt_ms, millis());
-
-          p += found_len;
-          last_byte_ms = 0;
-        } else {
-          if (buf_len - p >= 64) {
-            Ch4_DropInvalidFrame(&buf[p], buf_len - p);
-            p++;
-            continue;
-          }
-          break;
-        }
-      }
-
-      if (p > 0) {
-        if (p < buf_len) {
-          memmove(buf, buf + p, buf_len - p);
-          buf_len -= p;
-        } else {
-          buf_len = 0;
-        }
-      }
+      Ch4_ProcessLockedFrames(buf, buf_len, last_byte_ms, last_tx_pkt,
+                              last_tx_ms, last_pkt, last_pkt_ms, target_stx,
+                              target_etx, target_len);
     }
 
     if (last_byte_ms > 0 &&
         TimeUtils::isElapsed(last_byte_ms, Config::Timing::DOORPHONE_IPG_MS)) {
-
-      if (is_locked) {
-        buf_len = 0;
-      } else {
-        if (buf_len >= 3) {
-          StaticPacket packet{4, static_cast<uint8_t>(buf_len)};
-          memcpy(packet.data.data(), buf, buf_len);
-
-          uint8_t pkt_stx = packet.data[0];
-          uint8_t pkt_etx = packet.data[packet.length - 1];
-
-          if (s_dispatcher.onDoorphoneFrameDetected) {
-            s_dispatcher.onDoorphoneFrameDetected(pkt_stx, pkt_etx, packet.length);
-          }
-
-          Ch4_HandleDoorphoneEvent(packet, last_pkt, last_pkt_ms, millis());
+      if (!is_locked && buf_len >= 3) {
+        StaticPacket packet{4, static_cast<uint8_t>(buf_len)};
+        memcpy(packet.data.data(), buf, buf_len);
+        const uint8_t pkt_stx = packet.data[0];
+        const uint8_t pkt_etx = packet.data[packet.length - 1];
+        if (s_dispatcher.onDoorphoneFrameDetected) {
+          s_dispatcher.onDoorphoneFrameDetected(pkt_stx, pkt_etx, packet.length);
         }
-        buf_len = 0;
+        Ch4_HandleDoorphoneEvent(packet, last_pkt, last_pkt_ms, millis());
       }
+      buf_len = 0;
       last_byte_ms = 0;
     }
 
     uint32_t wait_ms = (buf_len > 0) ? 1 : 5;
     if (last_byte_ms > 0) {
-      uint32_t elapsed = millis() - last_byte_ms;
+      const uint32_t elapsed = millis() - last_byte_ms;
       if (elapsed < Config::Timing::DOORPHONE_IPG_MS) {
         wait_ms =
             (buf_len > 0) ? 1 : (Config::Timing::DOORPHONE_IPG_MS - elapsed);

@@ -2,9 +2,65 @@
 #include <cstring>
 #include <lwip/sockets.h>
 
-// ── System Lifecycle & Synchronization Primitives ──
-EventGroupHandle_t g_system_event_group = nullptr;
-std::atomic<bool> g_ota_in_progress{false};
+// ── System Lifecycle & Synchronization Primitives (Static-Sealed, Rule 17) ──
+static StaticEventGroup_t s_system_event_group_buf;
+static EventGroupHandle_t s_system_event_group = nullptr;
+static std::atomic<bool> s_ota_in_progress{false};
+
+void System_EnsureEventGroup() noexcept {
+  if (!s_system_event_group) {
+    s_system_event_group = xEventGroupCreateStatic(&s_system_event_group_buf);
+    xEventGroupSetBits(s_system_event_group, SYS_EVT_OTA_IDLE);
+  }
+}
+
+EventGroupHandle_t System_GetEventGroup() noexcept {
+  return s_system_event_group;
+}
+
+void System_SetEventGroup(EventGroupHandle_t eg) noexcept {
+  s_system_event_group = eg;
+}
+
+void System_SetEventBits(EventBits_t bits) noexcept {
+  if (s_system_event_group) {
+    xEventGroupSetBits(s_system_event_group, bits);
+  }
+}
+
+void System_ClearEventBits(EventBits_t bits) noexcept {
+  if (s_system_event_group) {
+    xEventGroupClearBits(s_system_event_group, bits);
+  }
+}
+
+EventBits_t System_GetEventBits() noexcept {
+  return s_system_event_group ? xEventGroupGetBits(s_system_event_group) : 0;
+}
+
+bool System_WaitEventBits(EventBits_t bits, TickType_t ticks_to_wait,
+                          EventBits_t *out_bits) noexcept {
+  if (!s_system_event_group)
+    return false;
+  const EventBits_t res =
+      xEventGroupWaitBits(s_system_event_group, bits, pdFALSE, pdFALSE, ticks_to_wait);
+  if (out_bits)
+    *out_bits = res;
+  return true;
+}
+
+bool System_IsNetworkReady() noexcept {
+  return (s_system_event_group != nullptr) &&
+         ((xEventGroupGetBits(s_system_event_group) & SYS_EVT_NETWORK_READY) != 0);
+}
+
+bool System_IsOtaInProgress() noexcept {
+  return s_ota_in_progress.load(std::memory_order_acquire);
+}
+
+void System_SetOtaInProgress(bool in_prog) noexcept {
+  s_ota_in_progress.store(in_prog, std::memory_order_release);
+}
 
 // ── Global Decoupled Diagnostic Trace Message Sink ──
 static std::atomic<SystemTraceMessageFn> s_trace_msg_sink{nullptr};

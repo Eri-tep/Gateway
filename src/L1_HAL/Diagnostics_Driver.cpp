@@ -1,3 +1,4 @@
+// SRP_COHESIVE: LogManager and SystemMetricsTracker form one cohesive L1 diagnostics & crash-telemetry subsystem.
 #include "L1_HAL/Diagnostics_Driver.h"
 #include "L0_Foundation/System_Buffer.h"
 #include "L0_Foundation/System_Config.h"
@@ -214,10 +215,8 @@ static std::atomic<bool> s_ota_validated{false};
 
 
 void System_Restart(const char *reason) {
-  g_ota_in_progress.store(true, std::memory_order_release);
-  if (g_system_event_group) {
-    xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-  }
+  System_SetOtaInProgress(true);
+  System_ClearEventBits(SYS_EVT_OTA_IDLE);
   vTaskDelay(pdMS_TO_TICKS(300));
 
   if (reason && strlen(reason) > 0) {
@@ -601,26 +600,18 @@ void Diag_StartRescueAp(const RescueHwConfig &cfg) {
     esp_wifi_connect();
   }
 
-  if (!g_system_event_group) {
-    static StaticEventGroup_t s_diag_system_event_group_buf;
-    g_system_event_group = xEventGroupCreateStatic(&s_diag_system_event_group_buf);
-    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-  }
+  System_EnsureEventGroup();
 
   ArduinoOTA.setHostname("gateway-rescue");
   ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.onStart([]() {
-    g_ota_in_progress.store(true, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
+    System_SetOtaInProgress(true);
+    System_ClearEventBits(SYS_EVT_OTA_IDLE);
   });
   ArduinoOTA.onEnd([]() { System_Restart("OTA Firmware Update"); });
   ArduinoOTA.onError([](ota_error_t) {
-    g_ota_in_progress.store(false, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
+    System_SetOtaInProgress(false);
+    System_SetEventBits(SYS_EVT_OTA_IDLE);
   });
   ArduinoOTA.begin();
 }

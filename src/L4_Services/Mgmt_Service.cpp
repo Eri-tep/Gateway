@@ -342,14 +342,14 @@ enum class ConvergenceSettleState : uint8_t {
 };
 
 void StepConvergenceSettleFsm(uint32_t now) noexcept {
-  if (!g_system_event_group)
+  if (!System_GetEventGroup())
     return;
 
   static ConvergenceSettleState s_state = ConvergenceSettleState::IDLE;
   static uint32_t s_start_ms = 0;
 
   const bool cache_ready =
-      (xEventGroupGetBits(g_system_event_group) & SYS_EVT_CACHE_READY) != 0;
+      (System_GetEventBits() & SYS_EVT_CACHE_READY) != 0;
 
   if (!cache_ready) {
     s_state = ConvergenceSettleState::IDLE;

@@ -23,7 +23,7 @@ from matchers.call_guard import verify_call_invariants
 from matchers.cpp_hygiene_guard import verify_cpp_hygiene
 from matchers.stack_guard import audit_stack_usage, MAX_STACK_FRAME_FATAL
 from matchers.thread_safety_guard import audit_thread_safety, discover_synchronized_sources
-from matchers.srp_audit import audit_srp_metrics, GOD_FILE_LINES
+from matchers.srp_audit import audit_srp_metrics, WARN_FUNC_LINES
 
 
 def get_staged_cpp_files(root_dir: str) -> List[str]:
@@ -134,19 +134,24 @@ def main():
         else:
             print(f"\033[92m  [OK] Gate 4A (Clang Thread Safety): Verified {len(sync_srcs)} synchronized files cleanly\033[0m")
 
-    # Gate 4B: SRP God-File Metrics
+    # Gate 4B: Cohesion-Centered SRP Audit
     srp = audit_srp_metrics(root_dir, staged_files)
-    god_cnt = len(srp["god_files"])
-    if god_cnt > 0:
+    multi_cnt = len(srp["multi_domain_files"])
+    long_cnt = len(srp["long_funcs"])
+    if multi_cnt > 0 or long_cnt > 0:
         tag_col = "\033[91m" if args.strict else "\033[93m"
-        print(f"{tag_col}  [INFO] Gate 4B (SRP Audit): {god_cnt} God Files (>={GOD_FILE_LINES}L), "
-              f"{len(srp['warn_files'])} Warn (>=600L), {len(srp['long_funcs'])} Long Funcs (>=150L)\033[0m")
-        for fp, lines in srp["god_files"][:5]:
-            print(f"    - {fp}: {lines}L")
+        print(f"{tag_col}  [INFO] Gate 4B (SRP Audit): {multi_cnt} Multi-Domain Files, "
+              f"{long_cnt} Long Funcs (>={WARN_FUNC_LINES}L), "
+              f"{len(srp['cohesive_large_files'])} Cohesive Large\033[0m")
+        for fp, lines, classes in srp["multi_domain_files"]:
+            print(f"    - [MULTI-DOMAIN] {fp}: {lines}L ({', '.join(classes)})")
+        for fp, fn, ln, lines in srp["long_funcs"]:
+            print(f"    - [LONG FUNC]    {fp}:{ln} {fn}() ({lines}L)")
         if args.strict:
             has_fatal_error = True
     else:
-        print("\033[92m  [OK] Gate 4B (SRP Audit): No God Files >= 1000L\033[0m")
+        print(f"\033[92m  [OK] Gate 4B (SRP Audit): Clean cohesion & all functions < {WARN_FUNC_LINES}L "
+              f"({len(srp['cohesive_large_files'])} cohesive >=1000L)\033[0m")
 
     # Module 5: Static Stack Usage & Task Call-Tree Auditor
     if not args.staged:

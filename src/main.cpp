@@ -186,11 +186,7 @@ static void Boot_InitSyncPrimitives() {
   ch2_config.event_queue_ptr = RS485_GetUartEventQueuePtr(1);
   ch3_config.event_queue_ptr = RS485_GetUartEventQueuePtr(2);
 
-  static StaticEventGroup_t s_system_event_group_buf;
-  if (!g_system_event_group) {
-    g_system_event_group = xEventGroupCreateStatic(&s_system_event_group_buf);
-    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-  }
+  System_EnsureEventGroup();
 }
 
 // ============================================================================
@@ -436,9 +432,7 @@ void setup() {
 
   Serial.println(F("[BOOT] All FreeRTOS tasks started successfully."));
   esp_task_wdt_delete(nullptr);
-  if (g_system_event_group) {
-    xEventGroupSetBits(g_system_event_group, SYS_EVT_SYSTEM_RUNNING);
-  }
+  System_SetEventBits(SYS_EVT_SYSTEM_RUNNING);
   vTaskDelete(nullptr);
 }
 

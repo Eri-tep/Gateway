@@ -57,11 +57,11 @@ def detect_included_layer(include_path: str) -> int:
     return -1
 
 
-def detect_l3_subzone(path: str) -> Optional[str]:
+def detect_subzone(path: str) -> Optional[str]:
     norm = path.replace("\\", "/")
-    if "L3_Protocol/Private/" in norm:
+    if "/Private/" in norm or norm.startswith("Private/"):
         return "Private"
-    if "L3_Protocol/Public/" in norm:
+    if "/Public/" in norm or norm.startswith("Public/"):
         return "Public"
     return None
 
@@ -69,17 +69,29 @@ def detect_l3_subzone(path: str) -> Optional[str]:
 def scan_file_for_layer_violations(file_path: str) -> List[Dict]:
     """
     Scans a single file for:
+      - Headers placed inside src/ (src/ header anti-pattern)
       - Upward includes (target > src)
       - Layer-skip bypass includes (e.g. L4->L1, L4->L2, L3->L1, L0->L1..L4)
-      - L3 Private <-> Public encapsulation boundary violations
+      - Cross-layer Private/ header encapsulation leaks (L1~L4)
+      - Private header reverse-including non-leaf Public header
     """
     norm_fp = file_path.replace("\\", "/")
+    is_header = norm_fp.endswith((".h", ".hpp"))
+
+    if is_header and ("/src/" in norm_fp or norm_fp.startswith("src/")):
+        return [{
+            "line": 1,
+            "content": os.path.basename(norm_fp),
+            "src_layer": "src/",
+            "target_layer": "Header",
+            "rule": "Forbidden Header in src/: Place all headers under include/, never inside src/",
+        }]
+
     src_layer = detect_file_layer(norm_fp)
     if src_layer < 0:
         return []
 
-    is_header = norm_fp.endswith((".h", ".hpp"))
-    src_l3_zone = detect_l3_subzone(norm_fp) if src_layer == 3 else None
+    src_zone = detect_subzone(norm_fp)
 
     violations: List[Dict] = []
     try:
@@ -103,28 +115,27 @@ def scan_file_for_layer_violations(file_path: str) -> List[Dict]:
                     })
                     continue
 
-                # 2. L3 Private Encapsulation Boundary Check
-                tgt_l3_zone = detect_l3_subzone(inc_target) if target_layer == 3 else None
-                if tgt_l3_zone == "Private":
-                    # L4 or L3_Public headers cannot depend on L3_Private
-                    if src_layer == 4 or (src_layer == 3 and src_l3_zone == "Public" and is_header):
+                # 2. Cross-layer & Public/Private Encapsulation Boundary Check
+                tgt_zone = detect_subzone(inc_target) if target_layer >= 0 else None
+                if tgt_zone == "Private":
+                    # Only files inside the SAME layer (and not Public headers) can include <Layer>/Private/
+                    if target_layer != src_layer or (src_zone == "Public" and is_header):
                         violations.append({
                             "line": idx,
                             "content": line.strip(),
                             "src_layer": f"L{src_layer}",
-                            "target_layer": "L3_Private",
-                            "rule": "Forbidden Private Boundary Leak: L4 and L3 Public headers cannot include L3_Protocol/Private/",
+                            "target_layer": f"L{target_layer}_Private",
+                            "rule": f"Forbidden Private Boundary Leak: L{src_layer} cannot include L{target_layer}/Private/",
                         })
-                elif tgt_l3_zone == "Public":
-                    # L3_Private headers cannot reverse-include L3_Public (except pure leaf Protocol_Types.h)
-                    if src_layer == 3 and src_l3_zone == "Private" and is_header:
+                elif tgt_zone == "Public":
+                    if src_layer == target_layer and src_zone == "Private" and is_header:
                         if not any(inc_target.endswith(leaf) for leaf in L3_LEAF_TYPE_HEADERS):
                             violations.append({
                                 "line": idx,
                                 "content": line.strip(),
-                                "src_layer": "L3_Private(.h)",
-                                "target_layer": "L3_Public(.h)",
-                                "rule": "Forbidden Reverse Include: L3 Private header cannot include L3 Public header (use Protocol_Types.h or forward decl)",
+                                "src_layer": f"L{src_layer}_Private(.h)",
+                                "target_layer": f"L{target_layer}_Public(.h)",
+                                "rule": "Forbidden Reverse Include: Private header cannot include Public header (use Protocol_Types.h or forward decl)",
                             })
     except Exception as e:
         print(f"[WARN] Error reading {file_path}: {e}", file=sys.stderr)

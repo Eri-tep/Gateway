@@ -283,17 +283,13 @@ static void configure_public_tls(WiFiClientSecure &client) {
 class OtaInProgressGuard {
 public:
   OtaInProgressGuard() {
-    g_ota_in_progress.store(true, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
+    System_SetOtaInProgress(true);
+    System_ClearEventBits(SYS_EVT_OTA_IDLE);
   }
   ~OtaInProgressGuard() {
     if (!_dismissed) {
-      g_ota_in_progress.store(false, std::memory_order_release);
-      if (g_system_event_group) {
-        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-      }
+      System_SetOtaInProgress(false);
+      System_SetEventBits(SYS_EVT_OTA_IDLE);
     }
   }
   void dismiss() noexcept { _dismissed = true; }
@@ -314,6 +310,106 @@ static void ota_fail(const char *fmt, ...) {
   ::Serial.printf("[OTA] Error: %s\r\n", s_http_ota_state.last_error);
 }
 
+static void otaStopHttpClients(HTTPClient &http, WiFiClientSecure &secure_client,
+                               WiFiClient &plain_client) {
+  http.end();
+  secure_client.stop();
+  plain_client.stop();
+}
+
+static bool otaSelectTransportAndBegin(HTTPClient &http,
+                                       WiFiClientSecure &secure_client,
+                                       WiFiClient &plain_client,
+                                       const char *current_url,
+                                       const char *host, int port,
+                                       bool is_https, OtaUrlContext ctx) {
+  if (!Ota_IsTrustedUrl(current_url, ctx)) {
+    ota_fail("Untrusted URL in chain (host: %s, port: %d)",
+             host[0] ? host : "invalid", port);
+    otaStopHttpClients(http, secure_client, plain_client);
+    return false;
+  }
+
+  WiFiClient *transport = nullptr;
+  if (is_https) {
+    if (Ota_IsPrivateHost(host)) {
+      secure_client.setInsecure();
+    } else {
+      configure_public_tls(secure_client);
+    }
+    transport = &secure_client;
+  } else {
+    plain_client.setTimeout(5);
+    transport = &plain_client;
+  }
+
+  if (!http.begin(*transport, current_url)) {
+    ota_fail("HTTP begin failed");
+    otaStopHttpClients(http, secure_client, plain_client);
+    return false;
+  }
+  return true;
+}
+
+static bool otaHandleRedirectResponse(HTTPClient &http,
+                                      WiFiClientSecure &secure_client,
+                                      WiFiClient &plain_client,
+                                      const char *initial_host,
+                                      int redirect_count, int httpCode,
+                                      char (&host)[128], char (&path)[256],
+                                      char *current_url, size_t current_url_sz) {
+  if (redirect_count > 2) {
+    ota_fail("Too many redirects (>2)");
+    otaStopHttpClients(http, secure_client, plain_client);
+    return false;
+  }
+
+  static char s_redirect_loc[MAX_REDIRECT_LOCATION_LEN + 2];
+  size_t loc_len = 0;
+  {
+    const auto &loc_ref = http.getLocation();
+    loc_len = loc_ref.length();
+    if (loc_len > 0 && loc_len <= MAX_REDIRECT_LOCATION_LEN) {
+      memcpy(s_redirect_loc, loc_ref.c_str(), loc_len);
+      s_redirect_loc[loc_len] = '\0';
+    }
+  }
+  otaStopHttpClients(http, secure_client, plain_client);
+
+  if (loc_len == 0 || loc_len > MAX_REDIRECT_LOCATION_LEN) {
+    ota_fail("Invalid redirect Location length: %u",
+             static_cast<unsigned>(loc_len));
+    return false;
+  }
+
+  if (strncmp(s_redirect_loc, "http://", 7) != 0 &&
+      strncmp(s_redirect_loc, "https://", 8) != 0) {
+    ota_fail("Relative redirect rejected");
+    return false;
+  }
+
+  int next_port = 0;
+  bool next_is_https = false;
+  memset(host, 0, sizeof(host));
+  memset(path, 0, sizeof(path));
+  if (!Ota_ExtractUrlComponents(s_redirect_loc, host, sizeof(host), next_port,
+                                path, sizeof(path), next_is_https)) {
+    ota_fail("Failed to parse redirect URL");
+    return false;
+  }
+
+  if (Ota_IsPrivateHost(host) != Ota_IsPrivateHost(initial_host)) {
+    ota_fail("Redirect crosses trust boundary");
+    return false;
+  }
+
+  strncpy(current_url, s_redirect_loc, current_url_sz - 1);
+  current_url[current_url_sz - 1] = '\0';
+  ::Serial.printf("[OTA] Redirect #%d (%d) -> to host: %s (port %d)\r\n",
+                  redirect_count, httpCode, host, next_port);
+  return true;
+}
+
 static bool Ota_ResolveDownloadUrl(const char *initial_url,
                                    WiFiClientSecure &secure_client,
                                    WiFiClient &plain_client, HTTPClient &http,
@@ -324,8 +420,8 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
   int initial_port = 0;
   bool is_https_initial = false;
   Ota_ExtractUrlComponents(initial_url, initial_host, sizeof(initial_host),
-                         initial_port, path, sizeof(path),
-                         is_https_initial);
+                           initial_port, path, sizeof(path),
+                           is_https_initial);
 
   if (!Ota_IsPrivateHost(initial_host) && time(nullptr) < 1700000000) {
     ota_fail("System time not synced (NTP required for TLS)");
@@ -368,37 +464,12 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
     int port = 0;
     bool is_https = false;
     Ota_ExtractUrlComponents(s_current_url, host, sizeof(host), port, path,
-                           sizeof(path), is_https);
+                             sizeof(path), is_https);
 
-    OtaUrlContext ctx = (redirect_count == 0) ? OtaUrlContext::Initial
-                                              : OtaUrlContext::Redirect;
-    if (!Ota_IsTrustedUrl(s_current_url, ctx)) {
-      ota_fail("Untrusted URL in chain (host: %s, port: %d)",
-               host[0] ? host : "invalid", port);
-      http.end();
-      secure_client.stop();
-      plain_client.stop();
-      return false;
-    }
-
-    WiFiClient *transport = nullptr;
-    if (is_https) {
-      if (Ota_IsPrivateHost(host)) {
-        secure_client.setInsecure();
-      } else {
-        configure_public_tls(secure_client);
-      }
-      transport = &secure_client;
-    } else {
-      plain_client.setTimeout(5);
-      transport = &plain_client;
-    }
-
-    if (!http.begin(*transport, s_current_url)) {
-      ota_fail("HTTP begin failed");
-      http.end();
-      secure_client.stop();
-      plain_client.stop();
+    const OtaUrlContext ctx =
+        (redirect_count == 0) ? OtaUrlContext::Initial : OtaUrlContext::Redirect;
+    if (!otaSelectTransportAndBegin(http, secure_client, plain_client,
+                                    s_current_url, host, port, is_https, ctx)) {
       return false;
     }
 
@@ -406,79 +477,27 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
     if (httpCode == HTTP_CODE_OK) {
       break;
     }
-    const bool is_redirect = (httpCode == HTTP_CODE_MOVED_PERMANENTLY ||
-                              httpCode == HTTP_CODE_FOUND || httpCode == HTTP_CODE_SEE_OTHER ||
-                              httpCode == HTTP_CODE_TEMPORARY_REDIRECT || httpCode == 308);
-    if (is_redirect) {
-      redirect_count++;
-      if (redirect_count > 2) {
-        ota_fail("Too many redirects (>2)");
-        http.end();
-        secure_client.stop();
-        plain_client.stop();
-        return false;
-      }
-
-      static char s_redirect_loc[MAX_REDIRECT_LOCATION_LEN + 2];
-      size_t loc_len = 0;
-      {
-        const auto &loc_ref = http.getLocation();
-        loc_len = loc_ref.length();
-        if (loc_len > 0 && loc_len <= MAX_REDIRECT_LOCATION_LEN) {
-          memcpy(s_redirect_loc, loc_ref.c_str(), loc_len);
-          s_redirect_loc[loc_len] = '\0';
-        }
-      }
-      http.end();
-      secure_client.stop();
-      plain_client.stop();
-
-      if (loc_len == 0 || loc_len > MAX_REDIRECT_LOCATION_LEN) {
-        ota_fail("Invalid redirect Location length: %u",
-                 static_cast<unsigned>(loc_len));
-        return false;
-      }
-
-      if (strncmp(s_redirect_loc, "http://", 7) != 0 &&
-          strncmp(s_redirect_loc, "https://", 8) != 0) {
-        ota_fail("Relative redirect rejected");
-        return false;
-      }
-
-      int next_port = 0;
-      bool next_is_https = false;
-      memset(host, 0, sizeof(host));
-      memset(path, 0, sizeof(path));
-      if (!Ota_ExtractUrlComponents(s_redirect_loc, host,
-                                  sizeof(host), next_port, path,
-                                  sizeof(path), next_is_https)) {
-        ota_fail("Failed to parse redirect URL");
-        return false;
-      }
-
-      if (Ota_IsPrivateHost(host) != Ota_IsPrivateHost(initial_host)) {
-        ota_fail("Redirect crosses trust boundary");
-        return false;
-      }
-
-      strncpy(s_current_url, s_redirect_loc, sizeof(s_current_url) - 1);
-      s_current_url[sizeof(s_current_url) - 1] = '\0';
-      ::Serial.printf("[OTA] Redirect #%d (%d) -> to host: %s (port %d)\r\n",
-                      redirect_count, httpCode, host, next_port);
-    } else {
+    const bool is_redirect =
+        (httpCode == HTTP_CODE_MOVED_PERMANENTLY || httpCode == HTTP_CODE_FOUND ||
+         httpCode == HTTP_CODE_SEE_OTHER || httpCode == HTTP_CODE_TEMPORARY_REDIRECT ||
+         httpCode == 308);
+    if (!is_redirect) {
       ota_fail("HTTP GET failed, code: %d", httpCode);
-      http.end();
-      secure_client.stop();
-      plain_client.stop();
+      otaStopHttpClients(http, secure_client, plain_client);
+      return false;
+    }
+
+    redirect_count++;
+    if (!otaHandleRedirectResponse(http, secure_client, plain_client, initial_host,
+                                   redirect_count, httpCode, host, path,
+                                   s_current_url, sizeof(s_current_url))) {
       return false;
     }
   }
 
   if (httpCode != HTTP_CODE_OK) {
     ota_fail("Failed to reach OK status (final code: %d)", httpCode);
-    http.end();
-    secure_client.stop();
-    plain_client.stop();
+    otaStopHttpClients(http, secure_client, plain_client);
     return false;
   }
 
@@ -487,9 +506,7 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
                   out_content_length);
   if (out_content_length <= 0) {
     ota_fail("Invalid Content-Length: %d", out_content_length);
-    http.end();
-    secure_client.stop();
-    plain_client.stop();
+    otaStopHttpClients(http, secure_client, plain_client);
     return false;
   }
 
@@ -689,10 +706,8 @@ static void Task_HttpOta(void *pvParameters) {
     }
     Update.abort(); // 실패 시 OTA 파티션 언락
     // 모든 실패 경로는 여기서 단 한 번 안전하게 원복됨
-    if (g_system_event_group) {
-      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
-    g_ota_in_progress.store(false, std::memory_order_release);
+    System_SetEventBits(SYS_EVT_OTA_IDLE);
+    System_SetOtaInProgress(false);
     s_http_ota_state.in_progress.store(false, std::memory_order_release);
     ::Serial.printf("[OTA] Task aborted. Stack high water mark: %u bytes\r\n",
                     (unsigned)uxTaskGetStackHighWaterMark(nullptr));
@@ -714,10 +729,8 @@ static void Task_HttpOta(void *pvParameters) {
   if (wdt_registered) {
     esp_task_wdt_delete(nullptr);
   }
-  if (g_system_event_group) {
-    xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-  }
-  g_ota_in_progress.store(false, std::memory_order_release);
+  System_SetEventBits(SYS_EVT_OTA_IDLE);
+  System_SetOtaInProgress(false);
   s_http_ota_state.in_progress.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
 }
@@ -725,18 +738,14 @@ static void Task_HttpOta(void *pvParameters) {
 class OtaAdmissionGuard {
 public:
   OtaAdmissionGuard() {
-    g_ota_in_progress.store(true, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
+    System_SetOtaInProgress(true);
+    System_ClearEventBits(SYS_EVT_OTA_IDLE);
   }
   ~OtaAdmissionGuard() {
     if (!_dismissed) {
-      g_ota_in_progress.store(false, std::memory_order_release);
+      System_SetOtaInProgress(false);
       s_http_ota_state.in_progress.store(false, std::memory_order_release);
-      if (g_system_event_group) {
-        xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-      }
+      System_SetEventBits(SYS_EVT_OTA_IDLE);
     }
   }
   void dismiss() noexcept { _dismissed = true; }
@@ -869,10 +878,8 @@ void SystemOta_InitArduinoOta(const char *hostname, const char *password) {
   }
   ArduinoOTA.onStart([]() {
     Supervisor::enterGlobalExempt();
-    g_ota_in_progress.store(true, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupClearBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
+    System_SetOtaInProgress(true);
+    System_ClearEventBits(SYS_EVT_OTA_IDLE);
     ::Serial.println(F("[ArduinoOTA] Start transfer..."));
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
@@ -886,10 +893,8 @@ void SystemOta_InitArduinoOta(const char *hostname, const char *password) {
   });
   ArduinoOTA.onError([](ota_error_t error) {
     Supervisor::exitGlobalExempt();
-    g_ota_in_progress.store(false, std::memory_order_release);
-    if (g_system_event_group) {
-      xEventGroupSetBits(g_system_event_group, SYS_EVT_OTA_IDLE);
-    }
+    System_SetOtaInProgress(false);
+    System_SetEventBits(SYS_EVT_OTA_IDLE);
     ::Serial.printf("[ArduinoOTA] Error (%u)\r\n", (unsigned)error);
   });
   ArduinoOTA.begin();

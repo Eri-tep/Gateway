@@ -268,98 +268,91 @@ void System_Sha256ToHex(const char *input, char *output) {
   output[64] = '\0';
 }
 
-void Config_Load() {
-  RuntimeConfig c{};
-  uint8_t loaded_bank = 0;
-  {
-    SystemNvs p;
-    const bool p_opened = p.begin("runtime-config", true);
-
-    if (p_opened) {
-      // 1. Try atomic sealed A/B Ping-Pong envelope first (Power-cut resilient)
-      RuntimeConfig env_cfg{};
-      const uint8_t active_bank = p.getUChar("cfg_act", 0);
-      const char *primary_key = (active_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
-      const char *secondary_key = (active_bank == 1) ? "cfg_bin_0" : "cfg_bin_1";
-
-      auto load_bank = [&]() {
-        if (nvsGetEnv(p, primary_key, env_cfg)) {
-          c = env_cfg;
-          loaded_bank = active_bank;
-          ESP_LOGI("CONFIG", "Loaded atomic A/B bank %u (CRC-32 verified)", active_bank);
-          return true;
-        }
-        if (nvsGetEnv(p, secondary_key, env_cfg)) {
-          c = env_cfg;
-          loaded_bank = (active_bank == 1) ? 0 : 1;
-          ESP_LOGW("CONFIG", "Primary bank %u corrupted; recovered from alternate bank %u (CRC-32 verified)",
-                   active_bank, loaded_bank);
-          return true;
-        }
-        if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
-          c = env_cfg;
-          loaded_bank = 0;
-          ESP_LOGI("CONFIG", "Loaded legacy cfg_bin (CRC-32 verified)");
-          return true;
-        }
-        return false;
-      };
-      bool loaded = load_bank();
-
-      if (!loaded) {
-        // 2. Fallback to individual legacy NVS keys
-        c.uart_baud_rate = p.getULong("uart_baud", 9600);
-        c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
-        c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
-        c.doorphone_baud_rate =
-            p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
-
-        c.wifi_ssid[0] = '\0';
-        p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
-        c.wifi_password[0] = '\0';
-        p.getString("wifi_pass", c.wifi_password, sizeof(c.wifi_password));
-        c.ap_ssid[0] = '\0';
-        p.getString("ap_ssid", c.ap_ssid, sizeof(c.ap_ssid));
-        c.ap_password[0] = '\0';
-        p.getString("ap_pass", c.ap_password, sizeof(c.ap_password));
-        c.telnet_pass_hash[0] = '\0';
-        p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
-
-        c.uart_parity = p.getUChar("u_parity", 0);
-        c.uart_stop_bits = p.getUChar("u_sbits", 1);
-        c.uart_data_bits = p.getUChar("u_dbits", 8);
-        c.ch2_parity = p.getUChar("ch2_parity", 0);
-        c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
-        c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
-        c.ch3_parity = p.getUChar("ch3_parity", 0);
-        c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
-        c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
-        c.doorphone_data_bits =
-            p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
-        c.doorphone_parity =
-            p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
-        c.doorphone_stop_bits =
-            p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
-        c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
-        auto raw_prof = nvsReadPrimitive<uint8_t>(p, "w_prof");
-        if (!raw_prof && raw_prof.error() != ESP_ERR_NVS_NOT_FOUND) {
-          ESP_LOGW("CONFIG", "w_prof: %s, using default ADAPTIVE", esp_err_to_name(raw_prof.error()));
-        }
-        const auto prof = toEnum(raw_prof.value_or(0),
-                                 WallpadProfileIndex::ADAPTIVE,
-                                 WallpadProfileIndex::CUSTOM3);
-        if (raw_prof && !prof) {
-          ESP_LOGW("CONFIG", "w_prof out of range (%u), using default ADAPTIVE",
-                   static_cast<unsigned>(*raw_prof));
-        }
-        c.wallpad_profile = std::to_underlying(prof.value_or(WallpadProfileIndex::ADAPTIVE));
-      }
-      p.end();
-    } else {
-      ESP_LOGW("CONFIG", "Failed to open NVS runtime-config (read-only); using defaults");
-    }
+static void loadConfigFromNvs(RuntimeConfig &c, uint8_t &loaded_bank) {
+  SystemNvs p;
+  const bool p_opened = p.begin("runtime-config", true);
+  if (!p_opened) {
+    ESP_LOGW("CONFIG", "Failed to open NVS runtime-config (read-only); using defaults");
+    return;
   }
 
+  // 1. Try atomic sealed A/B Ping-Pong envelope first (Power-cut resilient)
+  RuntimeConfig env_cfg{};
+  const uint8_t active_bank = p.getUChar("cfg_act", 0);
+  const char *primary_key = (active_bank == 1) ? "cfg_bin_1" : "cfg_bin_0";
+  const char *secondary_key = (active_bank == 1) ? "cfg_bin_0" : "cfg_bin_1";
+
+  bool loaded = false;
+  if (nvsGetEnv(p, primary_key, env_cfg)) {
+    c = env_cfg;
+    loaded_bank = active_bank;
+    ESP_LOGI("CONFIG", "Loaded atomic A/B bank %u (CRC-32 verified)", active_bank);
+    loaded = true;
+  } else if (nvsGetEnv(p, secondary_key, env_cfg)) {
+    c = env_cfg;
+    loaded_bank = (active_bank == 1) ? 0 : 1;
+    ESP_LOGW("CONFIG", "Primary bank %u corrupted; recovered from alternate bank %u (CRC-32 verified)",
+             active_bank, loaded_bank);
+    loaded = true;
+  } else if (nvsGetEnv(p, "cfg_bin", env_cfg)) {
+    c = env_cfg;
+    loaded_bank = 0;
+    ESP_LOGI("CONFIG", "Loaded legacy cfg_bin (CRC-32 verified)");
+    loaded = true;
+  }
+
+  if (!loaded) {
+    // 2. Fallback to individual legacy NVS keys
+    c.uart_baud_rate = p.getULong("uart_baud", 9600);
+    c.ch2_baud_rate = p.getULong("ch2_baud", 9600);
+    c.ch3_baud_rate = p.getULong("ch3_baud", 9600);
+    c.doorphone_baud_rate =
+        p.getULong("door_baud", Config::Serial::DEFAULT_DOORPHONE_BAUD);
+
+    c.wifi_ssid[0] = '\0';
+    p.getString("wifi_ssid", c.wifi_ssid, sizeof(c.wifi_ssid));
+    c.wifi_password[0] = '\0';
+    p.getString("wifi_pass", c.wifi_password, sizeof(c.wifi_password));
+    c.ap_ssid[0] = '\0';
+    p.getString("ap_ssid", c.ap_ssid, sizeof(c.ap_ssid));
+    c.ap_password[0] = '\0';
+    p.getString("ap_pass", c.ap_password, sizeof(c.ap_password));
+    c.telnet_pass_hash[0] = '\0';
+    p.getString("telnet_hash", c.telnet_pass_hash, sizeof(c.telnet_pass_hash));
+
+    c.uart_parity = p.getUChar("u_parity", 0);
+    c.uart_stop_bits = p.getUChar("u_sbits", 1);
+    c.uart_data_bits = p.getUChar("u_dbits", 8);
+    c.ch2_parity = p.getUChar("ch2_parity", 0);
+    c.ch2_stop_bits = p.getUChar("ch2_sbits", 1);
+    c.ch2_data_bits = p.getUChar("ch2_dbits", 8);
+    c.ch3_parity = p.getUChar("ch3_parity", 0);
+    c.ch3_stop_bits = p.getUChar("ch3_sbits", 1);
+    c.ch3_data_bits = p.getUChar("ch3_dbits", 8);
+    c.doorphone_data_bits =
+        p.getUChar("d_dbits", Config::Serial::DEFAULT_DOORPHONE_DATABITS);
+    c.doorphone_parity =
+        p.getUChar("d_parity", Config::Serial::DEFAULT_DOORPHONE_PARITY);
+    c.doorphone_stop_bits =
+        p.getUChar("d_sbits", Config::Serial::DEFAULT_DOORPHONE_STOPBITS);
+    c.wifi_connect_timeout_s = p.getUShort("w_tout", 30);
+    auto raw_prof = nvsReadPrimitive<uint8_t>(p, "w_prof");
+    if (!raw_prof && raw_prof.error() != ESP_ERR_NVS_NOT_FOUND) {
+      ESP_LOGW("CONFIG", "w_prof: %s, using default ADAPTIVE", esp_err_to_name(raw_prof.error()));
+    }
+    const auto prof = toEnum(raw_prof.value_or(0),
+                             WallpadProfileIndex::ADAPTIVE,
+                             WallpadProfileIndex::CUSTOM3);
+    if (raw_prof && !prof) {
+      ESP_LOGW("CONFIG", "w_prof out of range (%u), using default ADAPTIVE",
+               static_cast<unsigned>(*raw_prof));
+    }
+    c.wallpad_profile = std::to_underlying(prof.value_or(WallpadProfileIndex::ADAPTIVE));
+  }
+  p.end();
+}
+
+static void clampAndApplyConfigDefaults(RuntimeConfig &c) {
   // Defensive Range Validation & Clamping (Pillar 2 Safe Fallback)
   auto clampBaud = [](uint32_t baud, uint32_t def_val) -> uint32_t {
     return (baud >= 1200 && baud <= 921600) ? baud : def_val;
@@ -435,6 +428,13 @@ void Config_Load() {
     System_Sha256ToHex(DEFAULT_TELNET_PASS, c.telnet_pass_hash);
 #endif
   }
+}
+
+void Config_Load() {
+  RuntimeConfig c{};
+  uint8_t loaded_bank = 0;
+  loadConfigFromNvs(c, loaded_bank);
+  clampAndApplyConfigDefaults(c);
 
   {
     MutexLocker lock(getConfigRwMutex());

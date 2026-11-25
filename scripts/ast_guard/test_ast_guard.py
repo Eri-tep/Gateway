@@ -36,9 +36,12 @@ class TestEastg4Gate(unittest.TestCase):
             write_rel(tmp, "include/L0_Foundation/BadL0.h", '#include "L2_Transport/Bridge_CH.h"\n')
             # 3) L3 Private header reverse-including L3 Public header (non-leaf)
             write_rel(tmp, "include/L3_Protocol/Private/BadPriv.h", '#include "L3_Protocol/Public/Protocol_Device.h"\n')
-            # 4) L4 including L3 Private
+            # 4) L4 including L3 Private & L2 including L1 Private
             write_rel(tmp, "src/L4_Services/LeakSvc.cpp", '#include "L3_Protocol/Private/Wallpad_Engine.h"\n')
-            # 5) Header include cycle A -> B -> A
+            write_rel(tmp, "src/L2_Transport/LeakL1.cpp", '#include "L1_HAL/Private/Internal.h"\n')
+            # 5) Header inside src/ anti-pattern
+            write_rel(tmp, "src/L2_Transport/Internal.h", '#pragma once\n')
+            # 6) Header include cycle A -> B -> A
             write_rel(tmp, "include/L2_Transport/CycleA.h", '#include "L2_Transport/CycleB.h"\n')
             write_rel(tmp, "include/L2_Transport/CycleB.h", '#include "L2_Transport/CycleA.h"\n')
 
@@ -48,6 +51,7 @@ class TestEastg4Gate(unittest.TestCase):
             self.assertIn("Upward Include", rules)
             self.assertIn("Reverse Include", rules)
             self.assertIn("Private Boundary Leak", rules)
+            self.assertIn("Forbidden Header in src/", rules)
             self.assertIn("Circular #include", rules)
 
     def test_gate2_dip_and_mutex_flash_and_l2_uart(self):
@@ -122,10 +126,18 @@ class TestEastg4Gate(unittest.TestCase):
 
     def test_gate4_srp_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
-            write_rel(tmp, "src/L3_Protocol/Private/Huge.cpp", "\n".join(["int a = 0;"] * 1050))
+            # Cohesive single-domain large file should NOT be flagged as multi-domain
+            write_rel(tmp, "src/L2_Transport/Cohesive.cpp", "\n".join(["int a = 0;"] * 1050))
+            # Multi-domain large file with two 3+ method classes MUST be flagged
+            lines = ["class Alpha {}; class Beta {};"] + [f"void Alpha::m{i}() {{}}" for i in range(4)] + [f"void Beta::m{i}() {{}}" for i in range(4)] + ["int pad = 0;"] * 1050
+            write_rel(tmp, "src/L3_Protocol/Private/Multi.cpp", "\n".join(lines))
+            # Cohesive multi-class file explicitly marked with SRP_COHESIVE goes to info-only
+            coh_lines = ["// SRP_COHESIVE: Tightly coupled classes sharing private state"] + lines
+            write_rel(tmp, "src/L1_HAL/CohesiveMulti.cpp", "\n".join(coh_lines))
             res = audit_srp_metrics(tmp)
-            self.assertEqual(len(res["god_files"]), 1)
-            self.assertEqual(res["god_files"][0][1], 1050)
+            self.assertEqual(len(res["cohesive_large_files"]), 2)
+            self.assertEqual(len(res["multi_domain_files"]), 1)
+            self.assertEqual(res["multi_domain_files"][0][2], ["Alpha", "Beta"])
 
 
 if __name__ == "__main__":

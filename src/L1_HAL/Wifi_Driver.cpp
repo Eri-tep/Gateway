@@ -38,9 +38,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
       xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
     }
-    if (g_system_event_group) {
-      xEventGroupSetBits(g_system_event_group, SYS_EVT_NETWORK_READY);
-    }
+    System_SetEventBits(SYS_EVT_NETWORK_READY);
     WiFi.setSleep(false);
     configTime(0, 0, "pool.ntp.org", "asia.pool.ntp.org");
     setenv("TZ", "KST-9", 1);
@@ -57,9 +55,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
       xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_CONNECTED | WIFI_BIT_GOT_IP);
     }
-    if (g_system_event_group) {
-      xEventGroupClearBits(g_system_event_group, SYS_EVT_NETWORK_READY);
-    }
+    System_ClearEventBits(SYS_EVT_NETWORK_READY);
     break;
   case ARDUINO_EVENT_WIFI_AP_START:
     s_ap_active.store(true, std::memory_order_relaxed);
@@ -68,9 +64,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
       xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
     }
-    if (g_system_event_group) {
-      xEventGroupSetBits(g_system_event_group, SYS_EVT_NETWORK_READY);
-    }
+    System_SetEventBits(SYS_EVT_NETWORK_READY);
     break;
   case ARDUINO_EVENT_WIFI_AP_STOP:
     s_ap_active.store(false, std::memory_order_relaxed);
@@ -79,9 +73,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       xEventGroupSetBits(s_wifi_event_group, WIFI_BIT_DISCONNECTED);
       xEventGroupClearBits(s_wifi_event_group, WIFI_BIT_GOT_IP);
     }
-    if (g_system_event_group) {
-      xEventGroupClearBits(g_system_event_group, SYS_EVT_NETWORK_READY);
-    }
+    System_ClearEventBits(SYS_EVT_NETWORK_READY);
     break;
   case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
     Serial.printf(

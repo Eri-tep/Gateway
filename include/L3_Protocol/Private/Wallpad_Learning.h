@@ -392,12 +392,4 @@ bool ControlTemplate_DecodeByDevId(uint8_t dev_id,
                                    const DeviceStateEntry *dev,
                                    DecodedDeviceState &out) noexcept;
 
-extern std::atomic<uint8_t> s_norm_rule_count;
-uint8_t ControlTemplate_NormSub1_Slow(uint8_t dev_id, uint8_t sub1) noexcept;
-
-[[nodiscard]] inline uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept {
-  if (s_norm_rule_count.load(std::memory_order_relaxed) == 0) [[likely]] {
-    return sub1;
-  }
-  return ControlTemplate_NormSub1_Slow(dev_id, sub1);
-}
+[[nodiscard]] uint8_t ControlTemplate_NormSub1(uint8_t dev_id, uint8_t sub1) noexcept;
