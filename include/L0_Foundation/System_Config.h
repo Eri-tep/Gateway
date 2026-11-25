@@ -8,7 +8,7 @@
 #include <expected>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.2.5";
+constexpr const char *FIRMWARE_VERSION = "v1.3.0";
 } // namespace Config
 
 namespace Config::Task {
