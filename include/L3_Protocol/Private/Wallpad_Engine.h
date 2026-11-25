@@ -8,7 +8,7 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Platform.h"
-#include "L3_Protocol/Public/Protocol_Device.h"
+#include "L3_Protocol/Public/Protocol_Types.h"
 #include "L3_Protocol/Private/Wallpad_Learning.h"
 
 #include <atomic>
@@ -18,7 +18,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <span>
-#include "L3_Protocol/Public/Protocol_Facade.h"
 
 // ============================================================================
 // 1. DATA-DRIVEN VENDOR PROFILE DESCRIPTOR (STORED IN NVS)

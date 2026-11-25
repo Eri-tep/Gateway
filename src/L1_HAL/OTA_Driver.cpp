@@ -419,18 +419,28 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
         return false;
       }
 
-      String location = http.header("Location");
+      static char s_redirect_loc[MAX_REDIRECT_LOCATION_LEN + 2];
+      size_t loc_len = 0;
+      {
+        const auto &loc_ref = http.getLocation();
+        loc_len = loc_ref.length();
+        if (loc_len > 0 && loc_len <= MAX_REDIRECT_LOCATION_LEN) {
+          memcpy(s_redirect_loc, loc_ref.c_str(), loc_len);
+          s_redirect_loc[loc_len] = '\0';
+        }
+      }
       http.end();
       secure_client.stop();
       plain_client.stop();
 
-      if (location.isEmpty() || location.length() > MAX_REDIRECT_LOCATION_LEN) {
+      if (loc_len == 0 || loc_len > MAX_REDIRECT_LOCATION_LEN) {
         ota_fail("Invalid redirect Location length: %u",
-                 (unsigned)location.length());
+                 static_cast<unsigned>(loc_len));
         return false;
       }
 
-      if (!location.startsWith("http://") && !location.startsWith("https://")) {
+      if (strncmp(s_redirect_loc, "http://", 7) != 0 &&
+          strncmp(s_redirect_loc, "https://", 8) != 0) {
         ota_fail("Relative redirect rejected");
         return false;
       }
@@ -439,7 +449,7 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
       bool next_is_https = false;
       memset(host, 0, sizeof(host));
       memset(path, 0, sizeof(path));
-      if (!Ota_ExtractUrlComponents(location.c_str(), host,
+      if (!Ota_ExtractUrlComponents(s_redirect_loc, host,
                                   sizeof(host), next_port, path,
                                   sizeof(path), next_is_https)) {
         ota_fail("Failed to parse redirect URL");
@@ -451,7 +461,7 @@ static bool Ota_ResolveDownloadUrl(const char *initial_url,
         return false;
       }
 
-      strncpy(s_current_url, location.c_str(), sizeof(s_current_url) - 1);
+      strncpy(s_current_url, s_redirect_loc, sizeof(s_current_url) - 1);
       s_current_url[sizeof(s_current_url) - 1] = '\0';
       ::Serial.printf("[OTA] Redirect #%d (%d) -> to host: %s (port %d)\r\n",
                       redirect_count, httpCode, host, next_port);

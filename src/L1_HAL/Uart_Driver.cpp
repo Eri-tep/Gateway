@@ -179,6 +179,11 @@ void Uart_FlushHw(uart_port_t port) noexcept {
   uart_flush_input(port);
 }
 
+esp_err_t Uart_WaitTxDoneHw(uart_port_t port,
+                            TickType_t ticks_to_wait) noexcept {
+  return uart_wait_tx_done(port, ticks_to_wait);
+}
+
 void Uart_FlushSwSerial() noexcept {
   while (s_doorphone_serial.available() > 0) {
     s_doorphone_serial.read();

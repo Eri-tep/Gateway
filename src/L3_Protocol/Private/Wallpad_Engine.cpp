@@ -11,11 +11,9 @@
 
 #include <span>
 #include <Arduino.h>
-#include <Preferences.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <esp_task_wdt.h>
 #include <esp_timer.h>
 #include "L3_Protocol/Public/Protocol_Facade.h"
 
@@ -555,7 +553,7 @@ void ProfileRepository::init() {
   VendorProfileDescriptor loaded[MAX_PROFILES];
   memcpy(loaded, s_default_profiles, sizeof(s_default_profiles));
 
-  Preferences prefs;
+  SystemNvs prefs;
   if (prefs.begin("wp_profiles", true)) {
     for (size_t i = 0; i < MAX_PROFILES; ++i) {
       char k[16];
@@ -892,11 +890,7 @@ void ProfileRepository::resetAllToDefaults() {
     memcpy(s_active_profiles, s_default_profiles, sizeof(s_default_profiles));
   }
   Wallpad_InvalidateProfileCache();
-  Preferences prefs;
-  if (prefs.begin("wp_profiles", false)) {
-    prefs.clear();
-    prefs.end();
-  }
+  nvsClearNs("wp_profiles");
 }
 
 // ============================================================================
@@ -1292,10 +1286,7 @@ void FramingTracker::reset() noexcept {
 
 void FramingTracker::clearNvs(const char *nvs_ns, const char *tag) noexcept {
   reset();
-  Preferences prefs;
-  if (prefs.begin(nvs_ns, false)) {
-    prefs.clear();
-    prefs.end();
+  if (nvsClearNs(nvs_ns)) {
     ::Serial.printf("[%s] Cleared framing NVS storage (%s).\r\n", tag, nvs_ns);
   }
 }
@@ -1374,7 +1365,7 @@ void FramingTracker::restoreFromNvs(const char *nvs_ns,
   if (!nvs_ns)
     nvs_ns = "dp_frame_p0";
 
-  Preferences prefs;
+  SystemNvs prefs;
   if (prefs.begin(nvs_ns, true)) {
     uint8_t s = prefs.getUChar("stx", 0);
     uint8_t e = prefs.getUChar("etx", 0);
@@ -1490,12 +1481,10 @@ bool FramingTracker::commitNvsIfPending() noexcept {
     return true; // Wear guard: identical data
   }
 
-  if (esp_task_wdt_status(nullptr) == ESP_OK) {
-    esp_task_wdt_reset();
-  }
+  System_TaskWdtResetSelf();
 
   System_SetNvsBusy(true);
-  Preferences prefs;
+  SystemNvs prefs;
   bool success = false;
   if (prefs.begin(pending_nvs_ns, false)) {
     prefs.putUChar("stx", s);
@@ -1571,12 +1560,10 @@ bool FramingTracker::forceFlush(uint32_t timeout_ms) noexcept {
     return true;
   }
 
-  if (esp_task_wdt_status(nullptr) == ESP_OK) {
-    esp_task_wdt_reset();
-  }
+  System_TaskWdtResetSelf();
 
   System_SetNvsBusy(true);
-  Preferences prefs;
+  SystemNvs prefs;
   bool success = false;
   if (prefs.begin(pending_nvs_ns, false)) {
     prefs.putUChar("stx", s);

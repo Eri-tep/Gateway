@@ -211,15 +211,14 @@ static inline bool Uart_DrainToStreamBuffer(uart_port_t u_num, uint8_t *stream,
                                                       size_t &stream_len,
                                                       size_t max_stream_buf,
                                                       uint32_t &last_rx_ms) {
-  size_t avail = 0;
-  uart_get_buffered_data_len(u_num, &avail);
+  size_t avail = Uart_AvailableHw(u_num);
   if (avail == 0)
     return false;
 
   uint8_t temp[Config::Packet::UART_READ_CHUNK];
   size_t read_limit = std::min(avail, sizeof(temp));
-  int rx = uart_read_bytes(u_num, temp, read_limit, 0);
-  if (rx <= 0)
+  size_t rx = Uart_ReadHw(u_num, temp, read_limit);
+  if (rx == 0)
     return false;
 
   if (stream_len + rx > max_stream_buf) {
@@ -262,7 +261,7 @@ struct ChannelRxStreamContext {
 static ChannelRxStreamContext s_uart_rx_streams[3];
 
 static inline void Uart_FlushChannelInput(uart_port_t u_num) {
-  uart_flush_input(u_num);
+  Uart_FlushHw(u_num);
   size_t u_idx = static_cast<size_t>(u_num);
   if (u_idx < 3) {
     s_uart_rx_streams[u_idx].stream_len = 0;
@@ -506,9 +505,9 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
     }
 
     Uart_FlushChannelInput(UART_NUM_0);
-    uart_write_bytes(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
-    uart_wait_tx_done(UART_NUM_0,
-                      pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
+    (void)Uart_WriteHw(UART_NUM_0, ctrlPacket.data.data(), ctrlPacket.length);
+    (void)Uart_WaitTxDoneHw(
+        UART_NUM_0, pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
     Diag_RecordChannelActivity(1, millis());
     Ch1_RecordTxFinish();
     Diag_RecordChannelTx(1);
@@ -546,7 +545,7 @@ void Ch1_HandleCtrl(const StaticPacket &ctrlPacket) {
       {
         MutexLocker lock(cfg.mutex, pdMS_TO_TICKS(100));
         if (lock.isLocked()) {
-          uart_write_bytes(cfg.uart_num, ack.data.data(), ack.length);
+          (void)Uart_WriteHw(cfg.uart_num, ack.data.data(), ack.length);
           fwd_success = true;
         } else {
           Diag_RecordChannelLockTimeout(cfg.channel_id);
@@ -620,9 +619,9 @@ void Ch1_PollNext(size_t &current_dev_idx) {
       }
 
       Uart_FlushChannelInput(UART_NUM_0);
-      uart_write_bytes(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
-      uart_wait_tx_done(UART_NUM_0,
-                        pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
+      (void)Uart_WriteHw(UART_NUM_0, q_pkt.data.data(), q_pkt.length);
+      (void)Uart_WaitTxDoneHw(
+          UART_NUM_0, pdMS_TO_TICKS(Config::Timing::UART_TX_DONE_TIMEOUT_MS));
       Diag_RecordChannelActivity(1, millis());
       Diag_RecordChannelTx(1);
       tx_executed = true;
@@ -782,8 +781,8 @@ static uint32_t Ch2Ch3_DrainVirtualAckQueue(void *arg) {
   while (ctx->ack_q->dequeueIfDue(now, next_ack)) {
     MutexLocker lock(ctx->uart_mutex, pdMS_TO_TICKS(100));
     if (LIKELY(lock.isLocked())) {
-      uart_write_bytes(ctx->cfg->uart_num, next_ack.data.data(),
-                       next_ack.length);
+      (void)Uart_WriteHw(ctx->cfg->uart_num, next_ack.data.data(),
+                         next_ack.length);
     } else {
       ctx->stats->lock_timeouts.fetch_add(1, std::memory_order_relaxed);
       static uint32_t s_warn_vack_mux_ms = 0;

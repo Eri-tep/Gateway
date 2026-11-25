@@ -27,7 +27,6 @@
 #include "freertos/semphr.h"
 #include <Arduino.h>
 #include <IPAddress.h>
-#include <Preferences.h>
 #include "Supervisor.h"
 #include "ThreadSafety.h"
 
@@ -141,10 +140,6 @@ public:
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #endif
 
-using std::span;
-using std::string_view;
-using std::to_underlying;
-
 [[nodiscard]] inline uint32_t FastCrc32(std::span<const uint8_t> data) noexcept {
   return ~esp_rom_crc32_le(~0U, data.data(), data.size());
 }
@@ -174,8 +169,69 @@ template <typename T> struct alignas(4) NvsEnvelope {
   }
 };
 
+enum class NvsValueType : uint8_t {
+  I8 = 0,
+  U8,
+  I16,
+  U16,
+  I32,
+  U32,
+  I64,
+  U64,
+  STR,
+  BLOB,
+  INVALID
+};
+
+/// L0 RAII NVS storage handle encapsulating ESP-IDF NVS (zero heap / zero Arduino Preferences leak).
+class SystemNvs {
+private:
+  uint32_t _handle{0};
+  bool _started{false};
+  bool _readOnly{false};
+
+public:
+  SystemNvs() noexcept = default;
+  ~SystemNvs() noexcept;
+  SystemNvs(const SystemNvs &) = delete;
+  SystemNvs &operator=(const SystemNvs &) = delete;
+  SystemNvs(SystemNvs &&) = delete;
+  SystemNvs &operator=(SystemNvs &&) = delete;
+
+  bool begin(const char *name, bool readOnly = false) noexcept;
+  void end() noexcept;
+  bool clear() noexcept;
+  bool remove(const char *key) noexcept;
+
+  [[nodiscard]] bool isKey(const char *key) noexcept;
+  [[nodiscard]] NvsValueType getType(const char *key) noexcept;
+
+  size_t putChar(const char *key, int8_t value) noexcept;
+  size_t putUChar(const char *key, uint8_t value) noexcept;
+  size_t putShort(const char *key, int16_t value) noexcept;
+  size_t putUShort(const char *key, uint16_t value) noexcept;
+  size_t putLong(const char *key, int32_t value) noexcept;
+  size_t putULong(const char *key, uint32_t value) noexcept;
+  size_t putUInt(const char *key, uint32_t value) noexcept;
+  size_t putBool(const char *key, bool value) noexcept;
+  size_t putString(const char *key, const char *value) noexcept;
+  size_t putBytes(const char *key, const void *value, size_t len) noexcept;
+
+  int8_t getChar(const char *key, int8_t defaultValue = 0) noexcept;
+  uint8_t getUChar(const char *key, uint8_t defaultValue = 0) noexcept;
+  int16_t getShort(const char *key, int16_t defaultValue = 0) noexcept;
+  uint16_t getUShort(const char *key, uint16_t defaultValue = 0) noexcept;
+  int32_t getLong(const char *key, int32_t defaultValue = 0) noexcept;
+  uint32_t getULong(const char *key, uint32_t defaultValue = 0) noexcept;
+  uint32_t getUInt(const char *key, uint32_t defaultValue = 0) noexcept;
+  bool getBool(const char *key, bool defaultValue = false) noexcept;
+  size_t getString(const char *key, char *value, size_t maxLen) noexcept;
+  size_t getBytesLength(const char *key) noexcept;
+  size_t getBytes(const char *key, void *buf, size_t maxLen) noexcept;
+};
+
 template <class T>
-inline bool nvsGetEnv(Preferences &p, const char *key, T &out) {
+inline bool nvsGetEnv(SystemNvs &p, const char *key, T &out) {
   NvsEnvelope<T> env{};
   if (p.getBytesLength(key) != sizeof(env))
     return false;
@@ -186,7 +242,7 @@ inline bool nvsGetEnv(Preferences &p, const char *key, T &out) {
 }
 
 template <class T>
-inline bool nvsPutEnv(Preferences &p, const char *key, const T &v) {
+inline bool nvsPutEnv(SystemNvs &p, const char *key, const T &v) {
   NvsEnvelope<T> env{};
   env.payload = v;
   env.seal();
@@ -195,7 +251,7 @@ inline bool nvsPutEnv(Preferences &p, const char *key, const T &v) {
 
 template <class T>
 inline bool nvsGetEnvNs(const char *ns, const char *key, T &out) {
-  Preferences p;
+  SystemNvs p;
   if (!p.begin(ns, true))
     return false;
   bool ok = nvsGetEnv(p, key, out);
@@ -205,13 +261,25 @@ inline bool nvsGetEnvNs(const char *ns, const char *key, T &out) {
 
 template <class T>
 inline bool nvsPutEnvNs(const char *ns, const char *key, const T &v) {
-  Preferences p;
+  SystemNvs p;
   if (!p.begin(ns, false))
     return false;
   bool ok = nvsPutEnv(p, key, v);
   p.end();
   return ok;
 }
+
+inline bool nvsClearNs(const char *ns) noexcept {
+  SystemNvs p;
+  if (!p.begin(ns, false))
+    return false;
+  bool ok = p.clear();
+  p.end();
+  return ok;
+}
+
+[[nodiscard]] bool System_NvsPutUInt(const char *ns, const char *key,
+                                     uint32_t val) noexcept;
 
 template <typename U, bool = std::is_enum_v<U>>
 struct UnderlyingTypeHelper {
@@ -225,21 +293,21 @@ struct UnderlyingTypeHelper<U, false> {
 
 template <typename T>
   requires ((std::is_integral_v<T> && sizeof(T) <= 4 && !std::is_same_v<T, bool>) || std::is_enum_v<T>)
-[[nodiscard]] inline std::expected<T, esp_err_t> nvsReadPrimitive(Preferences &p, const char *key) noexcept {
+[[nodiscard]] inline std::expected<T, esp_err_t> nvsReadPrimitive(SystemNvs &p, const char *key) noexcept {
   if (!p.isKey(key)) {
     return std::unexpected(ESP_ERR_NVS_NOT_FOUND);
   }
   using Underlying = typename UnderlyingTypeHelper<T>::type;
-  PreferenceType expected_type = PT_INVALID;
+  NvsValueType expected_type = NvsValueType::INVALID;
   if constexpr (sizeof(Underlying) == 1) {
-    expected_type = std::is_signed_v<Underlying> ? PT_I8 : PT_U8;
+    expected_type = std::is_signed_v<Underlying> ? NvsValueType::I8 : NvsValueType::U8;
   } else if constexpr (sizeof(Underlying) == 2) {
-    expected_type = std::is_signed_v<Underlying> ? PT_I16 : PT_U16;
+    expected_type = std::is_signed_v<Underlying> ? NvsValueType::I16 : NvsValueType::U16;
   } else if constexpr (sizeof(Underlying) == 4) {
-    expected_type = std::is_signed_v<Underlying> ? PT_I32 : PT_U32;
+    expected_type = std::is_signed_v<Underlying> ? NvsValueType::I32 : NvsValueType::U32;
   }
 
-  const PreferenceType actual_type = p.getType(key);
+  const NvsValueType actual_type = p.getType(key);
   if (actual_type != expected_type) {
     return std::unexpected(ESP_ERR_NVS_TYPE_MISMATCH);
   }
@@ -276,13 +344,16 @@ struct CoreDumpInfo {
   char task_name[16]{};
   uint32_t exc_pc{0};
   uint32_t exc_cause{0};
+  uint32_t exc_vaddr{0};
   uint32_t bt[16]{};
   uint8_t bt_depth{0};
   bool bt_corrupted{false};
 };
 
 void System_GetCoreDumpSnapshot(CoreDumpInfo &out) noexcept;
+[[nodiscard]] bool System_GetCoreDumpLiveSummary(CoreDumpInfo &out) noexcept;
 void System_ClearCoreDumpInfo() noexcept;
+void System_EraseCoreDump() noexcept;
 
 void Tcp_EnableKeepalive(int sock, int idle, int intvl, int cnt);
 
@@ -492,6 +563,8 @@ void System_RecordCh6Connection() noexcept;
 using WdtFeedHook = void (*)(size_t) noexcept;
 void System_RegisterWdtHook(WdtFeedHook hook) noexcept;
 void System_FeedWdt(size_t index) noexcept;
+[[nodiscard]] bool System_TaskWdtAddSelf() noexcept;
+void System_TaskWdtResetSelf() noexcept;
 void System_FormatTaskStacks(AppendBuf &out, const StackSnapshot &st) noexcept;
 
 // ── Persistent Reboot Log & Boot Lifecycle ───────────────────────────────────
@@ -508,15 +581,56 @@ void System_GetNvsStats(uint32_t &err_count, uint32_t &last_sync_ms,
                         uint32_t *last_duration_ms = nullptr) noexcept;
 void System_ResetNvsStats() noexcept;
 
-// ── HTTP / Cloud Firmware OTA Engine ─────────────────────────────────────────
+// ── HTTP / Cloud Firmware OTA Engine & Partition Contract ────────────────────
+enum class OtaImgState : uint8_t {
+  NEW = 0,
+  PENDING_VERIFY,
+  VALID,
+  INVALID,
+  ABORTED,
+  UNDEFINED
+};
+
+struct OtaPartitionInfo {
+  bool valid{false};
+  char label[17]{};
+  uint32_t address{0};
+  uint32_t size{0};
+  OtaImgState state{OtaImgState::UNDEFINED};
+};
+
 void System_StartHttpOta(const char *url) noexcept;
 void System_GetHttpOtaSnapshot(HttpOtaSnapshot &out) noexcept;
 [[nodiscard]] bool System_IsHttpOtaInProgress() noexcept;
+void System_GetOtaPartitions(OtaPartitionInfo &running_out,
+                             OtaPartitionInfo &next_out) noexcept;
+[[nodiscard]] esp_err_t System_OtaMarkValidCancelRollback() noexcept;
+[[nodiscard]] esp_err_t System_OtaRollbackAndReboot() noexcept;
 
 // ── Network & Wi-Fi Platform Services (L0 Universal Contract) ────────────────
 constexpr EventBits_t WIFI_BIT_CONNECTED = BIT0;
 constexpr EventBits_t WIFI_BIT_DISCONNECTED = BIT1;
 constexpr EventBits_t WIFI_BIT_GOT_IP = BIT2;
+
+enum class WifiOpMode : uint8_t { OFF = 0, STA = 1, AP = 2, AP_STA = 3 };
+enum class WifiAuthMode : uint8_t {
+  OPEN = 0,
+  WEP,
+  WPA_PSK,
+  WPA2_PSK,
+  WPA_WPA2_PSK,
+  WPA2_ENTERPRISE,
+  WPA3_PSK,
+  WPA2_WPA3_PSK,
+  OTHER
+};
+
+struct WifiScanEntry {
+  char ssid[33]{};
+  int32_t rssi{0};
+  uint8_t channel{0};
+  WifiAuthMode auth{WifiAuthMode::OPEN};
+};
 
 void System_WifiInit() noexcept;
 [[nodiscard]] bool System_WifiIsConnected() noexcept;
@@ -525,7 +639,16 @@ void System_WifiInit() noexcept;
 [[nodiscard]] IPAddress System_WifiGetApIp() noexcept;
 [[nodiscard]] IPAddress System_WifiGetApSubnetMask() noexcept;
 [[nodiscard]] int8_t System_WifiGetRssi() noexcept;
+void System_WifiGetSsid(char *out_buf, size_t max_len) noexcept;
+[[nodiscard]] WifiOpMode System_WifiGetMode() noexcept;
+void System_WifiSetMode(WifiOpMode mode) noexcept;
+void System_WifiConnect(const char *ssid, const char *pass) noexcept;
+void System_WifiDisconnect() noexcept;
 void System_WifiReconnect() noexcept;
+[[nodiscard]] int System_WifiScanStart(bool async, bool show_hidden) noexcept;
+[[nodiscard]] bool System_WifiScanGetEntry(int index, WifiScanEntry &out) noexcept;
+[[nodiscard]] int32_t System_WifiScanGetRssi(int index) noexcept;
+void System_WifiScanDelete() noexcept;
 [[nodiscard]] EventBits_t System_WifiGetEventBits() noexcept;
 void System_WifiStartFallbackAp() noexcept;
 [[nodiscard]] bool System_WifiIsApActive() noexcept;

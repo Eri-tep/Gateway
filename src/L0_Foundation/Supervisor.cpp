@@ -7,7 +7,7 @@
 #include <cstring>
 #include <iterator>
 
-#include <Preferences.h>
+#include "L0_Foundation/System_Platform.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -400,7 +400,7 @@ void onBoot() noexcept {
 
   Mode saved = Mode::Shadow;
   {
-    Preferences p;
+    SystemNvs p;
     if (p.begin("sup", /*readOnly=*/true)) {
       saved = (p.getUChar("mode", 0) == 1) ? Mode::Active : Mode::Shadow;
       p.end();
@@ -411,7 +411,7 @@ void onBoot() noexcept {
     saved = Mode::Shadow;
     ESP_LOGW("SUP", "demoted to Shadow (rapid reboot loop guard)");
     // 전원 사이클 후에도 루프를 방지하도록 NVS의 mode 키도 Shadow로 영구 동기화
-    Preferences p;
+    SystemNvs p;
     if (p.begin("sup", false)) {
       p.putUChar("mode", 0);
       p.end();
@@ -440,7 +440,7 @@ void setMode(Mode m, bool persist) noexcept {
   }
   s_mode.store(m, std::memory_order_relaxed);
   if (persist) {
-    Preferences p;
+    SystemNvs p;
     if (p.begin("sup", false)) {
       p.putUChar("mode", m == Mode::Active ? 1 : 0);
       p.end();

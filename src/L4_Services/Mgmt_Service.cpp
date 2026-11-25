@@ -296,9 +296,9 @@ void handleFsmTesting(uint32_t now, EventBits_t bits) noexcept {
         "[WIFI] ⚠️ New Wi-Fi failed within 15s! Reverting to '%s'...\r\n",
         cfg.wifi_ssid);
     Config_SaveStaged(cfg, TimingConfig_Get());
-    WiFi.disconnect(false);
+    System_WifiDisconnect();
     vTaskDelay(pdMS_TO_TICKS(100));
-    WiFi.begin(cfg.wifi_ssid, cfg.wifi_password);
+    System_WifiConnect(cfg.wifi_ssid, cfg.wifi_password);
     s_net_fsm = NetworkFsmState::DISCONNECTED;
     s_last_sta_retry_ms = now;
   }

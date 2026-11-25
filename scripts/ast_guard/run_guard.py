@@ -2,10 +2,11 @@
 # ============================================================================
 # run_guard.py: Standalone CLI Runner for Embedded AST Guard System (E-ASTG)
 # Modules:
-#   1. Canonical 4+1 Layer Invariant Checker (AGENTS.md Rule 17)
-#   2. Function Call AST Matcher (Zero-Heap, Non-Blocking, Critical Sections)
-#   3. Static Stack Usage & Task Call-Tree Budget Auditor
-#   4. Clang Thread Safety & Lock Order Deep Auditor (--deep)
+#   1. Gate 1: Strict Adjacent Layer, Private/Public Boundary & Include DAG
+#   2. Gate 2: Call AST, DIP HAL/Platform Isolation & Mutex+Flash Safety
+#   3. Gate 3: ESP-IDF C++ Guide Hygiene & Compiler Flag Guard
+#   4. Gate 4: Clang Thread Safety (--deep) & SRP Metrics (--strict)
+#   5. Module 5: Static Stack Usage & Task Call-Tree Budget Auditor
 # ============================================================================
 
 import os
@@ -19,8 +20,10 @@ sys.path.insert(0, curr_dir)
 
 from matchers.layer_guard import check_all_layers
 from matchers.call_guard import verify_call_invariants
-from matchers.stack_guard import audit_stack_usage, MAX_STACK_FRAME_FATAL, MAX_STACK_FRAME_WARN
-from matchers.thread_safety_guard import audit_thread_safety
+from matchers.cpp_hygiene_guard import verify_cpp_hygiene
+from matchers.stack_guard import audit_stack_usage, MAX_STACK_FRAME_FATAL
+from matchers.thread_safety_guard import audit_thread_safety, discover_synchronized_sources
+from matchers.srp_audit import audit_srp_metrics, GOD_FILE_LINES
 
 
 def get_staged_cpp_files(root_dir: str) -> List[str]:
@@ -45,13 +48,14 @@ def main():
                         help="Scan only git staged C/C++ files (Pre-Commit Mode)")
     parser.add_argument("--deep", action="store_true",
                         help="Run Clang Thread Safety & Lock Order Deep Scan")
+    parser.add_argument("--strict", action="store_true",
+                        help="Treat SRP God Files and mutable extern warnings as fatal")
     parser.add_argument("--install-git-hook", action="store_true",
                         help="Install pre-commit hook into .git/hooks/pre-commit")
     args = parser.parse_args()
 
     root_dir = os.path.abspath(args.root)
 
-    # Git hook installation helper
     if args.install_git_hook:
         hook_path = os.path.join(root_dir, ".git", "hooks", "pre-commit")
         hook_content = (
@@ -75,54 +79,76 @@ def main():
         print(f"\033[96m[E-ASTG Pre-Commit] Auditing {len(staged_files)} staged C/C++ files...\033[0m")
 
     mode_label = "Deep Analysis Mode" if args.deep else "Standard Mode"
-    print(f"\033[96m================================================================================\033[0m")
+    print("\033[96m================================================================================\033[0m")
     print(f"\033[96m  [E-ASTG] Embedded AST Guard Suite ({mode_label}): {root_dir}\033[0m")
-    print(f"\033[96m================================================================================\033[0m")
+    print("\033[96m================================================================================\033[0m")
 
     has_fatal_error = False
 
-    # -------------------------------------------------------------------------
-    # Module 1: Layer Invariant Checker
-    # -------------------------------------------------------------------------
+    # Gate 1: Layer, Private/Public Boundary & Include DAG
     scanned_cnt, layer_viols = check_all_layers(root_dir, staged_files)
     if layer_viols:
         has_fatal_error = True
-        print(f"\n\033[91m[E-ASTG FATAL] Module 1: {len(layer_viols)} Layer Invariant Violations Detected!\033[0m")
+        print(f"\n\033[91m[E-ASTG FATAL] Gate 1 (Layer/Boundary/DAG): {len(layer_viols)} Violations Detected!\033[0m")
         for v in layer_viols:
             print(f"  \033[93m{v['file']}:{v['line']}\033[0m -> {v['content']}")
-            print(f"    \033[91mForbidden: {v['src_layer']} cannot include higher {v['target_layer']}!\033[0m (AGENTS.md Rule 17)")
+            print(f"    \033[91m{v.get('rule', 'Layer violation')}\033[0m")
     else:
-        print(f"\033[92m  [OK] Module 1 (Layer Invariant): Verified {scanned_cnt} files (0 Upward Includes)\033[0m")
+        print(f"\033[92m  [OK] Gate 1 (Layer, Boundary & DAG): Verified {scanned_cnt} files (Adjacent + Acyclic)\033[0m")
 
-    # -------------------------------------------------------------------------
-    # Module 2 & 3.2: Function Call & Critical Section AST Matcher
-    # -------------------------------------------------------------------------
+    # Gate 2: Call AST, DIP HAL Isolation & Mutex+Flash Purity
     call_viols = verify_call_invariants(root_dir, staged_files)
     if call_viols:
         has_fatal_error = True
-        print(f"\n\033[91m[E-ASTG FATAL] Module 2 & 3.2: {len(call_viols)} Call/Purity Violations Detected!\033[0m")
+        print(f"\n\033[91m[E-ASTG FATAL] Gate 2 (DIP / Call / Mutex+Flash): {len(call_viols)} Violations Detected!\033[0m")
         for cv in call_viols:
             print(f"  \033[91m{cv}\033[0m\n")
     else:
-        print(f"\033[92m  [OK] Module 2 & 3.2 (Call & Critical Section AST): Zero-Heap, Non-Blocking, Pure Atomic\033[0m")
+        print("\033[92m  [OK] Gate 2 (DIP, Call Purity & Mutex+Flash): Zero-Heap, Non-Blocking, Safe Locks\033[0m")
 
-    # -------------------------------------------------------------------------
-    # Module 4: Clang Thread Safety Deep Scan (--deep)
-    # -------------------------------------------------------------------------
+    # Gate 3: ESP-IDF C++ Hygiene & Flags
+    hygiene_fatals, hygiene_warns = verify_cpp_hygiene(root_dir, staged_files)
+    if hygiene_fatals:
+        has_fatal_error = True
+        print(f"\n\033[91m[E-ASTG FATAL] Gate 3 (ESP-IDF C++ Hygiene): {len(hygiene_fatals)} Violations Detected!\033[0m")
+        for hf in hygiene_fatals:
+            print(f"  \033[91m{hf}\033[0m\n")
+    else:
+        warn_suffix = f" ({len(hygiene_warns)} extern warn)" if hygiene_warns else ""
+        print(f"\033[92m  [OK] Gate 3 (ESP-IDF C++ Hygiene & Flags): Clean C++23 / FreeRTOS Mutex / Zero-String{warn_suffix}\033[0m")
+    if args.strict and hygiene_warns:
+        has_fatal_error = True
+        for hw in hygiene_warns:
+            print(f"  \033[93m{hw}\033[0m")
+
+    # Gate 4A: Clang Thread Safety (--deep)
     if args.deep:
-        ts_errs = audit_thread_safety(root_dir, staged_files)
+        sync_srcs = staged_files if staged_files else discover_synchronized_sources(root_dir)
+        ts_errs = audit_thread_safety(root_dir, sync_srcs)
         fatal_ts = [e for e in ts_errs if "[WARN]" not in e]
         if fatal_ts:
             has_fatal_error = True
-            print(f"\n\033[91m[E-ASTG FATAL] Module 4: Clang Thread Safety Violations Detected!\033[0m")
+            print("\n\033[91m[E-ASTG FATAL] Gate 4 (Clang Thread Safety): Violations Detected!\033[0m")
             for e in fatal_ts:
                 print(f"  \033[91m{e}\033[0m\n")
         else:
-            print(f"\033[92m  [OK] Module 4 (Clang Thread Safety Analysis): Mutex capabilities & lock orders clean\033[0m")
+            print(f"\033[92m  [OK] Gate 4A (Clang Thread Safety): Verified {len(sync_srcs)} synchronized files cleanly\033[0m")
 
-    # -------------------------------------------------------------------------
+    # Gate 4B: SRP God-File Metrics
+    srp = audit_srp_metrics(root_dir, staged_files)
+    god_cnt = len(srp["god_files"])
+    if god_cnt > 0:
+        tag_col = "\033[91m" if args.strict else "\033[93m"
+        print(f"{tag_col}  [INFO] Gate 4B (SRP Audit): {god_cnt} God Files (>={GOD_FILE_LINES}L), "
+              f"{len(srp['warn_files'])} Warn (>=600L), {len(srp['long_funcs'])} Long Funcs (>=150L)\033[0m")
+        for fp, lines in srp["god_files"][:5]:
+            print(f"    - {fp}: {lines}L")
+        if args.strict:
+            has_fatal_error = True
+    else:
+        print("\033[92m  [OK] Gate 4B (SRP Audit): No God Files >= 1000L\033[0m")
+
     # Module 5: Static Stack Usage & Task Call-Tree Auditor
-    # -------------------------------------------------------------------------
     if not args.staged:
         build_dir = args.build_dir
         if not build_dir:
@@ -134,12 +160,12 @@ def main():
         if build_dir and os.path.exists(build_dir):
             fatals, warns, top_5, task_res = audit_stack_usage(build_dir, root_dir)
             if top_5:
-                print(f"\033[94m  [INFO] Module 5 (Top 3 Single Frames):\033[0m")
+                print("\033[94m  [INFO] Module 5 (Top 3 Single Frames):\033[0m")
                 for idx, f in enumerate(top_5[:3], start=1):
                     loc_short = f['location'].split('/')[-1] if '/' in f['location'] else f['location']
                     print(f"    {idx}. {f['size']:>4}B | {loc_short}")
             if task_res:
-                print(f"\033[94m  [INFO] Module 5 (Task Cumulative Call-Tree Depth):\033[0m")
+                print("\033[94m  [INFO] Module 5 (Task Cumulative Call-Tree Depth):\033[0m")
                 for tr in task_res:
                     status_col = "\033[91m" if tr["exceeded"] else "\033[92m"
                     tag = "[FAIL]" if tr["exceeded"] else "[PASS]"
@@ -151,13 +177,13 @@ def main():
                     print(f"    - {fatal['size']}B: {fatal['location']}")
             elif any(t["exceeded"] for t in task_res):
                 has_fatal_error = True
-                print(f"\n\033[91m[E-ASTG FATAL] Module 5: One or more tasks exceeded 70% safe call-tree stack budget!\033[0m")
+                print("\n\033[91m[E-ASTG FATAL] Module 5: One or more tasks exceeded 70% safe call-tree stack budget!\033[0m")
             else:
                 print(f"\033[92m  [OK] Module 5 (Stack & Call-Tree): All frames <= {MAX_STACK_FRAME_FATAL}B & tasks within safe budget\033[0m")
         else:
-            print(f"\033[90m  [SKIP] Module 5 (Stack Auditor): No .su files found (run build first)\033[0m")
+            print("\033[90m  [SKIP] Module 5 (Stack Auditor): No .su files found (run build first)\033[0m")
 
-    print(f"\033[96m================================================================================\033[0m")
+    print("\033[96m================================================================================\033[0m")
     if has_fatal_error:
         sys.exit(1)
     sys.exit(0)

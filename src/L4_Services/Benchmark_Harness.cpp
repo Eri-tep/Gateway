@@ -17,10 +17,10 @@
 
 #include "L4_Services/CLI_Commands.h"
 
+// BENCHMARK_EXCEPTION: Direct HAL/RTOS access intentionally permitted for
+// cycle-accurate measurement (esp_cpu, FreeRTOS SMP spinlocks, heap_caps).
 #include <esp_cpu.h>
-#include <esp_task_wdt.h>
 #include <esp_system.h>
-#include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -156,7 +156,7 @@ static JitterDistribution MeasureIsolatedOnCore1(F &&workload, uint32_t sample_r
     uint32_t probe_oh = (s_probe_overhead_cycles > 0) ? s_probe_overhead_cycles : 1;
     for (uint32_t i = 0; i < c->runs; ++i) {
       if (i > 0 && (i & 0x07FF) == 0) {
-        esp_task_wdt_reset();
+        System_TaskWdtResetSelf();
       }
       uint32_t t0 = esp_cpu_get_cycle_count();
       (*c->fn)();
@@ -291,7 +291,7 @@ BenchmarkReport RunPhase0_BaselineCalibration() noexcept {
     uint32_t c1 = esp_cpu_get_cycle_count();
     s_observable_sink += (c1 >= c0) ? (c1 - c0) : 0;
     if ((i & 0x03FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
     }
   }
   uint32_t c_loop_end = esp_cpu_get_cycle_count();
@@ -356,7 +356,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
     test_atomic.fetch_add(1, std::memory_order_relaxed);
 
     if (i > 0 && (i & 0x01FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -442,7 +442,7 @@ BenchmarkReport RunPhase1_PrimitiveParser(uint32_t iterations) noexcept {
     }
 
     if (i > 0 && (i & 0x03FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -531,7 +531,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     std::memcpy(s_null_sink, GOLDEN_ACK, sizeof(GOLDEN_ACK));
 
     if (i > 0 && (i & 0x01FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -692,7 +692,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     }
 
     if (i > 0 && (i & 0x0FFF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -736,7 +736,7 @@ BenchmarkReport RunPhase2_CH1HotPathFlow(uint32_t iterations) noexcept {
     sum_isolated_e2e += static_cast<uint32_t>(pe_t1 - pe_t0);
     s_observable_sink += pe_ext.length ^ (pe_dummy.is_online ? 1 : 0);
     if ((k & 0x03FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -843,7 +843,7 @@ BenchmarkReport RunPhase3_SyncAndAtomic(uint32_t iterations) noexcept {
     local_atomic.fetch_add(1, std::memory_order_relaxed);
 
     if (i > 0 && (i & 0x01FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -984,7 +984,7 @@ BenchmarkReport RunPhase3_SyncAndAtomic(uint32_t iterations) noexcept {
     }
 
     if ((i & 0x03FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -1024,14 +1024,16 @@ BenchmarkReport RunPhase4_CodegenDiagnostics() noexcept {
 
   CaptureSafetyPre(r.safety);
 
+  // BENCHMARK_EXCEPTION: direct heap_caps/FreeRTOS stack inspection for memory telemetry
   r.phase4.iram_text_bytes = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_EXEC);
   r.phase4.dram_data_bytes = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) -
                              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   r.phase4.dram_bss_bytes = uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
 
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  if (running) {
-    r.phase4.flash_text_bytes = running->size;
+  OtaPartitionInfo running{}, next{};
+  System_GetOtaPartitions(running, next);
+  if (running.valid) {
+    r.phase4.flash_text_bytes = running.size;
   }
 
   CaptureSafetyPost(r.safety);
@@ -1085,7 +1087,7 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
     (void)Device_FindCopy(0x88, 0x88, 0x88, dummy);
 
     if ((w & 0x01FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }
@@ -1150,7 +1152,7 @@ BenchmarkReport RunPhase5_RealWorkloadReplay(uint32_t iterations) noexcept {
     }
 
     if (i > 0 && (i & 0x03FF) == 0) {
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
       System_FeedWdt(Config::Task::WDT_ID_TELNET);
       taskYIELD();
     }

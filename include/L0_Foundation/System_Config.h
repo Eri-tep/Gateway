@@ -6,10 +6,9 @@
 
 #include "L0_Foundation/System_Platform.h"
 #include <expected>
-#include <shared_mutex>
 
 namespace Config {
-constexpr const char *FIRMWARE_VERSION = "v1.2.4";
+constexpr const char *FIRMWARE_VERSION = "v1.2.5";
 } // namespace Config
 
 namespace Config::Task {
@@ -247,6 +246,7 @@ bool Config_SetUartFraming(uint8_t ch, uint32_t baud, uint8_t data_bits,
 void Config_Load();
 void Config_Save();
 void Config_ResetDefaults();
+bool Config_SaveTelnetHash(const char *hash) noexcept;
 void System_Sha256ToHex(const char *input, char *output);
 
 void TimingConfig_Load();

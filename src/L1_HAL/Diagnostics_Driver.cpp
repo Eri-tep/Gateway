@@ -4,7 +4,6 @@
 #include "L0_Foundation/System_Platform.h"
 #include <Arduino.h>
 #include <ArduinoOTA.h>
-#include <Preferences.h>
 #include <WiFi.h>
 #include <algorithm>
 #include <cstdio>
@@ -413,9 +412,98 @@ void System_GetCoreDumpSnapshot(CoreDumpInfo &out) noexcept {
   out = s_coredump_info;
 }
 
+bool System_GetCoreDumpLiveSummary(CoreDumpInfo &out) noexcept {
+  out = CoreDumpInfo{};
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+  esp_core_dump_summary_t s{};
+  if (esp_core_dump_get_summary(&s) != ESP_OK) {
+    return false;
+  }
+  out.valid = true;
+  snprintf(out.task_name, sizeof(out.task_name), "%s", s.exc_task);
+  out.exc_pc = s.exc_pc;
+  out.exc_cause = s.ex_info.exc_cause;
+  out.exc_vaddr = s.ex_info.exc_vaddr;
+  uint8_t depth = static_cast<uint8_t>(s.exc_bt_info.depth);
+  if (depth > 16)
+    depth = 16;
+  out.bt_depth = depth;
+  out.bt_corrupted = s.exc_bt_info.corrupted;
+  for (uint8_t i = 0; i < depth; ++i) {
+    out.bt[i] = s.exc_bt_info.bt[i];
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
 void System_ClearCoreDumpInfo() noexcept {
   s_coredump_info.valid = false;
   memset(&s_coredump_info, 0, sizeof(s_coredump_info));
+}
+
+void System_EraseCoreDump() noexcept {
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+  esp_core_dump_image_erase();
+#endif
+  System_ClearCoreDumpInfo();
+}
+
+static OtaImgState mapOtaImgState(esp_ota_img_states_t s) noexcept {
+  switch (s) {
+  case ESP_OTA_IMG_NEW:
+    return OtaImgState::NEW;
+  case ESP_OTA_IMG_PENDING_VERIFY:
+    return OtaImgState::PENDING_VERIFY;
+  case ESP_OTA_IMG_VALID:
+    return OtaImgState::VALID;
+  case ESP_OTA_IMG_INVALID:
+    return OtaImgState::INVALID;
+  case ESP_OTA_IMG_ABORTED:
+    return OtaImgState::ABORTED;
+  default:
+    return OtaImgState::UNDEFINED;
+  }
+}
+
+static void fillOtaPartInfo(const esp_partition_t *part,
+                            OtaPartitionInfo &out) noexcept {
+  out = OtaPartitionInfo{};
+  if (!part)
+    return;
+  out.valid = true;
+  snprintf(out.label, sizeof(out.label), "%s", part->label);
+  out.address = part->address;
+  out.size = part->size;
+  esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+  if (esp_ota_get_state_partition(part, &st) == ESP_OK) {
+    out.state = mapOtaImgState(st);
+  }
+}
+
+void System_GetOtaPartitions(OtaPartitionInfo &running_out,
+                             OtaPartitionInfo &next_out) noexcept {
+  fillOtaPartInfo(esp_ota_get_running_partition(), running_out);
+  fillOtaPartInfo(esp_ota_get_next_update_partition(nullptr), next_out);
+}
+
+esp_err_t System_OtaMarkValidCancelRollback() noexcept {
+  return esp_ota_mark_app_valid_cancel_rollback();
+}
+
+esp_err_t System_OtaRollbackAndReboot() noexcept {
+  return esp_ota_mark_app_invalid_rollback_and_reboot();
+}
+
+bool System_TaskWdtAddSelf() noexcept {
+  return (esp_task_wdt_add(nullptr) == ESP_OK);
+}
+
+void System_TaskWdtResetSelf() noexcept {
+  if (esp_task_wdt_status(nullptr) == ESP_OK) {
+    esp_task_wdt_reset();
+  }
 }
 
 bool System_IsOtaPendingVerify() {
@@ -591,7 +679,7 @@ uint32_t System_GetBootTimeMs() noexcept {
 void LogManager::writeRebootLog(const char *reason) {
   if (!reason || strlen(reason) == 0)
     return;
-  Preferences p;
+  SystemNvs p;
   if (!p.begin("logs", false))
     return;
 
@@ -622,7 +710,7 @@ void LogManager::writeRebootLog(const char *reason) {
 }
 
 size_t LogManager::getLogCount() {
-  Preferences p;
+  SystemNvs p;
   if (!p.begin("logs", true))
     return 0;
   size_t c = p.getUInt("count", 0);
@@ -634,7 +722,7 @@ size_t LogManager::getLogCount() {
 LogManager::getLogEntry(size_t idx) noexcept {
   if (idx >= MAX_LOG_ENTRIES)
     return std::unexpected(LogReadError::OutOfBounds);
-  Preferences p;
+  SystemNvs p;
   if (!p.begin("logs", true))
     return std::unexpected(LogReadError::Empty);
 
@@ -671,7 +759,7 @@ bool LogManager::getLogEntry(size_t idx, LogEntry &out_entry) noexcept {
 }
 
 void LogManager::clearRebootLog() {
-  Preferences p;
+  SystemNvs p;
   if (p.begin("logs", false)) {
     p.clear();
     p.end();

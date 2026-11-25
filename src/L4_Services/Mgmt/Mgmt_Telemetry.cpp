@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <esp_wifi.h>
 #include <lwip/sockets.h>
 
 // ── JSON-RPC & TCP Management Server (formerly Service.cpp) ──
@@ -40,18 +39,26 @@ static void serializeSysMetrics(AppendBuf &out, uint8_t c0, uint8_t c1,
       min_free_heap_kb, ntp_synced ? "true" : "false",
       Config::FIRMWARE_VERSION);
 
-  wifi_mode_t cur_wmode = WIFI_MODE_NULL;
-  esp_wifi_get_mode(&cur_wmode);
+  const WifiOpMode cur_wmode = System_WifiGetMode();
   const char *mode_str =
-      (cur_wmode == WIFI_MODE_AP)
+      (cur_wmode == WifiOpMode::AP)
           ? "AP"
-          : (cur_wmode == WIFI_MODE_APSTA ? "AP_STA" : "STA");
+          : (cur_wmode == WifiOpMode::AP_STA ? "AP_STA" : "STA");
+
+  const bool sta_connected = System_WifiIsConnected();
+  char ssid_buf[33]{};
+  if (sta_connected) {
+    System_WifiGetSsid(ssid_buf, sizeof(ssid_buf));
+  }
+  const IPAddress ip = System_WifiGetIp();
+  char ip_buf[16]{};
+  snprintf(ip_buf, sizeof(ip_buf), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
 
   out.appendFormat(
       "\"wifi\":{\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"mode\":\"%s\"},",
-      WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected",
-      WiFi.status() == WL_CONNECTED ? static_cast<int>(WiFi.RSSI()) : -100,
-      WiFi.localIP().toString().c_str(), mode_str);
+      sta_connected ? ssid_buf : "Disconnected",
+      sta_connected ? static_cast<int>(System_WifiGetRssi()) : -100,
+      ip_buf, mode_str);
 
   HttpOtaSnapshot ota_snap{};
   System_GetHttpOtaSnapshot(ota_snap);
@@ -233,7 +240,7 @@ void Mgmt_SerializeTelemetry(AppendBuf &out, long req_id) {
   uint8_t c0 = 0, c1 = 0;
   int8_t temp_c = 0;
   System_GetCpuAndTemp(c0, c1, temp_c);
-  int8_t rssi = WiFi.isConnected() ? WiFi.RSSI() : 0;
+  int8_t rssi = System_WifiIsConnected() ? System_WifiGetRssi() : 0;
   uint32_t uptime_s = millis() / 1000;
   uint32_t free_heap_kb = heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024;
   uint32_t min_free_heap_kb =

@@ -1,12 +1,7 @@
 #include "L4_Services/CLI_Commands.h"
 #include "L0_Foundation/System_Platform.h"
 #include "L3_Protocol/Public/Protocol_Facade.h"
-#include <Preferences.h>
-#include <WiFi.h>
 #include <algorithm>
-#include <esp_core_dump.h>
-#include <esp_ota_ops.h>
-#include <esp_task_wdt.h>
 
 namespace WifiCli {
 
@@ -24,7 +19,7 @@ static void AsyncWifiScanTask(void *pvParameters) {
   Supervisor::DeadlineHold net_hold(static_cast<uint8_t>(SystemTaskId::NETWORK), 10000);
   vTaskDelay(pdMS_TO_TICKS(100));
 
-  int n = WiFi.scanNetworks(false, true);
+  int n = System_WifiScanStart(false, true);
 
   char *scratch = Cli_GetScratchBuffer();
   size_t scratch_sz = Cli_GetScratchBufferSize();
@@ -55,27 +50,30 @@ static void AsyncWifiScanTask(void *pvParameters) {
   } else {
     int max_display = std::min(n, 40);
     for (int i = 0; i < max_display; ++i) {
+      WifiScanEntry entry{};
+      if (!System_WifiScanGetEntry(i, entry))
+        continue;
       const char *encType = "OPEN";
-      switch (WiFi.encryptionType(i)) {
-      case WIFI_AUTH_WEP:
+      switch (entry.auth) {
+      case WifiAuthMode::WEP:
         encType = "WEP";
         break;
-      case WIFI_AUTH_WPA_PSK:
+      case WifiAuthMode::WPA_PSK:
         encType = "WPA-PSK";
         break;
-      case WIFI_AUTH_WPA2_PSK:
+      case WifiAuthMode::WPA2_PSK:
         encType = "WPA2-PSK";
         break;
-      case WIFI_AUTH_WPA_WPA2_PSK:
+      case WifiAuthMode::WPA_WPA2_PSK:
         encType = "WPA / WPA2";
         break;
-      case WIFI_AUTH_WPA2_ENTERPRISE:
+      case WifiAuthMode::WPA2_ENTERPRISE:
         encType = "WPA2-Enterprise";
         break;
-      case WIFI_AUTH_WPA3_PSK:
+      case WifiAuthMode::WPA3_PSK:
         encType = "WPA3-SAE";
         break;
-      case WIFI_AUTH_WPA2_WPA3_PSK:
+      case WifiAuthMode::WPA2_WPA3_PSK:
         encType = "WPA2-PSK / WPA3-SAE";
         break;
       default:
@@ -83,20 +81,19 @@ static void AsyncWifiScanTask(void *pvParameters) {
       }
       FixedBuf<8> no_buf;
       no_buf.appendFormat("%d", i + 1);
-      int rssi = WiFi.RSSI(i);
       FixedBuf<16> sig_buf;
-      sig_buf.appendFormat("%d dBm (%d%%)", rssi,
-                           std::min(std::max(2 * (rssi + 100), 0), 100));
+      sig_buf.appendFormat("%d dBm (%d%%)", static_cast<int>(entry.rssi),
+                           std::min(std::max(2 * (static_cast<int>(entry.rssi) + 100), 0), 100));
       FixedBuf<8> ch_buf;
-      ch_buf.appendFormat("%d", WiFi.channel(i));
-      table.row({no_buf.c_str(), WiFi.SSID(i).c_str(), sig_buf.c_str(), ch_buf.c_str(), encType});
+      ch_buf.appendFormat("%u", static_cast<unsigned>(entry.channel));
+      table.row({no_buf.c_str(), entry.ssid, sig_buf.c_str(), ch_buf.c_str(), encType});
     }
   }
   table.end('-');
   CliFmt::PrintBoxFooter(out,
                          "Use 'wifi connect <ssid> <password>' to switch AP");
   out.append("\r\n");
-  WiFi.scanDelete();
+  System_WifiScanDelete();
 
   CLI_GetTelnetManager().sendScanResult(req, out.buf);
   s_wifi_scan_running.store(false, std::memory_order_release);
@@ -122,28 +119,39 @@ void cmdWifi(CliContext &ctx) {
            TableRenderer table(out, WIFI_COLS, 4);
            table.header(false);
 
-           bool sta_ok = (WiFi.status() == WL_CONNECTED);
+           bool sta_ok = System_WifiIsConnected();
            FixedBuf<16> rssi_b;
-           rssi_b.appendFormat("%d dBm", WiFi.RSSI());
+           rssi_b.appendFormat("%d dBm", static_cast<int>(System_WifiGetRssi()));
+           char sta_ssid[33]{};
+           if (sta_ok) {
+             System_WifiGetSsid(sta_ssid, sizeof(sta_ssid));
+           }
+           IPAddress sta_ip = System_WifiGetIp();
+           FixedBuf<16> sta_ip_b;
+           sta_ip_b.appendFormat("%u.%u.%u.%u", sta_ip[0], sta_ip[1], sta_ip[2], sta_ip[3]);
 
            const auto &cfg = Config_Get();
            table.row({"Station (STA)", "SSID",
-                      sta_ok ? WiFi.SSID().c_str() : cfg.wifi_ssid,
+                      sta_ok ? sta_ssid : cfg.wifi_ssid,
                       sta_ok ? "[CONNECTED]" : "[DISCONNECTED]"});
            table.row({"", "IP Address",
-                      sta_ok ? WiFi.localIP().toString().c_str() : "0.0.0.0",
+                      sta_ok ? sta_ip_b.c_str() : "0.0.0.0",
                       sta_ok ? "[ACTIVE]" : "[IDLE]"});
            table.row({"", "Signal (RSSI)", sta_ok ? rssi_b.c_str() : "N/A",
                       sta_ok ? "[STABLE]" : "[IDLE]"});
            table.separator('-');
 
-           bool ap_active = (WiFi.getMode() == WIFI_MODE_AP ||
-                             WiFi.getMode() == WIFI_MODE_APSTA);
+           WifiOpMode wmode = System_WifiGetMode();
+           bool ap_active = (wmode == WifiOpMode::AP ||
+                             wmode == WifiOpMode::AP_STA);
+           IPAddress ap_ip = System_WifiGetApIp();
+           FixedBuf<16> ap_ip_b;
+           ap_ip_b.appendFormat("%u.%u.%u.%u", ap_ip[0], ap_ip[1], ap_ip[2], ap_ip[3]);
            table.row({"SoftAP (AP)", "SSID", cfg.ap_ssid,
                       ap_active ? "[BROADCASTING]" : "[DISABLED]"});
            table.row(
                {"", "AP IP",
-                ap_active ? WiFi.softAPIP().toString().c_str() : "0.0.0.0",
+                ap_active ? ap_ip_b.c_str() : "0.0.0.0",
                 ap_active ? "[ACTIVE]" : "[INACTIVE]"});
            table.row({"", "Clients", ap_active ? "Max 4 Clients" : "0 Clients",
                       ap_active ? "[READY]" : "[OFF]"});
@@ -192,13 +200,13 @@ void cmdWifi(CliContext &ctx) {
          Config_SaveStaged(staged_cfg, TimingConfig_Get());
          sendTelnetMsgf(s, "[WIFI] Saved SSID '%s' to NVS. Connecting...\r\n",
                         ssid_arg);
-         WiFi.disconnect(false);
+         System_WifiDisconnect();
          vTaskDelay(pdMS_TO_TICKS(100));
-         WiFi.begin(ssid_arg, pass_arg);
+         System_WifiConnect(ssid_arg, pass_arg);
        }},
       {"disconnect", "disconnect", "Disconnect from current Wi-Fi AP",
        [](int s, int, const Args &) {
-         WiFi.disconnect(false);
+         System_WifiDisconnect();
          sendTelnetMsg(s, "[WIFI] Disconnected from Wi-Fi AP.\r\n");
        }},
   };
@@ -595,7 +603,7 @@ void cmdCoreDump(CliContext &ctx) {
   static const CliFmt::SubCmdDef kCoredumpDefs[] = {
       {"clear", "clear", "Erase crash core dump partition",
        [](int s, int, const Args &) {
-         esp_core_dump_image_erase();
+         System_EraseCoreDump();
          sendTelnetMsg(s, "Crash core dump partition successfully ERASED.\r\n");
        }},
   };
@@ -605,10 +613,8 @@ void cmdCoreDump(CliContext &ctx) {
     return;
   }
 
-  esp_core_dump_summary_t summary;
-  esp_err_t err = esp_core_dump_get_summary(&summary);
-
-  if (err != ESP_OK) {
+  CoreDumpInfo summary{};
+  if (!System_GetCoreDumpLiveSummary(summary)) {
     sendTelnetMsg(client, "\r\n[COREDUMP] No crash core dump summary available "
                           "(Partition clean or empty).\r\n");
     return;
@@ -618,25 +624,25 @@ void cmdCoreDump(CliContext &ctx) {
     CliFmt::PrintBoxHeader(out, "CRASH CORE DUMP ANALYSIS SUMMARY");
     out.append("| Status          : Valid Core Dump Found                      "
                "                |\r\n");
-    out.appendFormat("| Crashed Task    : %-58.58s |\r\n", summary.exc_task);
+    out.appendFormat("| Crashed Task    : %-58.58s |\r\n", summary.task_name);
     out.appendFormat("| Program Counter : 0x%08X                               "
                      "                  |\r\n",
                      static_cast<unsigned>(summary.exc_pc));
     out.appendFormat("| Exception Cause : %-58lu |\r\n",
-                     static_cast<unsigned long>(summary.ex_info.exc_cause));
+                     static_cast<unsigned long>(summary.exc_cause));
     out.appendFormat("| Exception VAddr : 0x%08X                               "
                      "                  |\r\n",
-                     static_cast<unsigned>(summary.ex_info.exc_vaddr));
+                     static_cast<unsigned>(summary.exc_vaddr));
     out.appendFormat("| Backtrace Depth : %-2d frames%-48s |\r\n",
-                     summary.exc_bt_info.depth,
-                     summary.exc_bt_info.corrupted ? " (CORRUPTED)" : "");
+                     static_cast<int>(summary.bt_depth),
+                     summary.bt_corrupted ? " (CORRUPTED)" : "");
     out.append("| Backtrace PCs   :                                            "
                "                |\r\n");
 
-    for (int i = 0; i < summary.exc_bt_info.depth; ++i) {
+    for (uint8_t i = 0; i < summary.bt_depth; ++i) {
       out.appendFormat("|   [%2d] 0x%08X                                       "
                        "                      |\r\n",
-                       i, static_cast<unsigned>(summary.exc_bt_info.bt[i]));
+                       static_cast<int>(i), static_cast<unsigned>(summary.bt[i]));
     }
     out.append("+--------------------------------------------------------------"
                "----------------+\r\n");
@@ -646,36 +652,33 @@ void cmdCoreDump(CliContext &ctx) {
 }
 
 void otaPrintStatus(AppendBuf &out) {
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
-  esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
-  if (running) {
-    esp_ota_get_state_partition(running, &ota_state);
-  }
+  OtaPartitionInfo running{}, next{};
+  System_GetOtaPartitions(running, next);
+  const OtaImgState ota_state = running.state;
 
   const char *state_desc =
-      (ota_state == ESP_OTA_IMG_NEW) ? "New Image (First Boot)"
-      : (ota_state == ESP_OTA_IMG_PENDING_VERIFY)
+      (ota_state == OtaImgState::NEW) ? "New Image (First Boot)"
+      : (ota_state == OtaImgState::PENDING_VERIFY)
           ? "Evaluating (Rollback Active)"
-      : (ota_state == ESP_OTA_IMG_INVALID) ? "Invalidated Image"
-      : (ota_state == ESP_OTA_IMG_ABORTED) ? "Aborted Image"
-                                           : "Confirmed";
-  const char *state_status = (ota_state == ESP_OTA_IMG_NEW) ? "[NEW]"
-                             : (ota_state == ESP_OTA_IMG_PENDING_VERIFY)
+      : (ota_state == OtaImgState::INVALID) ? "Invalidated Image"
+      : (ota_state == OtaImgState::ABORTED) ? "Aborted Image"
+                                            : "Confirmed";
+  const char *state_status = (ota_state == OtaImgState::NEW) ? "[NEW]"
+                             : (ota_state == OtaImgState::PENDING_VERIFY)
                                  ? "[PENDING]"
-                             : (ota_state == ESP_OTA_IMG_INVALID) ? "[INVALID]"
-                             : (ota_state == ESP_OTA_IMG_ABORTED) ? "[ABORTED]"
-                                                                  : "[STABLE]";
+                             : (ota_state == OtaImgState::INVALID) ? "[INVALID]"
+                             : (ota_state == OtaImgState::ABORTED) ? "[ABORTED]"
+                                                                   : "[STABLE]";
 
   FixedBuf<36> run_val, next_val, timer_val, crash_val;
   run_val.appendFormat("%s (0x%06X, %u KB)",
-                       running ? running->label : "app0",
-                       running ? static_cast<unsigned>(running->address) : 0x10000,
-                       running ? static_cast<unsigned>(running->size / 1024) : 3712);
+                       running.valid ? running.label : "app0",
+                       running.valid ? static_cast<unsigned>(running.address) : 0x10000,
+                       running.valid ? static_cast<unsigned>(running.size / 1024) : 3712);
   next_val.appendFormat("%s (0x%06X, %u KB)",
-                        next ? next->label : "app1",
-                        next ? static_cast<unsigned>(next->address) : 0x3B0000,
-                        next ? static_cast<unsigned>(next->size / 1024) : 3712);
+                        next.valid ? next.label : "app1",
+                        next.valid ? static_cast<unsigned>(next.address) : 0x3B0000,
+                        next.valid ? static_cast<unsigned>(next.size / 1024) : 3712);
 
   bool val_done = TimeUtils::isElapsed(
       System_GetBootTimeMs(), Config::Timing::OTA_VALIDATION_PERIOD_MS);
@@ -698,18 +701,14 @@ void otaPrintStatus(AppendBuf &out) {
   table.row({"", "State", state_desc, state_status});
   table.separator('-');
 
-  esp_ota_img_states_t next_state = ESP_OTA_IMG_UNDEFINED;
-  if (next) {
-    esp_ota_get_state_partition(next, &next_state);
-  }
   const char *next_desc = "Hardware Dual-Slot";
   const char *next_status = "[READY]";
-  switch (next_state) {
-  case ESP_OTA_IMG_INVALID:
+  switch (next.state) {
+  case OtaImgState::INVALID:
     next_desc = "Invalidated (Failed Boot)";
     next_status = "[INVALID]";
     break;
-  case ESP_OTA_IMG_ABORTED:
+  case OtaImgState::ABORTED:
     next_desc = "Aborted Image";
     next_status = "[ABORTED]";
     break;
@@ -736,7 +735,7 @@ void otaTriggerRollback(int sock) {
   sendTelnetMsg(sock, "[OTA] Invalidating current app and triggering hardware "
                       "rollback to previous firmware...\r\n");
   vTaskDelay(pdMS_TO_TICKS(100));
-  esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+  esp_err_t err = System_OtaRollbackAndReboot();
   if (err != ESP_OK) {
     sendTelnetMsgf(sock,
                    "[ERROR] Rollback failed (No rollback partition available, "
@@ -746,7 +745,7 @@ void otaTriggerRollback(int sock) {
 }
 
 void otaValidate(int sock) {
-  esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+  esp_err_t err = System_OtaMarkValidCancelRollback();
   if (err == ESP_OK) {
     sendTelnetMsg(sock, "[OTA] Current firmware manually confirmed as VALID. "
                         "Auto-rollback cancelled.\r\n");
@@ -775,19 +774,14 @@ void cmdNvs(CliContext &ctx) {
            if (num_cycles > 100) num_cycles = 100;
          }
          sendTelnetMsgf(s, "[NVS STRESS] Starting %d forced NVS write cycles on Core 0...\r\n", num_cycles);
-         Preferences prefs;
          const uint32_t start_ms = millis();
          int success_count = 0;
          for (int i = 0; i < num_cycles; ++i) {
-           if (esp_task_wdt_status(nullptr) == ESP_OK) {
-             esp_task_wdt_reset();
-           }
+           System_TaskWdtResetSelf();
            System_SetNvsBusy(true);
-           if (prefs.begin("nvs_stress", false)) {
-             char key[16];
-             snprintf(key, sizeof(key), "k%d", i % 10);
-             prefs.putUInt(key, millis());
-             prefs.end();
+           char key[16];
+           snprintf(key, sizeof(key), "k%d", i % 10);
+           if (System_NvsPutUInt("nvs_stress", key, millis())) {
              success_count++;
            }
            System_SetNvsBusy(false);

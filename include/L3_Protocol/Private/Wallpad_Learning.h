@@ -9,7 +9,10 @@
 
 #include "L0_Foundation/System_Config.h"
 #include "L0_Foundation/System_Platform.h"
-#include "L3_Protocol/Public/Protocol_Device.h"
+#include "L3_Protocol/Public/Protocol_Types.h"
+
+struct DeviceStateEntry;
+struct DecodedDeviceState;
 
 #include <array>
 #include <atomic>

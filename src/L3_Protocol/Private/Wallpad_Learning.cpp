@@ -10,13 +10,11 @@
 #include "L0_Foundation/Seqlock.h"
 
 #include <Arduino.h>
-#include <Preferences.h>
 #include <algorithm>
 #include <array>
 #include <bitset>
 #include <cstdio>
 #include <cstring>
-#include <esp_task_wdt.h>
 #include <utility>
 #include "L3_Protocol/Public/Protocol_Facade.h"
 
@@ -820,7 +818,7 @@ void WarmCache_SaveToRtc() {
 void WarmCache_SaveToNvs() {
   WarmCache_SaveToRtc();
   if (rtc_warm_cache.count > 0) {
-    Preferences p;
+    SystemNvs p;
     if (p.begin("wp_wc", false)) {
       s_warm_cache_env.payload = rtc_warm_cache;
       s_warm_cache_env.seal();
@@ -860,7 +858,7 @@ void WarmCache_RestoreOnBoot() {
   }
 
   // 2순위: NVS Flash 스냅샷에서 무결성 검증 후 복원
-  Preferences p;
+  SystemNvs p;
   if (p.begin("wp_wc", true)) {
     if (p.isKey("wc_data")) {
       size_t len = p.getBytesLength("wc_data");
@@ -1637,11 +1635,7 @@ bool ControlTemplateRegistry::resetGroup(uint8_t dev_id, bool full_reset) {
       if (nvs_lock.isLocked()) {
         char ns[16];
         getControlNamespace(ns, sizeof(ns), getCurrentProfileIndex());
-        Preferences prefs;
-        if (prefs.begin(ns, false)) {
-          prefs.clear();
-          prefs.end();
-        }
+        nvsClearNs(ns);
       }
     }
     synthesizeFromConvergedCache();
@@ -1956,15 +1950,13 @@ bool ControlTemplateRegistry::commitNvsIfPending() noexcept {
     return true; // Wear guard: identical data, flash write skipped
   }
 
-  if (esp_task_wdt_status(nullptr) == ESP_OK) {
-    esp_task_wdt_reset();
-  }
+  System_TaskWdtResetSelf();
 
   System_SetNvsBusy(true);
   const uint8_t prof_idx = getCurrentProfileIndex();
   char ns[16];
   getControlNamespace(ns, sizeof(ns), prof_idx);
-  Preferences prefs;
+  SystemNvs prefs;
   bool success = false;
   if (prefs.begin(ns, false)) {
     prefs.putUChar("cnt", save_count);
@@ -2037,15 +2029,13 @@ bool ControlTemplateRegistry::forceFlush(uint32_t timeout_ms) noexcept {
     return true;
   }
 
-  if (esp_task_wdt_status(nullptr) == ESP_OK) {
-    esp_task_wdt_reset();
-  }
+  System_TaskWdtResetSelf();
 
   System_SetNvsBusy(true);
   const uint8_t prof_idx = getCurrentProfileIndex();
   char ns[16];
   getControlNamespace(ns, sizeof(ns), prof_idx);
-  Preferences prefs;
+  SystemNvs prefs;
   bool success = false;
   if (prefs.begin(ns, false)) {
     prefs.putUChar("cnt", save_count);
@@ -2083,7 +2073,7 @@ void ControlTemplateRegistry::loadFromNvsForProfile(uint8_t prof_idx) {
 
   size_t valid = 0;
   {
-    Preferences prefs;
+    SystemNvs prefs;
     const bool opened = prefs.begin(ns, true);
     uint8_t cnt = opened ? prefs.getUChar("cnt", 0) : 0;
     if (cnt > MAX_GROUPS)

@@ -13,7 +13,6 @@ static IPAddress s_trusted_hub_ip(0, 0, 0, 0);
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
-#include <esp_core_dump.h>
 #include <lwip/sockets.h>
 
 static bool Socket_SendAll(int sock, const void *buf, size_t len,
@@ -280,8 +279,7 @@ static void HandleRpc_WallpadReset(int sock, long req_id,
 static void HandleRpc_ClearCoredump(int sock, long req_id,
                                     const char * /*json_str*/,
                                     const IPAddress & /*client_ip*/) {
-  esp_core_dump_image_erase();
-  System_ClearCoreDumpInfo();
+  System_EraseCoreDump();
   sendRpcResponse(sock, req_id, "ok", "Flash core dump erased");
 }
 
@@ -308,9 +306,9 @@ static void Task_RpcWifiScanWorker(void * /*pvParameters*/) {
   Supervisor::ExemptGuard scan_guard;
   vTaskDelay(pdMS_TO_TICKS(50));
 
-  int n = WiFi.scanNetworks(false, true);
+  int n = System_WifiScanStart(false, true);
   if (n <= 0) {
-    WiFi.scanDelete();
+    System_WifiScanDelete();
     char no_ap_msg[128];
     if (req_id >= 0) {
       snprintf(no_ap_msg, sizeof(no_ap_msg),
@@ -336,7 +334,9 @@ static void Task_RpcWifiScanWorker(void * /*pvParameters*/) {
   for (int i = 0; i < scan_limit; ++i)
     indices[i] = i;
   std::sort(indices.begin(), indices.begin() + scan_limit,
-            [](int a, int b) { return WiFi.RSSI(a) > WiFi.RSSI(b); });
+            [](int a, int b) {
+              return System_WifiScanGetRssi(a) > System_WifiScanGetRssi(b);
+            });
 
   struct ApInfo {
     char ssid[34];
@@ -348,8 +348,10 @@ static void Task_RpcWifiScanWorker(void * /*pvParameters*/) {
 
   for (int i = 0; i < scan_limit; ++i) {
     const int idx = indices[i];
-    const String raw_str = WiFi.SSID(idx);
-    const char *src = raw_str.c_str();
+    WifiScanEntry scan_entry{};
+    if (!System_WifiScanGetEntry(idx, scan_entry))
+      continue;
+    const char *src = scan_entry.ssid;
     while (*src && isspace(static_cast<unsigned char>(*src)))
       src++;
     if (!*src)
@@ -366,7 +368,7 @@ static void Task_RpcWifiScanWorker(void * /*pvParameters*/) {
     if (duplicate)
       continue;
 
-    int rssi = WiFi.RSSI(idx);
+    int rssi = static_cast<int>(scan_entry.rssi);
     int pct = std::min(100, std::max(0, 2 * (rssi + 100)));
 
     ApInfo &info = top_aps[top_aps_count++];
@@ -384,7 +386,7 @@ static void Task_RpcWifiScanWorker(void * /*pvParameters*/) {
     if (top_aps_count >= MAX_TOP_APS)
       break;
   }
-  WiFi.scanDelete();
+  System_WifiScanDelete();
 
   char resp[512];
   int offset = 0;
@@ -464,22 +466,22 @@ static void HandleRpc_SetWifiMode(int sock, long req_id, const char *json_str,
                                   const IPAddress & /*client_ip*/) {
   char mode_buf[16] = {0};
   if (findJsonStringValue(json_str, "mode", mode_buf, sizeof(mode_buf))) {
-    wifi_mode_t target_mode = WIFI_STA;
+    WifiOpMode target_mode = WifiOpMode::STA;
     switch (Hash::fnv1a32_ci_rt(mode_buf)) {
     case Hash::fnv1a32_ci("AP"):
-      target_mode = WIFI_AP;
+      target_mode = WifiOpMode::AP;
       break;
     case Hash::fnv1a32_ci("AP_STA"):
     case Hash::fnv1a32_ci("AP+STA"):
-      target_mode = WIFI_AP_STA;
+      target_mode = WifiOpMode::AP_STA;
       break;
     case Hash::fnv1a32_ci("STA"):
     default:
-      target_mode = WIFI_STA;
+      target_mode = WifiOpMode::STA;
       break;
     }
 
-    WiFi.mode(target_mode);
+    System_WifiSetMode(target_mode);
     sendRpcResponse(sock, req_id, "ok");
   } else {
     sendRpcResponse(sock, req_id, "error", "Missing mode parameter");
@@ -533,9 +535,9 @@ static void HandleRpc_SetWifi(int sock, long req_id, const char *json_str,
   sendRpcResponse(sock, req_id, "ok");
   vTaskDelay(pdMS_TO_TICKS(50));
 
-  WiFi.disconnect(false);
+  System_WifiDisconnect();
   vTaskDelay(pdMS_TO_TICKS(50));
-  WiFi.begin(new_ssid, new_pass);
+  System_WifiConnect(new_ssid, new_pass);
 }
 
 static void HandleRpc_SetUart(int sock, long req_id, const char *json_str,
@@ -826,8 +828,9 @@ void Mgmt_DispatchJsonRpc(int sock, const char *json_str) {
     if (client_ip != IPAddress(0, 0, 0, 0) &&
         s_trusted_hub_ip == IPAddress(0, 0, 0, 0)) {
       s_trusted_hub_ip = client_ip;
-      ESP_LOGI("NET", "[RPC] Trusted Hub IP locked to %s",
-               s_trusted_hub_ip.toString().c_str());
+      ESP_LOGI("NET", "[RPC] Trusted Hub IP locked to %u.%u.%u.%u",
+               s_trusted_hub_ip[0], s_trusted_hub_ip[1],
+               s_trusted_hub_ip[2], s_trusted_hub_ip[3]);
     }
     handler = HandleRpc_GetTelemetry;
     break;

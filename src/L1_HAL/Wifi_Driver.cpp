@@ -258,6 +258,112 @@ void System_WifiReconnect() noexcept {
   Wifi_Driver_Reconnect();
 }
 
+void System_WifiGetSsid(char *out_buf, size_t max_len) noexcept {
+  if (!out_buf || max_len == 0)
+    return;
+  out_buf[0] = '\0';
+  wifi_ap_record_t ap{};
+  if (WiFi.status() == WL_CONNECTED &&
+      esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    snprintf(out_buf, max_len, "%.32s",
+             reinterpret_cast<const char *>(ap.ssid));
+  }
+}
+
+WifiOpMode System_WifiGetMode() noexcept {
+  wifi_mode_t m = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&m) != ESP_OK)
+    return WifiOpMode::OFF;
+  switch (m) {
+  case WIFI_MODE_STA:
+    return WifiOpMode::STA;
+  case WIFI_MODE_AP:
+    return WifiOpMode::AP;
+  case WIFI_MODE_APSTA:
+    return WifiOpMode::AP_STA;
+  default:
+    return WifiOpMode::OFF;
+  }
+}
+
+void System_WifiSetMode(WifiOpMode mode) noexcept {
+  wifi_mode_t m = WIFI_STA;
+  switch (mode) {
+  case WifiOpMode::AP:
+    m = WIFI_AP;
+    break;
+  case WifiOpMode::AP_STA:
+    m = WIFI_AP_STA;
+    break;
+  case WifiOpMode::OFF:
+    m = WIFI_OFF;
+    break;
+  case WifiOpMode::STA:
+  default:
+    m = WIFI_STA;
+    break;
+  }
+  WiFi.mode(m);
+}
+
+void System_WifiConnect(const char *ssid, const char *pass) noexcept {
+  WiFi.begin(ssid ? ssid : "", pass ? pass : "");
+}
+
+void System_WifiDisconnect() noexcept {
+  WiFi.disconnect(false);
+}
+
+int System_WifiScanStart(bool async, bool show_hidden) noexcept {
+  return WiFi.scanNetworks(async, show_hidden);
+}
+
+static WifiAuthMode mapAuthMode(wifi_auth_mode_t auth) noexcept {
+  switch (auth) {
+  case WIFI_AUTH_OPEN:
+    return WifiAuthMode::OPEN;
+  case WIFI_AUTH_WEP:
+    return WifiAuthMode::WEP;
+  case WIFI_AUTH_WPA_PSK:
+    return WifiAuthMode::WPA_PSK;
+  case WIFI_AUTH_WPA2_PSK:
+    return WifiAuthMode::WPA2_PSK;
+  case WIFI_AUTH_WPA_WPA2_PSK:
+    return WifiAuthMode::WPA_WPA2_PSK;
+  case WIFI_AUTH_WPA2_ENTERPRISE:
+    return WifiAuthMode::WPA2_ENTERPRISE;
+  case WIFI_AUTH_WPA3_PSK:
+    return WifiAuthMode::WPA3_PSK;
+  case WIFI_AUTH_WPA2_WPA3_PSK:
+    return WifiAuthMode::WPA2_WPA3_PSK;
+  default:
+    return WifiAuthMode::OTHER;
+  }
+}
+
+bool System_WifiScanGetEntry(int index, WifiScanEntry &out) noexcept {
+  const auto *it =
+      reinterpret_cast<const wifi_ap_record_t *>(WiFi.getScanInfoByIndex(index));
+  if (!it)
+    return false;
+  snprintf(out.ssid, sizeof(out.ssid), "%.32s",
+           reinterpret_cast<const char *>(it->ssid));
+  out.rssi = it->rssi;
+  out.channel = it->primary;
+  out.auth = mapAuthMode(it->authmode);
+  return true;
+}
+
+int32_t System_WifiScanGetRssi(int index) noexcept {
+  const auto *it =
+      reinterpret_cast<const wifi_ap_record_t *>(WiFi.getScanInfoByIndex(index));
+  return it ? it->rssi : -127;
+}
+
+void System_WifiScanDelete() noexcept {
+  WiFi.scanDelete();
+}
+
 [[nodiscard]] EventBits_t Wifi_Driver_GetEventBits() noexcept {
   return s_wifi_event_group ? xEventGroupGetBits(s_wifi_event_group) : 0;
 }

@@ -11,14 +11,11 @@
 #include "L4_Services/Benchmark_Harness.h"
 #endif
 
-#include <WiFi.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <esp_ota_ops.h>
-#include <esp_task_wdt.h>
 #include <initializer_list>
 #include <lwip/sockets.h>
 #include <string_view>
@@ -294,11 +291,7 @@ TelnetManager::AuthResult TelnetManager::evaluateAuth(const char *clean_pw,
   // 대소문자 구분 비교로 보안 엔트로피 강화 [C-4]
   if (!auth_ok && strcmp(clean_pw, DEFAULT_TELNET_PASS) == 0) {
     auth_ok = true;
-    Preferences p;
-    if (p.begin("runtime-config", false)) {
-      p.putString("telnet_hash", input_hash);
-      p.end();
-    }
+    Config_SaveTelnetHash(input_hash);
   }
 #endif
 
@@ -372,8 +365,8 @@ bool TelnetManager::handlePassword(TelnetSession *session,
 
     if (System_IsRollbackDetected()) {
       char warn_msg[384];
-      const esp_partition_t *cur = esp_ota_get_running_partition();
-      const esp_partition_t *other = esp_ota_get_next_update_partition(nullptr);
+      OtaPartitionInfo cur{}, other{};
+      System_GetOtaPartitions(cur, other);
       snprintf(
           warn_msg, sizeof(warn_msg),
           "===================================================================="
@@ -384,7 +377,7 @@ bool TelnetManager::handlePassword(TelnetSession *session,
           "invalidated.\r\n"
           "===================================================================="
           "============\r\n\r\n",
-          cur ? cur->label : "app0", other ? other->label : "app1");
+          cur.valid ? cur.label : "app0", other.valid ? other.label : "app1");
       sendTelnetMsg(session->sock, warn_msg);
     }
     if (System_IsRescueMode()) {
@@ -827,12 +820,12 @@ void TelnetManager::onClientConnect(int new_sock,
   const uint8_t *ip_bytes =
       reinterpret_cast<const uint8_t *>(&client_addr.sin_addr.s_addr);
   IPAddress remote_ip(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-  Serial.printf("[TELNET] Incoming connection from %s (sock: %d)\r\n",
-                remote_ip.toString().c_str(), new_sock);
+  Serial.printf("[TELNET] Incoming connection from %u.%u.%u.%u (sock: %d)\r\n",
+                remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3], new_sock);
 
   if (!Telnet_IsAllowedIP(remote_ip)) {
-    Serial.printf("[TELNET] Connection rejected: IP %s not allowed!\r\n",
-                  remote_ip.toString().c_str());
+    Serial.printf("[TELNET] Connection rejected: IP %u.%u.%u.%u not allowed!\r\n",
+                  remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3]);
     close(new_sock);
     return;
   }
@@ -1101,8 +1094,7 @@ bool TelnetManager::broadcastNoticeNonBlocking(const char *msg) {
 
 void Task_Telnet(void *pvParameters) {
   TSTAGE(1);
-  const esp_err_t wdt_ret = esp_task_wdt_add(nullptr);
-  const bool twdt_registered = (wdt_ret == ESP_OK);
+  const bool twdt_registered = System_TaskWdtAddSelf();
   TSTAGE(2);
   if (!s_tracer_sem)
     s_tracer_sem = xSemaphoreCreateBinary();
@@ -1140,7 +1132,7 @@ void Task_Telnet(void *pvParameters) {
         }
         s_last_twdt_feed_ms = now_ms;
       }
-      esp_task_wdt_reset();
+      System_TaskWdtResetSelf();
     }
     System_FeedWdt(Config::Task::WDT_ID_TELNET);
   };

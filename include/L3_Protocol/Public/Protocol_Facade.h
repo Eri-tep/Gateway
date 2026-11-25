@@ -9,8 +9,9 @@
 // ============================================================================
 
 #include "L0_Foundation/System_Buffer.h"
-#include "L2_Transport/Bridge_CH.h"
+#include "L2_Transport/Bridge_Types.h"
 #include "L3_Protocol/Public/Protocol_Device.h"
+#include "L3_Protocol/Public/Protocol_Types.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -245,7 +246,6 @@ inline constexpr uint16_t kChecksumInvalid = 0x0100;
 [[nodiscard]] uint16_t ProtocolDiag_CalculateChecksum(const uint8_t *data, size_t len) noexcept;
 
 // ── Bridge Transport Slot Control API (L4 → L3 Gateway) ──────────────────────
-struct HubClientSlotSnapshot;
 bool ProtocolDiag_GetBridgeSlotSnapshot(uint8_t slot_idx, HubClientSlotSnapshot &out) noexcept;
 bool ProtocolDiag_SetBridgeSlotEnabled(uint8_t slot_idx, bool enabled) noexcept;
 bool ProtocolDiag_SetBridgeSlotConfig(uint8_t slot_idx, bool enabled, const char *ip,
@@ -255,11 +255,6 @@ bool ProtocolDiag_ResetBridgeFraming(uint8_t slot_idx) noexcept;
 void ProtocolDiag_ResetBridgeStats() noexcept;
 
 // ── Benchmark & Diagnostics Packet Codec Validation Facade ────────────────────
-struct ExtractedFrameResult {
-  int length{-1};         // > 0: Valid frame length, 0: Partial/incomplete frame, -1: Invalid STX or bounds
-  bool checksum_ok{false}; // True if STX/ETX/Length bounds AND Checksum were verified valid
-};
-
 ExtractedFrameResult ProtocolDiag_ExtractAndValidateFast(const uint8_t *stream, size_t stream_len, size_t stx_idx) noexcept;
 bool ProtocolDiag_ValidatePacket(std::span<const uint8_t> frame) noexcept;
 #if defined(BENCHMARK_BUILD)

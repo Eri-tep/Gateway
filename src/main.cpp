@@ -4,6 +4,7 @@
 #include "L1_HAL/Wifi_Driver.h"
 
 // ── L2 Transport Channels ──
+#include "L2_Transport/Bridge_CH.h"
 #include "L2_Transport/RS485_CH.h"
 #include "L2_Transport/TCP_CH.h"
 
